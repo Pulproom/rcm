@@ -1,5 +1,5 @@
 import { buildQuizJob } from "./quiz.js";
-import { STORY_TIME_GUIDANCE, SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "@rcm/shared";
+import { STORY_TIME_GUIDANCE, SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE, ACCESS_BASIS_GUIDANCE } from "@rcm/shared";
 
 /** Titles are scene names people scan in a list; landmark labels are reserved for kinds the user names. */
 const TITLE_AND_LANDMARK_LABEL_GUIDANCE = `- A memory title names the one central event or turn of the scene in about 3 to 8 words (roughly 40 characters). Do not list several events joined by commas or "and"; the content carries the rest.
@@ -398,6 +398,7 @@ ${STORY_TIME_GUIDANCE}
 SOURCE AND ACCESS
 sourceRef selects one supplied unit ("s3") or ordered units of the same message (["s3","s4"]). Omit quote so the server copies exact source; add an exact partial quote only when narrowing mixed content. Units are mechanical boundaries, not speakers or access grants. Never join gaps into a fabricated continuous quote.
 Every memory, detail and access grant needs evidence ${evidenceShape}. Grant access only to holders who know EVERY assertion in that detail. Split public behavior, private thoughts, remote reports, audible replies and uncertain inference. Co-presence, affiliation, or narrator access alone grants no knowledge. Keep knownBy consistent with explicit access; empty access is valid when no character is established to know.
+${ACCESS_BASIS_GUIDANCE}
 
 SCENES
 Find coherent independently recallable events. Repeated narration of one action is one occurrence; the same setting or participants do not make separate occurrences one scene. Preserve cause, action and result; distinguish unresolved outcomes. Ordinary continuous scenes normally need zero or one episode memory. Lasting secrets, boundaries, revelations and turning points may merit separate arc/durable records. Do not fill a quota.

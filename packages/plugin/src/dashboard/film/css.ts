@@ -398,6 +398,11 @@ html, body { margin: 0; min-height: 100%; }
 .reader .notice { margin-top: 14px; }
 .lines { display: grid; gap: 14px; margin: 22px 0 0; padding: 20px 18px; background: var(--screen); border-radius: var(--r); }
 .lines .subtitle > span { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.lines__row { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-width: 0; text-align: center; }
+.lines__row > .subtitle { min-width: 0; max-width: 100%; }
+.lines button.subtitle { cursor: pointer; user-select: text; -webkit-user-select: text; }
+.lines button.subtitle:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.lines__access { font-size: var(--t-micro); line-height: 1.5; color: var(--ink-3); overflow-wrap: anywhere; }
 .rec { margin: 20px 0 0; max-width: 66ch; font-size: var(--t-read); line-height: 1.95; color: var(--ink); white-space: pre-line; overflow-wrap: anywhere; }
 .quote { margin: 0; padding-left: 12px; border-left: 2px solid var(--rule-2); color: var(--ink-2); font-size: var(--t-body); line-height: 1.75; white-space: pre-line; overflow-wrap: anywhere; }
 .pager { display: flex; justify-content: space-between; margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--rule); }

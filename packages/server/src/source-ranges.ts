@@ -20,6 +20,9 @@ export interface SourceRange {
   rawTokens: number; memoryIds: string[]; groupIds: string[];
 }
 const failure = (message: string, code = "RANGE_NOT_ELIGIBLE") => Object.assign(new Error(message), { code });
+const isCurrentRangeMessage = (message: RangeMessage): boolean =>
+  ['pending', 'committed', 'client_pruned'].includes(message.lifecycle)
+  && ['active', 'all_before'].includes(message.visibility) && message.extractionState !== 'skipped_policy';
 
 export function rangeMessages(db: RcmDatabase, chatId: string): RangeMessage[] {
   return db.prepare(`SELECT message_id AS id,ordinal,role,
@@ -72,7 +75,7 @@ export function listSourceRanges(db: RcmDatabase, chatId: string): SourceRange[]
   });
   const covered = new Set(ranges.flatMap((row) => row.sourceMessageIds));
   for (const message of messages.values()) {
-    if (covered.has(message.id) || !['active', 'all_before'].includes(message.visibility) || message.extractionState === 'skipped_policy') continue;
+    if (covered.has(message.id) || !isCurrentRangeMessage(message)) continue;
     ranges.push({ id: `unprocessed:${message.id}`, startOrdinal: message.ordinal, endOrdinal: message.ordinal,
       sourceMessageIds: [message.id], status: message.extractionState, eligible: false,
       reason: message.lifecycle === 'pending' ? '새 응답이 아직 확정되지 않았어요'
@@ -94,7 +97,7 @@ export function selectSourceRanges(db: RcmDatabase, chatId: string, batchIds: st
   // A missing/unprocessed message between batches is not an implicit selection.
   const start = selected[0]!.startOrdinal, end = selected.at(-1)!.endOrdinal;
   if (rangeMessages(db, chatId).some((row) => row.ordinal >= start && row.ordinal <= end && !ids.has(row.id)
-    && ['active', 'all_before'].includes(row.visibility) && row.extractionState !== 'skipped_policy')) {
+    && isCurrentRangeMessage(row))) {
     throw failure("선택 사이에 처리되지 않은 원문이 있어요", "NONCONTIGUOUS_SELECTION");
   }
   return selected;

@@ -1763,7 +1763,9 @@ export function detailAccessLine(memoryId: string, detail: any, editing: boolean
     return `<form id="detail-access-form" class="form detail-know-form" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}" data-item-kind="${kind}"><div class="access-holder-list">${holders.map((item, index) => accessHolderRow(item.name, item.basis, index)).join("")}</div>${btn("인물 추가", { kind: "quiet", action: "add-access-holder", icon: "plus" })}<p class="sub">인물이 없으면 작가만 아는 기록이에요. 직접 들은 대사는 ‘직접 목격·청취’, 대사로 전달받은 별개의 사건은 ‘직접 전달받음’을 골라 주세요.</p>${everyoneCheck("detailAccessEveryone", detail?.access?.everyone === true, "모두 아는 기억")}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-detail-access" })}${btn("저장", { kind: "primary", action: "submit-form", data: { formId: "detail-access-form" } })}</div></form>`;
   }
   const names = holders.map((item) => `${escapeHtml(item.name)}${ACCESS_BASIS_LABELS[item.basis ?? ""] ? `<span class="detail-know__how">(${ACCESS_BASIS_LABELS[item.basis ?? ""]})</span>` : ""}`).join(" · ");
-  return `<p class="detail-know"><span class="detail-know__k">아는 인물</span><span class="detail-know__v notranslate" translate="no">${detail?.access?.everyone === true ? "모두" : names || "작가만"}</span><button type="button" class="linkbtn hit" data-action="edit-detail-access" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}">수정</button></p>`;
+  const label = detail?.access?.everyone === true ? "모두" : names || "작가만";
+  if (kind === "dialogue") return `<small class="lines__access notranslate" translate="no" aria-label="아는 인물">${label}</small>`;
+  return `<p class="detail-know"><span class="detail-know__k">아는 인물</span><span class="detail-know__v notranslate" translate="no">${label}</span><button type="button" class="linkbtn hit" data-action="edit-detail-access" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}">수정</button></p>`;
 }
 
 function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set()): string {
@@ -1806,7 +1808,10 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
     // A run of lines from one speaker names them once, like a message thread.
     const continues = lineIndex > 0 && String(displayedDialogues[lineIndex - 1]?.speaker ?? "") === String(item.speaker ?? "");
     const speaker = escapeHtml(item.speaker);
-    return `${phone && !continues && side === "in" ? `<small class="lines__speaker">${speaker}</small>` : ""}<p class="subtitle" data-side="${side}"${continues ? " data-cont" : ""}><span>${displayText(item.text, translated, display)}</span>${phone ? "" : `<small>${speaker}</small>`}</p>${item.id && item.access ? detailAccessLine(memory.id, item, view.accessEditing === item.id, "dialogue") : ""}`;
+    const editable = Boolean(item.id && item.access);
+    const tag = editable ? "button" : "p";
+    const action = editable ? ` type="button" data-action="edit-detail-access" data-memory-id="${escapeHtml(memory.id)}" data-detail-id="${escapeHtml(String(item.id))}" title="아는 인물과 인지 경로 수정" aria-expanded="${view.accessEditing === item.id}"` : "";
+    return `${phone && !continues && side === "in" ? `<small class="lines__speaker">${speaker}</small>` : ""}<div class="lines__row" data-side="${side}"><${tag} class="subtitle" data-side="${side}"${continues ? " data-cont" : ""}${action}><span>${displayText(item.text, translated, display)}</span>${phone ? "" : `<small>${speaker}</small>`}</${tag}>${editable ? detailAccessLine(memory.id, item, false, "dialogue") : ""}</div>${editable && view.accessEditing === item.id ? detailAccessLine(memory.id, item, true, "dialogue") : ""}`;
   }).join("")}</div>` : "";
   const record = `<div class="rec" lang="${display === "ko" ? "ko" : sourceLanguage}">${displayText(String(memory.content ?? ""), translatedContent, display)}</div>`;
   const labelledBlock = (label: string, count: number, body: string) => `<section class="memory-block"><h3 class="sec">${escapeHtml(label)} <span class="n">${count}</span></h3>${body}</section>`;
@@ -5343,9 +5348,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       return;
     }
     if (action === "edit-detail-access") {
+      // Selecting a quote for copying must not open its editor on pointer release.
+      const selection = root.ownerDocument.getSelection();
+      if (target.matches(".lines .subtitle") && event.detail > 0 && selection?.toString()
+        && (target.contains(selection.anchorNode) || target.contains(selection.focusNode))) return;
       if (editorHasChanges() && !await confirmDashboard("저장하지 않은 변경을 버릴까요?")) return;
       formDirty = false;
-      timelineView.accessEditing = target.dataset.detailId ?? "";
+      timelineView.accessEditing = timelineView.accessEditing === target.dataset.detailId
+        ? undefined : target.dataset.detailId ?? "";
       render();
       root.querySelector<HTMLInputElement>('#detail-access-form input[name="holder"]')?.focus();
       return;

@@ -895,6 +895,10 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 .lines .subtitle[data-cont] small { display: none; }
 .lines__speaker { margin: 2px 10px 0; font-size: var(--t-cap); font-weight: 600; color: var(--ink-3); }
 .lines__speaker:not(:first-child) { margin-top: 9px; }
+.lines__row { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; gap: 4px 8px; text-align: start; }
+.lines__row[data-side="out"] { flex-direction: row-reverse; }
+.lines__row > .subtitle { max-width: 100%; }
+.lines__access { font-size: var(--t-cap); }
 /* ---- 설정: the Settings app. A section list (icon tile, name, ›) opens each section; on a phone as its own screen, on PC beside the list ---- */
 .settings-nav { display: grid; margin: 10px 0 0; overflow: hidden; border-radius: 12px; background: var(--screen); }
 .settings-nav__row { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; min-height: 54px; padding: 8px 14px 8px 16px; color: var(--ink); text-align: left; }

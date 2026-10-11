@@ -1,14 +1,14 @@
 import { z } from "zod";
 
-export const QUIZ_BATCH_SIZE = 20;
-export const QUIZ_MIN_SCENES = 6;
-export const QUIZ_REFILL_BELOW = 5;
-export const QUIZ_MIX = { easy: 7, medium: 7, hard: 6 } as const;
+export const QUIZ_BATCH_SIZE = 15;
+export const QUIZ_MIN_SCENES = 2;
+export const QUIZ_REFILL_BELOW = 10;
+export const QUIZ_MIX = { easy: 5, medium: 5, hard: 5 } as const;
 
 export type QuizFormat = "choice4" | "ox";
 export type QuizDifficulty = "easy" | "medium" | "hard";
 export interface QuizDraftItem { format: QuizFormat; difficulty: QuizDifficulty; question: string; options: string[]; answerIndex: number; explanation: string; quote?: string; memoryRef: string }
-export interface QuizJobMeta { refs: Record<string, string>; sceneCount: number }
+export interface QuizJobMeta { refs: Record<string, string>; sceneCount: number; fingerprints?: Record<string, string>; targetCount?: number }
 export interface QuizStats { streak: number; bestStreak: number; answered: number; correct: number }
 export interface QuizQuestion { id: string; attemptToken: string; retry: boolean; format: QuizFormat; difficulty: QuizDifficulty; question: string; options: string[]; storyTime?: string }
 export const QuizAnswerRequestSchema = z.object({ chosenIndex: z.number().int().min(0), attemptToken: z.string().min(1) });

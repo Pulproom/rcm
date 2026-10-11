@@ -2004,7 +2004,6 @@ export function createApp(dependencies: Dependencies): Hono {
     const previousAccess = memoryDetailAccess(db, chatId, detailId, kind);
     const previousHolders = previousAccess.everyone ? [EVERYONE_HOLDER] : previousAccess.holders.map(holder => holder.name);
     const accessChanged = previousHolders.length !== holders.length || previousHolders.some(holder => !holders.includes(holder));
-    const attributionChanged = accessChanged || previousAccess.holders.some(holder => bases.get(holder.name) !== holder.basis);
     db.transaction(() => {
       const timestamp = Date.now();
       db.prepare("UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?").run(timestamp, chatId);
@@ -2027,7 +2026,8 @@ export function createApp(dependencies: Dependencies): Hono {
         syncDetailKnownBy(db, chatId, detailId);
         db.prepare("UPDATE memory_details SET updated_at=? WHERE chat_id=? AND id=?").run(timestamp, chatId, detailId);
       }
-      if (attributionChanged) invalidateStorySupports(db, chatId, new Set([`${kind}:${detailId}`]));
+      // Story atoms carry holder scope, not the acquisition basis.
+      if (accessChanged) invalidateStorySupports(db, chatId, new Set([`${kind}:${detailId}`]));
     })();
     // Contextual detail group fingerprints include access: regroup through the existing indexer.
     if (accessChanged) void embeddings.indexPending(chatId);
@@ -2067,7 +2067,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const chatId = context.req.param("id");
     const memoryId = context.req.param("memoryId");
     const result = db.transaction(() => {
-      if (!db.prepare("SELECT 1 FROM memories WHERE id=? AND chat_id=?").get(memoryId, chatId)) return 0;
+      const previous = db.prepare("SELECT title,content,active FROM memories WHERE id=? AND chat_id=?").get(memoryId, chatId) as { title: string; content: string; active: number } | undefined;
+      if (!previous) return 0;
       if (updates.length > 0) {
         const normalizedUpdate = updates.includes("storyTime") ? ",story_time_normalized=?" : "";
         db.prepare(`UPDATE memories SET ${updates.map((key) => `${columns[key]}=?`).join(",")}${normalizedUpdate},user_managed=1,updated_at=? WHERE id=? AND chat_id=?`).run(
@@ -2079,7 +2080,12 @@ export function createApp(dependencies: Dependencies): Hono {
           refreshMemoryParticipantCounts(db, chatId, memoryId);
         }
         if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || updates.includes("participants")) refreshMemoryFts(db, memoryId);
-        if (participants!==undefined || body.active===false) invalidateStorySupports(db,chatId,storyMemorySupportIds(db,chatId,[memoryId]));
+        // Parent story atoms use title/content; participant tags and display metadata
+        // do not grant character knowledge. Disabling the parent revokes its children.
+        if (previous.active && body.active === false) invalidateStorySupports(db,chatId,storyMemorySupportIds(db,chatId,[memoryId]));
+        else if (previous.active && (["title", "content"] as const).some(key => body[key] !== undefined && body[key] !== previous[key])) {
+          invalidateStorySupports(db,chatId,new Set([`memory:${memoryId}`]));
+        }
       }
       if (bookmarkUpdate) setMemoryBookmark(db, chatId, memoryId, body.bookmarked === true);
       return 1;
