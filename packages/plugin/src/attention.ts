@@ -369,7 +369,7 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
       ? "분기 이전의 기억을 이어받았습니다."
       : "선택한 원본 채팅의 기억을 이어받았습니다.",
   };
-  if (state.perspectiveStatus?.unresolved) return {
+  if (state.perspectiveStatus?.unresolved && state.perspectiveStatus.omissionReason !== "no_memories") return {
     kind: "review",
     label: "관점 확인 필요",
     detail: state.perspectiveStatus.omissionReason === "unresolved_perspective"

@@ -1,12 +1,12 @@
 {
-  "productVersion": "1.0.3",
-  "pluginVersion": "1.0.2",
+  "productVersion": "1.0.4",
+  "pluginVersion": "1.0.3",
   "serverVersion": "1.0.3",
   "apiRevision": 87,
   "minimumPluginVersion": "1.0.0",
   "minimumServerVersion": "1.0.0",
   "releaseNotes": [
-    "다른 설치에서 만든 전체 백업이 복원되지 않던 문제를 수정했습니다.",
-    "전체 백업 복원에 실패하면 이유를 표시합니다."
+    "아직 저장된 기억이 없는 신규 채팅에서는 불필요한 관점 확인 알림을 표시하지 않습니다.",
+    "기존 기억이 있지만 관점을 확정하지 못한 경우의 안내는 유지합니다."
   ]
 }
