@@ -42,6 +42,30 @@ function sceneFingerprint(scene: Pick<QuizSceneRow, "title" | "content">): strin
   return createHash("sha256").update(JSON.stringify([scene.title, scene.content])).digest("hex");
 }
 
+/** Capture before a source-guarded episode regeneration, never during an ordinary edit. */
+export function snapshotRegenerationQuizzes(db: RcmDatabase, chatId: string, memoryIds: string[]) {
+  const selected = new Set(memoryIds);
+  return quizSceneRows(db, chatId).filter(scene => selected.has(scene.id)).map(scene => {
+    const sources = db.prepare(`SELECT DISTINCT msg.message_id,
+        CASE WHEN msg.canonical_hash<>'' THEN msg.canonical_hash ELSE msg.content_hash END hash
+      FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id
+      WHERE e.chat_id=? AND e.memory_id=? AND msg.content IS NOT NULL
+        AND msg.lifecycle IN ('committed','client_pruned') AND msg.host_visibility IN ('active','all_before')
+      ORDER BY msg.message_id`).all(chatId, scene.id);
+    return { id: scene.id, fingerprint: sceneFingerprint(scene), sources: sources.length ? JSON.stringify(sources) : null };
+  });
+}
+
+export function preserveRegenerationQuizzes(db: RcmDatabase, chatId: string, before: ReturnType<typeof snapshotRegenerationQuizzes>): void {
+  const after = new Map(snapshotRegenerationQuizzes(db, chatId, before.map(row => row.id)).map(row => [row.id, row]));
+  const update = db.prepare(`UPDATE quiz_items SET memory_fingerprint=? WHERE chat_id=? AND memory_id=?
+    AND retired_at IS NULL AND memory_fingerprint=?`);
+  for (const prior of before) {
+    const current = after.get(prior.id);
+    if (prior.sources && current?.sources === prior.sources) update.run(current.fingerprint, chatId, prior.id, prior.fingerprint);
+  }
+}
+
 // A typed source reference in the existing quiz reference column; never a memory record.
 const SOURCE_REF = "source-message:";
 const QUIZ_SOURCE_LAG = 2;
@@ -374,7 +398,7 @@ All readers are adults: intimate and explicit scenes are fair game and are asked
 Return one JSON object: {"items":[{"format":"choice4"|"ox","difficulty":"easy"|"medium"|"hard","question":string,"options":[string],"answerIndex":integer,"explanation":string,"quote"?:string,"memoryRef":string}]}
 Spread questions across the supplied material. A scene may support several questions only when they test distinct facts. For each scene, ask something different from its Already asked questions. memoryRef is the supplied ref such as "s3".
 Source refs such as s1 or s3, message ordinals and input section labels are internal metadata, not story content. Use a source ref only in memoryRef; never mention these internal labels in question, options, explanation or quote.
-The reader cannot see your input materials. Make every question understandable on its own by identifying the relevant situation through supported people, actions, places or events, without revealing the answer. Do not replace an internal label with an equally opaque phrase such as "scene 1" or "the supplied passage". Before returning, check all reader-facing fields for references to your input labels and rewrite them using story context.
+The reader cannot see your input materials. In every question, including O/X statements, briefly establish which moment is being asked about: use a distinctive preceding event, location, purpose of the interaction, or an in-story date/time explicitly stated in the source. Combine supported cues when one alone could fit several moments; names, generic emotions or recurring gestures alone do not identify a situation. Never invent a date or use storage timestamps as story dates. Put this context in the question itself, not only in the explanation, without revealing the answer or making the tested detail easier. Small details remain valid quiz subjects at the difficulty levels below. Do not replace an internal label with an equally opaque phrase such as "scene 1" or "the supplied passage". Before returning, check that the reader can identify the intended moment from each question alone and that all reader-facing fields use story context rather than input labels.
 easy: a central fact of the scene (who, where, what happened). About half of the easy items are "ox" statements; their options are ["O","X"], answerIndex 0 when the statement is true and 1 when false.
 medium: a specific, memorable fact (a promise, a gift, a decision, a place).
 hard: a small detail only an attentive reader remembers (a line of dialogue, an object, a number). Use scenes that include Details, Dialogue or Source excerpt. quote, when you give it, is a short line copied from that scene.

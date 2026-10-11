@@ -1,4 +1,5 @@
 import { syncManualCognition } from "./social-knowledge.js";
+import { preserveRegenerationQuizzes, snapshotRegenerationQuizzes } from "./quiz.js";
 import { createHash, randomUUID } from "node:crypto";
 import { estimateTokens, ExtractionResultSchema, type ExtractionResult } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
@@ -531,6 +532,7 @@ export function applyEpisodeRegeneration(db: RcmDatabase, chatId: string, runId:
     target: "atomRef" in relation.target ? relation.target : remapBatchRef(relation.target),
   })) };
   const prominence = db.prepare("SELECT * FROM entity_prominence WHERE chat_id=?").all(chatId) as any[];
+  const quizzes = snapshotRegenerationQuizzes(db, chatId, old.map(item => item.id));
   const relationWarnings: string[] = [];
   db.transaction(() => {
     invalidateStorySpine(db, chatId);
@@ -541,6 +543,7 @@ export function applyEpisodeRegeneration(db: RcmDatabase, chatId: string, runId:
       db.prepare("DELETE FROM embedding_items WHERE kind='memory' AND source_id=?").run(item.id);
     }
     relationWarnings.push(...ingestExtraction(db, chatId, applied, run.job_id, run.batch_id, resolveRelationContext(db, chatId, relationContext)));
+    preserveRegenerationQuizzes(db, chatId, quizzes);
     db.prepare("DELETE FROM entity_scene_presence WHERE chat_id=? AND scene_key=?").run(chatId, run.job_id);
     db.prepare("DELETE FROM entity_prominence WHERE chat_id=?").run(chatId);
     const restore = db.prepare("INSERT INTO entity_prominence(chat_id,entity_name,tier,scene_count,durable_links,pinned,updated_at) VALUES(?,?,?,?,?,?,?)");
