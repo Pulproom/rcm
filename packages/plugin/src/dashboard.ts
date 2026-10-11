@@ -2847,7 +2847,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     extraction: "대화에서 기억 찾기", extraction_repair: "응답 형식 보완",
     initial_calibration: "초기 인물 설정", initial_calibration_repair: "초기 설정 응답 보완",
     audit: "추출 결과 재검수", audit_repair: "재검수 응답 보완",
-    reconciliation: "상태 추출·기존 기억과 대조", reconciliation_repair: "상태 응답 형식 보완",
+    reconciliation: "상태 추출·기존 기억과 대조", reconciliation_repair: "상태 대조·접근 근거 보완", state_response_repair: "상태 응답 형식 보완",
     ledger_consistency: "마지막 장부 대조", ledger_consistency_repair: "장부 응답 형식 보완",
     relationship_projection: "관계 상태 갱신", relationship_projection_repair: "관계 응답 형식 보완",
     story_consolidation: "줄거리 갱신", story_consolidation_repair: "줄거리 응답 형식 보완",

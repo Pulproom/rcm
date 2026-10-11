@@ -1,3 +1,4 @@
+import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { isChatMemoryEnabled } from "./settings.js";
 import { parseReconciliationResult, type SourceUnit } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
@@ -67,7 +68,7 @@ export function parseJson(text: string): unknown {
   return parseStructuredModelJson(text).value;
 }
 
-type WorkerJsonPurpose = "memory_group" | "memory_group_repair" | "extraction" | "extraction_repair" | "initial_calibration" | "initial_calibration_repair" | "audit" | "audit_repair" | "reconciliation" | "reconciliation_repair" | "ledger_consistency" | "ledger_consistency_repair" | "relationship_projection" | "relationship_projection_repair" | "story_consolidation" | "story_consolidation_repair" | "quiz" | "episode_draft" | "episode_draft_repair" | "episode_finalize" | "episode_finalize_repair";
+type WorkerJsonPurpose = "memory_group" | "memory_group_repair" | "extraction" | "extraction_repair" | "initial_calibration" | "initial_calibration_repair" | "audit" | "audit_repair" | "reconciliation" | "reconciliation_repair" | "state_response_repair" | "ledger_consistency" | "ledger_consistency_repair" | "relationship_projection" | "relationship_projection_repair" | "story_consolidation" | "story_consolidation_repair" | "quiz" | "episode_draft" | "episode_draft_repair" | "episode_finalize" | "episode_finalize_repair";
 
 async function generateQuiz(state: RuntimeState, job: LeasedJob): Promise<unknown> {
   return parseWorkerJson(state, await runModel(state, [
@@ -406,13 +407,18 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
   try { return validate(first, purpose); }
   catch (firstError) {
     onRepair?.();
-    const repaired = await runModel(state, buildAuxiliaryRepairMessages({
+    const repairPurpose = prepared.stateExtraction ? "state_response_repair" : "reconciliation_repair";
+    const reason = structuredValidationDiagnostic(firstError);
+    addLog(state.logs, "warn", `상태 응답 검증 실패: ${reason}; repair=${repairPurpose}`);
+    let repaired: string;
+    try { repaired = await runModel(state, buildAuxiliaryRepairMessages({
       originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "reconciliation" },
-    }), "reconciliation_repair");
+    }), repairPurpose); }
+    catch (error) { throw new Error(`State response repair failed: ${String(error)}; initial_validation=${reason}`); }
     return validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "reconciliation",
       regenerate: () => runModel(state, messages, "reconciliation"),
-      validate: (output, phase) => validate(output, phase === "repair" ? "reconciliation_repair" : "reconciliation"),
+      validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
   }
 }
@@ -515,18 +521,18 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       }, 20_000);
       const firstStage = job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction";
       const llmCallStats: OperationLlmCallStats = { total: job.llmCallStats?.total ?? 0, repairs: job.llmCallStats?.repairs ?? 0, byPurpose: { ...(job.llmCallStats?.byPurpose ?? {}) } };
-      let repairBudgetUsed = job.repairBudgetUsed ?? (llmCallStats.repairs >= 1);
+      let repairBudgetUsed = job.repairBudgetUsed ?? (llmCallStats.repairs > (llmCallStats.byPurpose.state_response_repair ?? 0));
+      let stateRepairBudgetUsed = job.stateRepairBudgetUsed ?? ((llmCallStats.byPurpose.state_response_repair ?? 0) > 0);
       if (job.auxiliaryBudget) modelJobBudgets.set(state, job.auxiliaryBudget);
       validatedPartRecorders.set(state, async (purpose, part, result) => client.validatedAuxiliaryPart?.(job.id, state.workerId, purpose, part, result));
       modelDraftRecorders.set(state, async (output, storyValidationReason) => client.stageDraft?.(job.id, state.workerId, output, storyValidationReason));
       modelCallRecorders.set(state, async (purpose, outcome, error, usage) => {
         if (outcome === "started") {
-          if (purpose.endsWith("_repair") && repairBudgetUsed) throw new Error("REPAIR_BUDGET_EXHAUSTED: one automatic repair per batch attempt");
+          ({ repairBudgetUsed, stateRepairBudgetUsed } = consumeAuxiliaryRepair(purpose, { repairBudgetUsed, stateRepairBudgetUsed }));
           llmCallStats.total += 1;
           llmCallStats.byPurpose[purpose] = (llmCallStats.byPurpose[purpose] ?? 0) + 1;
           if (purpose.endsWith("_repair")) {
             llmCallStats.repairs += 1;
-            repairBudgetUsed = true;
           }
         }
         const phase = state.currentJob?.phase;

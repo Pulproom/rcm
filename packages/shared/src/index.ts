@@ -43,7 +43,7 @@ export { MEMORY_GUIDANCE, memoryGuidanceBlock, withMemoryGuidance, memoryEvidenc
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
-export { measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
+export { consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
 export { buildSourceUnits, findAtomicDisplaySpans, resolveSourceQuote, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";
@@ -1437,6 +1437,9 @@ export function validateRecognitionReferences(result: Pick<ExtractionDraftResult
   }
 }
 
+function requireCoreDetail(memory: z.infer<typeof ExtractedMemorySchema>, context: z.RefinementCtx, path: (string | number)[] = []): void {
+  if (!memory.details?.some(detail => detail.role === "core")) context.addIssue({ code: "custom", path: [...path, "details"], message: "Materialize the memory's essential event/claim as a source-backed core detail. A summary or relationship reason alone is not deliverable evidence." });
+}
 /** Current first-pass extraction contract. It deliberately omits canonical
  * assertion, belief, and promise lifecycle decisions. */
 export const Api38ExtractionDraftResultSchema = ExtractionDraftResultSchema.superRefine((result, context) => {
@@ -1444,7 +1447,7 @@ export const Api38ExtractionDraftResultSchema = ExtractionDraftResultSchema.supe
   for (const field of ["sourcePassages", "unfinishedSource"] as const) if (!Array.isArray(result[field])) context.addIssue({ code: "custom", path: [field], message: `Current extraction must explicitly return ${field}, using [] when empty.` });
   result.memories.forEach((memory, index) => {
     if (!memory.retention) context.addIssue({ code: "custom", path: ["memories", index, "retention"], message: "Current extraction memories require a retention class." });
-    if (!memory.details?.some(detail => detail.role === "core")) context.addIssue({ code: "custom", path: ["memories", index, "details"], message: "Materialize the memory's essential event/claim as a source-backed core detail. A summary or relationship reason alone is not deliverable evidence." });
+    requireCoreDetail(memory, context, ["memories", index]);
     for (const [detailIndex, detail] of (memory.details ?? []).entries()) {
       if (!detail.role) context.addIssue({ code: "custom", path: ["memories", index, "details", detailIndex, "role"], message: "Declare core or supporting; core is essential event context, not a relevance score." });
       if (detail.access === undefined) context.addIssue({ code: "custom", path: ["memories", index, "details", detailIndex, "access"], message: "Explicit whole-record access is required; use [] for narrator-only and split partially known claims." });
@@ -1467,7 +1470,7 @@ const StateDetailSchema = ExtractedMemoryDetailSchema.safeExtend({
 });
 export const StateExtractionSchema = z.object({
   entities: z.array(EntitySchema).default([]),
-  memories: z.array(ExtractedMemorySchema.safeExtend({details:z.array(StateDetailSchema).min(1),retention:z.enum(["scene","arc","durable"])})).default([]),
+  memories: z.array(ExtractedMemorySchema.safeExtend({details:z.array(StateDetailSchema).min(1),retention:z.enum(["scene","arc","durable"])}).superRefine(requireCoreDetail)).default([]),
   detailAdditions: z.array(z.object({ memoryKey: z.string().min(1), detail: StateDetailSchema })).default([]),
   stateObservations: z.array(StateObservationSchema).default([]),
   relationshipEvents: z.array(RelationshipEventSchema).default([]),
@@ -1658,6 +1661,7 @@ export interface LeasedJob {
   llmCallStats?: OperationLlmCallStats;
   llmUsage?: { inputTokens: number; outputTokens: number; callsWithUsage: number };
   repairBudgetUsed?: boolean;
+  stateRepairBudgetUsed?: boolean;
   operationStage?: string;
   operationStageOrdinal?: number;
   operationStageTotal?: number;

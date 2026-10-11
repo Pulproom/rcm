@@ -52,7 +52,7 @@ import {
 import type { RcmDatabase } from "./db.js";
 import { saveSecret } from "./admin.js";
 import { normalizeAndValidateSetupEvidence } from "./initial-calibration.js";
-import { recordJobLlmCall, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
+import { recordJobLlmCall, repairBudgetSpent, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, type CachedAuxiliaryPurpose } from "./auxiliary-page-cache.js";
 
 const CONFIG_KEY = "server_llm_config";
@@ -180,7 +180,7 @@ export class ServerLlmStore {
   recordTiming(event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }): void { this.#timingObserver?.(event); }
   canRepair(jobId: string): boolean {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(jobId) as { payload_json: string } | undefined;
-    return Number(JSON.parse(row?.payload_json ?? "{}").llmCallStats?.repairs ?? 0) < 1;
+    return !repairBudgetSpent(JSON.parse(row?.payload_json ?? "{}"));
   }
   stageOutput(jobId: string, output: string, storyValidationReason?: string): void { stageJobModelOutput(this.db, jobId, output, undefined, storyValidationReason); }
   settleCall(jobId: string, purpose: ServerLlmPurpose, outcome: "succeeded" | "failed", details?: { error?: unknown; usage?: Record<string, unknown> }): void { settleJobLlmCall(this.db, jobId, purpose, outcome, details); }
@@ -405,7 +405,7 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
   }
 }
 
-type ServerLlmPurpose = "quiz" | "memory_group" | "memory_group_repair" | "extraction" | "extraction_repair" | "initial_calibration" | "initial_calibration_repair" | "audit" | "audit_repair" | "reconciliation" | "reconciliation_repair" | "ledger_consistency" | "ledger_consistency_repair" | "relationship_projection" | "relationship_projection_repair" | "story_consolidation" | "story_consolidation_repair" | "episode_draft" | "episode_draft_repair" | "episode_finalize" | "episode_finalize_repair";
+type ServerLlmPurpose = "quiz" | "memory_group" | "memory_group_repair" | "extraction" | "extraction_repair" | "initial_calibration" | "initial_calibration_repair" | "audit" | "audit_repair" | "reconciliation" | "reconciliation_repair" | "state_response_repair" | "ledger_consistency" | "ledger_consistency_repair" | "relationship_projection" | "relationship_projection_repair" | "story_consolidation" | "story_consolidation_repair" | "episode_draft" | "episode_draft_repair" | "episode_finalize" | "episode_finalize_repair";
 
 export async function groupMemoriesWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal): Promise<MemoryGroupingResult> {
   const stage = job.memoryGrouping!;
@@ -888,14 +888,18 @@ export async function reconcileWithServerLlm(
   };
   try { return validate(first, purpose); } catch (firstError) {
     onRepair?.();
-    console.warn(`[RCM] Server LLM validation repair purpose=reconciliation issue=${validationSummary(firstError)}`);
-    const repaired = await callRepairProvider(() => callProvider(store, jobId, buildAuxiliaryRepairMessages({
+    const repairPurpose = prompts.stateExtraction ? "state_response_repair" : "reconciliation_repair";
+    const reason = validationSummary(firstError);
+    console.warn(`[RCM] Server LLM validation repair purpose=${repairPurpose} issue=${reason}`);
+    let repaired: string;
+    try { repaired = await callRepairProvider(() => callProvider(store, jobId, buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages, invalidOutput: first, validationError: firstError, request: { kind: "reconciliation" },
-    }), signal, "reconciliation_repair"));
+    }), signal, repairPurpose)); }
+    catch (error) { throw new Error(`State response repair failed: ${String(error)}; initial_validation=${reason}`); }
     return validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "reconciliation",
       regenerate: () => callProvider(store, jobId, sourceMessages, signal, "reconciliation"),
-      validate: (output, phase) => validate(output, phase === "repair" ? "reconciliation_repair" : "reconciliation"),
+      validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
   }
 }

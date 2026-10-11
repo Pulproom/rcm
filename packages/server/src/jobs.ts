@@ -1,3 +1,4 @@
+import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { buildQuizJob } from "./quiz.js";
 import { STORY_TIME_GUIDANCE, SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE, ACCESS_BASIS_GUIDANCE } from "@rcm/shared";
 
@@ -61,8 +62,11 @@ export function normalizeLlmCallStats(value: unknown): OperationLlmCallStats {
   return { total, repairs, byPurpose };
 }
 
-const repairBudgetSpent = (payload: Record<string, unknown>, stats = normalizeLlmCallStats(payload.llmCallStats)): boolean =>
-  typeof payload.repairBudgetUsed === "boolean" ? payload.repairBudgetUsed : stats.repairs >= 1;
+export const repairBudgetSpent = (payload: Record<string, unknown>, stats = normalizeLlmCallStats(payload.llmCallStats)): boolean =>
+  typeof payload.repairBudgetUsed === "boolean" ? payload.repairBudgetUsed : stats.repairs > (stats.byPurpose.state_response_repair ?? 0);
+
+const stateRepairBudgetSpent = (payload: Record<string, unknown>, stats = normalizeLlmCallStats(payload.llmCallStats)): boolean =>
+  typeof payload.stateRepairBudgetUsed === "boolean" ? payload.stateRepairBudgetUsed : (stats.byPurpose.state_response_repair ?? 0) > 0;
 
 export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string, workerId?: string): OperationLlmCallStats {
   return db.transaction(() => {
@@ -71,12 +75,11 @@ export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string
     if (row.status !== "leased" || (workerId && row.lease_owner !== workerId)) throw new Error("Cannot account an LLM call outside the active job lease");
     const payload = JSON.parse(row.payload_json || "{}") as Record<string, unknown>;
     const stats = normalizeLlmCallStats(payload.llmCallStats);
-    if (purpose.endsWith("_repair") && repairBudgetSpent(payload, stats)) throw new Error("REPAIR_BUDGET_EXHAUSTED: one automatic repair per batch attempt");
+    Object.assign(payload, consumeAuxiliaryRepair(purpose, { repairBudgetUsed: repairBudgetSpent(payload, stats), stateRepairBudgetUsed: stateRepairBudgetSpent(payload, stats) }));
     stats.byPurpose[purpose] = (stats.byPurpose[purpose] ?? 0) + 1;
     stats.total += 1;
     if (purpose.endsWith("_repair")) {
       stats.repairs += 1;
-      payload.repairBudgetUsed = true;
     }
     payload.llmCallStats = stats;
     appendLlmCallDiagnostic(payload, { purpose, attempt: row.attempts, outcome: "started", at: now() });
@@ -796,9 +799,9 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     `).get(timestamp, options.storyOnly ? 1 : 0) as { id: string; chat_id: string; type: string; payload_json: string; attempts: number; profile: RpProfile; memory_language: MemoryLanguage } | undefined;
     if (!row) return null;
     planningJobId = row.id;
-    const payload = JSON.parse(row.payload_json) as Partial<RecallCandidateSnapshot> & { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[] | string; includeUserMessages?: boolean; episodeId?: string; resolvedSetup?: ResolvedSetupProjection; identityHints?: Record<string, unknown>; pairs?: Array<{ from: string; to: string; mode?: "incremental" | "replay" }>; memoryLanguage?: MemoryLanguage; postExtractionReview?: boolean; auditDraft?: ExtractionDraftResult; continuationDraft?: ExtractionDraftResult; sourceRecovery?: boolean; sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] }; batchId?: string; regenerationRunId?: string; backfillRunId?: string; groups?: any[]; level?: "segment" | "arc" | "overview"; generationId?: string; startOrdinal?: number; endOrdinal?: number; sourceNodeIds?: string[]; sourceBatchIds?: string[]; sourceTokens?: number; llmCallStats?: OperationLlmCallStats; repairBudgetUsed?: boolean; operationStage?: string; operationStageOrdinal?: number; operationStageTotal?: number };
+    const payload = JSON.parse(row.payload_json) as Partial<RecallCandidateSnapshot> & { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[] | string; includeUserMessages?: boolean; episodeId?: string; resolvedSetup?: ResolvedSetupProjection; identityHints?: Record<string, unknown>; pairs?: Array<{ from: string; to: string; mode?: "incremental" | "replay" }>; memoryLanguage?: MemoryLanguage; postExtractionReview?: boolean; auditDraft?: ExtractionDraftResult; continuationDraft?: ExtractionDraftResult; sourceRecovery?: boolean; sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] }; batchId?: string; regenerationRunId?: string; backfillRunId?: string; groups?: any[]; level?: "segment" | "arc" | "overview"; generationId?: string; startOrdinal?: number; endOrdinal?: number; sourceNodeIds?: string[]; sourceBatchIds?: string[]; sourceTokens?: number; llmCallStats?: OperationLlmCallStats; repairBudgetUsed?: boolean; stateRepairBudgetUsed?: boolean; operationStage?: string; operationStageOrdinal?: number; operationStageTotal?: number };
     const memoryLanguage = payload.memoryLanguage ?? row.memory_language;
-    const operationMeta = { llmCallStats: normalizeLlmCallStats(payload.llmCallStats), repairBudgetUsed: payload.repairBudgetUsed, operationStage: payload.operationStage,
+    const operationMeta = { llmCallStats: normalizeLlmCallStats(payload.llmCallStats), repairBudgetUsed: payload.repairBudgetUsed, stateRepairBudgetUsed: payload.stateRepairBudgetUsed, operationStage: payload.operationStage,
       operationStageOrdinal: payload.operationStageOrdinal, operationStageTotal: payload.operationStageTotal };
     if (row.type === 'memory_group') {
       if (!validatePendingMemoryGroup(db, row.chat_id, row.id, payload as any)) return null;
@@ -1080,9 +1083,18 @@ export function setJobPipelineStage(db: RcmDatabase, jobId: string, stage: JobPi
   if (llmCallStats) {
     const previous = normalizeLlmCallStats(payload.llmCallStats);
     const supplied = normalizeLlmCallStats(llmCallStats);
-    const addedRepairs = Math.max(0, supplied.repairs - previous.repairs);
-    if (addedRepairs > (repairBudgetSpent(payload, previous) ? 0 : 1)) throw new Error("REPAIR_BUDGET_EXHAUSTED: one automatic repair per batch attempt");
-    if (addedRepairs > 0) payload.repairBudgetUsed = true;
+    let budget = { repairBudgetUsed: repairBudgetSpent(payload, previous), stateRepairBudgetUsed: stateRepairBudgetSpent(payload, previous) };
+    let namedRepairs = 0;
+    for (const [purpose, count] of Object.entries(supplied.byPurpose)) {
+      if (!purpose.endsWith("_repair")) continue;
+      const added = Math.max(0, count - (previous.byPurpose[purpose] ?? 0));
+      for (let index = 0; index < added; index++) budget = consumeAuxiliaryRepair(purpose, budget);
+      namedRepairs += added;
+    }
+    // Unnamed call totals consume the general slot, never the reserved one.
+    const unnamedRepairs = Math.max(0, supplied.repairs - previous.repairs - namedRepairs);
+    for (let index = 0; index < unnamedRepairs; index++) budget = consumeAuxiliaryRepair("extraction_repair", budget);
+    Object.assign(payload, budget);
     payload.llmCallStats = supplied.total >= previous.total ? supplied : previous;
     payload.pipelineRepairCount = normalizeLlmCallStats(payload.llmCallStats).repairs;
   }
@@ -1112,7 +1124,7 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, error:
   const maxAttempts = 3;
   const nonRetryable = /(?:returned\s+(?:400|401|403|413)\b|HTTP\s+(?:400|401|403|413)\b|context (?:length|window)|(?:maximum|max|exceed(?:s|ed)?).{0,24}context|too many (?:input )?tokens|input.{0,20}too (?:large|long)|payload too large)/i.test(error);
   const originalPayload = JSON.parse(row.payload_json || "{}") as Record<string, unknown>;
-  const status = nonRetryable || repairBudgetSpent(originalPayload) || row.attempts >= maxAttempts ? "failed" : "queued";
+  const status = nonRetryable || repairBudgetSpent(originalPayload) || stateRepairBudgetSpent(originalPayload) || row.attempts >= maxAttempts ? "failed" : "queued";
   const failedPayload = {
     ...originalPayload,
     pipelineStage: status === "queued" ? "retrying" : "failed",

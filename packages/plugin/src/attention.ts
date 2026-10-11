@@ -106,7 +106,7 @@ export function auxiliaryPurposeLabel(purpose: string): string {
 
 function activeGroupSuffix(state: RuntimeState, event?: { purpose: string; groupOrdinal?: number; groupTotal?: number }): string {
   if (event?.groupOrdinal && event.groupTotal) return ` ${event.groupOrdinal}/${event.groupTotal}`;
-  if (event && !["extraction", "extraction_repair", "audit", "audit_repair", "reconciliation", "reconciliation_repair"].includes(event.purpose)) return "";
+  if (event && !["extraction", "extraction_repair", "audit", "audit_repair", "reconciliation", "reconciliation_repair", "state_response_repair"].includes(event.purpose)) return "";
   const progress = liveBackfillProgress(state);
   return progress?.activeGroupOrdinal && progress.activeGroupTotal
     ? ` ${progress.activeGroupOrdinal}/${progress.activeGroupTotal}`

@@ -2744,6 +2744,7 @@ export function createApp(dependencies: Dependencies): Hono {
       for (const job of failed) {
         const payload = JSON.parse(job.payload_json || "{}") as Record<string, unknown>;
         payload.repairBudgetUsed = false;
+        payload.stateRepairBudgetUsed = false;
         payload.pipelineRepairCount = 0;
         changes += update.run(JSON.stringify(payload), Date.now(), job.id).changes;
       }
