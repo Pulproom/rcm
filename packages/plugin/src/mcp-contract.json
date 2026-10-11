@@ -1,0 +1,44 @@
+{
+  "tools": [
+    {
+      "id": "recall_rp_memory",
+      "name": "recall_rp_memory",
+      "description": "Retrieve a specific missing fact from stored RP history when it would help the next scene: an event, world fact, relationship, belief, preference, or promise. Use recent conversation and supplied memories directly when they already provide it. This is optional archival lookup, not a routine continuity check, scene planner, or predictor of what someone will do next. Ask one natural-language question about the missing record. For more detail in a supplied memory, use expand_rp_memory. Results are evidence with scene context and dialogue; they do not certify a question’s premise or grant character knowledge.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "A natural-language question about stored roleplay history."
+          }
+        }
+      }
+    },
+    {
+      "id": "expand_rp_memory",
+      "name": "expand_rp_memory",
+      "description": "Expand one clearly chosen memory ref with its details, dialogue, and source evidence. Use this after a supplied record is known to be the right one; do not expand several refs as a general continuity check. Optional focus narrows the result to locally matching evidence inside that memory and may return no match; it never searches other memories. If several records might answer, use recall_rp_memory instead. Use a currently supplied ref.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref"
+        ],
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "The exact ref supplied beside a memory."
+          },
+          "focus": {
+            "type": "string",
+            "description": "Optional detail to look for within this memory."
+          }
+        }
+      }
+    }
+  ]
+}

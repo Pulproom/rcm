@@ -1,0 +1,12 @@
+{
+  "productVersion": "1.0.3",
+  "pluginVersion": "1.0.2",
+  "serverVersion": "1.0.3",
+  "apiRevision": 87,
+  "minimumPluginVersion": "1.0.0",
+  "minimumServerVersion": "1.0.0",
+  "releaseNotes": [
+    "다른 설치에서 만든 전체 백업이 복원되지 않던 문제를 수정했습니다.",
+    "전체 백업 복원에 실패하면 이유를 표시합니다."
+  ]
+}
