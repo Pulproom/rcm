@@ -72,6 +72,10 @@ export const PHONE_SKIN_CSS = `
 .btn--quiet { color: var(--accent-text); padding: 0 8px; }
 .btn--quiet:hover, .btn--quiet.is-hover { color: var(--accent-text); background: var(--fill); }
 .btn--danger { color: var(--cut); background: var(--cut-dim); }
+@media (max-width: 760px) {
+  .btn { height: 32px; }
+  .btn:not(.btn--quiet) { padding-inline: 12px; }
+}
 .iconbtn { border-radius: 50%; color: var(--tungsten); }
 .iconbtn:hover, .iconbtn.is-hover, .iconbtn[aria-expanded="true"] { color: var(--tungsten); background: var(--fill); }
 .linkbtn { color: var(--accent-text); text-decoration: none; }
@@ -510,7 +514,7 @@ button.scene__title:hover { color: var(--accent-text); }
 @media (max-width: 899px) {
   /* on a phone the verbs read like an action sheet: full width, the consequential one first */
   .world-confirm .form__bar { display: flex; flex-direction: column-reverse; align-items: stretch; gap: 8px; }
-  .world-confirm .form__bar .btn { width: 100%; min-height: 50px; justify-content: center; border-radius: 14px; font-size: var(--t-body); }
+  .world-confirm .form__bar .btn { width: 100%; min-height: 44px; justify-content: center; border-radius: 14px; font-size: var(--t-body); }
 }
 
 /* ---- 랜드마크 chips and the 기본 관계 form: filled pills like iOS tokens; the relation reads back on its own card ---- */

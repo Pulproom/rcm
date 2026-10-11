@@ -1,3 +1,4 @@
+import { ACCESS_BASIS_GUIDANCE } from "./state-classification.js";
 import {
   INITIAL_AFFECTION_LEVELS,
   INITIAL_INTENSITY_LEVELS,
@@ -188,6 +189,7 @@ function taskInstruction(request: AuxiliaryRepairRequest): string {
 - Every field named evidence is an array shaped ${evidence}; never use a string or one object.
 - Every stateObservations[] item has non-empty evidence in that shape and a non-empty batch-local key. Remove an unsupported observation instead of dropping its evidence. Preserve an existing key or use a simple kind-and-index label; never turn it into a canonical predicate or promise key.
 - Every access field is an array shaped ${access}. access[].basis is one of ${ITEM_ACCESS_BASIS_VALUES.join("|")}. Empty access means narrator archive only.
+${ACCESS_BASIS_GUIDANCE}
 - The top level is exactly language, entities, memories, stateObservations, relationshipEvents, socialKnowledge, relationshipBaselines, physicalIntimacy, memoryRecallObservations, atomRelations, sourcePassages, unfinishedSource. sourcePassages and unfinishedSource are required arrays; use [] when empty. Never add canonical assertions, beliefs, or promises.
 - physicalIntimacy[].act is exactly one of ${PHYSICAL_INTIMACY_ACT_VALUES.join("|")}; use other with customLabel only when no listed act fits.
 - details[].kind is exactly one of ${MEMORY_DETAIL_KIND_VALUES.join("|")} and keyDialogues[].kind is exactly one of ${KEY_DIALOGUE_KIND_VALUES.join("|")}.

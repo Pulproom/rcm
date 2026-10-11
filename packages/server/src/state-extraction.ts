@@ -2,7 +2,7 @@ import { canAutomaticallyChange, USER_CORRECTION_GUIDANCE } from "./user-correct
 import { createHash } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, ExtractionAggregateSchema, Api38ExtractionDraftResultSchema, validateRecognitionReferences,
   STORY_TIME_GUIDANCE, StateExtractionSchema, SOCIAL_MEMORY_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE,
-  STATE_CLASSIFICATION_GUIDANCE, buildSourceUnits, type ExtractionDraftResult, type ReconciliationSubmission } from "@rcm/shared";
+  ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, buildSourceUnits, type ExtractionDraftResult, type ReconciliationSubmission } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { prepareReconciliation } from "./reconciliation.js";
 import { listSocialKnowledge } from "./social-knowledge.js";
@@ -52,6 +52,7 @@ ${IDENTITY_TERM_GUIDANCE}
 ${OBSERVATION_CAUSE_GUIDANCE}
 ${PHYSICAL_CONTACT_GUIDANCE}
 ${STATE_CLASSIFICATION_GUIDANCE}
+${ACCESS_BASIS_GUIDANCE}
 ${USER_CORRECTION_GUIDANCE}
 Use eventDraft memory/detail keys for links when they fully establish a state. To add a recognition or other state detail to an existing event, use detailAdditions:[{memoryKey,detail}] with a NEW detail key. NEVER copy an existing event into state.memories or replace its details. state.memories is ONLY for a source-supported state lacking any suitable event parent; use fresh keys prefixed state_. Do not re-emit existing entities. An absent event detail is not permission to omit a source-established state. Never infer a role from shared affiliation, romance from intimacy, or knowledge from narrator access. Historical introductions stay events; recognition describes current source-supported understanding. Existing ledger entries are context, never new source evidence.
 Return strict JSON {state:{entities:[],memories:[],detailAdditions:[],stateObservations:[],relationshipEvents:[],socialKnowledge:[],relationshipBaselines:[],physicalIntimacy:[]},decisions:[]}.

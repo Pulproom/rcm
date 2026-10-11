@@ -1,4 +1,5 @@
 import { syncManualCognition } from "./social-knowledge.js";
+import { memoryReferenceHighWater } from "./memory-references.js";
 import type { RcmDatabase } from "./db.js";
 import { ChatBackupSettingsSchema, type ChatBackupSettings } from "@rcm/shared";
 import { bindInheritedMemoryGroups, invalidateChangedMemoryGroups } from './memory-grouping.js';
@@ -9,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { deleteDerivedRows } from "./derived-state.js";
 import { pruneTranslationCache, translationCacheKey } from "./translation-cache.js";
 import { ledgerEditOriginsKey, readRemovedAliases, readUserDeletions, removedAliasesKey, userDeletionsKey, type Deletion, type RemovedAliases } from "./user-deletions.js";
-import { detailAccessEditsKey } from "./item-access.js";
+import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 
 export const BACKUP_VERSION = 31 as const;
 
@@ -114,13 +115,13 @@ function chatTableWhere(db: RcmDatabase, table: string): string {
   if (columns.includes("child_chat_id")) return "child_chat_id=?";
   const owner=indirectChatOwners[table];
   if (owner) return `${owner[0]} IN (SELECT id FROM ${owner[1]} WHERE chat_id=?)`;
-  // Eight chat-owned keys, including detail access edits. Keep restore
+  // Chat-owned keys, including access edits and pending dialogue identities. Keep restore
   // validation and admin deletion aligned.
-  if (table === "server_meta") return "key IN ('retrieval_trace_chat:' || ?, 'memory_bookmarks:' || ?, 'view_preferences:' || ?, 'user_deletions:' || ?, 'persona_hint:' || ?, 'ledger_edit_origins:' || ?, 'removed_aliases:' || ?, 'detail_access_edits:' || ?)";
+  if (table === "server_meta") return "key IN ('retrieval_trace_chat:' || ?, 'memory_bookmarks:' || ?, 'view_preferences:' || ?, 'user_deletions:' || ?, 'persona_hint:' || ?, 'ledger_edit_origins:' || ?, 'removed_aliases:' || ?, 'detail_access_edits:' || ?, 'dialogue_access_identity:' || ?)";
   throw new Error(`Chat backup ownership is not defined: ${table}`);
 }
 
-const chatTableBindings = (table: string, chatId: string): string[] => table === "server_meta" ? Array(8).fill(chatId) : [chatId];
+const chatTableBindings = (table: string, chatId: string): string[] => table === "server_meta" ? Array(9).fill(chatId) : [chatId];
 
 export function exportCompleteArchive(db: RcmDatabase, privateData: CompleteBackupPrivateData = {}): Uint8Array {
   return exportArchive(db, privateData);
@@ -270,7 +271,7 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
   validateCurrentSchema(db, parsed.manifest);
   const tables = archiveTables(parsed.files);
   const currentTables = persistentTables(db);
-  const refHighWater = BigInt((db.prepare("SELECT value FROM server_meta WHERE key='memory_ref_sequence'").get() as {value:string} | undefined)?.value ?? "0");
+  const refHighWater = memoryReferenceHighWater(db);
   let vectorsRestored = 0;
   db.pragma("foreign_keys = OFF");
   try {
@@ -278,8 +279,11 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
       try { db.prepare("DELETE FROM embedding_vectors_v4_chat").run(); } catch { /* vector extension optional */ }
       for (const table of [...currentTables].reverse()) db.prepare(`DELETE FROM ${table}`).run();
       for (const table of currentTables) insertRows(db, table, tables[table] ?? []);
-      const restoredHighWater = BigInt((db.prepare("SELECT value FROM server_meta WHERE key='memory_ref_sequence'").get() as {value:string} | undefined)?.value ?? "0");
-      db.prepare("INSERT INTO server_meta(key,value) VALUES('memory_ref_sequence',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(refHighWater > restoredHighWater ? refHighWater : restoredHighWater));
+      const restoredHighWater = memoryReferenceHighWater(db);
+      for (const [key, value] of refHighWater) {
+        const restored = restoredHighWater.get(key) ?? 0n;
+        db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value > restored ? value : restored));
+      }
       vectorsRestored = restoreVectors(db, parsed.files);
       rebuildSearch(db);
     })();
@@ -300,7 +304,7 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
     Object.entries(indirectChatOwners).map(([table,[column,parent]])=>[table,[column,ownedIds(parent,"id")]]));
   for (const [table,rows] of Object.entries(tables)) for (const row of rows) {
     const valid=table==="chats" ? row.id===chatId : table==="server_meta" ? [
-      `retrieval_trace_chat:${chatId}`, `memory_bookmarks:${chatId}`, `view_preferences:${chatId}`, `user_deletions:${chatId}`, `persona_hint:${chatId}`, ledgerEditOriginsKey(chatId), removedAliasesKey(chatId), detailAccessEditsKey(chatId),
+      `retrieval_trace_chat:${chatId}`, `memory_bookmarks:${chatId}`, `view_preferences:${chatId}`, `user_deletions:${chatId}`, `persona_hint:${chatId}`, ledgerEditOriginsKey(chatId), removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId),
     ].includes(String(row.key))
       : Object.hasOwn(row,"chat_id") ? row.chat_id===chatId : Object.hasOwn(row,"child_chat_id") ? row.child_chat_id===chatId
       : owners[table]?.[1].has(row[owners[table]![0]]);
@@ -474,7 +478,7 @@ export function transplantCompleteArchive(db: RcmDatabase, archive: Uint8Array, 
       [ledgerEditOriginsKey(targetChatId), JSON.stringify(Object.fromEntries(Object.entries(origins).map(([id, entry]) => [rewriteIdentifier(id, ids), rewriteDeletion(entry)])))],
       [removedAliasesKey(targetChatId), JSON.stringify({ ...readRemovedAliases(db, targetChatId), ...Object.fromEntries(Object.entries(aliasRemovals).map(([id, terms]) => [rewriteIdentifier(id, ids), terms])) })],
       [detailAccessEditsKey(targetChatId), JSON.stringify(Object.fromEntries(Object.entries(detailAccessEdits)
-        .filter(([id]) => (selected.memory_details ?? []).some(row => row.id === id)).map(([id, holders]) => [rewriteIdentifier(id, ids), holders])))],
+        .filter(([id]) => [...(selected.memory_details ?? []), ...(selected.memory_dialogues ?? [])].some(row => row.id === id)).map(([id, holders]) => [rewriteIdentifier(id, ids), holders])))],
     ]) db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
     db.prepare("DELETE FROM messages WHERE chat_id=? AND source_kind='archive'").run(targetChatId);
     for (const table of insertionOrder) if (transplantTables.has(table)) insertRows(db, table, remapped[table] ?? []);

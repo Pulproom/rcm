@@ -8,7 +8,7 @@ import { now } from "./db.js";
 import { applyHostVisibilityProjection } from "./host-visibility.js";
 import { invalidateSocialKnowledgeEvidence } from "./social-knowledge.js";
 import { queueRelationshipProjection } from "./relationship-projections.js";
-import { deactivateItemAccess, deactivateItemAccessByEvidence } from "./item-access.js";
+import { readDetailAccessEdits, readDialogueAccessIdentities, writeDialogueAccessIdentities, deactivateItemAccess, deactivateItemAccessByEvidence } from "./item-access.js";
 import { invalidateStorySupports, markStorySupportsInvalid, maybeEnqueueStorySpine, storyMemorySupportIds } from "./story-spine.js";
 import { rebuildCharacterRecallTraces } from "./ingest.js";
 import { invalidateSourcePassageAccess } from "./source-evidence.js";
@@ -86,6 +86,13 @@ function invalidateDerived(
   const directDialogueIds = (db.prepare("SELECT id FROM memory_dialogues WHERE chat_id=? AND EXISTS(SELECT 1 FROM json_each(evidence_json) WHERE json_extract(value,'$.messageId')=?)").all(chatId, messageId) as Array<{ id: string }>).map((row) => row.id);
   directDialogueIds.forEach(id => invalidatedSupports.add(`dialogue:${id}`));
   deactivateItemAccess(db, chatId, "dialogue", directDialogueIds);
+  const editedDialogues = readDetailAccessEdits(db, chatId);
+  const identities = readDialogueAccessIdentities(db, chatId);
+  for (const id of directDialogueIds) if (editedDialogues.has(id)) {
+    const row = db.prepare("SELECT memory_id AS memoryId,speaker,text,message_id AS messageId FROM memory_dialogues WHERE id=? AND chat_id=?").get(id, chatId) as import("./item-access.js").DialogueAccessIdentity;
+    identities.set(id, row);
+  }
+  writeDialogueAccessIdentities(db, chatId, identities);
   if (directDialogueIds.length) db.prepare(`DELETE FROM memory_dialogues WHERE id IN (${directDialogueIds.map(() => "?").join(",")})`).run(...directDialogueIds);
 
   const directMilestoneIds = (db.prepare(`SELECT id FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND manual_override=0

@@ -1743,16 +1743,24 @@ export function expandableLongContent(label: string, html: string, textLength: n
 
 const EPISTEMIC_LABELS: Record<string, string> = { observed: "관찰", stated: "진술", inferred: "추론", unresolved: "미확인" };
 // Only second-hand knowing is named; seeing or living it is the default reading of a name.
-const ACCESS_BASIS_LABELS: Record<string, string> = { told: "전해 들음", heard: "엿들음", inferred: "추측" };
+const ACCESS_BASIS_LABELS: Record<string, string> = { told: "전해 들음", heard: "간접 전언·소문", inferred: "추측" };
 
 /** 모두 아는: visible to whoever recalls it, characters who appear later included. Shared by 기본 관계 and memory details. */
 const everyoneCheck = (name: string, checked: boolean, label: string): string => `<label class="check"><input type="checkbox" name="${name}"${checked ? " checked" : ""}><span>${label}<small>누가 떠올려도 보여요. 나중에 등장하는 인물도 포함돼요.</small></span></label>`;
 
-/** 아는 인물 reads the grants retrieval actually uses, so what the page shows is what the story is told. */
-export function detailAccessLine(memoryId: string, detail: any, editing: boolean): string {
+const ACCESS_BASIS_OPTIONS: Record<import("@rcm/shared").ItemAccessBasis, string> = {
+  experienced: "직접 참여", witnessed: "직접 목격·청취", told: "직접 전달받음", heard: "간접 전언·소문", inferred: "추론", internal: "자신의 생각·감정",
+};
+function accessHolderRow(name = "", basis = "witnessed", index = 0): string {
+  const id = `access-holder-${index}`;
+  return `<div class="access-holder-row">${field({ id, label: "인물", control: `<input id="${id}" class="input notranslate" translate="no" name="holder" value="${escapeHtml(name)}" placeholder="인물 이름">` })}${field({ id: `${id}-basis`, label: "알게 된 경로", control: `<select id="${id}-basis" class="select" name="basis">${Object.entries(ACCESS_BASIS_OPTIONS).map(([value, label]) => `<option value="${value}"${value === basis ? " selected" : ""}>${label}</option>`).join("")}</select>` })}${btn("제외", { kind: "quiet", action: "remove-access-holder" })}</div>`;
+}
+
+/** Uses the same active grants as retrieval, for both details and dialogue. */
+export function detailAccessLine(memoryId: string, detail: any, editing: boolean, kind: "detail" | "dialogue" = "detail"): string {
   const holders: Array<{ name: string; basis?: string }> = Array.isArray(detail?.access?.holders) ? detail.access.holders : [];
   if (editing) {
-    return `<form id="detail-access-form" class="form detail-know-form" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}">${field({ id: "detail-access-holders", label: "아는 인물", control: `<input id="detail-access-holders" class="input notranslate" translate="no" name="holders" value="${escapeHtml(holders.map((item) => item.name).join(", "))}" placeholder="쉼표로 구분 · 비우면 작가만">` })}${everyoneCheck("detailAccessEveryone", detail?.access?.everyone === true, "모두 아는 기억")}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-detail-access" })}${btn("저장", { kind: "primary", action: "submit-form", data: { formId: "detail-access-form" } })}</div></form>`;
+    return `<form id="detail-access-form" class="form detail-know-form" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}" data-item-kind="${kind}"><div class="access-holder-list">${holders.map((item, index) => accessHolderRow(item.name, item.basis, index)).join("")}</div>${btn("인물 추가", { kind: "quiet", action: "add-access-holder", icon: "plus" })}<p class="sub">인물이 없으면 작가만 아는 기록이에요. 직접 들은 대사는 ‘직접 목격·청취’, 대사로 전달받은 별개의 사건은 ‘직접 전달받음’을 골라 주세요.</p>${everyoneCheck("detailAccessEveryone", detail?.access?.everyone === true, "모두 아는 기억")}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-detail-access" })}${btn("저장", { kind: "primary", action: "submit-form", data: { formId: "detail-access-form" } })}</div></form>`;
   }
   const names = holders.map((item) => `${escapeHtml(item.name)}${ACCESS_BASIS_LABELS[item.basis ?? ""] ? `<span class="detail-know__how">(${ACCESS_BASIS_LABELS[item.basis ?? ""]})</span>` : ""}`).join(" · ");
   return `<p class="detail-know"><span class="detail-know__k">아는 인물</span><span class="detail-know__v notranslate" translate="no">${detail?.access?.everyone === true ? "모두" : names || "작가만"}</span><button type="button" class="linkbtn hit" data-action="edit-detail-access" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}">수정</button></p>`;
@@ -1798,7 +1806,7 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
     // A run of lines from one speaker names them once, like a message thread.
     const continues = lineIndex > 0 && String(displayedDialogues[lineIndex - 1]?.speaker ?? "") === String(item.speaker ?? "");
     const speaker = escapeHtml(item.speaker);
-    return `${phone && !continues && side === "in" ? `<small class="lines__speaker">${speaker}</small>` : ""}<p class="subtitle" data-side="${side}"${continues ? " data-cont" : ""}><span>${displayText(item.text, translated, display)}</span>${phone ? "" : `<small>${speaker}</small>`}</p>`;
+    return `${phone && !continues && side === "in" ? `<small class="lines__speaker">${speaker}</small>` : ""}<p class="subtitle" data-side="${side}"${continues ? " data-cont" : ""}><span>${displayText(item.text, translated, display)}</span>${phone ? "" : `<small>${speaker}</small>`}</p>${item.id && item.access ? detailAccessLine(memory.id, item, view.accessEditing === item.id, "dialogue") : ""}`;
   }).join("")}</div>` : "";
   const record = `<div class="rec" lang="${display === "ko" ? "ko" : sourceLanguage}">${displayText(String(memory.content ?? ""), translatedContent, display)}</div>`;
   const labelledBlock = (label: string, count: number, body: string) => `<section class="memory-block"><h3 class="sec">${escapeHtml(label)} <span class="n">${count}</span></h3>${body}</section>`;
@@ -5320,12 +5328,26 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       root.querySelector<HTMLInputElement>('#anniversary-new-form input[name="label"]')?.focus();
       return;
     }
+    if (action === "add-access-holder") {
+      const list = root.querySelector(".access-holder-list");
+      const index = Math.max(-1, ...Array.from(list?.querySelectorAll<HTMLInputElement>('input[name="holder"]') ?? []).map(input => Number(input.id.replace("access-holder-", "")))) + 1;
+      list?.insertAdjacentHTML("beforeend", accessHolderRow("", "witnessed", index));
+      list?.querySelector<HTMLInputElement>(`#access-holder-${index}`)?.focus();
+      formDirty = true;
+      return;
+    }
+    if (action === "remove-access-holder") {
+      target.closest(".access-holder-row")?.remove();
+      formDirty = true;
+      root.querySelector<HTMLButtonElement>('[data-action="add-access-holder"]')?.focus();
+      return;
+    }
     if (action === "edit-detail-access") {
       if (editorHasChanges() && !await confirmDashboard("저장하지 않은 변경을 버릴까요?")) return;
       formDirty = false;
       timelineView.accessEditing = target.dataset.detailId ?? "";
       render();
-      root.querySelector<HTMLInputElement>("#detail-access-holders")?.focus();
+      root.querySelector<HTMLInputElement>('#detail-access-form input[name="holder"]')?.focus();
       return;
     }
     if (action === "cancel-detail-access") {
@@ -6465,14 +6487,20 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         successMessage = "지금까지의 이야기 저장됨";
       } else if (form.id === "detail-access-form") {
         const memoryId = form.dataset.memoryId ?? "", detailId = form.dataset.detailId ?? "";
-        const holders = String(values.holders ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-        const result = await client.request<MemoryDetailAccessResponse>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/memories/${encodeURIComponent(memoryId)}/details/${encodeURIComponent(detailId)}/access`, { method: "PUT", body: JSON.stringify({ holders, everyone: (form.elements.namedItem("detailAccessEveryone") as HTMLInputElement | null)?.checked ?? false } satisfies MemoryDetailAccessPatch) });
+        const grants = Array.from(form.querySelectorAll<HTMLElement>(".access-holder-row")).map(row => ({
+          name: row.querySelector<HTMLInputElement>('input[name="holder"]')!.value.trim(),
+          basis: row.querySelector<HTMLSelectElement>('select[name="basis"]')!.value as import("@rcm/shared").ItemAccessBasis,
+        })).filter(item => item.name);
+        if (new Set(grants.map(item => item.name.normalize("NFKC").toLocaleLowerCase())).size !== grants.length) throw new Error("같은 인물을 두 번 입력하지 말아 주세요.");
+        const holders = grants.map(item => item.name), bases = Object.fromEntries(grants.map(item => [item.name, item.basis]));
+        const kind = form.dataset.itemKind === "dialogue" ? "dialogues" : "details";
+        const result = await client.request<MemoryDetailAccessResponse>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/memories/${encodeURIComponent(memoryId)}/${kind}/${encodeURIComponent(detailId)}/access`, { method: "PUT", body: JSON.stringify({ holders, bases, everyone: (form.elements.namedItem("detailAccessEveryone") as HTMLInputElement | null)?.checked ?? false } satisfies MemoryDetailAccessPatch) });
         if (!result.ok) throw new Error("아는 인물을 저장하지 못했습니다.");
-        const detail = data.memories.find((item) => item.id === memoryId)?.details?.find((item: any) => item.id === detailId);
+        const detail = data.memories.find((item) => item.id === memoryId)?.[kind === "dialogues" ? "keyDialogues" : "details"]?.find((item: any) => item.id === detailId);
         if (detail) { detail.access = result.access; detail.knownBy = result.knownBy; }
         timelineView.accessEditing = undefined;
         formDirty = false;
-        successMessage = "아는 인물 저장됨";
+        successMessage = "아는 인물과 인지 경로 저장됨";
       } else if (form.id === "anniversary-new-form") {
         const label = String(values.label ?? "").trim();
         const storyTime = String(values.storyTime ?? "").trim();

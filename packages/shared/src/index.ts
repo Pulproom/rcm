@@ -16,7 +16,7 @@ import {
   RELATIONSHIP_TREND_VALUES,
   SIGNED_RELATIONSHIP_BASELINE_VALUES,
 } from "./structured-contract-values.js";
-export const RCM_API_REVISION = 87;
+export const RCM_API_REVISION = 88;
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const UserCorrectionViewSchema = z.object({ userEdited: z.boolean(), userEditOrdinal: z.number().int().nullable(), locked: z.boolean() });
 export const STATE_KIND_VALUES = ["condition", "goal", "secret"] as const;
@@ -38,7 +38,7 @@ export { ATOM_RELATION_GUIDANCE } from "./atom-relation-guidance.js";
 import { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "./dialogue-source-guidance.js";
 export { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "./dialogue-source-guidance.js";
 import { STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
-export { STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
+export { ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
 export { MEMORY_GUIDANCE, memoryGuidanceBlock, withMemoryGuidance, memoryEvidenceKind } from "./memory-presentation.js";
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";

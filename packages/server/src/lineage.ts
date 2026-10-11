@@ -690,8 +690,9 @@ function cloneLineage(
     // A fork may exclude future grants: preserve only the user-selected scope safe at its boundary.
     writeDetailAccessEdits(db, child, new Map([...readDetailAccessEdits(db, parent).keys()]
       .flatMap(id => {
-        const childId = detailMap.get(id);
-        return childId ? [[childId, memoryDetailAccess(db, child, childId).everyone ? [EVERYONE_HOLDER] : memoryDetailAccess(db, child, childId).holders.map(holder => holder.name)] as const] : [];
+        const childId = detailMap.get(id) ?? dialogueMap.get(id);
+        const access = childId ? memoryDetailAccess(db, child, childId, detailMap.has(id) ? "detail" : "dialogue") : undefined;
+        return childId && access ? [[childId, access.everyone ? [EVERYONE_HOLDER] : access.holders.map(holder => holder.name)] as const] : [];
       })));
     for (const id of detailMap.values()) syncDetailKnownBy(db, child, id);
     if (boundaryMessageIds.size) {

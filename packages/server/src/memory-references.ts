@@ -1,11 +1,21 @@
 import { createHash } from "node:crypto";
 import type { RcmDatabase } from "./db.js";
 
+export const MEMORY_REF_SEQUENCE_PREFIX = "memory_ref_sequence:";
+
+export function memoryReferenceHighWater(db: RcmDatabase): Map<string, bigint> {
+  if (db.prepare("SELECT 1 FROM server_meta WHERE key='memory_ref_sequence'").get()) {
+    throw new Error("Global memory reference counters require an explicit offline conversion before using per-chat references");
+  }
+  return new Map((db.prepare("SELECT key,value FROM server_meta WHERE key GLOB 'memory_ref_sequence:*'").all() as Array<{key:string;value:string}>)
+    .map(row => [row.key, BigInt(row.value)]));
+}
+
 /** Addresses are issued only for delivered memories. A new generation, source
  * revision, or target mutation invalidates them; lookup never searches. */
 export class MemoryReferences {
   private scopes = new Map<string, { generation: string; revision: number; issued: Map<string, { id: string; version: string; delivered: boolean }> }>();
-  constructor(private db: RcmDatabase) {}
+  constructor(private db: RcmDatabase) { memoryReferenceHighWater(db); }
   private revision(chatId: string): number {
     return (this.db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined)?.revision ?? -1;
   }
@@ -41,9 +51,10 @@ export class MemoryReferences {
     // Persist the high-water mark independently of request registries. A stale
     // model-visible address must never acquire a different target after restart.
     const sequence = this.db.transaction(() => {
-      const row = this.db.prepare("SELECT value FROM server_meta WHERE key='memory_ref_sequence'").get() as { value: string } | undefined;
+      const key = MEMORY_REF_SEQUENCE_PREFIX + chatId;
+      const row = this.db.prepare("SELECT value FROM server_meta WHERE key=?").get(key) as { value: string } | undefined;
       const next = BigInt(row?.value ?? "0") + 1n;
-      this.db.prepare("INSERT INTO server_meta(key,value) VALUES('memory_ref_sequence',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(next));
+      this.db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(next));
       return next;
     })();
     const ref = `m${sequence}`;

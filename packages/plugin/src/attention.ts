@@ -401,7 +401,13 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
 [x-rcm-status-widget] button:focus-visible{outline:1.5px solid ${skin.accent};outline-offset:-3px}
 [x-rcm-status-widget] button:not([aria-disabled="true"]):not([data-rcm-quiz-scene]):hover{background:${skin.hover}!important}
 [x-rcm-status-widget] button:is([data-rcm-open]:not([data-quiet]),[data-rcm-quiz-start],[data-rcm-quiz-next]):hover{background:${skin.accentHover}!important;color:${skin.accentInk}!important}
-@media(pointer:coarse){[x-rcm-status-widget] [data-rcm-drag]{height:44px!important}[x-rcm-status-widget] button{min-height:44px!important}[x-rcm-status-widget] [data-rcm-toggle]{width:44px!important;height:44px!important}}
+@media(pointer:coarse){
+[x-rcm-status-widget] [data-rcm-drag]{height:44px!important}
+[x-rcm-status-widget] button{min-height:36px!important}
+[x-rcm-status-widget] [data-rcm-toggle]{width:44px!important;height:44px!important}
+[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-drag]{height:34px!important}
+[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-toggle]{height:34px!important;min-height:34px!important}
+}
 `;
     await widgetStyle.setTextContent(widgetStyleText(chipSkin(state.settings)));
     const styleHost = await root.querySelector("head") ?? bodyHost;
@@ -626,6 +632,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizStart ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
       if (quiz.view) body = quizViewHtml(quiz.view, skin);
       if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
+      await widget.setAttribute("x-rcm-expanded", String(expanded));
       await widget.setAttribute(STATUS_TIMED_ATTRIBUTE, current.startedAt ? "true" : "false");
       await widget.setInnerHTML(`<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);overflow:auto;box-sizing:border-box">${body}</div>` : ""}`);
       await cacheElapsedClockElements(expanded ? activeStatusTimingRows(state).length : 0);

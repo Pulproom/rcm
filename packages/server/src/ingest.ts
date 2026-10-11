@@ -17,7 +17,7 @@ import { refreshMemoryFts } from "./memory-search-document.js";
 import { transitionEvidenceJson, transitionSourceEvidence, canAutomaticallyChange } from "./user-corrections.js";
 import { storeAtomRelations, type AtomRelationContext } from "./atom-relations.js";
 import { aliasRemovalGuard, deletionGuard, userDeletionsKey } from "./user-deletions.js";
-import { readDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
+import { readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
 
 const storyHeader = /\[🌐\|([^|\]\r\n]+)\|/g;
 
@@ -371,6 +371,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
   db.transaction(() => {
     const revokedStorySupports=new Set<string>();
     const detailAccessEdits = readDetailAccessEdits(db, chatId);
+    const dialogueIdentities = readDialogueAccessIdentities(db, chatId);
     const timestamp = now();
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
@@ -378,6 +379,16 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     storeSourcePassages(db, chatId, result.sourcePassages, sourceBatchId);
     const replaceAccess = (itemKind: string, itemId: string, grants: Array<{ holder: string; basis: string; evidence: Array<{ messageId: string; quote?: string }>; confidence: number }>): void =>
       replaceItemAccess(db, chatId, itemKind, itemId, grants, revision, timestamp);
+
+    const editedAccess = (kind: "detail" | "dialogue", id: string, evidence: Array<{ messageId: string; quote?: string }>) => {
+      const holders = detailAccessEdits.get(id);
+      if (holders === undefined) return undefined;
+      const provenance = db.prepare("SELECT basis,confidence FROM item_access WHERE chat_id=? AND item_kind=? AND item_id=? AND holder=?");
+      return holders.map(holder => {
+        const previous = provenance.get(chatId, kind, id, holder) as { basis: string; confidence: number } | undefined;
+        return { holder, basis: previous?.basis ?? "witnessed", confidence: previous?.confidence ?? 1, evidence };
+      });
+    };
 
     const entityIds = new Map<string, string>();
     const removedAlias = aliasRemovalGuard(db, chatId);
@@ -450,20 +461,27 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           randomUUID(), chatId, id, evidence.messageId, evidence.quote ?? null, timestamp,
         );
       }
-      const previousDialogueIds = (db.prepare("SELECT id FROM memory_dialogues WHERE memory_id=?").all(id) as Array<{ id: string }>).map((row) => row.id);
+      const previousDialogues = db.prepare("SELECT id,speaker,text,message_id FROM memory_dialogues WHERE memory_id=?").all(id) as Array<{ id: string; speaker: string; text: string; message_id: string }>;
+      for (const [savedId, item] of dialogueIdentities) if (item.memoryId === id && !previousDialogues.some(row => row.id === savedId)) {
+        previousDialogues.push({ id: savedId, speaker: item.speaker, text: item.text, message_id: item.messageId });
+      }
+      const previousDialogueIds = previousDialogues.map(row => row.id);
       previousDialogueIds.forEach(id=>revokedStorySupports.add(`dialogue:${id}`));
       if (previousDialogueIds.length) db.prepare(`UPDATE item_access SET active=0 WHERE chat_id=? AND item_kind='dialogue' AND item_id IN (${previousDialogueIds.map(() => "?").join(",")})`).run(chatId, ...previousDialogueIds);
       db.prepare("DELETE FROM memory_dialogues WHERE memory_id=?").run(id);
       for (const [ordinal, dialogue] of keyDialogues.entries()) {
         const reviewedDuplicate = db.prepare("SELECT 1 FROM memory_dialogues WHERE memory_id=? AND message_id=? AND text=? LIMIT 1").get(id, dialogue.messageId, dialogue.text);
         if (reviewedDuplicate) continue;
-        const dialogueId = randomUUID();
+        // Exact atom identity only: never carry grants onto a different utterance.
+        const previous = previousDialogues.find(row => row.speaker === dialogue.speaker && row.text === dialogue.text && row.message_id === dialogue.messageId);
+        const dialogueId = previous?.id ?? randomUUID();
         db.prepare(`
           INSERT INTO memory_dialogues(id,chat_id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal,created_at)
           VALUES(?,?,?,?,?,?,?,?,?,?)
         `).run(dialogueId, chatId, id, dialogue.speaker, dialogue.text, dialogue.messageId, JSON.stringify(dialogue.evidence), dialogue.kind, ordinal, timestamp);
-        replaceAccess("dialogue", dialogueId, dialogue.access !== undefined ? dialogue.access : memory.knownBy.map((holder) => ({ holder, basis: "witnessed", evidence: [{ messageId: dialogue.messageId }], confidence: 1 })));
+        replaceAccess("dialogue", dialogueId, editedAccess("dialogue", dialogueId, dialogue.evidence) ?? dialogue.access ?? memory.knownBy.map(holder => ({ holder, basis: "witnessed", evidence: [{ messageId: dialogue.messageId }], confidence: 1 })));
       }
+      for (const [savedId, item] of dialogueIdentities) if (item.memoryId === id) dialogueIdentities.delete(savedId);
       const incomingDetailKeys = new Set((memory.details ?? []).map((detail) => detail.key));
       const previousDetails = db.prepare("SELECT id,detail_key FROM memory_details WHERE memory_id=?").all(id) as Array<{ id: string; detail_key: string }>;
       // An upsert keeps detail IDs, but its old semantic relationships were
@@ -497,14 +515,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           ordinals.length ? Math.min(...ordinals) : null, ordinals.length ? Math.max(...ordinals) : null, 1, revision, timestamp, timestamp, detail.role ?? "supporting", detail.originalKind ?? null, detail.seed ? JSON.stringify(detail.seed) : null,
         );
         detailByKey.set(JSON.stringify([memory.key, detail.key]), detailId);
-        const editedHolders = detailAccessEdits.get(detailId);
-        if (editedHolders !== undefined) {
-          const provenance = db.prepare("SELECT basis,confidence FROM item_access WHERE chat_id=? AND item_kind='detail' AND item_id=? AND holder=?");
-          replaceAccess("detail", detailId, editedHolders.map(holder => {
-            const previous = provenance.get(chatId, detailId, holder) as { basis: string; confidence: number } | undefined;
-            return { holder, basis: previous?.basis ?? "witnessed", confidence: previous?.confidence ?? 1, evidence: detail.evidence };
-          }));
-        } else replaceAccess("detail", detailId, detail.access !== undefined ? detail.access : detail.knownBy.map((holder) => ({ holder, basis: "witnessed", evidence: detail.evidence, confidence: 1 })));
+        replaceAccess("detail", detailId, editedAccess("detail", detailId, detail.evidence) ?? detail.access ?? detail.knownBy.map(holder => ({ holder, basis: "witnessed", evidence: detail.evidence, confidence: 1 })));
         syncDetailKnownBy(db, chatId, detailId);
         db.prepare("DELETE FROM memory_detail_fts WHERE detail_id=?").run(detailId);
         db.prepare("INSERT INTO memory_detail_fts(detail_id,chat_id,memory_id,text,participants,locations) VALUES(?,?,?,?,?,?)")
@@ -835,6 +846,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
 
     for (const memoryId of new Set(memoryByKey.values())) refreshMemoryFts(db, memoryId);
     applySeedResolutions(db, chatId, result.seedResolutions);
+    writeDialogueAccessIdentities(db, chatId, dialogueIdentities);
     pruneDetailAccessEdits(db, chatId);
     invalidateStorySupports(db,chatId,revokedStorySupports);
   })();

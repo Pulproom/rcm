@@ -46,7 +46,7 @@ export type SocialKnowledgeApiItem = {
 declare const __RCM_DISTRIBUTION__: boolean;
 
 export type SocialRelationApiItem = import("@rcm/shared").SocialRelation & { knownBy: string[]; knownByEveryone: boolean };
-export type MemoryDetailAccessPatch = { holders: string[]; everyone: boolean };
+export type MemoryDetailAccessPatch = { holders: string[]; everyone: boolean; bases: Record<string, import("@rcm/shared").ItemAccessBasis> };
 
 export type MemoryDetailAccessResponse = { ok: boolean; access: import("@rcm/shared").MemoryDetailAccess; knownBy: string[] };
 export type MemoryDetailApiItem = import("@rcm/shared").MemoryContextItem["details"][number] & {

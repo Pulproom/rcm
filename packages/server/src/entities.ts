@@ -7,7 +7,7 @@ import { aliasRemovalGuard, deleteLedgerRecord, mergeAliasRemovals, readRemovedA
 import { personaHintKey, readViewPreferences } from "./view-preferences.js";
 import { updateSetupRecognition } from "./setup-recognition.js";
 import { invalidateStorySupports, storySupportScopes } from "./story-spine.js";
-import { readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits } from "./item-access.js";
+import { readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits } from "./item-access.js";
 
 export const normalizeEntityName = (value: string): string => value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
 
@@ -432,6 +432,9 @@ export function mergeEntities(db: RcmDatabase, chatId: string, sourceId: string,
 
     const detailEdits = readDetailAccessEdits(db, chatId);
     for (const [id, holders] of detailEdits) detailEdits.set(id, [...new Set(holders.map(name => matches(name) ? target.name : name))]);
+    const identities = readDialogueAccessIdentities(db, chatId);
+    for (const item of identities.values()) if (matches(item.speaker)) item.speaker = target.name;
+    writeDialogueAccessIdentities(db, chatId, identities);
     writeDetailAccessEdits(db, chatId, detailEdits);
     const accessRows = db.prepare("SELECT id,item_kind,item_id,holder,basis,evidence_json,confidence,active FROM item_access WHERE chat_id=?").all(chatId) as Array<{
       id: string; item_kind: string; item_id: string; holder: string; basis: string; evidence_json: string; confidence: number; active: number;

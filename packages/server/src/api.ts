@@ -56,7 +56,7 @@ import {
   normalizeStoryTime,
   measureAuxiliaryPrompt,
   splitAuxiliarySource,
-  RCM_API_REVISION,
+  RCM_API_REVISION, ItemAccessBasisSchema,
   STATE_KIND_VALUES,
   renderMcpAnswer,
   RCM_SERVER_VERSION,
@@ -1818,7 +1818,7 @@ export function createApp(dependencies: Dependencies): Hono {
         (SELECT msg.event_time FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id ORDER BY msg.ordinal LIMIT 1) AS source_event_time
       FROM memories m WHERE m.chat_id=? ORDER BY CASE WHEN source_ordinal IS NULL THEN 0 ELSE 1 END,CASE WHEN source_ordinal IS NULL THEN m.created_at END DESC,source_ordinal DESC,m.created_revision DESC
     `).all(chatId) as Array<Record<string, unknown> & { id: string }>;
-    const dialogueQuery = db.prepare("SELECT speaker,text,message_id AS messageId,evidence_json AS evidence,kind FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal");
+    const dialogueQuery = db.prepare("SELECT id,speaker,text,message_id AS messageId,evidence_json AS evidence,kind FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal");
     const detailQuery = db.prepare(`SELECT id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,locations_json AS locations,
       epistemic,salience,retention_class AS retention,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal
       FROM memory_details WHERE memory_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`);
@@ -1843,7 +1843,7 @@ export function createApp(dependencies: Dependencies): Hono {
         return { ...detail, access, participants: JSON.parse(detail.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
           locations: JSON.parse(detail.locations || "[]"), evidence: JSON.parse(detail.evidence || "[]") };
       });
-      const keyDialogues = (dialogueQuery.all(item.id) as Array<Record<string,any>>).map(dialogue => ({...dialogue,evidence:JSON.parse(dialogue.evidence)}));
+      const keyDialogues = (dialogueQuery.all(item.id) as Array<Record<string,any>>).map(dialogue => ({...dialogue,access:memoryDetailAccess(db,chatId,dialogue.id,"dialogue"),evidence:JSON.parse(dialogue.evidence)}));
       return { ...rest, known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
         active: item.active === 1, bookmarked: bookmarks.has(item.id), keyDialogues, details, detailCount: details.length, episode, sections };
     }) };
@@ -1980,49 +1980,58 @@ export function createApp(dependencies: Dependencies): Hono {
     void embeddings.indexPending(chatId);
     return context.json({ ok: true, id, memoryKey }, 201);
   });
-  app.put("/v1/chats/:id/memories/:memoryId/details/:detailId/access", async (context) => {
+  for (const kind of ["detail", "dialogue"] as const) app.put(`/v1/chats/:id/memories/:memoryId/${kind === "detail" ? "details" : "dialogues"}/:detailId/access`, async (context) => {
     const chatId = context.req.param("id"), memoryId = context.req.param("memoryId"), detailId = context.req.param("detailId");
-    const body = z.object({ holders: z.array(z.string().trim().min(1)), everyone: z.boolean().default(false) }).safeParse(await context.req.json());
-    if (!body.success) return context.json({ error: "holders must be an array of non-empty character names", issues: body.error.issues }, 400);
-    const detail = db.prepare(`SELECT d.evidence_json FROM memory_details d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
-      WHERE d.chat_id=? AND d.memory_id=? AND d.id=? AND d.active=1`).get(chatId, memoryId, detailId) as { evidence_json: string } | undefined;
-    if (!detail) return context.json({ error: "Memory detail not found in this chat and memory" }, 404);
+    const body = z.object({ holders: z.array(z.string().trim().min(1)), everyone: z.boolean().default(false), bases: z.record(z.string().trim(), ItemAccessBasisSchema) }).safeParse(await context.req.json());
+    if (!body.success) return context.json({ error: "Provide character names and a valid knowledge basis for each holder", issues: body.error.issues }, 400);
+    const detail = db.prepare(`SELECT d.evidence_json FROM ${kind === "detail" ? "memory_details" : "memory_dialogues"} d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
+      WHERE d.chat_id=? AND d.memory_id=? AND d.id=? ${kind === "detail" ? "AND d.active=1" : ""}`).get(chatId, memoryId, detailId) as { evidence_json: string } | undefined;
+    if (!detail) return context.json({ error: "Memory atom not found in this chat and memory" }, 404);
     const resolve = buildEntityIdentityResolver(db, chatId);
     const names = new Set(listEntities(db, chatId).map(entity => entity.name));
     const holders: string[] = [];
+    const bases = new Map<string, import("@rcm/shared").ItemAccessBasis>();
     for (const name of body.data.everyone ? [] : body.data.holders) {
       const identity = resolve(name);
       if (identity.ambiguous || !names.has(identity.canonical)) return context.json({ error: `${identity.ambiguous ? "Ambiguous" : "Unknown"} character name: ${name}` }, 400);
+      const basis = body.data.bases[name];
+      if (!basis) return context.json({ error: `Missing knowledge basis: ${name}` }, 400);
+      if (bases.has(identity.canonical) && bases.get(identity.canonical) !== basis) return context.json({ error: `Conflicting knowledge bases: ${name}` }, 400);
+      bases.set(identity.canonical, basis);
       if (!holders.includes(identity.canonical)) holders.push(identity.canonical);
     }
     if (body.data.everyone) { holders.length = 0; holders.push(EVERYONE_HOLDER); }
-    const previousAccess = memoryDetailAccess(db, chatId, detailId);
+    const previousAccess = memoryDetailAccess(db, chatId, detailId, kind);
     const previousHolders = previousAccess.everyone ? [EVERYONE_HOLDER] : previousAccess.holders.map(holder => holder.name);
     const accessChanged = previousHolders.length !== holders.length || previousHolders.some(holder => !holders.includes(holder));
+    const attributionChanged = accessChanged || previousAccess.holders.some(holder => bases.get(holder.name) !== holder.basis);
     db.transaction(() => {
       const timestamp = Date.now();
       db.prepare("UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?").run(timestamp, chatId);
       const { revision } = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
-      if (!holders.length) replaceItemAccess(db, chatId, "detail", detailId, [], revision, timestamp);
+      if (!holders.length) replaceItemAccess(db, chatId, kind, detailId, [], revision, timestamp);
       else {
-        db.prepare(`UPDATE item_access SET active=0 WHERE chat_id=? AND item_kind='detail' AND item_id=?
-          AND holder NOT IN (SELECT value FROM json_each(?))`).run(chatId, detailId, JSON.stringify(holders));
+        db.prepare(`UPDATE item_access SET active=0 WHERE chat_id=? AND item_kind=? AND item_id=?
+          AND holder NOT IN (SELECT value FROM json_each(?))`).run(chatId, kind, detailId, JSON.stringify(holders));
         const insert = db.prepare(`INSERT OR IGNORE INTO item_access(id,chat_id,item_kind,item_id,holder,basis,evidence_json,confidence,active,source_revision,created_at)
-          VALUES(?,?,'detail',?,?,'witnessed',?,1,1,?,?)`);
+          VALUES(?,?,?,?,?,?,?,1,1,?,?)`);
         for (const holder of holders) {
-          // User grants use the ingest fallback basis; existing attribution and evidence stay intact.
-          insert.run(randomUUID(), chatId, detailId, holder, detail.evidence_json, revision, timestamp);
-          db.prepare("UPDATE item_access SET active=1 WHERE chat_id=? AND item_kind='detail' AND item_id=? AND holder=?").run(chatId, detailId, holder);
+          // Correct attribution without replacing existing evidence; new holders cite the atom.
+          const basis = bases.get(holder) ?? "witnessed";
+          insert.run(randomUUID(), chatId, kind, detailId, holder, basis, detail.evidence_json, revision, timestamp);
+          db.prepare("UPDATE item_access SET active=1,basis=? WHERE chat_id=? AND item_kind=? AND item_id=? AND holder=?").run(basis, chatId, kind, detailId, holder);
         }
       }
       const edits = readDetailAccessEdits(db, chatId); edits.set(detailId, holders); writeDetailAccessEdits(db, chatId, edits);
-      syncDetailKnownBy(db, chatId, detailId);
-      db.prepare("UPDATE memory_details SET updated_at=? WHERE chat_id=? AND id=?").run(timestamp, chatId, detailId);
-      if (accessChanged) invalidateStorySupports(db, chatId, new Set([`detail:${detailId}`]));
+      if (kind === "detail") {
+        syncDetailKnownBy(db, chatId, detailId);
+        db.prepare("UPDATE memory_details SET updated_at=? WHERE chat_id=? AND id=?").run(timestamp, chatId, detailId);
+      }
+      if (attributionChanged) invalidateStorySupports(db, chatId, new Set([`${kind}:${detailId}`]));
     })();
     // Contextual detail group fingerprints include access: regroup through the existing indexer.
     if (accessChanged) void embeddings.indexPending(chatId);
-    const access = memoryDetailAccess(db, chatId, detailId);
+    const access = memoryDetailAccess(db, chatId, detailId, kind);
     return context.json({ ok: true, access, knownBy: access.holders.map(holder => holder.name) });
   });
   app.patch("/v1/chats/:id/memories/:memoryId", async (context) => {

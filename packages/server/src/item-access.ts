@@ -26,7 +26,8 @@ export function publicMemoryContext(item: MemoryContextItem): MemoryContextItem 
   };
 }
 
-// User-selected scope survives source invalidation; valid re-extraction renews its evidence.
+// User-selected detail/dialogue scope survives source invalidation; valid re-extraction renews its evidence.
+// Basis stays on item_access, including inactive rows, rather than duplicating provenance in metadata.
 // This never freezes detail content.
 export const detailAccessEditsKey = (chatId: string): string => `detail_access_edits:${chatId}`;
 export function readDetailAccessEdits(db: RcmDatabase, chatId: string): Map<string, string[]> {
@@ -38,20 +39,38 @@ export function writeDetailAccessEdits(db: RcmDatabase, chatId: string, ids: Rea
   else db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
     .run(detailAccessEditsKey(chatId), JSON.stringify(Object.fromEntries(ids)));
 }
+// A revised source removes dialogue rows immediately. Keep only edited atom identities
+// until re-extraction can match the exact utterance; these never grant retrieval access.
+export const dialogueAccessIdentityKey = (chatId: string): string => `dialogue_access_identity:${chatId}`;
+export type DialogueAccessIdentity = { memoryId: string; speaker: string; text: string; messageId: string };
+export function readDialogueAccessIdentities(db: RcmDatabase, chatId: string): Map<string, DialogueAccessIdentity> {
+  const row = db.prepare("SELECT value FROM server_meta WHERE key=?").get(dialogueAccessIdentityKey(chatId)) as { value: string } | undefined;
+  return new Map(Object.entries(row ? JSON.parse(row.value) : {}));
+}
+export function writeDialogueAccessIdentities(db: RcmDatabase, chatId: string, identities: ReadonlyMap<string, DialogueAccessIdentity>): void {
+  if (!identities.size) db.prepare("DELETE FROM server_meta WHERE key=?").run(dialogueAccessIdentityKey(chatId));
+  else db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    .run(dialogueAccessIdentityKey(chatId), JSON.stringify(Object.fromEntries(identities)));
+}
 export function pruneDetailAccessEdits(db: RcmDatabase, chatId: string): void {
   const ids = readDetailAccessEdits(db, chatId);
-  const exists = db.prepare("SELECT 1 FROM memory_details WHERE chat_id=? AND id=?");
-  for (const id of ids.keys()) if (!exists.get(chatId, id)) ids.delete(id);
+  const identities = readDialogueAccessIdentities(db, chatId);
+  for (const [id, item] of identities) if (!ids.has(id) || !db.prepare("SELECT 1 FROM memories WHERE chat_id=? AND id=?").get(chatId, item.memoryId)) identities.delete(id);
+  writeDialogueAccessIdentities(db, chatId, identities);
+  const exists = db.prepare("SELECT 1 FROM (SELECT chat_id,id FROM memory_details UNION ALL SELECT chat_id,id FROM memory_dialogues) WHERE chat_id=? AND id=?");
+  for (const id of ids.keys()) if (!exists.get(chatId, id) && !identities.has(id)) ids.delete(id);
   writeDetailAccessEdits(db, chatId, ids);
   db.prepare(`DELETE FROM item_access WHERE chat_id=? AND item_kind='detail'
     AND NOT EXISTS(SELECT 1 FROM memory_details d WHERE d.chat_id=item_access.chat_id AND d.id=item_access.item_id)`).run(chatId);
+  db.prepare(`DELETE FROM item_access WHERE chat_id=? AND item_kind='dialogue' AND item_id NOT IN (SELECT value FROM json_each(?))
+    AND NOT EXISTS(SELECT 1 FROM memory_dialogues d WHERE d.chat_id=item_access.chat_id AND d.id=item_access.item_id)`).run(chatId, JSON.stringify([...identities.keys()]));
 }
 
 /** Same active-grant resolver as retrieval; never infer grants from display knownBy. */
-export function memoryDetailAccess(db: RcmDatabase, chatId: string, id: string): MemoryDetailAccess {
-  const rows = db.prepare("SELECT holder,basis FROM item_access WHERE chat_id=? AND item_kind='detail' AND item_id=? AND active=1")
-    .all(chatId, id) as Array<{ holder: string; basis: ItemAccessBasis }>;
-  const scope = resolveItemAccess(new Map(rows.length ? [[key("detail", id), rows.map(row => row.holder)]] : []), "detail", id);
+export function memoryDetailAccess(db: RcmDatabase, chatId: string, id: string, kind: "detail" | "dialogue" = "detail"): MemoryDetailAccess {
+  const rows = db.prepare("SELECT holder,basis FROM item_access WHERE chat_id=? AND item_kind=? AND item_id=? AND active=1")
+    .all(chatId, kind, id) as Array<{ holder: string; basis: ItemAccessBasis }>;
+  const scope = resolveItemAccess(new Map(rows.length ? [[key(kind, id), rows.map(row => row.holder)]] : []), kind, id);
   return { holders: scope.holders.map(name => ({ name, basis: rows.find(row => row.holder === name)!.basis })), narratorOnly: !scope.everyone && scope.holders.length === 0, everyone: scope.everyone === true };
 }
 
@@ -67,7 +86,7 @@ export function syncDetailKnownBy(db: RcmDatabase, chatId: string, id: string): 
 /** Presentation only. Raw holder names remain the authority for access checks. */
 export function knownByLabels(db: RcmDatabase, chatId: string, kind: ItemAccessKind, id: string, holders: string[]): string[] {
   const rows=db.prepare("SELECT holder,basis FROM item_access WHERE chat_id=? AND item_kind=? AND item_id=? AND active=1").all(chatId,kind,id) as Array<{holder:string;basis:string}>;
-  const annotations:Record<string,string>={told:"was told",heard:"heard from others",inferred:"a guess"};
+  const annotations:Record<string,string>={told:"was told",heard:"indirect report or rumor",inferred:"a guess"};
   if (holders.includes(EVERYONE_HOLDER) || rows.some(row => row.holder === EVERYONE_HOLDER)) return ["everyone"];
   return holders.map(holder=>{
     const basis=rows.find(row=>normalized(row.holder)===normalized(holder))?.basis;
