@@ -24,6 +24,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import {
   CompleteJobRequestSchema,
+  ExtractionAggregateSchema,
   EpisodeCapsuleResultSchema,
   EpisodeCloseRequestSchema,
   EpisodeStartRequestSchema,
@@ -1102,11 +1103,10 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/jobs/:id/complete", async (context) => {
     const rawBody = await context.req.json();
-    let body = CompleteJobRequestSchema.extend({ result: z.unknown() }).parse(rawBody);
+    const body = CompleteJobRequestSchema.parse(rawBody);
     const job = db.prepare(`SELECT j.type,j.chat_id,j.payload_json,j.attempts,c.profile,c.memory_language FROM jobs j JOIN chats c ON c.id=j.chat_id
       WHERE j.id=? AND j.lease_owner=? AND j.status='leased'`).get(context.req.param("id"), body.workerId) as { type: string; chat_id: string; payload_json: string; attempts: number; profile: any; memory_language: any } | undefined;
     if (!job) return context.json({ error: "Lease not found" }, 409);
-    if (job.type !== "quiz") body = CompleteJobRequestSchema.parse(rawBody);
     const expectedLanguage = (JSON.parse(job.payload_json || "{}") as { memoryLanguage?: string }).memoryLanguage ?? job.memory_language;
     if (job.type !== 'memory_group' && job.type !== "relationship_projection" && job.type !== "initial_calibration" && job.type !== "story_consolidation" && job.type !== "ledger_consistency" && job.type !== "quiz" && (body.result as { language?: unknown } | null)?.language !== expectedLanguage) {
       return context.json({ error: `Canonical language must be ${expectedLanguage}` }, 400);
@@ -1125,7 +1125,7 @@ export function createApp(dependencies: Dependencies): Hono {
         : job.type === "ledger_consistency"
           ? completeLedgerConsistencyJob(db, buildLedgerConsistencyJob({ id: context.req.param("id"), chatId: job.chat_id, profile: job.profile, memoryLanguage: job.memory_language,
             attempt: job.attempts, payload: JSON.parse(job.payload_json) }), body.workerId, LedgerConsistencyResultSchema.parse(body.result))
-          : completeExtractionJob(db, context.req.param("id"), body.workerId, body.result as any, body.reconciliation, body.audit);
+          : completeExtractionJob(db, context.req.param("id"), body.workerId, ExtractionAggregateSchema.parse(body.result), body.reconciliation, body.audit);
       if (job.type === "ledger_consistency") {
         finalizeLedgerConsistencyRun(db, completed.chatId, String((JSON.parse(job.payload_json) as { backfillRunId?: string }).backfillRunId ?? ""));
       }

@@ -1,11 +1,26 @@
 import type { QuizAnswerRequest, SourceReferenceIssue } from "@rcm/shared";
-import { RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
+import { RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
 import type { PluginSettings } from "./types.js";
 
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 15_000;
 export const SERVER_STATUS_TIMEOUT_MS = 12_000;
 // Preparation waits for the complete packet; latency is measured, not a send deadline.
 export const TURN_PREPARE_TIMEOUT_MS: null = null;
+
+function serverErrorDetail(error: unknown): string {
+  if (typeof error !== "string") return "";
+  const detail = error.trim();
+  try {
+    const issues: unknown = JSON.parse(detail);
+    if (!Array.isArray(issues)) return "";
+    const diagnostics = issues.filter(issue => issue && typeof issue === "object" && typeof issue.message === "string").map(issue => ({
+      path: Array.isArray(issue.path) ? issue.path.filter((part: unknown) => typeof part === "string" || typeof part === "number") : [],
+      code: typeof issue.code === "string" ? issue.code : undefined,
+      message: issue.message,
+    }));
+    return diagnostics.length ? structuredValidationDiagnostic({ issues: diagnostics }).slice(0, 500) : "";
+  } catch { return detail.slice(0, 500); }
+}
 
 export interface PrepareClientTimings {
   setupMs?: number;
@@ -183,9 +198,11 @@ export class ServerClient {
         let readable = detail.slice(0, 240);
         let code: string | undefined;
         try {
-          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: string; existingId?: string };
+          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string };
           code = parsed.code;
-          readable = [parsed.summary ?? parsed.error, parsed.code ? `(${parsed.code})` : "", parsed.existingId ? `existingId=${parsed.existingId}` : ""].filter(Boolean).join(" ");
+          const summary = typeof parsed.summary === "string" ? parsed.summary.trim().slice(0, 240) : "";
+          const reason = serverErrorDetail(parsed.error);
+          readable = [summary, reason && !summary.includes(reason) ? reason : "", parsed.code ? `(${parsed.code})` : "", parsed.existingId ? `existingId=${parsed.existingId}` : ""].filter(Boolean).join(" ");
         } catch { /* retain a bounded non-JSON error response */ }
         throw new ServerRequestError(`Server request failed: ${method} ${path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code);
       }

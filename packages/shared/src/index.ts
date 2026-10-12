@@ -312,16 +312,22 @@ export const InitialCalibrationRelationshipSchema = z.object({
 });
 
 export const InitialCalibrationResultSchema = z.object({
-  entities: z.array(InitialCalibrationEntitySchema).default([]),
-  relationships: z.array(InitialCalibrationRelationshipSchema).default([]),
+  entities: z.array(InitialCalibrationEntitySchema).optional(),
+  relationships: z.array(InitialCalibrationRelationshipSchema).optional(),
   socialKnowledge: z.array(z.object({
     holderKey: z.string().trim().min(1), subjectKey: z.string().trim().min(1),
     level: z.enum(["aware_of", "interacted"]),
     knownAs: z.array(z.string().trim().min(1)).default([]),
     description: z.string().trim().min(1),
     evidence: z.array(SetupEvidenceSchema).min(1),
-  })).default([]),
-});
+  })).optional(),
+}).refine(result => result.entities !== undefined || result.relationships !== undefined || result.socialKnowledge !== undefined, {
+  message: "Initial calibration must include entities, relationships, or socialKnowledge; use an explicit empty array for an empty result.",
+}).transform(result => ({
+  entities: result.entities ?? [],
+  relationships: result.relationships ?? [],
+  socialKnowledge: result.socialKnowledge ?? [],
+}));
 export type InitialCalibrationResult = z.infer<typeof InitialCalibrationResultSchema>;
 
 export function mergeInitialCalibrationResults(results: InitialCalibrationResult[]): InitialCalibrationResult {
@@ -1520,7 +1526,8 @@ export const ReconciliationReviewResolutionSchema = z.object({
 export const LeaseJobRequestSchema = z.object({ workerId: z.string().min(1) });
 export const CompleteJobRequestSchema = z.object({
   workerId: z.string().min(1),
-  result: z.union([MemoryGroupingResultSchema, ExtractionAggregateSchema, EpisodeCapsuleResultSchema, RelationshipProjectionResultSchema, InitialCalibrationResultSchema, StorySpineConsolidationResultSchema, LedgerConsistencyResultSchema]),
+  // The stored job kind selects the result schema at the completion boundary.
+  result: z.unknown(),
   reconciliation: ReconciliationSubmissionSchema.optional(),
   audit: ExtractionAuditSubmissionSchema.optional(),
 });

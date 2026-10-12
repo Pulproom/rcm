@@ -107,6 +107,11 @@ function parseWorkerJson(state: RuntimeState, text: string, purpose: WorkerJsonP
 }
 
 async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose): Promise<string> {
+  const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
+    if (state.currentJob?.kind === "quiz") return;
+    try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
+    catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): ${String(reportError)}`); }
+  };
   const mode = state.settings.auxiliaryMode === "main" || state.settings.auxiliaryMode === "static"
     ? "model"
     : state.settings.auxiliaryMode;
@@ -137,11 +142,11 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     const inputTokens = rawUsage?.prompt_tokens ?? rawUsage?.input_tokens ?? rawUsage?.promptTokenCount;
     const outputTokens = rawUsage?.completion_tokens ?? rawUsage?.output_tokens ?? rawUsage?.candidatesTokenCount;
     const usage = Object.fromEntries([["inputTokens", inputTokens], ["outputTokens", outputTokens]].filter(([, value]) => typeof value === "number" && Number.isFinite(value)));
-    if (state.currentJob?.kind !== "quiz") await modelCallRecorders.get(state)?.(purpose, "succeeded", undefined, usage);
+    await reportOutcome("succeeded", undefined, usage);
     if (timing) finishTiming(state, timing, "succeeded");
     return output;
   } catch (error) {
-    if (state.currentJob?.kind !== "quiz") await modelCallRecorders.get(state)?.(purpose, "failed", error);
+    await reportOutcome("failed", error);
     if (timing) finishTiming(state, timing, "failed");
     throw error;
   } finally {
