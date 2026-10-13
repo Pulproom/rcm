@@ -44,6 +44,7 @@ export const ICONS: Record<string, string> = {
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   edit: '<path d="M4 20h4l11-11-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>',
+  copy: '<rect x="8" y="8" width="12" height="13" rx="1"/><path d="M16 8V3H3v13h5"/>',
   save: '<path d="M4.5 5h15v14h-15z"/><path d="M7.5 5v5h8V5M8 19v-6h8v6"/>',
   download: '<path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/>',
   add: '<path d="M12 5v14M5 12h14"/>',
@@ -92,6 +93,32 @@ export function btn(label: string, opts: {
 export function iconBtn(name: string, label: string, opts: { action?: string; data?: Data; expanded?: boolean } = {}): string {
   const expanded = opts.expanded === undefined ? "" : ` aria-expanded="${opts.expanded}"`;
   return `<button type="button" class="iconbtn hit" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"${actionAttrs(opts.action, opts.data)}${expanded}>${icon(name)}</button>`;
+}
+
+/** Reveals only this input's current value, never a credential from the server. */
+export function secretInput(name: string, label: string, opts: { value?: string; placeholder?: string; disabled?: boolean } = {}): string {
+  return `<span class="secret-input"><input name="${escapeHtml(name)}" type="password" aria-label="${escapeHtml(label)}" value="${escapeHtml(opts.value ?? "")}" autocomplete="new-password" spellcheck="false" autocapitalize="off" placeholder="${escapeHtml(opts.placeholder ?? "")}"${opts.disabled ? " disabled" : ""}><button type="button" class="iconbtn" data-action="toggle-secret" data-secret-label="${escapeHtml(label)}" aria-label="${escapeHtml(label)} 표시" title="${escapeHtml(label)} 표시" aria-pressed="false"${opts.disabled ? " disabled" : ""}>${icon("eye")}</button></span>`;
+}
+
+export function toggleSecretInput(button: HTMLElement, visible?: boolean): void {
+  const input = button.closest(".secret-input")?.querySelector<HTMLInputElement>("input");
+  if (!input || input.disabled) return;
+  const show = visible ?? input.type === "password";
+  input.type = show ? "text" : "password";
+  const label = `${button.dataset.secretLabel ?? "입력값"} ${show ? "숨기기" : "표시"}`;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+  button.setAttribute("aria-pressed", String(show));
+}
+
+export function maskSecretInputs(root: ParentNode): void {
+  root.querySelectorAll<HTMLElement>('[data-action="toggle-secret"]').forEach(button => toggleSecretInput(button, false));
+}
+
+export function connectionCheck(target: "risu" | "server" | "mcp" | "voyage", trailing = ""): string {
+  const label = { risu: "Risu 보조 모델", server: "서버 보조 모델", mcp: "검색 보조 모델", voyage: "Voyage" }[target];
+  const description = "짧은 확인 요청을 보냅니다. 호출 비용이 발생하며 설정은 저장하지 않아요.";
+  return `<div class="connection-check settings-action" data-connection-check="${target}"><button type="button" class="btn btn--quiet" data-action="test-connection" data-target="${target}" title="${description}" aria-describedby="connection-help-${target}">연결 확인</button><span class="sr-only" id="connection-help-${target}">${description}</span><span class="connection-result" role="status" aria-live="polite" aria-label="${label} 연결 확인 결과" data-connection-result></span>${trailing}</div>`;
 }
 
 export function seg(name: string, options: Array<{ value: string; label: string; pressed: boolean; action?: string; data?: Data }>): string {

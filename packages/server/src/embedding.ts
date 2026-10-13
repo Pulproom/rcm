@@ -18,6 +18,10 @@ const BLOCK_PAGE_SIZE = 10;
 const MAX_BLOCK_PAGES = 100;
 const MAX_ITEM_ATTEMPTS = 3;
 
+export class EmbeddingRequestError extends Error {
+  constructor(readonly status: number) { super(`Voyage embedding request failed (${status})`); }
+}
+
 interface VoyageEmbedding {
   embedding: number[];
   index: number;
@@ -237,7 +241,7 @@ export class EmbeddingService {
         const errorText = await response.text();
         if ([400, 413].includes(response.status) && /token|context.{0,20}(?:length|limit)|too (?:large|long)/i.test(errorText)
           && (inputs.length > 1 || (inputs[0]?.length ?? 0) > 1)) return split();
-        throw new Error(`Voyage embedding request failed (${response.status})`);
+        throw new EmbeddingRequestError(response.status);
       }
       const payload = await response.json() as VoyageResponse;
       const groups = payload.data
@@ -250,7 +254,6 @@ export class EmbeddingService {
       if (groups.length !== inputs.length || groups.some((group, index) =>
         group.length !== inputs[index]?.length || group.some((vector) => vector.length !== this.dimension),
       )) throw new Error("Voyage returned an unexpected embedding shape");
-      if (inputType === "query") this.#queryError = "";
       return groups;
     } finally {
       clearTimeout(timeout);
@@ -259,14 +262,21 @@ export class EmbeddingService {
 
   async #request(inputs: string[][], inputType: "document" | "query"): Promise<number[][][]> {
     const timeoutMs = Math.max(inputType === "query" ? QUERY_TIMEOUT_MS : INDEX_TIMEOUT_MS, this.#timeoutMs);
-    return this.#requestWithKey(inputs, inputType, timeoutMs, this.options.apiKey);
+    const result = await this.#requestWithKey(inputs, inputType, timeoutMs, this.options.apiKey);
+    if (inputType === "query") this.#queryError = "";
+    return result;
   }
 
-  async validateAndSetApiKey(apiKey: string): Promise<void> {
+  async testConnection(apiKey = this.options.apiKey): Promise<void> {
     const candidate = apiKey.trim();
     if (candidate.length < 12) throw new Error("Voyage API key is too short");
     if (!/^[A-Za-z0-9._-]+$/.test(candidate)) throw new Error("Voyage API key contains unsupported characters");
     await this.#requestWithKey([["Risu Cognitive Memory connection check"]], "query", this.#timeoutMs, candidate);
+  }
+
+  async validateAndSetApiKey(apiKey: string): Promise<void> {
+    const candidate = apiKey.trim();
+    await this.testConnection(candidate);
     this.options.apiKey = candidate;
     this.#indexError = "";
     this.#queryError = "";

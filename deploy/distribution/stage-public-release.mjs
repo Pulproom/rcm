@@ -21,6 +21,7 @@ const previousManifestBytes=fromHead(`updates/${channel}.json`);
 let previousManifest;
 try{previousManifest=previousManifestBytes?JSON.parse(previousManifestBytes.toString("utf8")):undefined;}catch{}
 const stageComponent=(name,versionField,file)=>{
+  if(previousManifest?.[versionField]!==nextManifest[versionField]&&nextManifest[versionField]!==productVersion)throw new Error(`Changed ${name} must use product version ${productVersion}`);
   const previous=previousManifest?.[versionField]===nextManifest[versionField]?fromHead(`channels/${channel}/${file}`):undefined;
   if(previous)writeFileSync(join(channelDir,file),previous);
   else copyFileSync(join(release,`RCM-windows-x64/${file}`),join(channelDir,file));

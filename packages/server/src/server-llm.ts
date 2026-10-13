@@ -1,3 +1,4 @@
+import { sanitizeDiagnosticText } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
 import { parseReconciliationResult } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
@@ -56,7 +57,7 @@ import { recordJobLlmCall, repairBudgetSpent, settleJobLlmCall, stageJobModelOut
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, type CachedAuxiliaryPurpose } from "./auxiliary-page-cache.js";
 
 const CONFIG_KEY = "server_llm_config";
-const providers: ServerLlmProvider[] = ["gemini_api", "vertex", "llm_gateway", "vercel", "ollama_cloud"];
+const providers: ServerLlmProvider[] = ["gemini_api", "vertex", "llm_gateway", "openai_compatible", "vercel", "ollama_cloud", "copilot"];
 const secretName = (provider: ServerLlmProvider) => `RCM_LLM_API_KEY_${provider.toUpperCase()}` as const;
 type StoredServerLlmConfig = Omit<ServerLlmPublicConfig, "keyConfigured" | "configuredProviders">;
 
@@ -110,6 +111,10 @@ export function validateEndpoint(provider: ServerLlmConfigInput["provider"], end
   if (provider === "vercel" && url.hostname !== "ai-gateway.vercel.sh") {
     throw new Error("Vercel endpoint must use ai-gateway.vercel.sh");
   }
+  if (provider === "copilot" && (!/^api(?:\.(?:individual|business|enterprise))?\.githubcopilot\.com$/.test(url.hostname)
+    || url.port || url.pathname !== "/chat/completions" || url.search || url.hash)) {
+    throw new Error("Copilot endpoint must use a GitHub Copilot /chat/completions URL");
+  }
   if (provider === "ollama_cloud" && (url.hostname !== "ollama.com" || url.pathname !== "/api/chat")) {
     throw new Error("Ollama Cloud endpoint must be https://ollama.com/api/chat");
   }
@@ -133,6 +138,7 @@ export class ServerLlmStore {
   #config: StoredServerLlmConfig;
   #apiKeys: Partial<Record<ServerLlmProvider, string>>;
   #vertexToken: { accessToken: string; expiresAt: number; projectId: string; credentialHash:string } | undefined;
+  #copilotToken?: { accessToken: string; expiresAt: number; endpoint: string; credentialHash: string };
   #jobConfigs = new Map<string, StoredServerLlmConfig>();
   #jobApiKeys = new Map<string, string>();
   #timingObserver?: (event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }) => void;
@@ -269,27 +275,56 @@ export class ServerLlmStore {
     return this.#vertexToken;
   }
 
-  update(input: ServerLlmConfigInput): ServerLlmPublicConfig {
+  async copilotCredential(signal: AbortSignal, apiKey: string, timeoutMs: number) {
+    const credentialHash = createHash("sha256").update(apiKey).digest("hex");
+    if (this.#copilotToken?.credentialHash === credentialHash && this.#copilotToken.expiresAt > Date.now() + 60_000) return this.#copilotToken;
+    const token = await copilotFetchJson("https://api.github.com/copilot_internal/v2/token", {
+      method: "GET", redirect: "error",
+      headers: { ...copilotHeaders, Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+    }, signal, timeoutMs);
+    if (typeof token.token !== "string" || !token.token.trim() || /[\r\n]/.test(token.token)
+      || !Number.isFinite(token.expires_at) || token.expires_at * 1000 <= Date.now()) {
+      throw new ProviderRequestError("json", undefined, "Copilot 인증 응답에 유효한 호출 토큰이 없어요.");
+    }
+    const endpoint = validateEndpoint("copilot", token.endpoints?.api === undefined
+      ? SERVER_LLM_DEFAULT_ENDPOINTS.copilot : `${String(token.endpoints.api).replace(/\/$/, "")}/chat/completions`);
+    this.#copilotToken = { accessToken: token.token, endpoint, credentialHash,
+      expiresAt: Math.min(token.expires_at * 1000, Number.isFinite(token.refresh_in) && token.refresh_in > 0 ? Date.now() + token.refresh_in * 1000 : Infinity) };
+    return this.#copilotToken;
+  }
+
+  private prepareConfig(input: ServerLlmConfigInput) {
     const parsed = ServerLlmConfigSchema.parse({ ...this.#config, ...input, endpoint: input.endpoint ?? (input.provider && input.provider !== this.#config.provider ? SERVER_LLM_DEFAULT_ENDPOINTS[input.provider] : this.#config.endpoint) });
     const next = {
       ...parsed,
       endpoint: validateEndpoint(parsed.provider, parsed.endpoint),
       thinking: normalizeDirectGeminiThinking(parsed.provider, parsed.model, parsed.thinking),
     };
-    if ((next.provider === "gemini_api" || next.provider === "ollama_cloud") && next.serviceTier !== "standard") {
+    if ((next.provider === "gemini_api" || next.provider === "ollama_cloud" || next.provider === "copilot") && next.serviceTier !== "standard") {
       throw new Error("The selected provider supports only the standard processing tier");
     }
     if (next.provider === "vertex" && next.serviceTier !== "standard" && new URL(next.endpoint).hostname !== "aiplatform.googleapis.com") {
       throw new Error("Vertex Flex and Priority require the global aiplatform.googleapis.com endpoint");
     }
-    if (next.engine === "server" && !next.apiKey && !this.#apiKeys[next.provider]) throw new Error("An API key is required for server processing");
+    if (next.engine === "server" && !next.apiKey && !this.#apiKeys[next.provider]) throw Object.assign(new Error("An API key is required for server processing"), { code: "AUTH_FAILED" });
     if (next.apiKey && next.provider !== "vertex" && /\r|\n/.test(next.apiKey)) throw new Error("API key contains unsupported line breaks");
+    return next;
+  }
+
+  async testConnection(input: ServerLlmConfigInput, signal: AbortSignal): Promise<void> {
+    const config = this.prepareConfig(input);
+    await testProviderConnection(this, config, config.apiKey || this.apiKeyFor(config.provider), signal);
+  }
+
+  update(input: ServerLlmConfigInput): ServerLlmPublicConfig {
+    const next = this.prepareConfig(input);
     const { apiKey, ...publicConfig } = next;
     if (apiKey) {
       const normalized = next.provider === "vertex" ? JSON.stringify(parseVertexServiceAccount(apiKey)) : apiKey;
       saveSecret(this.secretsPath, secretName(next.provider), normalized);
       this.#apiKeys[next.provider] = normalized;
       this.#vertexToken = undefined;
+      this.#copilotToken = undefined;
     }
     this.#config = publicConfig;
     this.db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(
@@ -303,6 +338,7 @@ export class ServerLlmStore {
     delete this.#apiKeys[this.#config.provider];
     saveSecret(this.secretsPath, secretName(this.#config.provider), null);
     this.#vertexToken = undefined;
+    this.#copilotToken = undefined;
   }
 }
 
@@ -373,7 +409,23 @@ function geminiApiUrl(endpoint: string, model: string): string {
 }
 
 export class ProviderRequestError extends Error {
+  providerMessage?: string;
   constructor(public readonly kind:"timeout"|"transport"|"http"|"json", public readonly status?:number, message?:string) { super(message ?? (kind === "http" ? `Provider HTTP ${status}` : `Provider ${kind} failure`)); }
+}
+
+const copilotHeaders = {
+  "Editor-Version": "vscode/1.105.0", "Editor-Plugin-Version": "copilot-chat/0.32.0",
+  "Copilot-Integration-Id": "vscode-chat", "User-Agent": "RCM",
+};
+
+// Never persist an authentication response body or an echoed bearer in job errors.
+async function copilotFetchJson(url: string, init: RequestInit, signal: AbortSignal, timeoutMs: number) {
+  try { return await fetchJson(url, init, signal, timeoutMs); }
+  catch (error) {
+    if (error instanceof ProviderRequestError) throw new ProviderRequestError(error.kind, error.status,
+      error.kind === "http" ? `Copilot HTTP ${error.status} · 토큰 권한, 구독 및 모델 사용 가능 여부를 확인해 주세요.` : `Copilot ${error.kind} failure`);
+    throw error;
+  }
 }
 
 async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, timeoutMs: number): Promise<any> {
@@ -396,7 +448,11 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
       if (controller.signal.aborted) throw controller.signal.reason;
       throw new ProviderRequestError("transport", response.status, `응답 수신 중 연결이 끊겼어요 (HTTP ${response.status}) · ${providerTransportFailureMessage(error)}`);
     }
-    if (!response.ok) throw new ProviderRequestError("http", response.status, providerHttpFailureMessage(response, body));
+    if (!response.ok) {
+      const error = new ProviderRequestError("http", response.status, providerHttpFailureMessage(response, body));
+      try { const parsed = JSON.parse(body); error.providerMessage = typeof parsed?.error?.message === "string" ? parsed.error.message : typeof parsed?.message === "string" ? parsed.message : undefined; } catch { /* Unstructured response bodies are not diagnostic messages. */ }
+      throw error;
+    }
     try { return JSON.parse(body); }
     catch { throw new ProviderRequestError("json"); }
   } finally {
@@ -561,10 +617,32 @@ async function callProvider(
   }
 }
 
+/** Fixed, unsaved probe: no job, retry, model output log or configuration update. */
+export async function testProviderConnection(
+  store: Pick<ServerLlmStore, "vertexCredential" | "copilotCredential">,
+  config: Parameters<typeof requestStructuredProvider>[1],
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!apiKey) throw Object.assign(new Error("CONNECTION_KEY_REQUIRED"), { code: "AUTH_FAILED" });
+  // Legacy Gemini counts an explicit thinking budget inside maxOutputTokens.
+  // Preserve the selected tuning without making a healthy connection fail on a contradictory cap.
+  const limit = (config.provider === "gemini_api" || config.provider === "vertex") && !usesGeminiFlashThinkingLevel(config.model)
+    ? 512 + (thinkingBudget(config.thinking) ?? 0) : 512;
+  let result;
+  try { result = await requestStructuredProvider(store, { ...config, llmTimeoutMs: Math.min(config.llmTimeoutMs, 60_000) }, apiKey,
+    [{ role: "user", content: "Connection check. Reply with OK only." }], signal, limit, undefined, "text");
+  } catch (error) {
+    if (error instanceof ProviderRequestError) error.providerMessage = sanitizeDiagnosticText(error.providerMessage ?? "", [apiKey]);
+    throw error;
+  }
+  if (!result.content.trim()) throw Object.assign(new Error("CONNECTION_EMPTY_RESPONSE"), { code: "INVALID_RESPONSE" });
+}
+
 /** Shared transport only. Selection and extraction keep independent config,
  * accounting, retry and output validation policies. */
 export async function requestStructuredProvider(
-  store: Pick<ServerLlmStore,"vertexCredential">,
+  store: Pick<ServerLlmStore,"vertexCredential" | "copilotCredential">,
   config: Pick<StoredServerLlmConfig,"provider"|"endpoint"|"model"|"temperature"|"thinking"|"serviceTier"|"llmTimeoutMs">,
   apiKey: string,
   messages: Array<{role:"system"|"user"|"assistant";content:string}>,
@@ -574,6 +652,18 @@ export async function requestStructuredProvider(
   outputFormat: "json" | "text" = "json",
 ): Promise<{content:string;finishReason?:unknown;usage?:any}> {
     const deadline = Date.now() + config.llmTimeoutMs;
+    if (config.provider === "copilot") {
+      const configuredEndpoint = validateEndpoint("copilot", config.endpoint);
+      const credential = await store.copilotCredential(signal, apiKey, Math.max(1, deadline - Date.now()));
+      onRequest();
+      const result = await copilotFetchJson(configuredEndpoint === SERVER_LLM_DEFAULT_ENDPOINTS.copilot ? credential.endpoint : configuredEndpoint, {
+        method: "POST", redirect: "error",
+        headers: { ...copilotHeaders, "Content-Type": "application/json", Authorization: `Bearer ${credential.accessToken}`, "X-Initiator": "agent" },
+        // Copilot model capabilities vary. Use prompt-based JSON and provider tuning defaults.
+        body: JSON.stringify({ model: config.model, messages, max_tokens: limit, stream: false }),
+      }, signal, Math.max(1, deadline - Date.now()));
+      return { content: String(result.choices?.[0]?.message?.content ?? ""), finishReason: result.choices?.[0]?.finish_reason, usage: result.usage };
+    }
     if (config.provider === "gemini_api" || config.provider === "vertex") {
       const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
       const contents = messages.filter((message) => message.role !== "system").map((message) => ({

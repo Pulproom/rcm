@@ -7,7 +7,7 @@ import { anniversaryDayOffset, buildAnniversaries, daysSinceFirstMet } from "./d
 import { buildSceneLog, type SceneCard, type SceneChip, type SceneDay } from "./scene-log.js";
 import { milestoneLabel, normalizeName, type PairSummary, pairKey, relationshipLabelTranslationKey } from "./pairs.js";
 import { buildCast } from "./film/cast.js";
-import { isLatinName, nameHtml, subjectParticle } from "./film/names.js";
+import { isLatinName, nameHtml } from "./film/names.js";
 import { sceneDate } from "./film/scene.js";
 import { avatar, btn, contactRow, empty, field, filters, fold, icon, menu, type MenuItem } from "./film/ui.js";
 import { promiseChainKey } from "./record-history.js";
@@ -210,13 +210,14 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   const role = [pair.label ? options.copy(pair.label, relationshipLabelTranslationKey(pair)) : "", `${allScenes}장면 함께함`].filter(Boolean).join(" · ");
   const socialKnowledge = (data.socialKnowledge ?? []) as SocialKnowledgeApiItem[];
   const calls = (holder: string, subject: string) => {
-    const item = socialKnowledge.find((candidate) => candidate.holder === holder && candidate.subject === subject);
-    // Same row as a person's aliases: who calls, then the names; names are never translated.
-    const terms = item?.addressTerms ?? [];
-    if (!terms.length && !options.canEditCalls) return "";
-    const inner = `<span class="entry__who">${escapeHtml(holder)}${subjectParticle(holder)} 부르는 이름</span><span class="entry__body notranslate${terms.length ? "" : " is-empty"}" translate="no">${terms.length ? terms.map(escapeHtml).join(" · ") : "아직 없음"}</span>`;
+    const item = socialKnowledge.find((candidate) => normalizeName(candidate.holder) === normalizeName(holder) && normalizeName(candidate.subject) === normalizeName(subject));
+    const met = socialKnowledge.some(candidate => pairKey(candidate.holder, candidate.subject) === pair.key && candidate.level === "interacted");
+    const known = item?.knownAs ?? [], terms = item?.addressTerms ?? [];
+    if (!met && !known.length && !terms.length && !options.canEditCalls) return "";
+    const names = (label: string, values: string[]) => `<span class="entry__who">${label}</span><span class="entry__body notranslate${values.length ? "" : " is-empty"}" translate="no">${values.length ? values.map(escapeHtml).join(" · ") : "아직 없음"}</span>`;
+    const inner = `<span class="entry__who">${escapeHtml(holder)} → ${escapeHtml(subject)}</span>${names("알고 있는 이름", known)}${names("부르는 이름", terms)}`;
     return `<li class="entry entry--promise entry--calls">${options.canEditCalls
-      ? `<button type="button" class="entry__face entry__tap" data-action="edit-address" data-holder="${escapeHtml(holder)}" data-subject="${escapeHtml(subject)}" aria-label="${escapeHtml(holder)}${subjectParticle(holder)} 부르는 이름 ${terms.length ? "수정" : "추가"}">${inner}${icon("chevron")}</button>`
+      ? `<button type="button" class="entry__face entry__tap" data-action="edit-address" data-holder="${escapeHtml(holder)}" data-subject="${escapeHtml(subject)}" aria-label="${escapeHtml(holder)} → ${escapeHtml(subject)} 이름·호칭 ${known.length || terms.length ? "수정" : "추가"}">${inner}${icon("chevron")}</button>`
       : inner}</li>`;
   };
   const isPersonaPair = Boolean(persona) && normalizeName(lead) === persona;
@@ -317,8 +318,7 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   }).join("");
   const relationSection = relationRows ? `<section class="psec"><h2 class="sec">기본 관계 <span class="n">${basicRelations.length}</span></h2><ul class="entries">${relationRows}</ul></section>` : "";
   const promiseSection = promises.length ? `<section class="psec"><h2 class="sec">약속 <span class="n">${promises.length}</span></h2><ul class="entries">${promiseRows.slice(0, 3).join("")}</ul>${promiseRows.length > 3 ? fold("더 보기", `<ul class="entries">${promiseRows.slice(3).join("")}</ul>`, { role: "more", count: promiseRows.length - 3, preserveKey: `pair-promises:${pair.key}` }) : ""}</section>` : "";
-  const callCount = socialKnowledge.filter((item) => pairKey(item.holder, item.subject) === pair.key).reduce((sum, item) => sum + (item.addressTerms?.length ?? 0), 0);
   const callRows = `${calls(lead, other)}${calls(other, lead)}`;
-  const callSection = callRows ? `<section class="psec pair-calls"><h2 class="sec">부르는 이름</h2><ul class="entries">${callRows}</ul></section>` : "";
+  const callSection = callRows ? `<section class="psec pair-calls"><h2 class="sec">이름·호칭</h2><ul class="entries">${callRows}</ul></section>` : "";
   return `<article class="reader pairsheet">${bar}${picker}${titles}${relationSection}${callSection}${views}${renderEmotions(directions, options)}${promiseSection}${marks}${log}${intimacy}${initial}${basis}</article>`;
 }

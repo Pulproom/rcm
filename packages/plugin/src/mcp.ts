@@ -111,6 +111,7 @@ export async function executeMemoryTool(
 ): Promise<string> {
   const toolStarted = performance.now();
   const toolStartedAt = Date.now();
+  if (state.internalModelCall) return '<rp_memory_result>Memory tools are unavailable during an RCM auxiliary call. Answer using only the supplied input; do not call memory tools again.</rp_memory_result>';
   if (!memoryToolFunctions.some((tool) => tool.name === toolName)) {
     throw new Error(`Unknown memory tool: ${toolName}`);
   }

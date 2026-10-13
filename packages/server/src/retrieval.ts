@@ -243,7 +243,6 @@ const escapeXml = (value: string): string => value
   .replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;");
 
-const normalizeDisplayedName = (value: string): string => normalizeEntityName(value).replace(/[^\p{L}\p{N}]+/gu, "");
 
 function safeExcerpt(value: string, maxLength: number): string {
   const text = value.trim();
@@ -688,47 +687,6 @@ function renderLandmarks(db: RcmDatabase, chatId: string, perspective: string, p
     accepted.push(line);
   }
   return accepted.length ? `<landmarks>\n${accepted.join("\n")}\n</landmarks>` : "";
-}
-
-function renderSocialKnowledge(
-  db: RcmDatabase,
-  chatId: string,
-  perspective: string,
-  signals: SearchQuerySignal[],
-  tokenBudget: number,
-): string {
-  if (tokenBudget <= 0 || perspective === "narrator" || perspective === "__shared__") return "";
-  const query = signals.map((signal) => signal.text).join(" ").toLocaleLowerCase();
-  const entities = listEntities(db, chatId).filter((entity) => ["person", "character"].includes(entity.type));
-  const relevant = entities.filter((entity) => normalizeEntityName(entity.name) !== normalizeEntityName(perspective)
-    && [entity.name, entity.key, ...entity.aliases].some((name) => {
-      const normalized = name.trim().toLocaleLowerCase();
-      return normalized.length > 1 && (query.includes(normalized) || overlapScore(new Set(normalizeSearchTokens(name)), query) > 0.5);
-    })).slice(0, 8);
-  if (relevant.length === 0) return "";
-  const records = listSocialKnowledge(db, chatId).filter((item) => normalizeEntityName(item.holder) === normalizeEntityName(perspective));
-  const lines: string[] = [];
-  for (const entity of relevant) {
-    const record = records.find((item) => normalizeEntityName(item.subject) === normalizeEntityName(entity.name));
-    const queryLabel = [entity.name, entity.key, ...entity.aliases].find((name) => query.includes(name.toLocaleLowerCase()));
-    if (!record) continue;
-    const safeName = record.knownAs.find((name) => query.includes(name.toLocaleLowerCase())) ?? record.knownAs[0] ?? queryLabel;
-    if (!safeName) continue;
-    const visibleKnownAs = [...new Map(record.knownAs
-      .map((name) => name.trim())
-      .filter((name) => name && normalizeDisplayedName(name) !== normalizeDisplayedName(safeName))
-      .map((name) => [normalizeDisplayedName(name), name])).values()];
-    const knownAs = visibleKnownAs.length ? ` known_as="${escapeXml(visibleKnownAs.join(", "))}"` : "";
-    const cognition = record.cognition.map(detail => escapeXml(detail.text)).join(" ");
-    lines.push(`<person name="${escapeXml(safeName)}" status="${record.level === "interacted" ? "direct_interaction_recorded" : "aware_of"}"${knownAs}>${cognition}</person>`);
-  }
-  if (lines.length === 0) return "";
-  while (lines.length > 0) {
-    const section = `<social_knowledge holder="${escapeXml(perspective)}">\nRecorded recognition, not a complete account of current knowledge; later explicit corrections take precedence. Missing means unknown. Awareness does not establish a meeting; direct interaction may be remote.\n${lines.join("\n")}\n</social_knowledge>`;
-    if (estimateTokens(section) <= tokenBudget) return section;
-    lines.pop();
-  }
-  return "";
 }
 
 type LedgerRelevance = (text: string, sourceId?: string | null) => number;
@@ -1250,7 +1208,7 @@ function renderRelevantNameHints(db: RcmDatabase, chatId: string, memories: Memo
   const rows = listEntities(db, chatId).filter((entity) => entity.displayName !== entity.name
     && [entity.key, entity.name, entity.displayName, ...entity.aliases].some((name) => involved.has(normalizeEntityName(name))));
   if (!rows.length) return "";
-  return `<name_hints>\n${rows.slice(0, 12).map((entity) => `<name archive_name="${escapeXml(entity.name)}" preferred_name="${escapeXml(entity.displayName)}"${entity.aliases.length ? ` aliases="${escapeXml(entity.aliases.slice(0, 6).join(" | "))}"` : ""} />`).join("\n")}\n</name_hints>`;
+  return `<name_hints>\n${rows.slice(0, 12).map((entity) => `<name archive_name="${escapeXml(entity.name)}" preferred_name="${escapeXml(entity.displayName)}" />`).join("\n")}\n</name_hints>`;
 }
 
 function cleanEmptyContinuityBlocks(data: string): string {
@@ -1313,6 +1271,7 @@ export function consolidateMemoryPacket(
   storySpine = "",
   manifest?: PacketManifest,
   latestStoryTime?: number,
+  sceneNames = "",
 ): string {
   const language = (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(chatId) as { memory_language?: string } | undefined)?.memory_language ?? "en";
   const recalledMap = new Map<string, MemoryContextItem>();
@@ -1385,7 +1344,7 @@ export function consolidateMemoryPacket(
   const sharedAnchors = anchors.size ? `<recorded_state>\n${[...anchors].join("\n")}\n</recorded_state>` : "";
   const state = [sharedAnchors, sharedSpine, sharedPhysical, sharedLandmarks, ...sections].filter(Boolean).join("\n");
   const history = [storySpine, allRecalled.map(item => renderMemoryScene(projectMemoryScene(item), latestStoryTime)).filter(Boolean).join("\n")].filter(Boolean).join("\n");
-  const payload = [nameHints,
+  const payload = [sceneNames, nameHints,
     history ? `<past_records>\n${history}\n</past_records>` : "",
     state ? `<current_state>\nFrom processed history; newer explicit events take precedence.\n${state}\n</current_state>` : "",
   ].filter(Boolean);

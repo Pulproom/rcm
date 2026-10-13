@@ -1,4 +1,4 @@
-import type { QuizAnswerResponse, QuizNextResponse, QuizQuestion, QuizStats } from "@rcm/shared";
+import { quizDateLabel, type QuizAnswerResponse, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
 import type { ChipSkin } from "./attention.js";
 
 /** What the chip shows while the quiz is open. `index`/`total` count this sitting: answered so far plus what remains. */
@@ -13,21 +13,17 @@ const DIFFICULTY_LABEL = { easy: "쉬움", medium: "보통", hard: "어려움" }
 const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 const tint = (color: string, amount: number): string => `color-mix(in srgb, ${color} ${amount}%, transparent)`;
 
-/** A story date such as 2024-06-12 reads as 06.12; anything else is shown as written. */
-export function quizDateLabel(storyTime: string | undefined): string {
-  if (!storyTime) return "";
-  const match = /^\d{4}-(\d{2})-(\d{2})/.exec(storyTime);
-  return match ? `${match[1]}.${match[2]}` : storyTime;
-}
+export { quizDateLabel } from "@rcm/shared";
 
 const buttonBase = (skin: ChipSkin): string =>
   `box-sizing:border-box;width:100%;min-height:36px;margin-top:6px;padding:8px 12px;border:0;border-radius:${skin.buttonRadius};font-family:inherit;font-size:13px;font-weight:600;line-height:1.4;cursor:pointer;text-align:${skin.buttonAlign}`;
 const primaryButton = (skin: ChipSkin): string => `${buttonBase(skin)};background:${skin.accent};color:${skin.accentInk}`;
 const quietButton = (skin: ChipSkin): string => `${buttonBase(skin)};background:${skin.button};color:${skin.ink}`;
 
-/** The entry above 대시보드 열기. Empty when the server has no quiz, it is off, or nothing is ready. */
+/** Quiz action or preparation guidance above 대시보드 열기; hidden when unavailable or off. */
 export function quizEntryButton(next: QuizNextResponse | undefined, skin: ChipSkin, waiting: boolean): string {
-  if (!next?.enabled || !next.available || !next.question) return "";
+  if (!next?.enabled) return "";
+  if (!next.available || !next.question) return `<p role="status" style="margin:8px 0 0;font-size:12px;line-height:1.5;color:${skin.ink3};overflow-wrap:anywhere">${next.generating ? "새 퀴즈를 만들고 있어요." : "다음 장면이 쌓이거나 지난 장면이 다시 열리면 새 퀴즈가 생겨요."}</p>`;
   const count = next.remaining > 0 ? next.remaining : 1;
   const centred = skin.buttonAlign === "center";
   const layout = centred ? "display:block" : "display:flex;justify-content:space-between;align-items:baseline;gap:8px";
@@ -89,7 +85,7 @@ export function quizViewHtml(view: QuizView, skin: ChipSkin): string {
     return `${header(skin, "퀴즈")}<div role="alert" style="font-size:13px;color:${skin.cut}">${escapeHtml(view.message)}</div><button type="button" data-rcm-quiz-retry="true" style="${quietButton(skin)}">다시 시도</button>`;
   }
   if (view.mode === "done") {
-    return `${header(skin, "퀴즈")}<p style="margin:0;font-size:15px;font-weight:600;line-height:1.45;color:${skin.ink}">준비된 문제를 다 풀었어요 🎉</p><p style="margin:6px 0 0;font-size:13px;line-height:1.5;color:${skin.ink2}">새 기억이 쌓이면 다음 문제를 만들어 둘게요.</p>${statsRow(skin, view.stats)}<button type="button" data-rcm-quiz-done="true" style="${quietButton(skin)}">닫기</button>`;
+    return `${header(skin, "퀴즈")}<p style="margin:0;font-size:15px;font-weight:600;line-height:1.45;color:${skin.ink}">준비된 문제를 다 풀었어요 🎉</p><p style="margin:6px 0 0;font-size:13px;line-height:1.5;color:${skin.ink2}">다음 장면이 쌓이거나 지난 장면이 다시 열리면 새 퀴즈가 생겨요.</p>${statsRow(skin, view.stats)}<button type="button" data-rcm-quiz-done="true" style="${quietButton(skin)}">닫기</button>`;
   }
   const title = `퀴즈 ${view.index}/${view.total}`;
   if (view.mode === "question") {

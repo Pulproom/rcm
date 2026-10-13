@@ -1,9 +1,13 @@
-import { defaultCanonicalizationPolicy } from "@rcm/shared";
+import { defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
 import type { PluginSettings, RuntimeLog } from "./types.js";
 
 export const SETTINGS_KEY = "rcm.settings.v1";
 export const CACHE_KEY = "rcm.cache.v1";
 const TOKEN_ARGUMENT = "hidden_server_token";
+const diagnosticSecrets = new Set<string>();
+export function rememberDiagnosticSecrets(values: readonly string[]): void {
+  values.filter(Boolean).forEach(value => diagnosticSecrets.add(value));
+}
 
 export const defaults: PluginSettings = {
   settingsRevision: 21,
@@ -143,6 +147,7 @@ export async function loadSettings(): Promise<PluginSettings> {
   settings.dashboardTheme = settings.dashboardTheme === "light" ? "light" : "dark";
   settings.dashboardSkin = settings.dashboardSkin === "phone" ? "phone" : "film";
   settings.settingsRevision = defaults.settingsRevision;
+  rememberDiagnosticSecrets([settings.serverToken]);
   return settings;
 }
 
@@ -202,6 +207,7 @@ function errorMessage(error: unknown): string {
 }
 
 export async function saveSettings(settings: PluginSettings): Promise<void> {
+  rememberDiagnosticSecrets([settings.serverToken]);
   let storageError: unknown;
   let argumentError: unknown;
 
@@ -242,7 +248,8 @@ export async function saveSettings(settings: PluginSettings): Promise<void> {
   }
 }
 
-export function addLog(logs: RuntimeLog[], level: RuntimeLog["level"], message: string): void {
-  logs.unshift({ at: Date.now(), level, message });
-  logs.splice(120);
+export function addLog(logs: RuntimeLog[], level: RuntimeLog["level"], message: string, diagnostic?: RuntimeLog["diagnostic"], detail?: string): void {
+  const secrets = [...diagnosticSecrets];
+  logs.unshift({ at: Date.now(), level, message: sanitizeDiagnosticText(message, secrets, 1000), ...(diagnostic ? { diagnostic } : {}), ...(detail ? { detail: sanitizeDiagnosticText(detail, secrets) } : {}) });
+  logs.splice(50);
 }

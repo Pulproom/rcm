@@ -5,7 +5,7 @@ import { McpSelectorConfigSchema, defaultMcpSelectorConfig, estimateTokens,
 import type { RcmDatabase } from "./db.js";
 import { saveSecret } from "./admin.js";
 import { ServerLlmStore, validateEndpoint, normalizeDirectGeminiThinking, parseVertexServiceAccount,
-  requestStructuredProvider, ProviderRequestError } from "./server-llm.js";
+  requestStructuredProvider, testProviderConnection, ProviderRequestError } from "./server-llm.js";
 
 type Config = Omit<McpSelectorConfig,"apiKey">;
 export interface SelectorCandidate { id:string; record?:string; time?:string; sourceOrder?:number; text:string; parts?:Array<{key:string;value:Record<string,unknown>}> }
@@ -67,18 +67,26 @@ export class McpSelector {
   }
   private key(config:Config):string { return config.credentialSource==="shared"?this.llm.apiKeyFor(config.provider):this.dedicatedKey(config); }
   get publicConfig():McpSelectorPublicConfig { return {...this.config,keyConfigured:Boolean(this.key(this.config)),dedicatedKeyConfigured:Boolean(this.dedicatedKey(this.config))}; }
-  update(input:unknown):McpSelectorPublicConfig {
+  private prepareConfig(input:unknown) {
     const parsed=McpSelectorConfigSchema.parse(input);
     parsed.endpoint=validateEndpoint(parsed.provider,parsed.endpoint);
     parsed.thinking=normalizeDirectGeminiThinking(parsed.provider,parsed.model,parsed.thinking);
-    if((parsed.provider==="gemini_api"||parsed.provider==="ollama_cloud")&&parsed.serviceTier!=="standard")throw new Error("This provider supports Standard only");
+    if((parsed.provider==="gemini_api"||parsed.provider==="ollama_cloud"||parsed.provider==="copilot")&&parsed.serviceTier!=="standard")throw new Error("This provider supports Standard only");
     if(parsed.provider==="vertex"&&parsed.serviceTier!=="standard"&&new URL(parsed.endpoint).hostname!=="aiplatform.googleapis.com")throw new Error("Vertex Flex/Priority requires the global endpoint");
     const {apiKey,...config}=parsed;
     if(apiKey&&config.credentialSource!=="dedicated")throw new Error("Choose dedicated credentials to save a separate key");
     if(apiKey&&parsed.provider!=="vertex"&&/[\r\n]/.test(apiKey))throw new Error("API key contains line breaks");
     const key=apiKey?(parsed.provider==="vertex"?JSON.stringify(parseVertexServiceAccount(apiKey)):apiKey):this.key(config);
     if(config.enabled&&!key)throw new Error("MCP provider credentials are not configured");
-    if(apiKey)saveSecret(this.secretsPath,this.secretName(config),key);
+    return {config,key,saveKey:Boolean(apiKey)};
+  }
+  async testConnection(input:unknown,signal:AbortSignal):Promise<void> {
+    const {config,key}=this.prepareConfig(input);
+    await testProviderConnection(this.llm,config,key,signal);
+  }
+  update(input:unknown):McpSelectorPublicConfig {
+    const {config,key,saveKey}=this.prepareConfig(input);
+    if(saveKey)saveSecret(this.secretsPath,this.secretName(config),key);
     this.db.prepare("INSERT INTO server_meta(key,value) VALUES('mcp_selector_config',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(config));
     this.config=config;return this.publicConfig;
   }

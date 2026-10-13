@@ -1,5 +1,5 @@
 import type { QuizAnswerRequest, SourceReferenceIssue } from "@rcm/shared";
-import { RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
+import { RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type QuizStatus, type QuizRegenerateResponse, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
 import type { PluginSettings } from "./types.js";
 
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 15_000;
@@ -43,6 +43,8 @@ export type ChatViewPreferences = {
 export type ChatViewPreferencesPatch = Partial<ChatViewPreferences>;
 
 export type SocialKnowledgeApiItem = {
+  derived?: "mutual_interaction";
+  derivedFrom?: string;
   id: string;
   holder: string;
   subject: string;
@@ -342,6 +344,14 @@ export class ServerClient {
 
   quizDisableAll(): Promise<{ ok: boolean }> {
     return this.request("/v1/quiz/enabled", { method: "PUT", body: JSON.stringify({ enabled: false }) });
+  }
+
+  quizStatus(chatId: string): Promise<QuizStatus> {
+    return this.request(`/v1/chats/${encodeURIComponent(chatId)}/quiz/status`);
+  }
+
+  quizRegenerate(chatId: string): Promise<QuizRegenerateResponse> {
+    return this.request(`/v1/chats/${encodeURIComponent(chatId)}/quiz/regenerate`, { method: "POST" });
   }
 
   quizResetStats(chatId: string): Promise<QuizStats> {

@@ -17,7 +17,7 @@ export const PHONE_SKIN_CSS = `
   --cut: #FF453A; --cut-dim: rgba(255,69,58,.18); --cut-ink: #FFFFFF; --ok: #30D158;
   --scrim: rgba(0,0,0,.5); --shadow: 0 16px 40px -12px rgba(0,0,0,.7); --lift: none;
   --credit: var(--sans);
-  --t-title: 26px; --t-sheet: 22px; --t-head: 20px; --t-read: 16px; --t-body: 17px; --t-ui: 15px; --t-meta: 13px; --t-cap: 12px;
+  --t-title: 1.625rem; --t-sheet: 1.375rem; --t-head: 1.25rem; --t-read: 1rem; --t-body: 1.0625rem; --t-ui: 0.9375rem; --t-meta: 0.8125rem; --t-cap: 0.75rem;
   /* Aliases for selectors inherited from Film. */
   --t-small: var(--t-meta); --t-sub: var(--t-meta); --t-list: var(--t-ui); --t-micro: var(--t-meta); --t-credit: var(--t-cap);
   --r: 12px; --control: 36px; --hit: 44px;
@@ -83,11 +83,12 @@ export const PHONE_SKIN_CSS = `
 
 /* segmented controls: 번역/원문, sort, radio groups, and section tabs */
 .seg { padding: 2px; gap: 0; border-radius: 9px; background: var(--fill); }
-.seg button, .seg label span { height: 30px; padding: 0 12px; border-radius: 7px; font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
+.seg button, .seg label span { min-height: 30px; height: auto; padding: 0 12px; border-radius: 7px; font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
 .seg button[aria-pressed="true"], .seg label input:checked + span { background: var(--screen); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.14), 0 0 0 .5px rgba(0,0,0,.04); }
 :root[data-theme="night"] .seg button[aria-pressed="true"], :root[data-theme="night"] .seg label input:checked + span { background: #636366; }
-.tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0; padding: 2px; border-bottom: 0; border-radius: 9px; background: var(--fill); }
-.tab { height: 30px; padding: 0 10px; border-radius: 7px; font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
+.tabs { display: flex; gap: 0; padding: 2px; border-bottom: 0; border-radius: 9px; background: var(--fill); }
+.tab { min-height: 30px; height: auto; padding: 0 10px; border-radius: 7px; font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
+.tab { flex-grow: 1; }
 .tab::after { display: none; }
 .tab[aria-selected="true"] { background: var(--screen); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.14); }
 :root[data-theme="night"] .tab[aria-selected="true"] { background: #636366; }
@@ -759,6 +760,7 @@ button.sent-row:hover .sent-row__t { color: inherit; }
 .acq__edit { padding: 4px 6px; margin: -4px -6px; border-radius: 8px; font-size: var(--t-meta); font-weight: 600; }
 .acq__tagrow { grid-template-columns: 4.6em minmax(0, 1fr); }
 .acq__k { padding-top: 3px; font-size: var(--t-cap); letter-spacing: 0; }
+.acq__tagrow > .is-empty { padding-top: 2px; font-size: var(--t-meta); line-height: 1.5; color: var(--ink-3); }
 .acq__tags { gap: 5px; }
 .acq__tag { padding: 2px 9px; border: 0; border-radius: 10px; font-size: var(--t-meta); line-height: 1.5; background: var(--fill); }
 .acq__tag--call { color: var(--accent-text); background: color-mix(in srgb, var(--tungsten) 13%, transparent); font-weight: 600; }
@@ -937,7 +939,8 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > :is(select, input[type="number"]) { grid-row: 1; grid-column: 2; align-self: center; width: auto; max-width: 48vw; min-height: 32px; margin-right: 14px; border: 0; background-color: transparent; color: var(--ink-3); text-align: right; text-align-last: right; }
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > select { padding: 0 22px 0 0; background-position: right 0 center; }
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > input[type="number"] { width: 84px; border-radius: 8px; background: var(--fill); color: var(--ink); text-align: center; }
-.film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > :is(input:not([type="checkbox"]):not([type="radio"]):not([type="number"]), textarea, p.sub) { grid-row: 2; grid-column: 1 / -1; width: auto; margin: 0 16px 12px; border: 0; }
+.film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > :is(input:not([type="checkbox"]):not([type="radio"]):not([type="number"]), textarea, p.sub, .secret-input) { grid-row: 2; grid-column: 1 / -1; width: auto; margin: 0 16px 12px; border: 0; }
+.film .settingspage .secret-input > input { border: 0; background: var(--fill); }
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > :is(input:not([type="checkbox"]):not([type="radio"]):not([type="number"]), textarea) { background: var(--fill); }
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > small { grid-row: 3; grid-column: 1 / -1; padding: 7px 16px 0; font-size: var(--t-meta); line-height: 1.4; color: var(--ink-3); }
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field--check > span:first-child { grid-column: 1 / -1; display: flex; flex-direction: row-reverse; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 16px; }
@@ -1041,6 +1044,7 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 .settings-injection p.sub { margin-top: 6px; font-size: var(--t-meta); }
 .settings-injection code { padding: 1px 5px; border-radius: 5px; background: var(--fill); font-size: .92em; }
 .film .settingspage :is(:is(.setting-group, .setting-group > details) > .form__row, .setting-group, .setting-group > form) > .field > .settings-cache-row { grid-row: 1; grid-column: 2; align-self: center; display: flex; align-items: center; gap: 4px; margin-right: 8px; }
+.film .settingspage .field > [data-quiz-controls] { grid-row: 2; grid-column: 1 / -1; margin: 0 6px 6px; }
 .settings-cache-row .sub { font-size: var(--t-ui); color: var(--ink-3); }
 .settings-regex-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 26px 16px 7px; }
 .settings-regex-toolbar strong { display: block; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
@@ -1298,6 +1302,16 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 }
 .scene-sheet.is-shown[open], .scene-sheet.is-shown::backdrop { animation: none; }
 @media (prefers-reduced-motion: reduce) { .scene-sheet[open], .scene-sheet::backdrop { animation: none; } }
+
+/* Model group titles outrank the grey setting sub-labels. */
+.film .settingspage h3.model-section-title, .film .settingspage .setting-group > h3.model-section-title { margin: 32px 16px 12px; font-size: var(--t-body); font-weight: 600; color: var(--ink); }
+.film .settingspage .model-section-title + .setting-group { padding-top: 0; }
+.film .settingspage :is(.setting-group, .setting-group > details) > .form__row.connection-card, .film .settingspage form.connection-card { background: var(--screen); border-radius: 12px; }
+.film .settingspage :is(.setting-group, .setting-group > details) > .form__row.connection-card > .field::before { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.film .settingspage .connection-card .settings-action { margin: 0 16px; padding: 0; border-color: var(--sep); }
+.film .settingspage .settings-action .btn { padding: 0 4px; margin: 0; background: transparent; box-shadow: none; border: 0; text-align: left; }
+.film .settingspage .settings-action .btn--danger { color: var(--cut); }
+.film .settingspage .settings-action .btn--quiet { color: var(--accent-text); }
 `;
 
 export const PHONE_CSS: string = FILM_CSS + PHONE_SKIN_CSS;

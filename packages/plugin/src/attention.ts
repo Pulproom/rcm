@@ -376,6 +376,10 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
       ? "등장인물 관점을 확정하지 못해 공유 기억만 안전하게 사용했습니다. Settings에서 자동 감지 결과를 확인하세요."
       : "마지막으로 확인된 관점 또는 공유 기억만 사용하고 있습니다.",
   };
+  const quiz = state.currentJob?.kind === "quiz" ? state.currentJob : state.serverWorker?.quizGenerating;
+  if (state.current && quiz?.chatId === state.current.chatId) return {
+    kind: "quiz", label: "퀴즈 만드는 중", detail: "보조 모델이 새 퀴즈를 만들고 있어요.",
+  };
   return { kind: "idle", label: "정상", detail: "새 기억 작업을 기다리고 있습니다." };
 }
 
@@ -478,9 +482,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       } else callObservedAt = 0;
       const tone: keyof typeof STATUS_ICON_PATHS = current.kind === "disabled" ? "off"
         : current.kind === "error" || ["paused", "review", "queued", "holding", "checking", "setup", "connection"].includes(current.kind) ? "bad"
-          : ["running", "initial", "capsule", "storing", "indexing", "timing"].includes(current.kind) ? "wait" : "ok";
+          : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz"].includes(current.kind) ? "wait" : "ok";
       const skin = chipSkin(state.settings);
-      const color = tone === "bad" ? skin.cut : tone === "wait" ? skin.wait : tone === "off" ? skin.ink3 : skin.ok;
+      const color = current.kind === "quiz" ? skin.ink3 : tone === "bad" ? skin.cut : tone === "wait" ? skin.wait : tone === "off" ? skin.ink3 : skin.ok;
       return { current, color, tone };
     };
     const cacheElapsedClockElements = async (rowCount: number): Promise<void> => {
@@ -557,7 +561,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const reportElapsedClockError = (error: unknown): void => {
       if (elapsedClockErrorReported) return;
       elapsedClockErrorReported = true;
-      addLog(state.logs, "warn", `Status widget clock update failed: ${String(error)}`);
+      addLog(state.logs, "warn", `Status widget clock update failed: [오류 원문 제외]`);
     };
     const clearElapsedTick = (): void => {
       if (elapsedTimer === undefined) return;
@@ -628,8 +632,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const waitingSince = state.activeModelRequest?.chatId === state.current?.chatId ? state.activeModelRequest?.startedAt : undefined;
       const quizStart = quizEntryButton(quizOn() ? quiz.next : undefined, skin, Boolean(waitingSince));
       const quizEntry = quizStart || (quizOn() && quiz.loadFailed ? quizReloadRow(skin) : "");
-      const dashboardTone = quizStart ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
-      body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizStart ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
+      const quizReady = quizOn() && quiz.next?.available && quiz.next.question;
+      const dashboardTone = quizReady ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
+      body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
       if (quiz.view) body = quizViewHtml(quiz.view, skin);
       if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
       await widget.setAttribute("x-rcm-expanded", String(expanded));
@@ -687,12 +692,17 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         await action.run();
       } catch (error) {
         actionError = String(error).replace(/^Error:\s*/, "");
-        addLog(state.logs, "warn", `Episode action failed: ${actionError}`);
+        addLog(state.logs, "warn", `Episode action failed: [오류 원문 제외]`);
         await render();
       }
     };
     // Polling may update the compact status, but it must not rebuild an open
     // picker/confirmation panel while the user is scrolling or deciding.
+    state.refreshQuizWidget = async () => {
+      quiz.reset();
+      await quiz.refresh();
+      await render();
+    };
     state.refreshStatusWidget = () => {
       const next = currentVisual().current;
       const nextKey = `${statusVisualKey(next)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}`;
@@ -766,6 +776,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       clearElapsedTick();
       clearCompletionExpiry();
       state.refreshStatusWidget = undefined;
+      state.refreshQuizWidget = undefined;
       state.setStatusWidgetHidden = undefined;
       for (const listener of installedListeners) await (root as any).removeEventListener(listener.type, listener.id);
       await widget.remove();
@@ -776,6 +787,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     if (elapsedTimer !== undefined) window.clearTimeout(elapsedTimer);
     if (completionTimer !== undefined) window.clearTimeout(completionTimer);
     state.refreshStatusWidget = undefined;
+    state.refreshQuizWidget = undefined;
     state.setStatusWidgetHidden = undefined;
     if (installedRoot) {
       for (const listener of installedListeners) {
@@ -784,8 +796,16 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     }
     if (installedWidget) await installedWidget.remove().catch(() => undefined);
     if (installedWidgetStyle) await installedWidgetStyle.remove().catch(() => undefined);
-    addLog(state.logs, "warn", `Status widget unavailable: ${String(error)}`);
+    addLog(state.logs, "warn", `Status widget unavailable: [오류 원문 제외]`);
     // Chat menu state remains the fallback in hosts without SafeRoot support.
+  }
+}
+
+export async function registerDashboardSetting(state: RuntimeState): Promise<void> {
+  try {
+    await risuai.registerSetting("Risu Cognitive Memory", () => state.openDashboard?.(), MEMORY_ICON, "html", "risu-cognitive-memory-settings");
+  } catch (error) {
+    addLog(state.logs, "warn", `Settings menu registration unavailable: [오류 원문 제외]`);
   }
 }
 
@@ -805,6 +825,6 @@ export async function updateWorkerMenuButton(state: RuntimeState): Promise<void>
 export async function showWorkerPauseNotice(state: RuntimeState): Promise<void> {
   state.refreshStatusWidget?.();
   await updateWorkerMenuButton(state).catch((error) => {
-    addLog(state.logs, "warn", `Worker menu unavailable: ${String(error)}`);
+    addLog(state.logs, "warn", `Worker menu unavailable: [오류 원문 제외]`);
   });
 }

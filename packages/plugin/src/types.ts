@@ -66,6 +66,8 @@ export interface CachedChatState {
 }
 
 export interface RuntimeLog {
+  detail?: string;
+  diagnostic?: import("./support-diagnostics.js").SupportDiagnostic;
   at: number;
   level: "info" | "warn" | "error";
   message: string;
@@ -119,6 +121,11 @@ export interface RuntimeState {
   quizSynced?: { chatId: string; enabled: boolean };
   cache: Record<string, CachedChatState>;
   logs: RuntimeLog[];
+  memoryToolRegistration?: {
+    status: "unavailable" | "pending" | "registered" | "retrying" | "paused" | "disabled";
+    at: number;
+    failures: number;
+  };
   current?: CurrentContext | DashboardContext;
   lastPrepare?: TurnPrepareResponse;
   lastResolvedSetup?: { chatId: string; projection: ResolvedSetupProjection };
@@ -240,6 +247,7 @@ export interface RuntimeState {
   publishActivity?: () => void;
   publishStatusSummary?: () => void;
   refreshStatusWidget?: () => void;
+  refreshQuizWidget?: () => Promise<void>;
   syncMemoryToolRegistration?: (enabled: boolean) => Promise<void>;
   restoreMemoryToolDiscoveryRegistration?: () => Promise<void>;
   setStatusWidgetHidden?: (hidden: boolean) => Promise<void>;
@@ -257,6 +265,7 @@ export interface RuntimeState {
   memoryToolExposureKeys?: Record<string, boolean>;
   lastPromptSourceMessageIds?: string[];
   internalModelCall: boolean;
+  risuConnectionTestRunning?: boolean;
   timingEvents?: import("./timing.js").TimingEvent[];
   openDashboard?: () => void;
   /** Set by the chip's quiz before openDashboard: the memory the dashboard opens on. */

@@ -240,12 +240,12 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
     });
     if (cacheItems.length && isCurrent()) await clientFor(state).request("/v1/translations/cache/upsert", { method: "POST", body: JSON.stringify({ items: cacheItems }) }, 8_000).catch(() => undefined);
     changeActivity(state, -pendingStarted, batchError); pendingStarted = 0;
-    if (batchError) addLog(state.logs, "warn", `Reference translation failed: ${batchError}`);
+    if (batchError) addLog(state.logs, "warn", `Reference translation failed: [오류 원문 제외]`);
     return prepared.map((item) => results.get(item.key) ?? { ...item.source, translated: item.source.text, cached: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     changeActivity(state, pendingStarted ? -pendingStarted : 0, message);
-    addLog(state.logs, "warn", `Reference translation failed: ${message}`);
+    addLog(state.logs, "warn", `Reference translation failed: [오류 원문 제외]`);
     return records.map((source) => ({ ...source, translated: source.text, cached: false, error: message }));
   }
 }

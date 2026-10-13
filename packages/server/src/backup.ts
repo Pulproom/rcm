@@ -58,7 +58,7 @@ export interface CompleteBackupPrivateData {
   serverToken?: string;
   secrets?: string;
   voyageApiKey?: string;
-  llmApiKeys?: Partial<Record<"gemini_api" | "vertex" | "llm_gateway" | "ollama_cloud", string>>;
+  llmApiKeys?: Partial<Record<"gemini_api" | "vertex" | "llm_gateway" | "openai_compatible" | "vercel" | "ollama_cloud" | "copilot", string>>;
 }
 export interface CompleteBackupInspection {
   manifest: CompleteManifest;

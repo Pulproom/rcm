@@ -45,6 +45,7 @@ const signature = (state: RuntimeState): string => JSON.stringify({
   connection: state.serverConnectionIssue,
   update: state.updateStatus,
   updateApplying: state.updateApplying,
+  memoryToolRegistration: [state.memoryToolRegistration?.status, state.memoryToolRegistration?.failures],
 });
 
 function isActive(state: RuntimeState): boolean {

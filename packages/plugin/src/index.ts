@@ -4,7 +4,7 @@ import { createRuntime, installInitializationRequestGate, installRequestHooks } 
 import { addLog } from "./settings.js";
 import { drainWorker, heartbeatServerWorker } from "./worker.js";
 import { registerMemoryToolAdapters } from "./tool-adapters.js";
-import { installStatusWidget, updateWorkerMenuButton } from "./attention.js";
+import { installStatusWidget, updateWorkerMenuButton, registerDashboardSetting } from "./attention.js";
 import { installActivityCoordinator } from "./activity.js";
 import { readOptionalDashboardContext } from "./context.js";
 import { isServerConfigured } from "./connection.js";
@@ -29,6 +29,7 @@ void (async () => {
   }
   const open = () => void openDashboard(state, client);
   state.openDashboard = open;
+  await registerDashboardSetting(state);
   await installStatusWidget(state, client);
   // Hydrate the active chat before the first activity poll. Without this,
   // the floating widget can claim the queue is healthy until another host

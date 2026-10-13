@@ -40,6 +40,8 @@ export type AcquaintanceRow = {
   level?: string;
   knownAs?: string[];
   addressTerms?: string[];
+  derived?: "mutual_interaction";
+  derivedFrom?: string;
   cognition?: Array<{ id?: string; text?: string }>;
   [key: string]: unknown;
 };
@@ -72,7 +74,7 @@ export type SocialEditorState = {
   knownAs: string;
   addressTerms?: string;
   editing: boolean;
-  /** "address" edits only what the holder calls the subject, from the pair sheet. */
+  /** "address" edits this direction's names and address terms from the pair sheet. */
   focus?: "address";
 };
 
@@ -266,16 +268,16 @@ export const socialEditorForm = (editor: SocialEditorState): string => {
   return `<form id="social-form" class="form social-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h4 class="subhead">${editor.editing ? `${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}` : "지인 관계 추가"}</h4><div class="form__row">${input("holder", "알고 있는 사람", editor.holder, " required")}${input("subject", "대상 인물", editor.subject, " required")}</div>${field({ id: "social-level", label: "상태", control: `<select id="social-level" class="select" name="level"><option value="aware_of" ${editor.level === "aware_of" ? "selected" : ""}>존재를 알고 있음</option><option value="interacted" ${editor.level === "interacted" ? "selected" : ""}>직접 교류한 기록 있음</option></select>` })}${input("knownAs", "알고 있는 이름·직함", editor.knownAs, ' placeholder="쉼표로 구분"')}${input("addressTerms", "부르는 이름", editor.addressTerms ?? "", ' placeholder="쉼표로 구분"')}${field({ id: "social-description", label: "인지 설명 · 사용자 편집", control: `<textarea id="social-description" class="textarea" name="description">${escapeHtml(editor.description ?? "")}</textarea>` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
 };
 
-/** The pair sheet's editor for one direction's 부르는 이름; everything else on the record rides along unchanged. */
+/** Edits directional names while preserving the record's cognition and lock state. */
 export const addressEditorForm = (editor: SocialEditorState): string => {
   const hidden = (name: string, value: string) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
-  return `<form id="social-form" class="form social-editor address-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h3 class="subhead">${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}</h3>${hidden("holder", editor.holder)}${hidden("subject", editor.subject)}${hidden("level", editor.level || "interacted")}${hidden("knownAs", editor.knownAs)}${field({ id: "social-addressTerms", label: "부르는 이름", control: `<input id="social-addressTerms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">`, hint: "대사에서 상대를 부를 때 쓰는 이름입니다." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
+  return `<form id="social-form" class="form social-editor address-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h3 class="subhead">${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}</h3>${hidden("holder", editor.holder)}${hidden("subject", editor.subject)}${hidden("level", editor.level || "interacted")}${field({ id: "social-knownAs", label: "알고 있는 이름", control: `<input id="social-knownAs" class="input notranslate" translate="no" name="knownAs" value="${escapeHtml(editor.knownAs)}" placeholder="쉼표로 구분">` })}${field({ id: "social-addressTerms", label: "부르는 이름", control: `<input id="social-addressTerms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">`, hint: "대사에서 상대를 부를 때 쓰는 이름입니다." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
 };
 
 /**
  * 아는 사이 as a contact list: both directions between this person and one other read as one contact.
  * The row is the person list's contact row; opening it shows each direction's names as tags
- * (blue for what they call, grey for names they only know) and the scene that taught it.
+ * (blue for what they call, grey for learned names) and the scene that taught it.
  */
 const acquaintanceContacts = (person: string, selfNames: string[], items: AcquaintanceRow[], options: RenderEssentials): string => {
   const self = new Set(selfNames.map((name) => name.trim().toLocaleLowerCase()).filter(Boolean));
@@ -288,25 +290,26 @@ const acquaintanceContacts = (person: string, selfNames: string[], items: Acquai
   }
   const tags = (label: string, values: string[], kind: "call" | "known") => values.length
     ? `<div class="acq__tagrow"><span class="acq__k">${label}</span><span class="acq__tags notranslate" translate="no">${values.map((value) => `<span class="acq__tag acq__tag--${kind}">${escapeHtml(value)}</span>`).join("")}</span></div>`
-    : "";
+    : `<div class="acq__tagrow"><span class="acq__k">${label}</span><span class="is-empty">아직 없음</span></div>`;
   const side = (item: AcquaintanceRow) => {
     const data = { holder: String(item?.holder ?? ""), subject: String(item?.subject ?? "") };
     const met = item?.level === "interacted";
     const calls = (item?.addressTerms ?? []).filter(Boolean);
-    const known = (item?.knownAs ?? []).filter((name) => name && !calls.includes(name));
+    const known = (item?.knownAs ?? []).filter(Boolean);
     const memo = (item?.cognition ?? []).map((detail: any) => `<p class="acq__memo">${displayText(String(detail?.text ?? ""), options.translations.get(`social-cognition:${detail?.id}`), options.display)}</p>`).join("");
+    const derivedOnly = item.derived === "mutual_interaction" && item.id === `mutual:${item.derivedFrom}`;
     const edit = menu({ label: `${data.holder} → ${data.subject} 편집`, items: [
-      { label: "수정", icon: "edit", action: "edit-social", data: { ...data, level: String(item?.level ?? ""), knownAs: (item?.knownAs ?? []).join(", ") } },
-      { label: "삭제", icon: "delete", action: "delete-social", data, danger: true },
-    ], face: { html: "편집", className: "acq__edit" } });
-    return `<div class="acq__side" data-social-row><div class="acq__h"><b>${escapeHtml(data.holder)} → ${escapeHtml(data.subject)}</b><span class="acq__lv${met ? " is-met" : ""}">${met ? "직접 교류" : "존재만 앎"}</span>${edit}</div>${tags("부르는", calls, "call")}${tags("알고 있는", known, "known")}${memo}</div>`;
+      { label: derivedOnly ? "추가" : "수정", icon: derivedOnly ? "add" : "edit", action: "edit-social", data: { ...data, level: String(item?.level ?? ""), knownAs: (item?.knownAs ?? []).join(", ") } },
+      ...(derivedOnly ? [] : [{ label: "삭제", icon: "delete" as const, action: "delete-social", data, danger: true }]),
+    ], face: { html: derivedOnly ? "추가" : "편집", className: "acq__edit" } });
+    return `<div class="acq__side" data-social-row><div class="acq__h"><b>${escapeHtml(data.holder)} → ${escapeHtml(data.subject)}</b><span class="acq__lv${met ? " is-met" : ""}">${met ? "직접 교류" : "존재만 앎"}</span>${edit}</div>${tags("알고 있는 이름", known, "known")}${tags("부르는 이름", calls, "call")}${memo}</div>`;
   };
   const contacts = [...groups.values()].map((rows) => {
     const other = counterpart(rows[0]!);
     // This person's own view leads; the other's view of them follows.
     const ordered = [...rows].sort((left, right) => Number(self.has(String(right?.holder ?? "").trim().toLocaleLowerCase())) - Number(self.has(String(left?.holder ?? "").trim().toLocaleLowerCase())));
     const metCount = rows.filter((item) => item?.level === "interacted").length;
-    const how = metCount === 0 ? '<span class="acq__how">이름만 앎</span>' : `<span class="acq__how is-met">${icon("check")}${metCount > 1 ? "서로 만난 사이" : "만난 사이"}</span>`;
+    const how = metCount === 0 ? '<span class="acq__how">이름만 앎</span>' : `<span class="acq__how is-met">${icon("check")}만난 사이</span>`;
     const lead = ordered[0]!;
     const hint = (lead?.addressTerms ?? []).filter((name) => name !== other).slice(0, 2).join(", ") || (lead?.knownAs ?? []).find((name) => name !== other) || "";
     const sub = `${how}${hint ? ` · <span class="notranslate" translate="no">${escapeHtml(hint)}</span>` : ""}`;

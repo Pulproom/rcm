@@ -1,9 +1,10 @@
+import { connectionFailureReason, type ConnectionFailureCode } from "@rcm/shared";
 import { storySeedCounts } from "./story-seeds.js";
 import { z } from "zod";
 import { deleteLedgerRecord, rememberLedgerEditOrigin } from "./user-deletions.js";
 import { QuizAnswerRequestSchema, UserCorrectionEditSchema } from "@rcm/shared";
 import { committedEditOrdinal, correctionView } from "./user-corrections.js";
-import { answerQuiz, completeQuizJob, disableAllQuizzes, nextQuiz, resetQuizStats, setQuizEnabled } from "./quiz.js";
+import { answerQuiz, completeQuizJob, disableAllQuizzes, nextQuiz, quizStatus, regenerateQuizzes, resetQuizStats, setQuizEnabled } from "./quiz.js";
 import { McpSelector } from "./mcp-selector.js";
 import { mcpRequestTimeoutMs, structuredStoryTimeEnd } from "@rcm/shared";
 import { collectStateEvidence, resolveAssertionHolders } from "./state-evidence.js";
@@ -67,13 +68,13 @@ import { openDatabase, type RcmDatabase } from "./db.js";
 import { BackupValidationError, exportCompleteArchive, exportChatArchive, restoreChatArchive, inspectCompleteArchive, previewMemoryTransplant, restoreCompleteArchive, transplantCompleteArchive } from "./backup.js";
 import { deleteChats, listAdminChats, listSourceLedger, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
 import { recanonicalizeSourceLedger } from "./lifecycle.js";
-import type { EmbeddingService } from "./embedding.js";
+import { EmbeddingRequestError, type EmbeddingService } from "./embedding.js";
 import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failJob, leaseJob, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot } from "./lifecycle.js";
 import { automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, mergeMemoryContextItems, processedHistoryCoverage, retrieve, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
-import { ServerLlmStore } from "./server-llm.js";
+import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
 import { ServerExtractionWorker } from "./server-worker.js";
 import { chatPacketBudgetKey, compileStorySpine, createStorySpineCompiler, completeStoryConsolidationById, expandArcForMemory, expandArcHits, invalidateStorySpine, invalidateStorySupports, storyMemorySupportIds, listStorySpine, maybeEnqueueStorySpine, storyBudgetLimit, updateStorySpineGroup } from "./story-spine.js";
@@ -91,7 +92,7 @@ import { resolveConflict, type ConflictResolution } from "./conflicts.js";
 import { readMemoryBookmarks, setMemoryBookmark } from "./memory-bookmarks.js";
 import { InvalidViewPreferencesPatchError, readViewPreferences, ViewPreferencesStorageError, writeViewPreferences } from "./view-preferences.js";
 import { acknowledgeChatLineage, applyManualLineage, applyProbedLineage, chooseChatLineage, declineChatLineage, ensureChatLineage, getChatLineage, previewManualLineage, probeChatLineage, revertChatLineage } from "./lineage.js";
-import { listSocialKnowledge, retractSocialKnowledge, setManualSocialKnowledge } from "./social-knowledge.js";
+import { appendSceneNames, mentionedCharacters, renderSceneNames, listSocialKnowledge, retractSocialKnowledge, setManualSocialKnowledge } from "./social-knowledge.js";
 import { fingerprintMatches, parseSourceFingerprintJson } from "./source-fingerprint.js";
 import { completeRelationshipProjectionJob, flushRelationshipProjectionQueue, listRelationshipProjections, setRelationshipProjectionOverride } from "./relationship-projections.js";
 import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
@@ -233,7 +234,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const health = {
       ok: true, version: RCM_SERVER_VERSION, apiRevision: RCM_API_REVISION, instanceId: serverInstanceId,
       vectorEnabled, embeddingReady: embeddings.ready, embedding: embeddings.status, reranker: reranker.status, serverTranslationCache: true, completeMemoryBackup: true,
-      serverLlm: llmStore.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
+      serverLlm: llmStore.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
     };
     Object.assign(health.capabilities, {
       chatOperationLifecycleV2: true,
@@ -427,6 +428,11 @@ export function createApp(dependencies: Dependencies): Hono {
     // Reserve their cost up front instead of letting N perspective-local caps
     // silently overflow the actual injection budget.
     const activeTurnPerspectives = perspectiveResolution.perspectives.filter((name) => name !== "__shared__");
+    const namesPresent = [...activeTurnPerspectives, ...(parsed.identityHints?.recentSpeakerNames ?? []), parsed.identityHints?.userPersonaName ?? ""];
+    const namesPrompt = (db.prepare("SELECT content FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal")
+      .all(parsed.chatId, JSON.stringify(trustedPromptSourceMessageIds)) as Array<{ content: string }>).map(row => row.content).join("\n");
+    const sceneNames = renderSceneNames(db, parsed.chatId, namesPresent, namesPresent,
+      mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n")), Math.min(200, Math.floor(parsed.tokenBudget * .1)));
     const maximumStoryBudget = storyBudgetLimit(parsed.tokenBudget);
     const storyProbe = compileStorySpine(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, maximumStoryBudget);
     const stateCorpus = collectStateEvidence(db, parsed.chatId);
@@ -586,7 +592,7 @@ export function createApp(dependencies: Dependencies): Hono {
     }, undefined);
     const rebuildPacket = () => {
       emittedManifest = mergePacketManifests(structuredManifests);
-      const body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, perspectiveSections, selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime);
+      const body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, perspectiveSections, selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
       const deliveredDetails = selectedItems.flatMap(item => item.details
         .filter(detail => emittedManifest.atomKeys.includes(memoryDetailAtomKey(detail))).map(detail => detail.text));
       const deliveredDialogueEvidence = selectedItems.flatMap(item => item.keyDialogues
@@ -720,7 +726,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const sceneDelivery = selectedItems.map(item => ({memoryId:item.id,ref:requestRefs.get(item.id),details:item.details.length,dialogues:item.keyDialogues.length}));
     const stateKinds = Object.fromEntries([...new Set(finalManifest.stateEvidenceIds.map(id=>id.split(":")[0]!))].map(kind=>[kind,finalManifest.stateEvidenceIds.filter(id=>id.startsWith(kind+":")).length]));
     const stateInventory = Object.fromEntries([...new Set(stateCorpus.map(item => item.kind))].map(kind => [kind, stateCorpus.filter(item => item.kind === kind).length]));
-    const assembly = { stateInventory, stateSearch: { ...embeddings.stateIndex.status }, sectionTokens, sceneDelivery, stateKinds, ...processedHistoryCoverage(db, parsed.chatId), refillAdded, refillRejected, unusedTokens: Math.max(0, hardTokenCeiling - estimateTokens(packet)), unusedReason: estimateTokens(packet) < hardTokenCeiling * .8 ? "eligible_scene_or_whole_atom_limit" : undefined };
+    const assembly = { names: { pairCount: sceneNames.pairCount, omittedCount: sceneNames.omittedCount }, stateInventory, stateSearch: { ...embeddings.stateIndex.status }, sectionTokens, sceneDelivery, stateKinds, ...processedHistoryCoverage(db, parsed.chatId), refillAdded, refillRejected, unusedTokens: Math.max(0, hardTokenCeiling - estimateTokens(packet)), unusedReason: estimateTokens(packet) < hardTokenCeiling * .8 ? "eligible_scene_or_whole_atom_limit" : undefined };
     const response = context.json({
       apiRevision: RCM_API_REVISION,
       serverInstanceId,
@@ -1242,6 +1248,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const deliverySource = "search" as const;
     const opportunityCurrent = opportunityTurnIsCurrent(db, context.req.param("id"), body.traceContext?.latestMessageId);
     const retrievalMs = performance.now() - retrievalStarted;
+    const queriedCharacters = mentionedCharacters(db, context.req.param("id"), body.query);
+    const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
     const finalizationStarted = performance.now();
     let finalized: Awaited<ReturnType<typeof finalizeMcpAnswer>>;
     try {
@@ -1249,7 +1257,7 @@ export function createApp(dependencies: Dependencies): Hono {
         archiveView: ["narrator", "omniscient", "omniscient narrator"].includes(body.perspective.trim().toLowerCase()),
         memoryOnlyInjection: body.memoryOnlyInjection,
         query: body.query, aspects: undefined,
-        tokenBudget: body.tokenBudget, perspectives: body.activePerspectives?.length ? body.activePerspectives : [body.perspective],
+        tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives?.length ? body.activePerspectives : [body.perspective],
         promptIds: body.promptSourceMessageIds, excludedAtoms: [...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])],
         excludedSourceRanges: body.excludeSourceRanges, currentMessageId: body.traceContext?.latestMessageId,
         semantic: semanticResults, referenceMemoryId: undefined,
@@ -1272,6 +1280,11 @@ export function createApp(dependencies: Dependencies): Hono {
       result.packet = renderMcpAnswer(result.answers ?? [], id => memoryReferences.issue(context.req.param("id"), body.memoryGeneration!, id));
       result.estimatedTokens = estimateTokens(result.packet);
     }
+    const involvedCharacters = queriedCharacters.length ? [...new Set([...queriedCharacters, ...result.selected.flatMap(item => item.participants)])] : [];
+    const names = renderSceneNames(db, context.req.param("id"),
+      [body.perspective, ...involvedCharacters], involvedCharacters, [], namesBudget);
+    result.packet = appendSceneNames(result.packet, names);
+    result.estimatedTokens = estimateTokens(result.packet);
     const spanRerankTokens=finalized.sourceSpans.usage?.total_tokens;
     const timings = { embeddingMs, retrievalMs, rerankMs: finalized.rerank.elapsedMs,
       rerankCalls: finalized.rerank.calls, spanRerankMs: finalized.sourceSpans.elapsedMs,
@@ -1286,6 +1299,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
       id: traceRequestId,
       kind: "mcp_search",
+      names: { pairCount: names.pairCount, omittedCount: names.omittedCount },
       selector: finalized.selector,
       timings, elapsedMs: timings.serverMs,
       answers: publicMcpAnswers(result.answers ?? []),
@@ -1331,16 +1345,22 @@ export function createApp(dependencies: Dependencies): Hono {
       activePerspectives: body.activePerspectives, collectDiagnostics: retrievalTrace.enabled });
     result.eligibleCandidates = result.eligibleCandidates.filter(item => item.id === memoryId);
     result.answers = [];
+    const involved = [...new Set(result.eligibleCandidates.flatMap(item => item.participants))];
+    const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
     await finalizeMcpAnswer(db, chatId, result, { archiveView: ["narrator", "omniscient", "omniscient narrator"].includes(body.perspective.trim().toLowerCase()), query: body.focus ?? "",
-      tokenBudget: body.tokenBudget, perspectives: body.activePerspectives ?? [body.perspective], excludedAtoms: [],
+      tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives ?? [body.perspective], excludedAtoms: [],
       semantic: [], seedMemoryId: memoryId });
     if (!memoryReferences.resolve(chatId, body.memoryGeneration, body.ref)) return context.json({ answers: [], error: "The memory changed during expansion.", code: "INVALID_MEMORY_REF" });
     for (const answer of result.answers ?? []) for (const evidence of answer.evidence) if (evidence.memoryId === memoryId) evidence.ref = body.ref;
-    result.packet = renderMcpAnswer(result.answers ?? []);
+    const names = renderSceneNames(db, chatId, [body.perspective, ...involved], involved,
+      mentionedCharacters(db, chatId, body.focus ?? ""), namesBudget);
+    result.packet = appendSceneNames(renderMcpAnswer(result.answers ?? []), names);
+    result.estimatedTokens = estimateTokens(result.packet);
     const timings = { serverMs: performance.now() - started, rerankCalls: 0, rerankTotalTokens: 0 };
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
       id: body.traceContext?.requestId ?? randomUUID(), kind: "mcp_search", chatId,
       traceContext: body.traceContext, query: body.focus ?? "Expand the referenced record", intent: "expand",
+      names: { pairCount: names.pairCount, omittedCount: names.omittedCount },
       answers: publicMcpAnswers(result.answers ?? []), selectedIds: result.selected.map(item => item.id), packet: result.packet,
       deliveredAtomKeys: result.deliveredAtomKeys, deliveredSourceRanges: result.deliveredSourceRanges,
       retrieval: result.diagnostics, timings, elapsedMs: timings.serverMs, deliverySource: "reference",
@@ -1394,6 +1414,42 @@ export function createApp(dependencies: Dependencies): Hono {
     } catch (error) {
       return context.json({ error: error instanceof Error ? error.message : String(error) }, 404);
     }
+  });
+  let connectionTestBusy = false;
+  app.post("/v1/admin/connection-test", async context => {
+    const body = await context.req.json().catch(() => null);
+    if (!body || !["voyage", "server", "mcp"].includes(body.target)) return context.json({ error: "연결 확인 대상을 선택해 주세요." }, 400);
+    if (connectionTestBusy) return context.json({ error: "다른 연결 확인이 끝난 뒤 다시 시도해 주세요." }, 409);
+    connectionTestBusy = true;
+    const started = performance.now();
+    try {
+      const signal = AbortSignal.any([context.req.raw.signal, AbortSignal.timeout(60_000)]);
+      if (body.target !== "voyage" && typeof body.config?.endpoint === "string" && !body.config.endpoint.trim()) {
+        throw Object.assign(new Error("Missing endpoint"), { code: "ENDPOINT_MISSING" });
+      }
+      if (body.target === "voyage") {
+        if (body.apiKey !== undefined && typeof body.apiKey !== "string") throw new Error("Invalid key");
+        await embeddings.testConnection(body.apiKey?.trim() || undefined);
+      } else if (body.target === "server") {
+        await llmStore.testConnection(ServerLlmConfigSchema.parse(body.config), signal);
+      } else {
+        await mcpSelector.testConnection(body.config, signal);
+      }
+      return context.json({ ok: true, elapsedMs: Math.round(performance.now() - started) });
+    } catch (error) {
+      const status = error instanceof ProviderRequestError || error instanceof EmbeddingRequestError ? error.status : undefined;
+      const localCode = (error as { code?: string })?.code;
+      const code: ConnectionFailureCode = localCode === "ENDPOINT_MISSING" ? "ENDPOINT_MISSING"
+        : status === 401 || status === 403 || localCode === "AUTH_FAILED" ? "AUTH_FAILED"
+        : status === 404 ? "MODEL_NOT_FOUND" : status === 429 ? "RATE_LIMITED"
+        : status === 408 || status === 504 || error instanceof ProviderRequestError && error.kind === "timeout"
+          || error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name) ? "TIMEOUT"
+        : error instanceof ProviderRequestError && error.kind === "transport" ? "NETWORK_ERROR"
+        : status ? "PROVIDER_HTTP_ERROR"
+        : error instanceof ProviderRequestError && error.kind === "json" || localCode === "INVALID_RESPONSE" ? "INVALID_RESPONSE" : "INVALID_CONFIG";
+      const detail = error instanceof ProviderRequestError ? error.providerMessage : undefined;
+      return context.json({ ok: false, code, message: connectionFailureReason(code), ...(detail ? { detail } : {}), ...(status ? { status } : {}), elapsedMs: Math.round(performance.now() - started) });
+    } finally { connectionTestBusy = false; }
   });
   app.get("/v1/admin/mcp-selector",context=>context.json({config:mcpSelector.publicConfig}));
   app.put("/v1/admin/mcp-selector",async context=>{
@@ -2332,6 +2388,12 @@ export function createApp(dependencies: Dependencies): Hono {
     setQuizEnabled(db, context.req.param("id"), body.enabled);
     const result = nextQuiz(db, context.req.param("id"));
     if (result.generating) serverWorker.wake();
+    return context.json(result);
+  });
+  app.get("/v1/chats/:id/quiz/status", (context) => context.json(quizStatus(db, context.req.param("id"))));
+  app.post("/v1/chats/:id/quiz/regenerate", (context) => {
+    const result = regenerateQuizzes(db, context.req.param("id"));
+    if (result.enqueued) serverWorker.wake();
     return context.json(result);
   });
   app.delete("/v1/chats/:id/quiz/stats", (context) => context.json(resetQuizStats(db, context.req.param("id"))));

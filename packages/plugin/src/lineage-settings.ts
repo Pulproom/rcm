@@ -20,5 +20,5 @@ export async function inheritLineageSettings(state: RuntimeState, target: string
   copy(state.settings.perspectives, []);
   if (!changed) return;
   try { await saveSettings(state.settings); }
-  catch (error) { addLog(state.logs, "warn", `Lineage setting persistence failed: ${String(error)}`); }
+  catch (error) { addLog(state.logs, "warn", `Lineage setting persistence failed: [오류 원문 제외]`); }
 }

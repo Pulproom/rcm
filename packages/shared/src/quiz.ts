@@ -1,14 +1,15 @@
 import { z } from "zod";
 
 export const QUIZ_BATCH_SIZE = 15;
-export const QUIZ_MIN_SCENES = 2;
-export const QUIZ_REFILL_BELOW = 10;
+export const QUIZ_REFILL_BELOW = 5;
 export const QUIZ_MIX = { easy: 5, medium: 5, hard: 5 } as const;
 
 export type QuizFormat = "choice4" | "ox";
 export type QuizDifficulty = "easy" | "medium" | "hard";
 export interface QuizDraftItem { format: QuizFormat; difficulty: QuizDifficulty; question: string; options: string[]; answerIndex: number; explanation: string; quote?: string; memoryRef: string }
-export interface QuizJobMeta { refs: Record<string, string>; sceneCount: number; fingerprints?: Record<string, string>; targetCount?: number }
+export interface QuizJobMeta { refs: Record<string, string>; sceneCount: number; fingerprints?: Record<string, string>; limits?: Record<string, number>; targetCount?: number }
+export interface QuizRegenerateResponse { retired: number; enqueued: boolean; reason?: "generating" | "disabled" | "no_material" }
+export interface QuizStatus { unanswered: number; generating: boolean }
 export interface QuizStats { streak: number; bestStreak: number; answered: number; correct: number }
 export interface QuizQuestion { id: string; attemptToken: string; retry: boolean; format: QuizFormat; difficulty: QuizDifficulty; question: string; options: string[]; storyTime?: string }
 export const QuizAnswerRequestSchema = z.object({ chosenIndex: z.number().int().min(0), attemptToken: z.string().min(1) });
@@ -47,4 +48,11 @@ export function acceptQuizItems(raw: unknown, allowedRefs: ReadonlySet<string>):
     items.push({ format: item.format, difficulty: item.difficulty, question: item.question, options, answerIndex: item.answerIndex, explanation: item.explanation, ...(item.quote ? { quote: item.quote } : {}), memoryRef: item.memoryRef });
   }
   return { items, dropped: list.length - items.length };
+}
+
+/** UI-owned story date format, shared with the generation prompt. */
+export function quizDateLabel(storyTime: string | undefined): string {
+  if (!storyTime) return "";
+  const match = /^\d{4}-(\d{2})-(\d{2})/.exec(storyTime);
+  return match ? `${match[1]}.${match[2]}` : storyTime;
 }

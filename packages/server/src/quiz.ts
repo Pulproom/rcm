@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { acceptQuizItems, compareStoryMemories, estimateTokens, measureAuxiliaryPrompt, isScene, sceneNumbers, QUIZ_BATCH_SIZE, QUIZ_MIN_SCENES, QUIZ_MIX, QUIZ_REFILL_BELOW,
-  type LeasedJob, type MemoryLanguage, type RpProfile, type QuizJobMeta, type QuizAnswerResponse, type QuizDraftItem, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
+import { acceptQuizItems, compareStoryMemories, estimateTokens, measureAuxiliaryPrompt, isScene, sceneNumbers, QUIZ_BATCH_SIZE, quizDateLabel, QUIZ_MIX, QUIZ_REFILL_BELOW,
+  type QuizRegenerateResponse, type QuizStatus, type LeasedJob, type MemoryLanguage, type RpProfile, type QuizJobMeta, type QuizAnswerResponse, type QuizDraftItem, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
 import { now, type RcmDatabase } from "./db.js";
 
 export interface QuizSceneRow {
@@ -8,9 +8,12 @@ export interface QuizSceneRow {
   story_time: string | null; locations_json: string; participants_json: string;
   landmark: number; capsule_parent_id: string | null; created_revision: number; source_ordinal: number | null;
   sourceOnly?: boolean;
+  context?: string;
+  sourceText?: string;
+  created_at?: number;
 }
 export interface QuizMaterial {
-  scenes: Array<{ ref: string; memoryId: string; rich: boolean; text: string; excerpt: string; questions: string[] }>;
+  scenes: Array<{ ref: string; memoryId: string; rich: boolean; text: string; excerpt: string; questions: string[]; limit?: number }>;
   sceneCount: number;
   targetCount?: number;
 }
@@ -22,7 +25,7 @@ const PLAIN_CAP = 900;
 const RICH_CAP = 3_200;
 
 export function quizSceneRows(db: RcmDatabase, chatId: string): QuizSceneRow[] {
-  const rows = db.prepare(`SELECT m.id,m.memory_key,m.type,m.title,m.content,m.story_time,m.locations_json,m.participants_json,m.landmark,m.capsule_parent_id,m.created_revision,
+  const rows = db.prepare(`SELECT m.id,m.memory_key,m.type,m.title,m.content,m.story_time,m.locations_json,m.participants_json,m.landmark,m.capsule_parent_id,m.created_revision,m.created_at,
       (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal
     FROM memories m WHERE m.chat_id=? AND m.active=1`).all(chatId) as QuizSceneRow[];
   return rows.filter(isScene).sort(compareStoryMemories);
@@ -67,7 +70,7 @@ export function preserveRegenerationQuizzes(db: RcmDatabase, chatId: string, bef
 }
 
 // A typed source reference in the existing quiz reference column; never a memory record.
-const SOURCE_REF = "source-message:";
+const SOURCE_REF = "source-chunk:";
 const QUIZ_SOURCE_LAG = 2;
 const QUIZ_SOURCE_REFILL_TURNS = 3;
 const QUIZ_MEMORY_ONLY_SCENES = 6;
@@ -81,17 +84,70 @@ function sourceProgress(db: RcmDatabase, chatId: string): { cutoff: number | nul
 }
 
 function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows(db, chatId)): QuizSceneRow[] {
+  if (scenes.length >= QUIZ_MEMORY_ONLY_SCENES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
   const { cutoff } = sourceProgress(db, chatId);
-  // Include old source-backed questions for validation even after the early-game window closes.
-  const rows = db.prepare(`SELECT message_id,ordinal,content FROM messages WHERE chat_id=? AND content IS NOT NULL
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')
-    AND (message_id IN (SELECT substr(memory_id,?) FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-message:%' AND retired_at IS NULL)
-      OR (? < ? AND ordinal IN (SELECT ordinal FROM messages WHERE chat_id=? AND ordinal<=? AND role IN ('user','assistant')
-        AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal DESC LIMIT 12)))
-    ORDER BY ordinal`).all(chatId, SOURCE_REF.length + 1, chatId, scenes.length, QUIZ_MEMORY_ONLY_SCENES, chatId, cutoff) as Array<{ message_id: string; ordinal: number; content: string }>;
-  return [...scenes, ...rows.map(row => ({ id: SOURCE_REF + row.message_id, memory_key: SOURCE_REF + row.message_id,
-    type: "source", title: "Earlier conversation", content: row.content, sourceOnly: true, story_time: null,
-    locations_json: "[]", participants_json: "[]", landmark: 0, capsule_parent_id: null, created_revision: 0, source_ordinal: row.ordinal }))];
+  const rows = db.prepare(`SELECT message_id,role,ordinal,content,updated_at FROM messages WHERE chat_id=?
+    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal`)
+    .all(chatId) as Array<{message_id:string;role:string;ordinal:number;content:string|null;updated_at:number}>;
+  const chunks: QuizSceneRow[] = [];
+  let previousExchange = "";
+  for (let index = 1; index < rows.length; index++) {
+    const reply = rows[index]!, user = rows[index - 1]!;
+    if (reply.role !== "assistant" || user.role !== "user" || reply.content === null || user.content === null
+      || cutoff === null || reply.ordinal > cutoff) continue;
+    const nearest = scenes.filter(scene => scene.source_ordinal !== null && scene.source_ordinal <= user.ordinal)
+      .sort((a,b) => b.source_ordinal! - a.source_ordinal!)[0];
+    const context = [nearest ? "Nearest stored scene (context only): " + [nearest.story_time, ...JSON.parse(nearest.locations_json), ...JSON.parse(nearest.participants_json)].filter(Boolean).join(" · ") : "",
+      previousExchange].filter(Boolean).join("\n");
+    chunks.push({ id: SOURCE_REF + reply.message_id, memory_key: SOURCE_REF + reply.message_id, type: "source",
+      title: "Earlier exchange", content: "User:\n" + user.content + "\nAssistant:\n" + reply.content,
+      context, sourceText: "User:\n" + takeCharacters(user.content, 3000) + "\nAssistant:\n" + takeCharacters(reply.content, 3000), sourceOnly: true, story_time: null, locations_json: "[]", participants_json: "[]", landmark: 0,
+      capsule_parent_id: null, created_revision: 0, created_at: reply.updated_at, source_ordinal: reply.ordinal });
+    previousExchange = "Preceding exchange — User:\n" + takeCharacters(user.content, 600) + "\nAssistant:\n" + takeCharacters(reply.content, 600);
+  }
+  // Keep complete source units available for validation after switching to memories.
+  return [...scenes, ...chunks];
+}
+
+export interface QuizUnit { row: QuizSceneRow; quota: number; remaining: number; weight: number }
+
+/** Retired unanswered questions release quota; answered history always counts. */
+export function quizUnits(db: RcmDatabase, chatId: string): QuizUnit[] {
+  const scenes = quizSceneRows(db, chatId);
+  const progress = sourceProgress(db, chatId);
+  const replies = db.prepare(`SELECT ordinal,updated_at FROM messages WHERE chat_id=? AND role='assistant'
+    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal`)
+    .all(chatId) as Array<{ordinal:number;updated_at:number}>;
+  const atTime = (time: number) => Math.max(0, replies.filter(reply => reply.updated_at <= time).length - QUIZ_SOURCE_LAG);
+  const history = db.prepare(`SELECT q.memory_id,q.batch_id,q.created_at,json_extract(j.payload_json,'$.sourceTurns') source_turns
+    FROM quiz_items q LEFT JOIN jobs j ON j.id=q.batch_id AND j.chat_id=q.chat_id
+    WHERE q.chat_id=? AND (q.retired_at IS NULL OR q.answered_at IS NOT NULL) ORDER BY q.created_at,q.rowid`).all(chatId) as Array<{memory_id:string;batch_id:string;created_at:number;source_turns:number|null}>;
+  const previousBatch = history.at(-1)?.batch_id;
+  const details = db.prepare("SELECT memory_id,COUNT(*) n FROM memory_details WHERE chat_id=? AND active=1 GROUP BY memory_id")
+    .all(chatId) as Array<{memory_id:string;n:number}>;
+  const sizes = db.prepare(`SELECT memory_id,SUM(chars) n FROM (
+    SELECT DISTINCT e.memory_id,msg.message_id,length(msg.content) chars FROM evidence_spans e
+    JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id
+    WHERE e.chat_id=? AND msg.content IS NOT NULL AND msg.lifecycle IN ('committed','client_pruned')
+      AND msg.host_visibility IN ('active','all_before')) GROUP BY memory_id`).all(chatId) as Array<{memory_id:string;n:number}>;
+  const detailCounts = new Map(details.map(row => [row.memory_id,row.n]));
+  const sourceSizes = new Map(sizes.map(row => [row.memory_id,row.n]));
+  return quizContentRows(db, chatId, scenes).filter(row => scenes.length < QUIZ_MEMORY_ONLY_SCENES ? row.sourceOnly : !row.sourceOnly).map(row => {
+    const quota = row.sourceOnly ? 2 : Math.max(3, Math.min(8, (detailCounts.get(row.id) ?? 0) + Math.ceil((sourceSizes.get(row.id) ?? 0) / 4000)));
+    const asked = history.filter(item => item.memory_id === row.id);
+    let used = 0, lastTurn: number | undefined;
+    for (const item of asked) {
+      const turn = item.source_turns ?? atTime(item.created_at);
+      if (used >= quota && lastTurn !== undefined && turn - lastTurn >= 30) used = 0;
+      used++; lastTurn = turn;
+    }
+    const elapsed = lastTurn === undefined ? 0 : Math.max(0, progress.turns - lastTurn);
+    if (used >= quota && elapsed >= 30) used = 0;
+    const createdTurn = atTime(row.created_at ?? 0);
+    const weight = (asked.length ? 1 : 1.5) * (progress.turns - createdTurn <= 10 ? 1.5 : 1)
+      * (1 + Math.min(1, elapsed / 60)) * (asked.some(item => item.batch_id === previousBatch) ? .3 : 1);
+    return { row, quota, remaining: Math.max(0, quota - used), weight };
+  });
 }
 
 function ensureState(db: RcmDatabase, chatId: string): void {
@@ -143,6 +199,30 @@ export function disableAllQuizzes(db: RcmDatabase): void {
   })();
 }
 
+function enqueueQuiz(db: RcmDatabase, chatId: string, sceneCount: number): void {
+  const timestamp = now();
+  db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
+    VALUES(?,?,'quiz','queued',?,0,?,?)`).run(randomUUID(), chatId, JSON.stringify({ sceneCount, sourceTurns: sourceProgress(db, chatId).turns }), timestamp, timestamp);
+}
+
+export function quizStatus(db: RcmDatabase, chatId: string): QuizStatus {
+  return { unanswered: (db.prepare("SELECT COUNT(*) n FROM quiz_items WHERE chat_id=? AND retired_at IS NULL AND answered_at IS NULL").get(chatId) as { n: number }).n,
+    generating: quizGenerating(db, chatId) };
+}
+
+/** Explicit replacement never cancels an in-flight model call. Retry after the existing job finishes. */
+export function regenerateQuizzes(db: RcmDatabase, chatId: string): QuizRegenerateResponse {
+  return db.transaction((): QuizRegenerateResponse => {
+    if (quizGenerating(db, chatId)) return { retired: 0, enqueued: false, reason: "generating" };
+    ensureState(db, chatId);
+    if (!quizState(db, chatId).enabled) return { retired: 0, enqueued: false, reason: "disabled" };
+    const retired = db.prepare("UPDATE quiz_items SET retired_at=? WHERE chat_id=? AND retired_at IS NULL AND answered_at IS NULL").run(now(), chatId).changes;
+    if (!quizUnits(db, chatId).some(unit => unit.remaining > 0)) return { retired, enqueued: false, reason: "no_material" };
+    enqueueQuiz(db, chatId, quizSceneRows(db, chatId).length);
+    return { retired, enqueued: true };
+  })();
+}
+
 export function maybeEnqueueQuiz(db: RcmDatabase, chatId: string): boolean {
   return db.transaction(() => {
     ensureState(db, chatId);
@@ -152,7 +232,9 @@ export function maybeEnqueueQuiz(db: RcmDatabase, chatId: string): boolean {
     const content = quizContentRows(db, chatId, scenes);
     retireInvalidQuizItems(db, chatId, content);
     const sceneCount = scenes.length;
-    if ((sceneCount < QUIZ_MIN_SCENES && !content.some(row => row.sourceOnly)) || openQuizCount(db, chatId) > QUIZ_REFILL_BELOW || quizGenerating(db, chatId)) return false;
+    const open = (db.prepare("SELECT COUNT(*) n FROM quiz_items WHERE chat_id=? AND retired_at IS NULL AND answered_at IS NULL").get(chatId) as {n:number}).n;
+    const available = Math.min(QUIZ_BATCH_SIZE, quizUnits(db, chatId).reduce((sum, unit) => sum + unit.remaining, 0));
+    if (open > QUIZ_REFILL_BELOW || quizGenerating(db, chatId) || available < (open === 0 ? 1 : 3)) return false;
     const latest = db.prepare(`SELECT status,payload_json FROM jobs
       WHERE chat_id=? AND type='quiz' ORDER BY created_at DESC,rowid DESC LIMIT 1`).get(chatId) as { status: string; payload_json: string } | undefined;
     const progress = sourceProgress(db, chatId);
@@ -160,12 +242,9 @@ export function maybeEnqueueQuiz(db: RcmDatabase, chatId: string): boolean {
     if (previous && latest?.status !== "superseded") {
       const newTurns = progress.turns - (previous.sourceTurns ?? 0);
       const newScenes = sceneCount > (previous.sceneCount ?? 0);
-      if (sceneCount < QUIZ_MEMORY_ONLY_SCENES && newTurns < QUIZ_SOURCE_REFILL_TURNS) return false;
       if ((latest?.status === "failed" || previous.exhausted) && !newScenes && newTurns < QUIZ_SOURCE_REFILL_TURNS) return false;
     }
-    const timestamp = now();
-    db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
-      VALUES(?,?,'quiz','queued',?,0,?,?)`).run(randomUUID(), chatId, JSON.stringify({ sceneCount, sourceTurns: progress.turns }), timestamp, timestamp);
+    enqueueQuiz(db, chatId, sceneCount);
     return true;
   })();
 }
@@ -221,7 +300,7 @@ export function nextQuiz(db: RcmDatabase, chatId: string, random: () => number =
       question = { id: item.id, attemptToken: String(item.answered_at ?? 0), retry: item.answered_at !== null, format: item.format, difficulty: item.difficulty, question: item.question,
         options: JSON.parse(item.options_json) as string[], ...(scene.story_time ? { storyTime: scene.story_time } : {}) };
     }
-    if (remaining <= QUIZ_REFILL_BELOW) maybeEnqueueQuiz(db, chatId);
+    maybeEnqueueQuiz(db, chatId);
     const enabled = quizState(db, chatId).enabled === 1;
     return { enabled, available: enabled && question !== null,
       remaining, generating: quizGenerating(db, chatId), question, stats: quizStats(db, chatId) };
@@ -274,53 +353,36 @@ export function resetQuizStats(db: RcmDatabase, chatId: string): QuizStats {
   })();
 }
 
-function orderPool(rows: QuizSceneRow[], used: Set<string>, random: () => number): QuizSceneRow[] {
-  const buckets: QuizSceneRow[][] = [[], [], [], []];
-  for (const row of rows) buckets[(used.has(row.id) ? 2 : 0) + (row.landmark === 1 ? 0 : 1)]!.push(row);
-  for (const bucket of buckets) {
-    for (let i = bucket.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(random() * (i + 1));
-      [bucket[i], bucket[j]] = [bucket[j]!, bucket[i]!];
-    }
-  }
-  return buckets.flat();
-}
-
 export function selectQuizMaterial(db: RcmDatabase, chatId: string, random: () => number = Math.random): QuizMaterial {
   const rows = quizSceneRows(db, chatId);
-  const used = new Set((db.prepare("SELECT DISTINCT memory_id FROM quiz_items WHERE chat_id=?").all(chatId) as Array<{ memory_id: string }>).map(row => row.memory_id));
-  const recentCount = Math.max(4, Math.ceil(rows.length * 0.2));
-  const split = Math.max(0, rows.length - recentCount);
-  const older = orderPool(rows.slice(0, split), used, random);
-  const recent = orderPool(rows.slice(split), used, random);
-  const picks = [...recent.slice(0, 4), ...older.slice(0, QUIZ_BATCH_SIZE - Math.min(4, recent.length))];
-  if (picks.length < QUIZ_BATCH_SIZE) picks.push(...recent.slice(4, 4 + QUIZ_BATCH_SIZE - picks.length));
-  const olderIds = new Set(older.map(row => row.id));
-  const richOrder = [...picks.filter(row => olderIds.has(row.id)), ...picks.filter(row => !olderIds.has(row.id))];
-  const richIds = new Set(richOrder.slice(0, QUIZ_MIX.hard).map(row => row.id));
-  const scenes = picks.map((row, index) => {
-    const ref = `s${index + 1}`;
-    const header = takeCharacters(`[${ref}] ${row.title} — ${row.story_time ?? "시점 미상"} · ${(JSON.parse(row.locations_json) as string[]).join(", ")} · ${(JSON.parse(row.participants_json) as string[]).join(", ")}`, 240);
-    const plain = takeCharacters(`${header}\n${row.content}`, PLAIN_CAP);
-    const rich = richIds.has(row.id);
-    const questions = (db.prepare(`SELECT question FROM quiz_items WHERE chat_id=? AND memory_id=?
-      ORDER BY created_at DESC,rowid DESC LIMIT 20`).all(chatId, row.id) as Array<{ question: string }>).map(item => item.question);
-    return { ref, memoryId: row.id, rich, text: rich ? richText(db, chatId, row.id, plain) : plain,
-      excerpt: sourceExcerpt(db, chatId, row.id, random, rows.length < QUIZ_MEMORY_ONLY_SCENES ? 6_000 : EXCERPT_CAP), questions };
-  });
-  if (rows.length < QUIZ_MEMORY_ONLY_SCENES) {
-    const cutoff = sourceProgress(db, chatId).cutoff;
-    const sources = quizContentRows(db, chatId, rows).filter(row => row.sourceOnly && cutoff !== null && row.source_ordinal! <= cutoff).slice(-12);
-    for (const source of sources) {
-      const ref = `s${scenes.length + 1}`;
-      const questions = (db.prepare("SELECT question FROM quiz_items WHERE chat_id=? ORDER BY created_at DESC,rowid DESC LIMIT 30")
-        .all(chatId) as Array<{ question: string }>).map(row => row.question);
-      scenes.push({ ref, memoryId: source.id, rich: true, text: `[${ref}] Earlier conversation · message ${source.source_ordinal! + 1}`,
-        excerpt: takeCharacters(source.content, 6_000), questions });
-    }
+  const units = quizUnits(db, chatId).filter(unit => unit.remaining > 0);
+  const picks: Array<{unit: QuizUnit; limit: number}> = [];
+  const slots = Math.min(QUIZ_BATCH_SIZE, units.reduce((sum, unit) => sum + Math.min(2, unit.remaining), 0));
+  for (let count = 0; count < slots; count++) {
+    const eligible = units.filter(unit => (picks.find(pick => pick.unit === unit)?.limit ?? 0) < Math.min(2, unit.remaining));
+    let roll = random() * eligible.reduce((sum, unit) => sum + unit.weight, 0);
+    const unit = eligible.find(unit => (roll -= unit.weight) < 0) ?? eligible.at(-1)!;
+    const pick = picks.find(pick => pick.unit === unit);
+    if (pick) pick.limit++; else picks.push({ unit, limit: 1 });
   }
-  const hasBatch = Boolean(db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? LIMIT 1").get(chatId));
-  return { scenes, sceneCount: rows.length, targetCount: !hasBatch && rows.length < QUIZ_MIN_SCENES ? 3 : QUIZ_BATCH_SIZE };
+  const scenes = picks.map(({unit, limit}, index) => {
+    const row = unit.row, ref = `s${index + 1}`;
+    const questions = (db.prepare(`SELECT question FROM quiz_items WHERE chat_id=? AND memory_id=? AND (retired_at IS NULL OR answered_at IS NOT NULL)
+      ORDER BY created_at DESC,rowid DESC LIMIT 20`).all(chatId, row.id) as Array<{question:string}>).map(item => item.question);
+    if (row.sourceOnly) return { ref, memoryId: row.id, rich: true, limit, questions,
+      text: `[${ref}] Earlier exchange (reader sees no scene label; quiz subject: Source excerpt only; maximum ${limit} questions)
+Context only, not a quiz subject:
+${takeCharacters(row.context ?? "No preceding exchange available.", 1600)}
+Quiz subject: the following user input and assistant reply only.`,
+      excerpt: row.sourceText! };
+    const label = quizDateLabel(row.story_time ?? undefined);
+    const header = takeCharacters(`[${ref}] ${row.title} (reader sees: ${label || "no date label"}; maximum ${limit} questions) — Place: ${(JSON.parse(row.locations_json) as string[]).join(", ")} · Participants: ${(JSON.parse(row.participants_json) as string[]).join(", ")}`, 360);
+    const plain = takeCharacters(header + "\n" + row.content, PLAIN_CAP);
+    const rich = index < QUIZ_MIX.hard;
+    return { ref, memoryId: row.id, rich, limit, questions, text: rich ? richText(db, chatId, row.id, plain) : plain,
+      excerpt: sourceExcerpt(db, chatId, row.id, random) };
+  });
+  return { scenes, sceneCount: rows.length, targetCount: slots };
 }
 
 function takeCharacters(text: string, length: number): string {
@@ -357,7 +419,7 @@ function richText(db: RcmDatabase, chatId: string, memoryId: string, plain: stri
 
 export function buildQuizPrompt(material: QuizMaterial): { systemPrompt: string; userPrompt: string } {
   const target = material.targetCount ?? QUIZ_BATCH_SIZE;
-  const systemPrompt = QUIZ_SYSTEM_PROMPT + `\nFor this batch, aim for ${target} items. ${target === 3 ? "This is the first short quiz: prefer easy, memorable facts." : "Aim for five easy, five medium and five hard items when the source supports that mix."} Return fewer items, even an empty items array, if the material does not support enough distinct, unambiguous questions. Do not pad the batch or repeat already asked facts with new wording. Earlier conversation entries are source passages, not stored memories; treat them as evidence for what happened or was said, not proof that every reported claim is true.`;
+  const systemPrompt = QUIZ_SYSTEM_PROMPT + `\nFor this batch, aim for ${target} items. ${target < QUIZ_BATCH_SIZE ? "For this short batch, prefer easy, memorable facts and vary difficulty where the material supports it." : "Aim for five easy, five medium and five hard items when the source supports that mix."} Return fewer items, even an empty items array, if the material does not support enough distinct, unambiguous questions. Do not pad the batch or repeat already asked facts with new wording. Earlier conversation entries are source passages, not stored memories; treat them as evidence for what happened or was said, not proof that every reported claim is true.`;
   const scenes = material.scenes.map(scene => ({ ...scene, history: scene.questions.join("\n") }));
   const render = () => "Scenes:\n\n" + scenes.map(scene => scene.text
     + (scene.excerpt ? `\nSource excerpt:\n${scene.excerpt}` : "")
@@ -396,9 +458,9 @@ Write every question, option and explanation in Korean; options and explanations
 Dialogue in a question or an option is always translated into natural Korean, even in hard items; the original line may appear only in quote. A foreign word that is itself the subject stays as written. No parenthetical translation glosses anywhere.
 All readers are adults: intimate and explicit scenes are fair game and are asked about like any other scene.
 Return one JSON object: {"items":[{"format":"choice4"|"ox","difficulty":"easy"|"medium"|"hard","question":string,"options":[string],"answerIndex":integer,"explanation":string,"quote"?:string,"memoryRef":string}]}
-Spread questions across the supplied material. A scene may support several questions only when they test distinct facts. For each scene, ask something different from its Already asked questions. memoryRef is the supplied ref such as "s3".
+Spread questions across the supplied material. Never exceed each unit’s maximum question count (at most two per batch). A scene may support two questions only when they test distinct facts. For each scene, ask something different from its Already asked questions. memoryRef is the supplied ref such as "s3".
 Source refs such as s1 or s3, message ordinals and input section labels are internal metadata, not story content. Use a source ref only in memoryRef; never mention these internal labels in question, options, explanation or quote.
-The reader cannot see your input materials. In every question, including O/X statements, briefly establish which moment is being asked about: use a distinctive preceding event, location, purpose of the interaction, or an in-story date/time explicitly stated in the source. Combine supported cues when one alone could fit several moments; names, generic emotions or recurring gestures alone do not identify a situation. Never invent a date or use storage timestamps as story dates. Put this context in the question itself, not only in the explanation, without revealing the answer or making the tested detail easier. Small details remain valid quiz subjects at the difficulty levels below. Do not replace an internal label with an equally opaque phrase such as "scene 1" or "the supplied passage". Before returning, check that the reader can identify the intended moment from each question alone and that all reader-facing fields use story context rather than input labels.
+The reader sees the date label marked "reader sees" for memory scenes; do not repeat that label in the question. The reader does not see source exchanges or their context. Add a brief context cue only when the question would otherwise be ambiguous. Prefer (1) the preceding event or what the characters were doing, then (2) place or who was present, then (3) an explicitly supported in-story date/time only if the first two cannot disambiguate. Never invent dates or use storage timestamps. For source exchanges, the "Context only, not a quiz subject" section can orient the question but only the marked quiz subject supplies the tested fact. Include any necessary cue in the question without giving away the answer. Small details remain valid quiz subjects. Do not use opaque labels like "scene 1" or "the supplied passage".
 easy: a central fact of the scene (who, where, what happened). About half of the easy items are "ox" statements; their options are ["O","X"], answerIndex 0 when the statement is true and 1 when false.
 medium: a specific, memorable fact (a promise, a gift, a decision, a place).
 hard: a small detail only an attentive reader remembers (a line of dialogue, an object, a number). Use scenes that include Details, Dialogue or Source excerpt. quote, when you give it, is a short line copied from that scene.
@@ -414,6 +476,7 @@ export function buildQuizJob(db: RcmDatabase, row: { id: string; chatId: string;
   if (!material.scenes.length) return null;
   const current = new Map(quizContentRows(db, row.chatId).map(scene => [scene.id, scene]));
   const quiz = { refs: Object.fromEntries(material.scenes.map(scene => [scene.ref, scene.memoryId])), sceneCount: material.sceneCount,
+    limits: Object.fromEntries(material.scenes.map(scene => [scene.ref, scene.limit ?? 2])),
     targetCount: material.targetCount, fingerprints: Object.fromEntries(material.scenes.map(scene => [scene.ref, sceneFingerprint(current.get(scene.memoryId)!)])) };
   const stored = db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(row.id) as { payload_json: string };
   db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(stored.payload_json), ...quiz, sourceTurns: sourceProgress(db, row.chatId).turns }), row.id);
@@ -433,8 +496,17 @@ export function completeQuizJob(db: RcmDatabase, jobId: string, workerId: string
     const explicitEmpty = Boolean(result && typeof result === "object" && Array.isArray((result as { items?: unknown }).items) && (result as { items: unknown[] }).items.length === 0);
     if (!items.length && !explicitEmpty) throw new Error("QUIZ_EMPTY: no valid quiz items");
     const target = payload.targetCount ?? QUIZ_BATCH_SIZE;
-    const accepted = storeQuizBatch(db, row.chat_id, jobId, items.slice(0, target).map(item => shuffleQuizOptions(stripQuizGlosses(item), random)), payload.refs, payload.sceneCount, payload.fingerprints);
-    db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...payload, exhausted: accepted < target }), jobId);
+    const remaining = new Map(quizUnits(db, row.chat_id).map(unit => [unit.row.id, unit.remaining]));
+    const counts = new Map<string, number>();
+    const bounded = items.filter(item => {
+      const id = payload.refs[item.memoryRef]!;
+      const count = counts.get(id) ?? 0;
+      const limit = Math.min(2, payload.limits?.[item.memoryRef] ?? 2, remaining.get(id) ?? 0);
+      if (count >= limit) return false;
+      counts.set(id, count + 1); return true;
+    });
+    const accepted = storeQuizBatch(db, row.chat_id, jobId, bounded.slice(0, target).map(item => shuffleQuizOptions(stripQuizGlosses(item), random)), payload.refs, payload.sceneCount, payload.fingerprints);
+    db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...payload, sourceTurns: sourceProgress(db, row.chat_id).turns, exhausted: accepted < target }), jobId);
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(now(), jobId);
     return { chatId: row.chat_id, accepted, warnings: dropped ? [`퀴즈 ${dropped}개는 형식이 맞지 않아 제외했어.`] : [] };
   })();

@@ -1,3 +1,4 @@
+import { supportFailure } from "./support-diagnostics.js";
 declare const __RCM_DISTRIBUTION__: boolean;
 import { withMemoryGuidance } from "@rcm/shared";
 import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
@@ -63,7 +64,7 @@ async function persistCache(state: RuntimeState): Promise<void> {
   try {
     await saveStoredJson(CACHE_KEY, state.cache);
   } catch (error) {
-    addLog(state.logs, "warn", `Injection inspector cache was not persisted: ${String(error)}`);
+    addLog(state.logs, "warn", `Injection inspector cache was not persisted: [오류 원문 제외]`);
   }
 }
 
@@ -86,7 +87,7 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
     if (!injection.blocked && !injection.omitted && ["fresh", "reused"].includes(injection.prepareOutcome ?? "")) {
       void client.traceRetrieval({ id: injection.prepareRequestId ?? injection.turnKey, kind: "automatic_injection",
         chatId: injection.chatId, receiptOnly: true, prepareOutcome: injection.prepareOutcome, blocked: false, omitted: false,
-        manifest: { memoryIds: injection.manifest.memoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: ${String(error)}`));
+        manifest: { memoryIds: injection.manifest.memoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`));
     }
     if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return;
   }
@@ -241,7 +242,7 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
     void syncQuizEnabled(state, client).catch(() => undefined);
     await client.prepare(makePrepareRequest(context, 0, { deferExtraction: false }), 5_000);
   } catch (error) {
-    addLog(state.logs, "warn", `Post-response memory sync deferred: ${String(error)}`);
+    addLog(state.logs, "warn", `Post-response memory sync deferred: [오류 원문 제외]`);
   } finally {
     scheduleWorker(state, client);
   }
@@ -281,6 +282,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
   return Promise.all([
     risuai.addRisuReplacer("beforeRequest", async (messages, type) => {
       if (type !== "model") return messages;
+      if (state.risuConnectionTestRunning) throw new Error("RCM 연결 확인이 끝난 뒤 메시지를 보내 주세요.");
       if (state.internalModelCall) {
         await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
         return messages;
@@ -468,14 +470,14 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               if (catchUpPending) {
                 delete state.settings.chatCatchUpPending[context.chatId];
                 void saveSettings(state.settings).catch((error) =>
-                  addLog(state.logs, "warn", `Catch-up state persistence failed: ${String(error)}`),
+                  addLog(state.logs, "warn", `Catch-up state persistence failed: [오류 원문 제외]`),
                 );
               }
               const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
               if (state.settings.serverInstances[serverUrl] !== response.serverInstanceId) {
                 state.settings.serverInstances[serverUrl] = response.serverInstanceId;
                 void saveSettings(state.settings).catch((error) =>
-                  addLog(state.logs, "warn", `Server identity persistence failed: ${String(error)}`),
+                  addLog(state.logs, "warn", `Server identity persistence failed: [오류 원문 제외]`),
                 );
               }
               if (!response) throw new Error("Memory preparation returned no response");
@@ -547,7 +549,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 const detectedKey = `${response.serverInstanceId}:${context.chatId}`;
                 if (JSON.stringify(state.settings.detectedPerspectives[detectedKey] ?? []) !== JSON.stringify(resolution.perspectives)) {
                   state.settings.detectedPerspectives[detectedKey] = resolution.perspectives;
-                  void saveSettings(state.settings).catch((error) => addLog(state.logs, "warn", `Perspective cache persistence failed: ${String(error)}`));
+                  void saveSettings(state.settings).catch((error) => addLog(state.logs, "warn", `Perspective cache persistence failed: [오류 원문 제외]`));
                 }
               }
               packet = renderMemoryReferences(state, response.packet, response.selected, state.settings.memoryToolsEnabled, new Set(response.memoryToolOpportunity?.followCandidates.map((item) => item.memoryId) ?? []));
@@ -588,7 +590,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               const knownInstanceId = state.settings.serverInstances[state.settings.serverUrl.replace(/\/$/, "")];
               packet = clampPacket(!context.memoryOnlyInjection && cached?.serverInstanceId && cached.serverInstanceId === knownInstanceId ? cached.stableAnchors : "", Math.min(1_500, effectiveAutoBudget));
               fallback = true;
-              addLog(state.logs, "warn", `turn/prepare ${prepareOutcome} after ${prepareElapsedMs}ms; fallback ~${estimateTokens(packet)} tokens: ${prepareError}`);
+              addLog(state.logs, "warn", `turn/prepare ${prepareOutcome} after ${prepareElapsedMs}ms; fallback ~${estimateTokens(packet)} tokens: [오류 원문 제외]`);
             }
           }
         }
@@ -696,7 +698,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
       } catch (error) {
         if (error instanceof MissingRcmMarkerError || error instanceof MemoryInjectionBlockedError) throw error;
         if (state.modelRequestEpoch === requestEpoch) state.activeModelRequest = undefined;
-        addLog(state.logs, "error", `beforeRequest blocked: ${String(error)}`);
+        addLog(state.logs, "error", `beforeRequest blocked: [오류 원문 제외]`, supportFailure("before_request", error));
         throw new MemoryInjectionBlockedError(String(error).replace(/\s+/g, " ").slice(0, 240));
       }
     }),

@@ -1,3 +1,4 @@
+import { supportFailure } from "./support-diagnostics.js";
 import type { ServerClient } from "./api-client.js";
 import { registerMemoryMcp } from "./mcp.js";
 import { addLog } from "./settings.js";
@@ -22,7 +23,7 @@ export async function registerMemoryToolAdapters(
   try {
     await registrars.native(state, client);
   } catch (error) {
-    addLog(state.logs, "warn", `Native MCP registration unavailable: ${String(error)}`);
+    addLog(state.logs, "warn", `Native MCP registration unavailable: ${String(error)}`, supportFailure("native_registration", error));
   }
 
   try {
@@ -33,6 +34,6 @@ export async function registerMemoryToolAdapters(
       void state.restoreMemoryToolDiscoveryRegistration?.().catch(() => undefined);
     }
   } catch (error) {
-    addLog(state.logs, "warn", `Yumi Provider Manager bridge unavailable: ${String(error)}`);
+    addLog(state.logs, "warn", `Yumi Provider Manager bridge unavailable: ${String(error)}`, supportFailure("provider_manager_registration", error));
   }
 }

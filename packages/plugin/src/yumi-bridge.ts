@@ -1,3 +1,4 @@
+import { supportFailure } from "./support-diagnostics.js";
 import type { ServerClient } from "./api-client.js";
 import { currentTurnMemoryToolNames, executeMemoryTool, MCP_REQUEST_TIMEOUT_MS, memoryToolFunctions, traceMemoryToolExposure, type MemoryToolName } from "./mcp.js";
 import { addLog } from "./settings.js";
@@ -10,6 +11,8 @@ const EVENT_CHANNEL = "tool-ipc.v1/event";
 const PLUGIN_NAME = "risu-cognitive-memory";
 const REGISTRATION_TIMEOUT_MS = 1_000;
 const DISCOVERY_REGISTRATION_KEY = "__rcm_discovery__";
+const DISCOVERY_RETRY_MS = 5_000;
+const DISCOVERY_REFRESH_MS = 30_000;
 
 type EnvelopeType = "request" | "response" | "error" | "event";
 
@@ -63,6 +66,8 @@ function isProviderManagerEnvelope(
 
 export async function registerYumiToolBridge(state: RuntimeState, client: ServerClient): Promise<void> {
   if (typeof risuai.addPluginChannelListener !== "function" || typeof risuai.postPluginChannelMessage !== "function") {
+    state.memoryToolRegistration = { status: "unavailable", at: Date.now(), failures: 0 };
+    addLog(state.logs, "warn", "Provider Manager 기억 도구 연결에 필요한 플러그인 통신 API가 없습니다.");
     state.syncMemoryToolRegistration = async (enabled) => {
       const planned = enabled ? currentTurnMemoryToolNames(state) : [];
       traceMemoryToolExposure(state, client, "yumi", planned, [], "not_connected");
@@ -82,6 +87,22 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
   const cancelledCalls = new Set<string>();
   let registeredFunctions = new Set<MemoryToolName>();
   let registeredTurnKey = "";
+  let disposed = false;
+  let discoveryWanted = false;
+  let discoveryTimer: number | undefined;
+  let discoveryPending: Promise<void> | undefined;
+  let registrationEpoch = 0;
+  let discoveryFailures = 0;
+  const setStatus = (status: NonNullable<RuntimeState["memoryToolRegistration"]>["status"]) => {
+    state.memoryToolRegistration = { status, at: Date.now(), failures: discoveryFailures };
+    state.publishActivity?.();
+  };
+  const stopDiscovery = () => {
+    discoveryWanted = false;
+    registrationEpoch++;
+    window.clearTimeout(discoveryTimer);
+    discoveryTimer = undefined;
+  };
 
   const envelope = (type: EnvelopeType, method: string, params?: unknown): ToolIpcEnvelope => ({
     protocol: "tool-ipc",
@@ -106,7 +127,8 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     await post(RESPONSE_CHANNEL, response);
   };
 
-  const registerFunctions = async (names: MemoryToolName[], registrationKey: string, diagnostics: Record<string, unknown> = {}): Promise<void> => {
+  const registerFunctions = async (names: MemoryToolName[], registrationKey: string, diagnostics: Record<string, unknown> = {}): Promise<boolean> => {
+    const epoch = registrationEpoch;
     const message = envelope("request", "tools/register", yumiDefinitionFor(names));
     message.meta.timeoutMs = REGISTRATION_TIMEOUT_MS;
     const startedAt = performance.now();
@@ -133,7 +155,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
         });
         // Bounded diagnostic history only; late replies never alter turn state.
         if (lateRegistrations.size > 32) lateRegistrations.delete(lateRegistrations.keys().next().value!);
-        reject(new Error("tools/register acknowledgement timed out"));
+        reject(Object.assign(new Error("tools/register acknowledgement timed out"), { code: "MCP_REGISTRATION_TIMEOUT" }));
       }, REGISTRATION_TIMEOUT_MS);
       pending.set(message.id, { resolve, reject, timeout });
     });
@@ -148,10 +170,14 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     });
     try {
       await response;
+      // An idle registration acknowledged after a turn starts (or unloading)
+      // must not overwrite the turn-specific registration state.
+      if (disposed || epoch !== registrationEpoch) return false;
       diagnostics.status = "acknowledged";
       diagnostics.ackWaitMs = performance.now() - startedAt;
       registeredFunctions = new Set(names);
       registeredTurnKey = registrationKey;
+      return true;
     } catch (error) {
       diagnostics.status ??= "error";
       diagnostics.ackWaitMs ??= performance.now() - startedAt;
@@ -159,16 +185,47 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     }
   };
 
+  const refreshDiscovery = (): Promise<void> => {
+    if (disposed || !discoveryWanted || !state.settings.memoryToolsEnabled) return Promise.resolve();
+    if (discoveryPending) return discoveryPending;
+    window.clearTimeout(discoveryTimer);
+    const epoch = registrationEpoch;
+    if (!discoveryFailures && registeredTurnKey !== DISCOVERY_REGISTRATION_KEY) setStatus("pending");
+    discoveryPending = (async () => {
+      try {
+        await registerFunctions(memoryToolFunctions.map((tool) => tool.name as MemoryToolName), DISCOVERY_REGISTRATION_KEY);
+        if (disposed || epoch !== registrationEpoch) return;
+        if (discoveryFailures) addLog(state.logs, "info", "Provider Manager 기억 도구 등록이 복구되었습니다.");
+        discoveryFailures = 0;
+        setStatus("registered");
+      } catch (error) {
+        if (disposed || epoch !== registrationEpoch) return;
+        discoveryFailures++;
+        // Provider Manager is optional. Log the transition, not every retry.
+        if (discoveryFailures === 1) addLog(state.logs, "warn", `Provider Manager 기억 도구 등록 미확인 · 대기 중 자동 재시도: ${String(error)}`, supportFailure("provider_manager_registration", error, { attempt: discoveryFailures }));
+        setStatus("retrying");
+      } finally {
+        discoveryPending = undefined;
+        if (!disposed && discoveryWanted && state.settings.memoryToolsEnabled) {
+          const delay = discoveryFailures ? Math.min(DISCOVERY_REFRESH_MS, DISCOVERY_RETRY_MS * 2 ** Math.min(discoveryFailures - 1, 3)) : DISCOVERY_REFRESH_MS;
+          discoveryTimer = window.setTimeout(() => { void refreshDiscovery(); }, delay);
+        }
+      }
+    })();
+    return discoveryPending;
+  };
+
   state.restoreMemoryToolDiscoveryRegistration = async () => {
-    if (!state.settings.memoryToolsEnabled) return;
-    const allNames = memoryToolFunctions.map((tool) => tool.name as MemoryToolName);
-    const allKey = [...allNames].sort().join(",");
-    const registeredKey = [...registeredFunctions].sort().join(",");
-    if (registeredTurnKey === DISCOVERY_REGISTRATION_KEY && allKey === registeredKey) return;
-    await registerFunctions(allNames, DISCOVERY_REGISTRATION_KEY);
+    if (disposed || !state.settings.memoryToolsEnabled) return;
+    discoveryWanted = true;
+    if (registeredTurnKey === DISCOVERY_REGISTRATION_KEY && discoveryTimer !== undefined) return;
+    await refreshDiscovery();
   };
 
   state.syncMemoryToolRegistration = async (enabled) => {
+    if (disposed) return;
+    stopDiscovery();
+    setStatus(state.settings.memoryToolsEnabled ? "paused" : "disabled");
     const planned = enabled ? currentTurnMemoryToolNames(state) : [];
     const startedAt = Date.now();
     const plannedKey = [...planned].sort().join(",");
@@ -179,9 +236,9 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     }
     if (!planned.length) {
       const clearingDiscoveryOnly = registeredTurnKey === DISCOVERY_REGISTRATION_KEY;
-      const changed = registeredFunctions.size > 0;
+      const changed = registeredFunctions.size > 0 || discoveryPending !== undefined;
       if (changed) {
-        await post(EVENT_CHANNEL, envelope("event", "tools/unregister", { all: true })).catch(() => undefined);
+        void post(EVENT_CHANNEL, envelope("event", "tools/unregister", { all: true })).catch(() => undefined);
         registeredFunctions.clear();
         registeredTurnKey = "";
       }
@@ -195,12 +252,13 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
       // Provider Manager replaces a tool bundle with the same id. Registering the
       // new turn directly avoids a visible missing/error state between unregister
       // and register, while the longer bound covers normal browser IPC variance.
-      await registerFunctions(planned, state.memoryToolOpportunity?.turnKey ?? "", registration);
+      if (!await registerFunctions(planned, state.memoryToolOpportunity?.turnKey ?? "", registration)) return;
+      setStatus("registered");
       traceMemoryToolExposure(state, client, "yumi", planned, planned, "offered", Date.now() - startedAt, false, registration);
     } catch (error) {
       const timeout = String(error).includes("timed out");
       traceMemoryToolExposure(state, client, "yumi", planned, [], timeout ? "timeout" : "error", Date.now() - startedAt, false, registration);
-      addLog(state.logs, "warn", `Yumi memory tool registration unconfirmed: ${String(error)}`);
+      addLog(state.logs, "warn", `Yumi memory tool registration unconfirmed: ${String(error)}`, supportFailure("provider_manager_registration", error));
     }
   };
 
@@ -216,7 +274,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     }
     window.clearTimeout(waiting.timeout);
     pending.delete(message.id);
-    if (message.type === "error") waiting.reject(new Error(message.error?.message ?? "Provider Manager rejected the request"));
+    if (message.type === "error") waiting.reject(Object.assign(new Error(message.error?.message ?? "Provider Manager rejected the request"), { code: "MCP_REGISTRATION_REJECTED" }));
     else waiting.resolve(message as ToolIpcEnvelope);
   });
 
@@ -274,6 +332,8 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
 
   if (typeof risuai.onUnload === "function") {
     await risuai.onUnload(async () => {
+      disposed = true;
+      stopDiscovery();
       activeCalls.forEach((controller) => controller.abort(new Error("RCM plugin unloaded")));
       activeCalls.clear();
       cancelledCalls.clear();
@@ -284,7 +344,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
       pending.clear();
       lateRegistrations.clear();
       const unregister = envelope("event", "tools/unregister", { all: true });
-      await post(EVENT_CHANNEL, unregister);
+      void post(EVENT_CHANNEL, unregister).catch(() => undefined);
     });
   }
 

@@ -16,6 +16,7 @@ import {
   RELATIONSHIP_TREND_VALUES,
   SIGNED_RELATIONSHIP_BASELINE_VALUES,
 } from "./structured-contract-values.js";
+export { sanitizeDiagnosticText, CONNECTION_FAILURE_LABELS, connectionFailureReason, type ConnectionFailureCode } from "./support-diagnostics.js";
 export const RCM_API_REVISION = 88;
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const UserCorrectionViewSchema = z.object({ userEdited: z.boolean(), userEditOrdinal: z.number().int().nullable(), locked: z.boolean() });
@@ -1540,15 +1541,18 @@ export const ExtractionEngineSchema = z.enum(["risu", "server"]);
 export type ExtractionEngine = z.infer<typeof ExtractionEngineSchema>;
 
 export const SERVER_LLM_PROVIDER_OPTIONS = [
+  ["copilot", "GitHub Copilot"],
   ["vertex", "Vertex AI"], ["gemini_api", "Google Gemini API"],
-  ["llm_gateway", "LLM Gateway / OpenAI 호환"], ["vercel", "Vercel AI Gateway"], ["ollama_cloud", "Ollama Cloud"],
+  ["llm_gateway", "LLM Gateway"], ["openai_compatible", "OpenAI 호환"], ["vercel", "Vercel AI Gateway"], ["ollama_cloud", "Ollama Cloud"],
 ] as const;
 export const SERVER_LLM_DEFAULT_ENDPOINTS = {
+  copilot: "https://api.githubcopilot.com/chat/completions",
+  openai_compatible: "https://api.openai.com/v1/chat/completions",
   vertex: "https://aiplatform.googleapis.com/v1", gemini_api: "https://generativelanguage.googleapis.com/v1beta",
   llm_gateway: "https://api.llmgateway.io/v1/chat/completions", vercel: "https://ai-gateway.vercel.sh/v1/chat/completions",
   ollama_cloud: "https://ollama.com/api/chat",
 } as const;
-export const ServerLlmProviderSchema = z.enum(["gemini_api", "vertex", "llm_gateway", "vercel", "ollama_cloud"]);
+export const ServerLlmProviderSchema = z.enum(["gemini_api", "vertex", "llm_gateway", "openai_compatible", "vercel", "ollama_cloud", "copilot"]);
 export type ServerLlmProvider = z.infer<typeof ServerLlmProviderSchema>;
 
 export const ThinkingLevelSchema = z.enum(["default", "off", "low", "medium", "high"]);
@@ -1627,6 +1631,8 @@ export interface ServerWorkerStatus {
   activeJob?: { chatId?: string; sourceMessageCount: number; sourceTurnCount?: number; startedAt: number; kind?: LeasedJob["kind"]; sourceRecovery?: boolean };
   /** Recent server-side auxiliary generation calls for the requested chat only. */
   auxiliaryCalls?: ServerAuxiliaryCallTiming[];
+  /** Active quiz generation, separate from memory processing and queue counts. */
+  quizGenerating?: { chatId: string; startedAt: number };
   lastCompletedAt?: number;
 }
 

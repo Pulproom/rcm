@@ -1,14 +1,19 @@
-import { defaultAuxiliaryModelConfig, SERVER_LLM_PROVIDER_OPTIONS, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
+import { sanitizeDiagnosticText } from "@rcm/shared";
+import { defaultAuxiliaryModelConfig, SERVER_LLM_PROVIDER_OPTIONS } from "@rcm/shared";
+import { diagnosticReason, shareDiagnostic, supportFailure, supportJobs, supportTime } from "./support-diagnostics.js";
+import { providerCapability, updateProviderFields } from "./provider-settings.js";
 import { mcpSelectorSettings, readMcpSelectorSettings, updateMcpSelectorControls } from "./mcp-selector-settings.js";
 import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
 declare const __RCM_DISTRIBUTION__: boolean;
-import { LANDMARK_KIND_VALUES, LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, compareStoryTimes, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type ManualLineagePreview, type ManualLineagePreviewRequest, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
+import { LANDMARK_KIND_VALUES, LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, compareStoryTimes, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type ManualLineagePreview, type ManualLineagePreviewRequest, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
 import { SERVER_STATUS_TIMEOUT_MS, type ChatViewPreferences, type MemoryDetailAccessPatch, type MemoryDetailAccessResponse, type ServerClient } from "./api-client.js";
 import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest } from "./context.js";
-import { addLog, defaults, isChatMemoryEnabled, normalizeMemoryOnlyInjection, supportedSettingsRevision, saveSettings, serverScopeKey, CACHE_KEY, loadStoredJson, saveStoredJson } from "./settings.js";
+import { addLog, rememberDiagnosticSecrets, defaults, isChatMemoryEnabled, normalizeMemoryOnlyInjection, supportedSettingsRevision, saveSettings, serverScopeKey, CACHE_KEY, loadStoredJson, saveStoredJson } from "./settings.js";
 import type { ActivityProgress, DashboardSkin, InitialCalibrationActivity, PluginSettings, RuntimeState, TranslationDisplay } from "./types.js";
 import { drainWorker, reconcileAutomaticServerPause } from "./worker.js";
-import { updateWorkerMenuButton } from "./attention.js";
+import { readServerModelConnection, testSettingsConnection } from "./connection-tests.js";
+import { connectionCheck } from "./dashboard/film/ui.js";
+import { updateWorkerMenuButton, widgetState } from "./attention.js";
 import { createOrganizationView, memoryOrganization, toggleOrganizationRange, type OrganizationData } from './memory-organization.js';
 import { subscribeActivity } from "./activity.js";
 import { clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
@@ -33,7 +38,7 @@ import { buildCrumbs, decorateFoldSummaries, handleShellNavigationAction, icon, 
 import { FILM_CSS } from "./dashboard/film/css.js";
 import { PHONE_CSS } from "./dashboard/phone/css.js";
 import { lex, setSkin } from "./dashboard/lexicon.js";
-import { avatar, btn, contactRow, empty, field, filters, fold, frame, iconBtn, loading, menu, notice, row, statusList, tabs as filmTabs, type MenuItem } from "./dashboard/film/ui.js";
+import { avatar, btn, contactRow, empty, field, filters, fold, frame, iconBtn, loading, menu, notice, row, statusList, secretInput, toggleSecretInput, maskSecretInputs, tabs as filmTabs, type MenuItem } from "./dashboard/film/ui.js";
 import { nameHtml } from "./dashboard/film/names.js";
 import { dayPart, sceneDate, slugline } from "./dashboard/film/scene.js";
 import { actScenes, compareStoryMemories, pickFrames, sceneLocator, sceneNumbers, storyScenes } from "./dashboard/scenes.js";
@@ -263,6 +268,7 @@ export function dashboardThemeFromColor(value: string, prefersDark: boolean): "d
 }
 
 export interface DashboardData {
+  quizStatus?: import("@rcm/shared").QuizStatus;
   chatId?: string;
   loadedDatasets?: DashboardChatDataset[];
   failedDatasets?: DashboardChatDataset[];
@@ -277,7 +283,7 @@ export interface DashboardData {
     serverLlm?: ServerLlmPublicConfig;
     mcpSelector?:McpSelectorPublicConfig;
     serverWorker?: ServerWorkerStatus;
-    capabilities?: { recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; sourceLedgerInspection?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean };
+    capabilities?: { recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; sourceLedgerInspection?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
   };
   memories: any[];
   storySpine: any;
@@ -401,8 +407,8 @@ export const dashboardNavigation = (reviewCount = 0): NavGroup[] => [
   ] },
   { id: "world", label: "현재", icon: "clock", defaultTab: "world", items: [] },
   { id: "manage", label: "관리", icon: "operations", defaultTab: "reviews", items: [
-    { tab: "reviews", label: "상태 확인", count: reviewCount },
-    { tab: "operations", label: "처리 상태" },
+    { tab: "reviews", label: "상태", count: reviewCount },
+    { tab: "operations", label: "처리" },
     { tab: "data", label: "데이터" }, { tab: "settings", label: "설정" },
   ] },
 ];
@@ -826,8 +832,8 @@ const formatRelativeTime = (value: unknown): string => {
   return days < 30 ? `${days}일 전` : new Date(time).toLocaleDateString();
 };
 
-const status = (kind: "ok" | "warn" | "error", text: string): string =>
-  `<span class="state state--${kind}">${icon(kind === "ok" ? "check" : kind === "warn" ? "clock" : "error")}<span>${escapeHtml(text)}</span></span>`;
+const status = (kind: "ok" | "warn" | "error" | "neutral", text: string): string =>
+  `<span class="state state--${kind}">${icon(kind === "ok" ? "check" : kind === "warn" || kind === "neutral" ? "clock" : "error")}<span>${escapeHtml(text)}</span></span>`;
 
 type HomeMessageTone = "neutral" | "success" | "warning" | "danger";
 
@@ -1016,7 +1022,7 @@ export async function closeDashboardContainer(
   try {
     await state.setStatusWidgetHidden?.(false);
   } catch (error) {
-    addLog(state.logs, "warn", `Status widget restore failed while closing dashboard: ${String(error)}`);
+    addLog(state.logs, "warn", `Status widget restore failed while closing dashboard: [오류 원문 제외]`);
   }
   await hideContainer();
 }
@@ -2823,6 +2829,39 @@ export function attentionPage(data: DashboardData, translations: TranslationView
   return `<div class="attention${view.mobileDetail && selected ? " is-detail" : ""}">${pageHeader("상태 확인", "RCM이 자동으로 바꾸지 않은 상태와 충돌만 모았습니다.")}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:attention:${escapeHtml(selected?.id ?? "")}">${detail}</div></div></div>`;
 }
 
+const memoryToolRegistrationLabels = {
+  unavailable: "플러그인 통신 API 없음", pending: "등록 확인 중", registered: "등록 확인됨",
+  retrying: "등록 미확인 · 대기 중 자동 재시도", paused: "요청 처리 중 · 자동 재등록 대기", disabled: "사용 안 함",
+};
+
+export function pluginDiagnosticSummary(state: RuntimeState, data: DashboardData): string {
+  // Metadata stays allowlisted; logs contain insertion-sanitized operational text.
+  // Raw model/host errors are excluded at their log call sites.
+  const version = (value: unknown) => typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value) ? value : "unknown";
+  const registration = state.memoryToolRegistration;
+  return JSON.stringify({
+    pluginVersion: RCM_PLUGIN_VERSION, serverVersion: version(data.health?.version), apiRevision: RCM_API_REVISION,
+    serverConnected: data.health?.ok === true, memoryToolsEnabled: state.settings.memoryToolsEnabled,
+    providerManager: {
+      status: !state.settings.memoryToolsEnabled ? "disabled" : ["registered", "retrying", "unavailable", "disabled", "pending", "paused"].includes(registration?.status ?? "") ? registration!.status : "unknown",
+      consecutiveFailures: Number.isSafeInteger(registration?.failures) && registration!.failures >= 0 ? registration!.failures : 0,
+    },
+    recentLogs: Object.fromEntries(["info", "warn", "error"].map(level => [level, state.logs.filter(log => log.level === level).length])),
+    processingEngine: ["risu", "server"].includes(state.settings.extractionEngine) ? state.settings.extractionEngine : "unknown",
+    workerPaused: state.settings.workerPaused === true,
+    recentErrors: state.logs.flatMap(log => {
+      const diagnostic = shareDiagnostic(log.diagnostic);
+      return diagnostic ? [{ at: supportTime(log.at), ...diagnostic }] : [];
+    }).slice(0, 30),
+    failedJobs: supportJobs(data.jobs),
+    logs: state.logs.map(log => ({ at: new Date(supportTime(log.at) ?? 0).toISOString(), level: log.level,
+      message: sanitizeDiagnosticText(log.message, [state.settings.serverToken], 1000),
+      diagnostic: shareDiagnostic(log.diagnostic), reason: diagnosticReason(shareDiagnostic(log.diagnostic)),
+      detail: log.detail ? sanitizeDiagnosticText(log.detail, [state.settings.serverToken]) : undefined,
+    })),
+  }, null, 2);
+}
+
 export function operations(state: RuntimeState, data: DashboardData): string {
   const serverMode = state.settings.extractionEngine === "server";
   const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId) : false;
@@ -3027,7 +3066,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     return jobGroup(group.title, meta, runTime, body, `operation-run:${key}`);
   }).join("");
   const jobs = `${visibleCurrent ? `<section><h2 class="sec">작업</h2><div class="jobs">${visibleCurrent}</div></section>` : ""}${older ? phone ? `<div data-preserve-scroll="operation-history">${older}</div>` : `<section data-preserve-scroll="operation-history"><h2 class="sec">완료</h2><div class="jobs">${older}</div></section>` : ""}`;
-  const logs = state.logs.map((log) => `<li class="entry"><span class="entry__k">${escapeHtml(log.level)}</span><div class="entry__v">${escapeHtml(log.message)}<small>${escapeHtml(formatTime(log.at))}</small></div></li>`).join("");
+  const logs = state.logs.map((log) => `<li class="entry"><span class="entry__k">${escapeHtml(log.level)}</span><div class="entry__v">${escapeHtml(log.message)}${log.level !== "info" && (log.diagnostic || log.detail) ? `<small class="diagnostic-reason">${escapeHtml([diagnosticReason(log.diagnostic), log.detail].filter(Boolean).join(" · "))}</small>` : ""}<small>${escapeHtml(formatTime(log.at))}</small></div></li>`).join("");
   const workerAction = state.settings.workerPaused
     ? btn("처리 재개", { kind: "primary", action: "resume-worker" })
     : btn(serverMode ? "즉시 일시정지" : "현재 호출 후 일시정지", { kind: "secondary", action: "pause-worker" });
@@ -3084,7 +3123,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     ${progressPanel}
     <div class="opstate">${statusList([{ tone: stateTone, text: operationTitle }])}<p class="sub">${escapeHtml(operationCopy)}</p><span class="n">${activeJobCount ? `진행 ${activeJobCount}개` : completedCount ? `완료 기록 ${completedCount}개` : "대기열 비어 있음"}</span></div>
     ${jobs || empty(data.jobsError ? "작업 목록을 확인할 수 없습니다" : "처리할 작업이 없습니다", data.jobsError ? "서버 연결을 확인해 주세요." : "새 대화가 모이면 여기에 작업이 쌓입니다.")}
-    ${typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__ ? fold("고급 진단 · 이 기기의 플러그인 기록", logs ? `<ul class="entries">${logs}</ul>` : '<p class="sub">런타임 로그가 없습니다.</p>', { role: "section", preserveKey: "operations-diagnostics" }) : ""}</div>`;
+    ${fold("고급 진단 · 이 기기의 플러그인 기록", `<section><h3 class="sec">현재 상태</h3><ul class="entries"><li class="entry"><span class="entry__k">도구 연결</span><div class="entry__v">Provider Manager · ${!state.settings.memoryToolsEnabled ? memoryToolRegistrationLabels.disabled : state.memoryToolRegistration ? memoryToolRegistrationLabels[state.memoryToolRegistration.status] : "등록 상태 확인 전"}</div></li></ul></section><section><div class="diagnostic-heading"><h3 class="sec">플러그인 기록</h3>${state.logs.length ? `<div class="diagnostic-actions"><button type="button" class="iconbtn hit" data-action="copy-plugin-diagnostics" aria-label="진단 정보 복사" title="버전·연결 상태·기록 전체를 복사합니다. 키·주소·채팅 내용은 제외합니다.">${icon("copy")}</button><button type="button" class="iconbtn hit" data-action="clear-plugin-logs" aria-label="기록 비우기">${icon("delete")}</button></div>` : ""}</div><ul class="entries">${logs || '<li class="entry"><div class="entry__v">런타임 로그가 없습니다.</div></li>'}</ul></section>`, { role: "section", preserveKey: "operations-diagnostics" })}</div>`;
 }
 
 export function acknowledgeBackfillLocally(data: DashboardData, runId: string): boolean {
@@ -3325,6 +3364,8 @@ export function resetQuizSupportForConnectionChange(
   }
 }
 
+export const SERVER_SETUP_REQUIRED = "먼저 서버 주소와 토큰을 설정하고 연결을 확인해 주세요.";
+
 export function settingsSaveFailureMessage(
   error: unknown,
   attempted: Pick<PluginSettings, "serverUrl" | "serverToken">,
@@ -3347,6 +3388,11 @@ function regexRuleEditor(rule: CanonicalRemovalRule): string {
   return `<article class="settings-regex-rule" data-regex-rule><label class="settings-regex-enabled" title="규칙 사용"><input name="customRuleEnabled" type="checkbox" aria-label="규칙 사용" ${rule.enabled ? "checked" : ""}><span>규칙 사용</span></label><label class="field settings-regex-name"><span>규칙 이름</span><input name="customRuleName" value="${escapeHtml(rule.name)}" placeholder="예: 상태 패널"></label><label class="field settings-regex-flags"><span>Flags</span><input name="customRuleFlags" value="${escapeHtml(rule.flags || "gis")}" aria-describedby="regex-flags-help"></label><label class="field settings-regex-pattern"><span>정규식 패턴</span><input name="customRulePattern" value="${escapeHtml(rule.pattern)}" placeholder="제거할 문자열 패턴"></label><button class="iconbtn hit settings-regex-remove" type="button" data-action="remove-regex-rule" aria-label="규칙 삭제" title="규칙 삭제">${icon("delete")}</button></article>`;
 }
 
+function quizManagementBusy(state: RuntimeState, data: DashboardData): boolean {
+  return Boolean(data.quizStatus?.generating || state.current && (state.currentJob?.kind === "quiz" && state.currentJob.chatId === state.current.chatId
+    || state.serverWorker?.quizGenerating?.chatId === state.current.chatId));
+}
+
 export function settingsV2(
   state: RuntimeState,
   data: DashboardData,
@@ -3358,6 +3404,7 @@ export function settingsV2(
 ): string {
   const settings = state.settings;
   const hasCurrentChat = Boolean(state.current);
+  const quizGenerating = quizManagementBusy(state, data);
   const currentChatEnabled = state.current ? isChatMemoryEnabled(settings, state.current.chatId) : settings.defaultChatEnabled;
   const includeUserMessages = state.current ? (settings.includeUserMessages[state.current.chatId] ?? true) : true;
   const memoryOnlyInjection = state.current ? (settings.memoryOnlyInjection[state.current.chatId] ?? false) : false;
@@ -3384,7 +3431,7 @@ export function settingsV2(
   const nav: Array<[SettingsSection, string, string]> = [["chat", "현재 채팅", "이 대화에만 적용"], ["memory", "기억", "주입 · 보호 · 원문 정리"], ["display", "화면", "테마 · 상태 칩 · 번역"], ["model", "모델", "추출 · 검색 · 임베딩"], ["server", "서버", "연결 · 업데이트"]];
   // A pane is its groups only: the section's name is already on the tab or the row that opened it.
   const pane = (key: SettingsSection, title: string, content: string) => `<section data-settings-pane="${key}" ${section === key ? "" : "hidden"}><h2 class="${lex().skin === "phone" ? "settings-pane__title" : "sr-only"}">${title}</h2>${content}</section>`;
-  const group = (title: string, body: string, extra = "") => `<div class="setting-group"${extra}><h3>${title}</h3>${body}</div>`;
+  const group = (title: string, body: string, extra = "") => `<div class="setting-group"${extra}>${title ? `<h3>${title}</h3>` : ""}${body}</div>`;
   const hint = (text: string) => text ? `<small class="sub">${text}</small>` : "";
   const check = (name: string, label: string, checked: boolean, note = "", disabled = false) => `<label class="field field--check"><span><input name="${name}" type="checkbox" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}> ${label}</span>${hint(note)}</label>`;
   const chatOff = hasCurrentChat ? "" : "disabled";
@@ -3430,29 +3477,31 @@ export function settingsV2(
     ${group("채팅 화면", `<div class="form__row">
       ${check("statusWidgetVisible", "상태 칩 보이기", settings.statusWidgetVisible !== false)}
       ${check("quizEnabled", "퀴즈 사용", settings.quizEnabled === true, "답변을 기다리는 동안 칩에서 풉니다. 보조 모델 호출이 조금 늘어납니다.")}
-      ${data.health?.capabilities?.memoryQuiz ? '<button class="btn btn--quiet" type="button" data-action="quiz-reset-stats">퀴즈 기록 초기화</button>' : ""}
+      ${hasCurrentChat && data.health?.capabilities?.quizManagement ? `<div class="field"><span>이 채팅 퀴즈</span><div class="decide" data-quiz-controls>${btn("남은 퀴즈 새로 만들기", { kind: "quiet", action: "quiz-regenerate", hit: true, disabled: quizGenerating })}${btn("점수 초기화", { kind: "quiet", action: "quiz-reset-stats", hit: true, disabled: quizGenerating })}</div></div>` : ""}
     </div>`)}
     ${group("참고 번역", `<div class="form__row">
       <label class="field"><span>번역 서비스</span><select name="translationProvider"><option value="google" ${settings.translationProvider === "google" ? "selected" : ""}>Google Translate</option><option value="risu" ${settings.translationProvider === "risu" ? "selected" : ""}>Yumi / Risu translator</option></select></label>
       <div class="field"><span>번역 캐시</span><div class="settings-cache-row"><span class="sub">${cacheStats.items.toLocaleString()}개 · ${(cacheStats.bytes / 1024 / 1024).toFixed(1)} MiB</span><button class="iconbtn hit settings-cache-clear" type="button" data-action="clear-translation-cache" aria-label="번역 캐시 비우기" title="번역 캐시 비우기">${icon("delete")}</button></div></div>
     </div>`)}`);
 
-  const standardOnly = serverLlm.provider === "gemini_api" || serverLlm.provider === "ollama_cloud" || serverLlm.provider === "vercel";
+  const capability = providerCapability(serverLlm.provider);
   const model = pane("model", "모델", `
-    ${group("기억 추출·정리", `<div class="form__row">
+    ${!isServerConfigured(settings) || !serverConnectionReady ? notice(SERVER_SETUP_REQUIRED, { action: btn("서버 설정으로 이동", { kind: "quiet", action: "settings-section", data: { section: "server" } }) }) : ""}
+    <h3 class="model-section-title">기억 추출</h3>
+    ${group("", `<div class="form__row connection-card">
       <label class="field"><span>처리 위치</span><select name="extractionEngine"><option value="risu" ${settings.extractionEngine === "risu" ? "selected" : ""}>Risu 보조 모델</option><option value="server" ${settings.extractionEngine === "server" ? "selected" : ""}>RCM 서버</option></select></label>
       <label class="field" data-engine-fields="risu" ${settings.extractionEngine === "risu" ? "" : "hidden"}><span>Risu 모델 슬롯</span><select name="auxiliaryMode">${[["main", "Main"], ["memory", "Memory"], ["otherAx", "Other AX"], ["static", "고정 모델 ID"]].map(([value, label]) => `<option value="${value}" ${settings.auxiliaryMode === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
       <label class="field" data-engine-fields="risu" data-static-model ${settings.extractionEngine === "risu" && settings.auxiliaryMode === "static" ? "" : "hidden"}><span>고정 모델 ID</span><input name="staticModel" value="${escapeHtml(settings.staticModel)}"></label>
-    </div>`)}
-    ${group(`서버 모델 연결 <span class="sub" data-provider-key-status>· ${serverLlmStatus}</span>`, `<div class="form__row">
-      <label class="field"><span>프로바이더</span><select name="serverLlmProvider" data-configured-providers="${escapeHtml([...configuredProviders].join(","))}">${SERVER_LLM_PROVIDER_OPTIONS.map(([value, label]) => `<option value="${value}" ${serverLlm.provider === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <div class="settings-action-wrap" data-engine-fields="risu" ${settings.extractionEngine === "risu" ? "" : "hidden"}>${connectionCheck("risu")}</div></div>`)}
+    ${group(`서버 모델 연결 <span class="sub" data-provider-key-status>· ${serverLlmStatus}</span>`, `<div class="form__row connection-card">
+      <label class="field"><span>프로바이더</span><select name="serverLlmProvider" data-previous-provider="${serverLlm.provider}" data-configured-providers="${escapeHtml([...configuredProviders].join(","))}">${SERVER_LLM_PROVIDER_OPTIONS.map(([value, label]) => `<option value="${value}" ${serverLlm.provider === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
       <label class="field"><span>엔드포인트</span><input name="serverLlmEndpoint" value="${escapeHtml(serverLlm.endpoint)}"></label>
-      <label class="field"><span>API 키 / 서비스 계정 JSON</span><input name="serverLlmApiKey" type="password" autocomplete="new-password" placeholder="${serverLlm.keyConfigured ? "저장된 인증정보 유지" : "인증정보 입력"}"></label>
-      <label class="field"><span>모델 ID</span><input name="serverLlmModel" value="${escapeHtml(serverLlm.model)}"></label>
-      <label class="field"><span>Temperature</span><input name="serverLlmTemperature" type="number" min="0" max="2" step="0.05" value="${serverLlm.temperature}"></label>
-      <label class="field"><span>Thinking</span><select name="serverLlmThinking">${[["default", "Provider default"], ["off", "Off"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]].map(([value, label]) => `<option value="${value}" ${serverLlm.thinking === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
-      <label class="field"><span>처리 등급</span><select name="serverLlmServiceTier" ${standardOnly ? "disabled" : ""}><option value="standard" ${serverLlm.serviceTier === "standard" ? "selected" : ""}>Standard</option><option value="flex" ${serverLlm.serviceTier === "flex" ? "selected" : ""}>Flex · 저렴하지만 느림</option><option value="priority" ${serverLlm.serviceTier === "priority" ? "selected" : ""}>Priority · 비싸지만 우선 처리</option></select>${hint(standardOnly ? "이 프로바이더는 Standard만 지원합니다." : "")}</label>
-    </div>${serverConnectionReady && configuredProviders.size ? `<button class="btn btn--danger" type="button" data-action="remove-server-llm-key" ${serverLlm.keyConfigured ? "" : "hidden"}>현재 인증정보 제거</button>` : ""}`, ` data-engine-fields="server" ${settings.extractionEngine === "server" ? "" : "hidden"}`)}
+      <label class="field"><span>${capability.credentialLabel}</span>${secretInput("serverLlmApiKey", capability.credentialLabel, { placeholder: capability.credentialPlaceholder })}</label>
+      <label class="field"><span>모델 ID</span><input name="serverLlmModel" placeholder="${capability.defaultModel}" value="${escapeHtml(serverLlm.model)}"></label>
+      <label class="field" ${capability.temperature ? "" : "hidden"}><span>Temperature</span><input name="serverLlmTemperature" type="number" min="0" max="2" step="0.05" value="${serverLlm.temperature}"></label>
+      <label class="field" ${capability.thinking ? "" : "hidden"}><span>Thinking</span><select name="serverLlmThinking">${[["default", "Provider default"], ["off", "Off"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]].map(([value, label]) => `<option value="${value}" ${serverLlm.thinking === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+      <label class="field" ${capability.serviceTier ? "" : "hidden"}><span>처리 등급</span><select name="serverLlmServiceTier"><option value="standard" ${serverLlm.serviceTier === "standard" ? "selected" : ""}>Standard</option><option value="flex" ${serverLlm.serviceTier === "flex" ? "selected" : ""}>Flex · 저렴하지만 느림</option><option value="priority" ${serverLlm.serviceTier === "priority" ? "selected" : ""}>Priority · 비싸지만 우선 처리</option></select></label>
+    ${connectionCheck("server", serverConnectionReady && configuredProviders.size ? `<span class="settings-action__end" data-remove-server-row ${serverLlm.keyConfigured ? "" : "hidden"}><button class="btn btn--danger" type="button" data-action="remove-server-llm-key">현재 인증정보 제거</button></span>` : "")}</div>`, ` data-engine-fields="server" ${settings.extractionEngine === "server" ? "" : "hidden"}`)}
     ${group("처리량", `<div class="form__row">
       <label class="field"><span>호출당 최대 입력 토큰</span><input name="maxInputTokens" type="number" min="1024" step="1" value="${serverLlm.maxInputTokens ?? 80000}">${hint("넘치는 입력은 원문을 보존하며 나누어 처리합니다.")}</label>
       <label class="field" data-engine-fields="server" ${settings.extractionEngine === "server" ? "" : "hidden"}><span>호출당 최대 출력 토큰</span><input name="maxOutputTokens" type="number" min="256" step="1" value="${serverLlm.maxOutputTokens ?? 24000}"></label>
@@ -3468,17 +3517,17 @@ export function settingsV2(
   const installedServerVersion = !data.connectionIssue && data.health?.ok
     ? data.health.version || updateStatus?.currentServerVersion
     : undefined;
-  const installedVersions = `<p class="sub">설치된 버전 · 플러그인 ${escapeHtml(RCM_PLUGIN_VERSION)}${installedServerVersion ? ` · 서버 ${escapeHtml(installedServerVersion)}` : ""}</p>`;
+  const installedVersions = `<p class="sub">RCM ${escapeHtml(RCM_PRODUCT_VERSION)} · 플러그인 ${escapeHtml(RCM_PLUGIN_VERSION)}${installedServerVersion ? ` · 서버 ${escapeHtml(installedServerVersion)}` : ""}</p>`;
   const updateNeedsAction = Boolean(updateStatus?.available || updateStatus?.restartRequired || pluginUpdateAvailable);
   const update = updateStatus?.configured ? group("업데이트", `<div class="settings-connection ${updateStatus.error ? "is-error" : updateNeedsAction ? "is-pending" : "is-ok"}" role="status"><span class="settings-connection__mark">${icon(updateStatus.error ? "error" : updateNeedsAction ? "clock" : "check")}</span><div><strong>${updateStatus.restartRequired ? updateStatus.canApplyAutomatically ? "서버 업데이트 설치 가능" : "서버 재시작 필요" : updateStatus.available ? `${escapeHtml(updateStatus.latestVersion ?? "새 버전")} 설치 가능` : pluginUpdateAvailable ? "플러그인 업데이트 필요" : "최신 버전 사용 중"}</strong><small>서버 ${escapeHtml(updateStatus.currentServerVersion)}${pluginUpdateAvailable ? ` · 플러그인 ${escapeHtml(updateStatus.latestPluginVersion ?? "새 버전")}` : ""}</small></div></div><div class="actions">${updateStatus.restartRequired && updateStatus.canApplyAutomatically || updateStatus.available && updateStatus.canStageServer ? `<button class="btn btn--primary" type="button" data-action="stage-server-update">${updateStatus.canApplyAutomatically ? "서버 업데이트 설치" : "서버 업데이트 준비"}</button>` : ""}<button class="btn btn--secondary" type="button" data-action="check-update">다시 확인</button></div>${pluginUpdateAvailable ? `<p class="sub">Risu 플러그인 메뉴의 + 버튼으로 새 플러그인을 설치해 주세요.</p>` : ""}`) : "";
   const server = pane("server", "서버", `
     <div class="settings-connection ${connectionKind}" role="status"><span class="settings-connection__mark">${icon(data.health?.ok ? "check" : data.connectionIssue?.kind === "unconfigured" ? "clock" : "error")}</span><div><strong>${connectionTitle}</strong><small>${data.health?.version ? `버전 ${escapeHtml(data.health.version)} · ` : ""}${embeddingState}</small></div></div>
     ${group("연결", `<div class="form__row">
       <label class="field"><span>서버 주소</span><input name="serverUrl" value="${escapeHtml(settings.serverUrl)}"></label>
-      <label class="field"><span>서버 토큰</span><input name="serverToken" type="password" value="${escapeHtml(settings.serverToken)}" autocomplete="new-password"></label>
+      <label class="field"><span>서버 토큰</span>${secretInput("serverToken", "서버 토큰", { value: settings.serverToken })}</label>
     </div>`)}
     ${installedVersions}${update}`);
-  const voyage = `<div class="setting-group" data-settings-voyage ${section === "model" ? "" : "hidden"}><h3>검색 임베딩</h3><form id="voyage-form"><label class="field"><span>Voyage API 키</span><input name="voyageApiKey" type="password" autocomplete="new-password" placeholder="${embedding?.configured ? "저장된 키 유지" : "키 입력"}" ${voyageBusy ? "disabled" : ""}></label>${embedding?.configured ? '<div class="actions"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></div>' : ""}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}</div></div>` : ""}</form></div>`;
+  const voyage = `<div class="setting-group" data-settings-voyage ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">검색 임베딩</h3><form id="voyage-form" class="connection-card"><label class="field"><span>Voyage API 키</span>${secretInput("voyageApiKey", "Voyage API 키", { placeholder: embedding?.configured ? "저장된 키 유지" : "키 입력", disabled: voyageBusy })}</label>${connectionCheck("voyage", embedding?.configured ? '<span class="settings-action__end"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></span>' : "")}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}</div></div>` : ""}</form></div>`;
   const saveAction = btn(voyageBusy ? "저장 중…" : "설정 저장", { kind: "primary", icon: "save", action: "save-settings", disabled: voyageBusy });
   // The phone skin lists the sections like the Settings app; on a phone a section opens as its own screen.
   const phone = lex().skin === "phone";
@@ -3697,6 +3746,10 @@ export async function loadDashboardData(
       chatCalls.set(dataset, result);
     }));
   }
+  let quizStatus = previous.quizStatus;
+  if (options.tab === "settings" && context && serverHasCurrent && healthCall.status === "fulfilled" && healthCall.value?.capabilities?.quizManagement) {
+    try { quizStatus = await client.quizStatus(context.chatId); } catch { quizStatus = undefined; }
+  }
   const failedDatasets = [...chatCalls]
     .filter(([, result]) => result.status === "rejected")
     .map(([dataset]) => dataset);
@@ -3737,6 +3790,7 @@ export async function loadDashboardData(
   }
   return {
     chatId: context?.chatId,
+    quizStatus,
     loadedDatasets: [...loadedDatasets],
     failedDatasets,
     health: healthCall.status === "fulfilled" ? healthCall.value : previous.health,
@@ -3881,6 +3935,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   let actionSaveState: ActionState | undefined;
   let actionSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsSaving = false;
+  let quizActionBusy = false;
+  let connectionCheckBusy = false;
   let voyageSaveBusy = false;
   const attentionView: AttentionViewState = { selectedId: "", query: "", filter: "all", mobileDetail: false };
   let settingsSection: SettingsSection = "chat";
@@ -4064,8 +4120,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   };
 
   const persistSettingsForm = async (form: HTMLFormElement) => {
+    if (connectionCheckBusy) throw new Error("연결 확인이 끝난 뒤 저장해 주세요.");
+    maskSecretInputs(root);
     const formData = new FormData(form);
     const values = Object.fromEntries(formData);
+    rememberDiagnosticSecrets(["serverToken", "serverLlmApiKey", "mcpApiKey"].map(name => String(formData.get(name) ?? "")));
+    if (!isServerConfigured({ serverUrl: String(values.serverUrl ?? ""), serverToken: String(values.serverToken ?? "") })) {
+      throw Object.assign(new Error(SERVER_SETUP_REQUIRED), { code: "SERVER_SETUP_REQUIRED" });
+    }
     const nextMcp=formData.has("mcpModel")?readMcpSelectorSettings(formData):undefined;
     const includeUserMessages = formData.has("includeUserMessages");
     const chatEnabled = formData.has("chatEnabled");
@@ -4170,7 +4232,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       const registration = state.settings.memoryToolsEnabled
         ? state.restoreMemoryToolDiscoveryRegistration?.()
         : state.syncMemoryToolRegistration?.(false);
-      await registration?.catch((error) => addLog(state.logs, "warn", `Memory tool registration update failed: ${String(error)}`));
+      await registration?.catch((error) => addLog(state.logs, "warn", `Memory tool registration update failed: [오류 원문 제외]`));
       state.automaticTurnPacket = undefined;
       if (!state.settings.memoryToolsEnabled) showActionSaveState({ kind: "success", message: "기억 도구를 중지했습니다. 수동 설치한 외부 도구는 Provider 설정에서도 꺼주세요." });
     }
@@ -4184,12 +4246,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       embeddingTimeoutMs: Number(values.embeddingTimeoutSeconds ?? (verifiedHealth?.serverLlm?.embeddingTimeoutMs ?? 15000) / 1000) * 1000,
       rerankTimeoutMs: Number(values.rerankTimeoutSeconds ?? (verifiedHealth?.serverLlm?.rerankTimeoutMs ?? 45000) / 1000) * 1000,
       llmTimeoutMs: Number(values.llmTimeoutSeconds ?? (verifiedHealth?.serverLlm?.llmTimeoutMs ?? 300000) / 1000) * 1000,
-      provider: String(values.serverLlmProvider) as ServerLlmPublicConfig["provider"],
-      endpoint: String(values.serverLlmEndpoint).trim(),
-      model: String(values.serverLlmModel).trim(),
-      temperature: Number(values.serverLlmTemperature),
-      thinking: String(values.serverLlmThinking) as ServerLlmPublicConfig["thinking"],
-      serviceTier: (values.serverLlmProvider === "gemini_api" || values.serverLlmProvider === "ollama_cloud" || values.serverLlmProvider === "vercel" ? "standard" : String(values.serverLlmServiceTier ?? "standard")) as ServerLlmPublicConfig["serviceTier"],
+      ...readServerModelConnection(formData),
     };
     if (serverConfigured && serverLlmUpdateRequiredForSettingsSave(bootstrappingServerConnection, verifiedHealth?.serverLlm, nextServerLlm, apiKey)) {
       const result = await client.request<{ worker: ServerWorkerStatus }>("/v1/admin/server-llm", {
@@ -4224,7 +4281,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     } catch (error) {
       dataView.inventory = [];
       dataView.inventoryStatus = "unavailable";
-      addLog(state.logs, "warn", `Risu chat inventory unavailable: ${String(error)}`);
+      addLog(state.logs, "warn", `Risu chat inventory unavailable: [오류 원문 제외]`);
     }
     if (activeTab === "data") render();
   };
@@ -4470,21 +4527,24 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   });
 
   const updateTopbar = () => {
+    root.querySelectorAll<HTMLButtonElement>("[data-quiz-controls] button").forEach(button => { button.disabled = quizActionBusy || quizManagementBusy(state, data); });
     const topbar = root.querySelector<HTMLElement>(".topbar");
     if (!topbar) return;
     const summary = state.statusSummary;
+    const floatingStatus = widgetState(state);
+    const quizActivity = floatingStatus.kind === "quiz" ? floatingStatus.label : "";
     const sourceRecovery = state.currentJob?.sourceRecovery === true || state.serverWorker?.activeJob?.sourceRecovery === true;
     const auditing = state.currentJob?.phase === "post_extraction_audit" || state.serverWorker?.phase === "post_extraction_audit";
     const reconciling = state.currentJob?.phase === "state_reconciliation" || state.serverWorker?.phase === "state_reconciliation";
-    const activity = refreshing ? "정보 갱신 중" : state.episodeActivity?.status === "holding" ? `에피소드 보류 중 · ${state.episodeActivity.turnCount}턴` : ["queued", "processing"].includes(state.episodeActivity?.status ?? "") ? "에피소드 정리 중" : sourceRecovery ? "원문 발췌 보완 중" : auditing ? "추출 재검수 중" : reconciling ? "상태 장부 대조 중" : state.currentJob || (state.serverWorker?.activeCalls ?? 0) > 0 ? "기억 추출 중" : (summary?.pendingEmbeddings ?? 0) > 0 ? "검색 인덱싱 중" : (state.translationActivity?.pending ?? 0) > 0 ? "번역 중" : "";
-    const workState = dashboardTopbarWorkState(activity, state.serverConnectionIssue ?? data.connectionIssue);
+    const activity = refreshing ? "정보 갱신 중" : state.episodeActivity?.status === "holding" ? `에피소드 보류 중 · ${state.episodeActivity.turnCount}턴` : ["queued", "processing"].includes(state.episodeActivity?.status ?? "") ? "에피소드 정리 중" : sourceRecovery ? "원문 발췌 보완 중" : auditing ? "추출 재검수 중" : reconciling ? "상태 장부 대조 중" : (state.currentJob && state.currentJob.kind !== "quiz") || (state.serverWorker?.activeCalls ?? 0) > 0 ? "기억 추출 중" : (summary?.pendingEmbeddings ?? 0) > 0 ? "검색 인덱싱 중" : (state.translationActivity?.pending ?? 0) > 0 ? "번역 중" : quizActivity;
+    const workState = dashboardTopbarWorkState(activity && activity === quizActivity ? "" : activity, state.serverConnectionIssue ?? data.connectionIssue);
     const currentStatus = settingsSaving
       ? status("warn", "저장 중…")
       : actionSaveState
       ? status(actionSaveState.kind === "success" ? "ok" : "error", actionSaveState.message)
       : workState ? status(workState.kind, workState.text)
       : state.activityStatusError === SERVER_RESPONSE_DELAYED ? status("warn", "서버 응답 지연")
-      : data.error ? status("error", "서버 확인 필요") : data.contextError ? status("warn", "채팅 확인 필요") : !state.current ? status("warn", "활성 채팅 없음") : status("ok", "동기화됨");
+      : data.error ? status("error", "서버 확인 필요") : data.contextError ? status("warn", "채팅 확인 필요") : !state.current ? status("warn", "활성 채팅 없음") : quizActivity ? status("neutral", quizActivity) : status("ok", "동기화됨");
     setHtmlIfChanged(topbar, currentShell().bar);
     const statusElement = topbar.querySelector<HTMLElement>(".bar__state");
     if (statusElement) statusElement.innerHTML = currentStatus;
@@ -4646,6 +4706,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if (activeTab === "reviews") applyAttentionSearch();
     if (replacedPage) setEditorBaselines(page);
     root.setAttribute("aria-busy", "false");
+    // Move only each horizontal control, preserving the page and reader positions.
+    root.querySelectorAll<HTMLElement>(".tabs, .seg").forEach(control => {
+      const selected = control.querySelector<HTMLElement>('[aria-selected="true"], [aria-pressed="true"], input:checked')?.closest<HTMLElement>("button, label");
+      if (!selected || control.scrollWidth <= control.clientWidth) return;
+      const box = control.getBoundingClientRect(), item = selected.getBoundingClientRect();
+      if (item.left < box.left) control.scrollLeft += item.left - box.left;
+      else if (item.right > box.right) control.scrollLeft += item.right - box.right;
+    });
     measurePhoneClamps();
     observeVisibleMemories();
     void queueStructuredTranslations();
@@ -4683,6 +4751,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     updateTopbar();
     try {
       const refreshed = await loadDashboardData(state, client, { tab: requestedTab, previous: data });
+      if (refreshed.chatId === state.current?.chatId) data.quizStatus = refreshed.quizStatus;
       if (organizationChatId !== state.current?.chatId) {
         Object.assign(organizationView, createOrganizationView());
         organizationChatId = state.current?.chatId;
@@ -4717,7 +4786,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       if (activeTab === "reviews") syncReviewActivity(state, refreshed);
       await hydrateCachedMemoryTranslations(refreshed);
       if (generation !== refreshGeneration || !dashboardOpen) return;
-      if (shouldDeferDashboardRefresh(options.forceApply === true, formDirty, activeTab, hasActiveSelection())) {
+      if (shouldDeferDashboardRefresh(options.forceApply === true, formDirty || connectionCheckBusy, activeTab, hasActiveSelection())) {
         pendingData = refreshed;
         newDataAvailable = true;
       } else {
@@ -4844,6 +4913,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   const saveVoyageKey = async (form: HTMLFormElement): Promise<boolean> => {
     if (voyageSaveBusy) return false;
     const apiKey = String(new FormData(form).get("voyageApiKey") ?? "").trim();
+    rememberDiagnosticSecrets([apiKey]);
     if (!apiKey) {
       voyageSaveState = { kind: "error", message: "Voyage API key를 입력하세요." };
       render();
@@ -4860,7 +4930,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       return true;
     } catch (error) {
       voyageSaveState = { kind: "error", message: String(error) };
-      addLog(state.logs, "error", `Voyage API key save failed: ${String(error)}`);
+      addLog(state.logs, "error", `Voyage API key save failed: [오류 원문 제외]`, supportFailure("voyage_save", error));
       return false;
     } finally {
       voyageSaveBusy = false;
@@ -4986,6 +5056,63 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     const target = clickedElement.closest<HTMLElement>("[data-action]");
     if (!target) return;
     const action = target.dataset.action;
+    if (action === "test-connection") {
+      const status = target.closest("[data-connection-check]")?.querySelector<HTMLElement>("[data-connection-result]");
+      const form = root.querySelector<HTMLFormElement>("#settings-form");
+      if (!status || !form) return;
+      if (connectionCheckBusy || settingsSaving) { status.textContent = "진행 중인 확인 또는 저장이 끝난 뒤 다시 시도해 주세요."; return; }
+      connectionCheckBusy = true;
+      maskSecretInputs(root);
+      const buttons = [...root.querySelectorAll<HTMLButtonElement>('[data-action="test-connection"], [data-action="save-settings"]')].filter(button => !button.disabled);
+      buttons.forEach(button => { button.disabled = true; });
+      status.textContent = target.dataset.target === "risu" ? "Risu 응답 확인 중… 호스트의 대기 시간과 출력 설정을 따릅니다." : "응답 확인 중…";
+      target.setAttribute("aria-busy", "true");
+      try {
+        const elapsed = await testSettingsConnection(state, new FormData(form), target.dataset.target ?? "", root.querySelector<HTMLInputElement>('[name="voyageApiKey"]')?.value ?? "");
+        if (status.isConnected) { status.classList.remove("is-error"); status.innerHTML = `${icon("check")}<span>응답 ${(elapsed / 1000).toFixed(1)}초</span>`; }
+        addLog(state.logs, "info", `Connection check succeeded (${target.dataset.target})`);
+      } catch (error) {
+        if (status.isConnected) { status.classList.add("is-error"); status.innerHTML = `${icon("error")}<span>${escapeHtml(error instanceof Error ? error.message : "연결 확인 실패")}</span>`; }
+        addLog(state.logs, "warn", `Connection check failed (${target.dataset.target})`, supportFailure("connection_test", error, { target: target.dataset.target }), (error as { detail?: string }).detail);
+      } finally {
+        connectionCheckBusy = false;
+        buttons.forEach(button => { button.disabled = false; });
+        target.removeAttribute("aria-busy");
+      }
+      return;
+    }
+    if (action === "toggle-secret") {
+      toggleSecretInput(target);
+      return;
+    }
+    if (action === "clear-plugin-logs") {
+      state.logs.length = 0;
+      render();
+      showActionSaveState({ kind: "success", message: "기록을 비웠습니다." });
+      return;
+    }
+    if (action === "copy-plugin-diagnostics") {
+      const summary = pluginDiagnosticSummary(state, data);
+      try {
+        try {
+          await navigator.clipboard.writeText(summary);
+        } catch {
+          // Clipboard API may be blocked in the host's plugin iframe.
+          const field = document.createElement("textarea");
+          field.className = "sr-only";
+          field.value = summary;
+          document.body.append(field);
+          try {
+            field.select();
+            if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+          } finally { field.remove(); target.focus(); }
+        }
+        showActionSaveState({ kind: "success", message: "진단 정보를 복사했습니다." });
+      } catch {
+        showActionSaveState({ kind: "error", message: "복사하지 못했습니다. 브라우저의 클립보드 권한을 확인해 주세요." });
+      }
+      return;
+    }
     if (["data-search", "data-filter", "select-probe-source", "ack-delete"].includes(action ?? "")) return;
     // The pair sheet shows one editor at a time; opening another asks before dropping typed changes, then closes the rest.
     if (["edit-relationship", "new-intimacy", "edit-intimacy", "new-anniversary", "designate-anniversary", "edit-address", "new-social", "edit-social", "new-world", "edit-world", "end-world", "delete-world"].includes(action ?? "")
@@ -5108,6 +5235,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if (action === "settings-section") {
       const next = target.dataset.section as SettingsSection;
       if (!(SETTINGS_SECTIONS as readonly string[]).includes(next)) return;
+      maskSecretInputs(root);
       settingsSection = next;
       settingsSectionOpen = true;
       root.querySelectorAll<HTMLElement>("[data-settings-pane]").forEach((pane) => { pane.hidden = pane.dataset.settingsPane !== next; });
@@ -5116,10 +5244,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       root.querySelector(".settingspage")?.classList.add("is-open");
       const voyage = root.querySelector<HTMLElement>("[data-settings-voyage]");
       if (voyage) voyage.hidden = next !== "model";
+      if (next === "server" && target.closest(".notice")) root.querySelector<HTMLInputElement>('[name="serverUrl"]')?.focus({ preventScroll: true });
       documentScroller(root)?.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       return;
     }
     if (action === "settings-back") {
+      maskSecretInputs(root);
       settingsSectionOpen = false;
       root.querySelector(".settingspage")?.classList.remove("is-open");
       documentScroller(root)?.scrollTo({ top: 0 });
@@ -5651,13 +5781,41 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       render();
       return;
     }
-    if (action === "quiz-reset-stats") {
-      if (!state.current) return;
+    if (action === "quiz-reset-stats" || action === "quiz-regenerate") {
+      const chatId = state.current?.chatId;
+      if (!chatId || quizActionBusy || !data.health?.capabilities?.quizManagement) return;
+      quizActionBusy = true;
+      const controls = root.querySelectorAll<HTMLButtonElement>("[data-quiz-controls] button");
+      controls.forEach(button => { button.disabled = true; });
       try {
-        await client.quizResetStats(state.current.chatId);
-        showActionSaveState({ kind: "success", message: "퀴즈 기록을 초기화했습니다." });
+        const status = await client.quizStatus(chatId);
+        if (state.current?.chatId !== chatId) return;
+        data.quizStatus = status;
+        if (status.generating) {
+          showActionSaveState({ kind: "error", message: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요." });
+          return;
+        }
+        const regenerate = action === "quiz-regenerate";
+        const message = regenerate
+          ? (status.unanswered ? `안 푼 퀴즈 ${status.unanswered}개를 정리하고 새로 만들어요. 보조 모델을 한 번 호출해요.` : "새 퀴즈를 만들어요. 보조 모델을 한 번 호출해요.")
+          : "연속 정답·정답률이 0이 돼요. 문제는 그대로예요.";
+        if (!await confirmDashboard(message, false, { title: "이 채팅 퀴즈", confirm: regenerate ? "새로 만들기" : "점수 초기화" }) || state.current?.chatId !== chatId) return;
+        if (regenerate) {
+          const result = await client.quizRegenerate(chatId);
+          const reasons = { no_material: "새로 낼 재료가 아직 없어요", generating: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요.", disabled: "퀴즈 사용을 켜고 저장한 뒤 다시 시도해 주세요." };
+          showActionSaveState({ kind: result.enqueued || result.reason === "no_material" ? "success" : "error",
+            message: result.enqueued ? "새 퀴즈 만들기를 시작했어요." : reasons[result.reason ?? "no_material"] });
+        } else {
+          await client.quizResetStats(chatId);
+          showActionSaveState({ kind: "success", message: "이 채팅의 퀴즈 점수를 초기화했어요." });
+        }
+        await state.refreshQuizWidget?.();
+        await refresh();
       } catch (error) {
-        showActionSaveState({ kind: "error", message: `퀴즈 기록을 초기화하지 못했습니다. ${String(error)}` });
+        showActionSaveState({ kind: "error", message: `퀴즈 작업을 완료하지 못했어요. ${String(error)}` });
+      } finally {
+        quizActionBusy = false;
+        updateTopbar();
       }
       return;
     }
@@ -5909,8 +6067,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       return;
     }
     if (action === "save-settings") {
+      if (connectionCheckBusy) return;
       const form = root.querySelector<HTMLFormElement>("#settings-form");
       if (!form) return;
+      maskSecretInputs(root);
       settingsSaving = true;
       target.setAttribute("disabled", "");
       updateTopbar();
@@ -5926,7 +6086,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         showActionSaveState({ kind: "success", message: "저장됨" });
       } catch (error) {
         settingsSaving = false;
-        addLog(state.logs, "error", `Settings save failed: ${String(error)}`);
+        addLog(state.logs, "error", `Settings save failed: [오류 원문 제외]`, supportFailure("settings_save", error));
         const attempted = new FormData(form);
         showActionSaveState({ kind: "error", message: settingsSaveFailureMessage(error, {
           serverUrl: String(attempted.get("serverUrl") ?? state.settings.serverUrl).trim(),
@@ -6248,7 +6408,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           organizationView.error = `기억 후보 생성을 준비하지 못했습니다. ${message}`;
-          addLog(state.logs, "error", `Regeneration preparation failed: ${message}`);
+          addLog(state.logs, "error", `Regeneration preparation failed: [오류 원문 제외]`);
         } finally {
           organizationView.busy = false;
           if (dashboardOpen) render();
@@ -6432,7 +6592,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       await refresh({ forceApply: true });
     } catch (error) {
       const message = String(error).replace(/^Error:\s*/, "");
-      addLog(state.logs, "error", `Dashboard action failed: ${message}`);
+      addLog(state.logs, "error", `Dashboard action failed: [오류 원문 제외]`, supportFailure("dashboard_action", error));
       showActionSaveState({ kind: "error", message: "작업 실패 · 관리 → 처리 상태에서 확인" });
     }
   });
@@ -6488,7 +6648,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
           summary, groupId, startOrdinal: Number(overview.startOrdinal ?? 0), endOrdinal: Number(overview.endOrdinal ?? 0), savedAt: Date.now(),
         } };
         try { await saveSettings(state.settings); }
-        catch (error) { addLog(state.logs, "warn", `Story overview saved, but its rebuild draft backup failed: ${String(error)}`); }
+        catch (error) { addLog(state.logs, "warn", `Story overview saved, but its rebuild draft backup failed: [오류 원문 제외]`); }
         await invalidateTranslationCache(state, { serverInstanceId: data.health?.instanceId, chatId, itemId: storyTranslationKey(storyGroupKey(overview, "overview"), "summary") });
         translations.delete(storyTranslationKey(storyGroupKey(overview, "overview"), "summary"));
         storyView.editingOverview = false;
@@ -6653,7 +6813,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         }) });
         if (!Array.isArray(result.items)) throw new Error("지인 관계 저장 결과를 확인하지 못했습니다.");
         data.socialKnowledge = result.items;
-        successMessage = socialEditor?.focus === "address" ? "부르는 이름 저장됨" : "지인 관계 저장됨";
+        successMessage = socialEditor?.focus === "address" ? "이름·호칭 저장됨" : "지인 관계 저장됨";
         socialEditor = undefined;
         formDirty = false;
       } else if (form.id === "intimacy-form") {
@@ -6762,7 +6922,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       }
       if (form.id === "settings-form") {
         settingsSaving = false;
-        addLog(state.logs, "error", `Settings save failed: ${String(error)}`);
+        addLog(state.logs, "error", `Settings save failed: [오류 원문 제외]`, supportFailure("settings_save", error));
         const attempted = new FormData(form);
         showActionSaveState({ kind: "error", message: settingsSaveFailureMessage(error, {
           serverUrl: String(attempted.get("serverUrl") ?? state.settings.serverUrl).trim(),
@@ -6923,34 +7083,19 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     }
     if(["mcpProvider","mcpEndpoint","mcpCredentialSource"].includes(input.name)) {updateMcpSelectorControls(root,input.name);return;}
     if (input.name === "serverLlmProvider") {
+      maskSecretInputs(root);
       const configured = new Set((input.dataset.configuredProviders ?? "").split(",").filter(Boolean));
       const configuredHere = configured.has(input.value);
       const keyStatus = root.querySelector<HTMLElement>("[data-provider-key-status]");
       const keyInput = root.querySelector<HTMLInputElement>('input[name="serverLlmApiKey"]');
-      const remove = root.querySelector<HTMLElement>('[data-action="remove-server-llm-key"]');
+      const remove = root.querySelector<HTMLElement>('[data-remove-server-row]');
       if (keyStatus) keyStatus.textContent = configuredHere ? "인증정보 저장됨" : "인증정보 없음";
-      if (keyInput) keyInput.placeholder = configuredHere ? "저장된 인증정보 유지 (변경할 때만 입력)" : "서버에 저장할 인증정보";
+      if (keyInput) {
+        keyInput.value = "";
+
+      }
       if (remove) remove.hidden = !configuredHere;
-      const endpoint = root.querySelector<HTMLInputElement>('input[name="serverLlmEndpoint"]');
-      const model = root.querySelector<HTMLInputElement>('input[name="serverLlmModel"]');
-      const serviceTier = root.querySelector<HTMLSelectElement>('select[name="serverLlmServiceTier"]');
-      if (serviceTier) {
-        serviceTier.disabled = input.value === "gemini_api" || input.value === "ollama_cloud" || input.value === "vercel";
-        if (serviceTier.disabled) serviceTier.value = "standard";
-      }
-      if (input.value === "vertex") {
-        if (endpoint) endpoint.value = "https://aiplatform.googleapis.com/v1";
-        if (model && (!model.value || model.value === "auto")) model.value = "gemini-2.5-flash";
-      } else if (input.value === "gemini_api") {
-        if (endpoint) endpoint.value = "https://generativelanguage.googleapis.com/v1beta";
-        if (model && (!model.value || model.value === "auto")) model.value = "gemini-2.5-flash";
-      } else if (input.value === "ollama_cloud") {
-        if (endpoint) endpoint.value = "https://ollama.com/api/chat";
-        if (model && (!model.value || model.value === "auto")) model.value = "gpt-oss:120b";
-      } else {
-        if (endpoint) endpoint.value = SERVER_LLM_DEFAULT_ENDPOINTS[input.value as keyof typeof SERVER_LLM_DEFAULT_ENDPOINTS];
-        if (model && !model.value) model.value = "auto";
-      }
+      updateProviderFields(root, "serverLlm");
       return;
     }
     if (input.id !== "backup-file" || !input.files?.[0]) return;
@@ -7035,6 +7180,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   await showCompletedProductReleaseNotice(state);
   lastServerActivitySignature = serverActivitySignature();
   lastLiveDataSignature = dashboardLiveDataSignature(state.statusSummary);
+  const toolRegistrationSignature = () => JSON.stringify([state.memoryToolRegistration?.status, state.memoryToolRegistration?.failures]);
+  let lastToolRegistrationSignature = toolRegistrationSignature();
   const refreshFromActivity = async () => {
     if (refreshing) { activityRefreshPending = true; return; }
     do {
@@ -7054,8 +7201,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     lastLiveDataSignature = nextLiveDataSignature;
     updateTopbar();
     updateNavBadges();
+    const nextToolRegistrationSignature = toolRegistrationSignature();
+    if (nextToolRegistrationSignature !== lastToolRegistrationSignature) {
+      lastToolRegistrationSignature = nextToolRegistrationSignature;
+      if (activeTab === "operations") render();
+    }
     if (!serverActivityChanged && !liveDataChanged) return;
-    if (liveDataChanged || (activityWasBusy && !busy)) void refreshFromActivity();
+    if (liveDataChanged || (activityWasBusy && !busy) || (activeTab === "settings" && serverActivityChanged)) void refreshFromActivity();
     activityWasBusy = busy;
   });
 }

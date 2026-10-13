@@ -16,7 +16,7 @@ export interface ServerConfig {
   embeddings: "voyage" | "off";
   embeddingModel: string;
   voyageApiKey: string;
-  llmApiKeys?: Partial<Record<"gemini_api" | "vertex" | "llm_gateway" | "vercel" | "ollama_cloud", string>>;
+  llmApiKeys?: Partial<Record<"gemini_api" | "vertex" | "llm_gateway" | "openai_compatible" | "vercel" | "ollama_cloud" | "copilot", string>>;
   secretsPath: string;
   voyageEndpoint: string;
   embeddingTimeoutMs: number;
@@ -50,7 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     const voyageLine = lines.find((entry) => entry.trim().startsWith("VOYAGE_API_KEY="));
     if (voyageLine) savedVoyageKey = voyageLine.slice(voyageLine.indexOf("=") + 1).trim();
   }
-  for (const provider of ["gemini_api", "vertex", "llm_gateway", "vercel", "ollama_cloud"] as const) {
+  for (const provider of ["gemini_api", "vertex", "llm_gateway", "openai_compatible", "vercel", "ollama_cloud", "copilot"] as const) {
     const value = env[`RCM_LLM_API_KEY_${provider.toUpperCase()}`];
     if (value) savedLlmKeys[provider] = value;
   }

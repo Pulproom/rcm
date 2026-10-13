@@ -81,9 +81,11 @@ export class ServerExtractionWorker {
           : visible.length ? "running"
             : controlled ? "standby" : "standby";
     const active = visible[0];
+    const quiz = [...this.#active.values()].find(item => item.job.kind === "quiz" && (!chatId || item.job.chatId === chatId));
     return {
       state,
       activeCalls: visible.length,
+      ...(quiz ? { quizGenerating: { chatId: quiz.job.chatId, startedAt: quiz.startedAt } } : {}),
       ...(controlled ? { controlLeaseUntil: this.#controlLeaseUntil } : {}),
       ...(this.#lastError ? { lastError: this.#lastError } : {}),
       queuedJobs: (this.db.prepare("SELECT count(*) AS count FROM jobs WHERE status IN ('queued','leased') AND type<>'quiz'").get() as { count: number }).count,

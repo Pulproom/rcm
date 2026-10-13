@@ -1,3 +1,4 @@
+import { supportFailure } from "./support-diagnostics.js";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { isChatMemoryEnabled } from "./settings.js";
 import { parseReconciliationResult, type SourceUnit } from "@rcm/shared";
@@ -17,7 +18,7 @@ const attentionReconciliationFlights = new WeakMap<RuntimeState, Promise<boolean
 async function pauseWithAttention(state: RuntimeState, message: string): Promise<void> {
   state.settings.workerPaused = true;
   state.settings.workerAttention = { at: Date.now(), message };
-  try { await saveSettings(state.settings); } catch (saveError) { addLog(state.logs, "warn", `Could not persist automatic pause: ${String(saveError)}`); }
+  try { await saveSettings(state.settings); } catch (saveError) { addLog(state.logs, "warn", `Could not persist automatic pause: [오류 원문 제외]`); }
   await showWorkerPauseNotice(state);
 }
 
@@ -44,7 +45,7 @@ export async function reconcileAutomaticServerPause(
       state.publishActivity?.();
       return true;
     } catch (error) {
-      addLog(state.logs, "warn", `Could not reconcile recovered server worker state: ${String(error)}`);
+      addLog(state.logs, "warn", `Could not reconcile recovered server worker state: [오류 원문 제외]`);
       return false;
     } finally {
       attentionReconciliationFlights.delete(state);
@@ -110,7 +111,7 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
   const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
     if (state.currentJob?.kind === "quiz") return;
     try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
-    catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): ${String(reportError)}`); }
+    catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`); }
   };
   const mode = state.settings.auxiliaryMode === "main" || state.settings.auxiliaryMode === "static"
     ? "model"
@@ -136,7 +137,7 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     if (state.currentJob?.kind !== "quiz") await modelDraftRecorders.get(state)?.(output);
     const finishReason = response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.candidates?.[0]?.finishReason;
     if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase())) {
-      throw new Error(`Auxiliary model output truncated (${finishReason}); raw response retained`);
+      throw Object.assign(new Error(`Auxiliary model output truncated (${finishReason}); raw response retained`), { code: "MODEL_OUTPUT_TRUNCATED" });
     }
     const rawUsage = response?.usage ?? response?.usageMetadata;
     const inputTokens = rawUsage?.prompt_tokens ?? rawUsage?.input_tokens ?? rawUsage?.promptTokenCount;
@@ -146,6 +147,7 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     if (timing) finishTiming(state, timing, "succeeded");
     return output;
   } catch (error) {
+    addLog(state.logs, "error", "Auxiliary model call failed", supportFailure("auxiliary_call", error, { purpose, attempt: state.currentJob?.attempt }));
     await reportOutcome("failed", error);
     if (timing) finishTiming(state, timing, "failed");
     throw error;
@@ -502,7 +504,7 @@ export async function heartbeatServerWorker(state: RuntimeState, client: ServerC
     state.serverConnectionIssue = describeServerConnectionIssue(state.settings, error);
     state.activityStatusError = state.serverConnectionIssue?.detail;
     state.publishActivity?.();
-    addLog(state.logs, "warn", `Server worker heartbeat failed: ${String(error)}`);
+    addLog(state.logs, "warn", `Server worker heartbeat failed: [오류 원문 제외]`, supportFailure("worker_heartbeat", error));
   }
 }
 
@@ -512,7 +514,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
     await heartbeatServerWorker(state, client);
     return;
   }
-  if (state.settings.workerPaused || state.workerBusy) return;
+  if (state.settings.workerPaused || state.workerBusy || state.risuConnectionTestRunning) return;
   state.workerBusy = true;
   try {
     for (;;) {
@@ -522,7 +524,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       state.activityStatusError = undefined;
       if (!job) break;
       const leaseHeartbeat = globalThis.setInterval(() => {
-        void client.renewLease(job.id, state.workerId).catch((error) => addLog(state.logs, "warn", `작업 lease 갱신 실패: ${String(error)}`));
+        void client.renewLease(job.id, state.workerId).catch((error) => addLog(state.logs, "warn", `작업 lease 갱신 실패: [오류 원문 제외]`));
       }, 20_000);
       const firstStage = job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction";
       const llmCallStats: OperationLlmCallStats = { total: job.llmCallStats?.total ?? 0, repairs: job.llmCallStats?.repairs ?? 0, byPurpose: { ...(job.llmCallStats?.byPurpose ?? {}) } };
@@ -562,7 +564,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
             try {
               const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
               result = applySourceRepairs(result, repaired, issues, job.sourceUnits);
-            } catch (error) { addLog(state.logs, "warn", `대사 원문 보완 미해결: ${String(error)}`); }
+            } catch (error) { addLog(state.logs, "warn", `대사 원문 보완 미해결: [오류 원문 제외]`); }
           }
         }
         const incomplete = Boolean((result as any)?.unfinishedSource?.length);
@@ -587,7 +589,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
                 const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
                 result = applySourceRepairs(result, repaired, repairIssues, job.sourceUnits);
               }
-            } catch (error) { addLog(state.logs, "warn", `원문 보완 미해결: ${String(error)}`); }
+            } catch (error) { addLog(state.logs, "warn", `원문 보완 미해결: [오류 원문 제외]`); }
             prepared = await client.prepareReconciliation(job.id, state.workerId, result, audit);
           }
           const accessDraft = prepared.groundingDraft ?? result;
@@ -608,7 +610,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
             try {
               const response = await runModel(state, [{ role: "system", content: accessPlan.systemPrompt }, { role: "user", content: accessPlan.userPrompt }], "extraction_repair");
               applyAccess(parseWorkerJson(state, response, "extraction_repair"));
-            } catch (error) { addLog(state.logs, "warn", `원문 접근 근거 보완 미해결: ${String(error)}`); }
+            } catch (error) { addLog(state.logs, "warn", `원문 접근 근거 보완 미해결: [오류 원문 제외]`); }
           }
         }
         if (job.kind !== "quiz") {
@@ -619,35 +621,36 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         const completed = await client.complete(job.id, state.workerId, result, reconciliation, audit);
         if (completed?.pendingReconciliations) state.statusSummary = { ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }), pendingReviews: (state.statusSummary?.pendingReviews ?? 0) + completed.pendingReconciliations, pendingReconciliations: (state.statusSummary?.pendingReconciliations ?? 0) + completed.pendingReconciliations };
         if (completed?.pendingReconciliations) state.publishStatusSummary?.();
-        if (completed?.warnings?.length) addLog(state.logs, "warn", completed.warnings.join("; "));
+        if (completed?.warnings?.length) addLog(state.logs, "warn", "Auxiliary job completed with warnings");
         addLog(state.logs, "info", `${job.kind === "quiz" ? "Quiz batch" : job.kind === "episode" ? "Episode capsule" : job.kind === "story_consolidation" ? "Story spine consolidation" : "Memory extraction"} completed (${job.sourceMessageIds.length} messages)`);
       } catch (error) {
+        addLog(state.logs, "error", "Auxiliary job failed", supportFailure("worker_job", error, { kind: job.kind, attempt: job.attempt }));
         const failure = await client.fail(job.id, state.workerId, String(error));
         if (failure.status === "queued") {
-          addLog(state.logs, "warn", `기억 묶음 재시도 ${failure.attempt + 1}/${failure.maxAttempts}: ${String(error)}`);
+          addLog(state.logs, "warn", `기억 묶음 재시도 ${failure.attempt + 1}/${failure.maxAttempts}: [오류 원문 제외]`);
           continue;
         }
         if (job.kind === "relationship_projection") {
-          addLog(state.logs, "error", `관계 요약 갱신 실패(사건 장부와 기존 요약은 유지됨): ${String(error)}`);
+          addLog(state.logs, "error", `관계 요약 갱신 실패(사건 장부와 기존 요약은 유지됨): [오류 원문 제외]`);
           continue;
         }
         if (job.kind === "story_consolidation") {
-          addLog(state.logs, "error", `Story spine 생성 실패(기존 spine과 정본은 유지됨): ${String(error)}`);
+          addLog(state.logs, "error", `Story spine 생성 실패(기존 spine과 정본은 유지됨): [오류 원문 제외]`);
           continue;
         }
         if (job.kind === 'memory_group') {
-          addLog(state.logs, 'warn', `묶기 후보 생성 실패(기존 기억은 유지됨): ${String(error)}`);
+          addLog(state.logs, 'warn', `묶기 후보 생성 실패(기존 기억은 유지됨): [오류 원문 제외]`);
           continue;
         }
         if (job.kind === "ledger_consistency") {
-          addLog(state.logs, "warn", `최종 장부 대조 실패(기억과 기존 상태는 유지됨): ${String(error)}`);
+          addLog(state.logs, "warn", `최종 장부 대조 실패(기억과 기존 상태는 유지됨): [오류 원문 제외]`);
           continue;
         }
         if (job.kind === "quiz") {
-          addLog(state.logs, "warn", `퀴즈 묶음 처리를 보류했습니다: ${String(error)}`);
+          addLog(state.logs, "warn", `퀴즈 묶음 처리를 보류했습니다: [오류 원문 제외]`);
           continue;
         }
-        addLog(state.logs, "error", `해당 채팅의 후속 기억 처리를 보류했습니다: ${String(error)}`);
+        addLog(state.logs, "error", `해당 채팅의 후속 기억 처리를 보류했습니다: [오류 원문 제외]`);
         continue;
       } finally {
         clearInterval(leaseHeartbeat);
@@ -662,7 +665,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
   } catch (error) {
     state.serverConnectionIssue = describeServerConnectionIssue(state.settings, error);
     state.activityStatusError = state.serverConnectionIssue?.detail;
-    addLog(state.logs, "warn", `Worker queue connection failed without pausing processing: ${String(error)}`);
+    addLog(state.logs, "warn", `Worker queue connection failed without pausing processing: [오류 원문 제외]`, supportFailure("worker_queue", error));
   } finally {
     state.workerBusy = false;
     state.currentJob = undefined;
