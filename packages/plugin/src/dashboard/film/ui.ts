@@ -96,8 +96,8 @@ export function iconBtn(name: string, label: string, opts: { action?: string; da
 }
 
 /** Reveals only this input's current value, never a credential from the server. */
-export function secretInput(name: string, label: string, opts: { value?: string; placeholder?: string; disabled?: boolean } = {}): string {
-  return `<span class="secret-input"><input name="${escapeHtml(name)}" type="password" aria-label="${escapeHtml(label)}" value="${escapeHtml(opts.value ?? "")}" autocomplete="new-password" spellcheck="false" autocapitalize="off" placeholder="${escapeHtml(opts.placeholder ?? "")}"${opts.disabled ? " disabled" : ""}><button type="button" class="iconbtn" data-action="toggle-secret" data-secret-label="${escapeHtml(label)}" aria-label="${escapeHtml(label)} 표시" title="${escapeHtml(label)} 표시" aria-pressed="false"${opts.disabled ? " disabled" : ""}>${icon("eye")}</button></span>`;
+export function secretInput(name: string, label: string, opts: { value?: string; placeholder?: string; disabled?: boolean; form?: string } = {}): string {
+  return `<span class="secret-input"><input${opts.form ? ` form="${escapeHtml(opts.form)}"` : ""} name="${escapeHtml(name)}" type="password" aria-label="${escapeHtml(label)}" value="${escapeHtml(opts.value ?? "")}" autocomplete="new-password" spellcheck="false" autocapitalize="off" placeholder="${escapeHtml(opts.placeholder ?? "")}"${opts.disabled ? " disabled" : ""}><button type="button" class="iconbtn" data-action="toggle-secret" data-secret-label="${escapeHtml(label)}" aria-label="${escapeHtml(label)} 표시" title="${escapeHtml(label)} 표시" aria-pressed="false"${opts.disabled ? " disabled" : ""}>${icon("eye")}</button></span>`;
 }
 
 export function toggleSecretInput(button: HTMLElement, visible?: boolean): void {
@@ -115,8 +115,8 @@ export function maskSecretInputs(root: ParentNode): void {
   root.querySelectorAll<HTMLElement>('[data-action="toggle-secret"]').forEach(button => toggleSecretInput(button, false));
 }
 
-export function connectionCheck(target: "risu" | "server" | "mcp" | "voyage", trailing = ""): string {
-  const label = { risu: "Risu 보조 모델", server: "서버 보조 모델", mcp: "검색 보조 모델", voyage: "Voyage" }[target];
+export function connectionCheck(target: "risu" | "server" | "mcp" | "voyage" | "translation", trailing = ""): string {
+  const label = { risu: "Risu 보조 모델", server: "서버 보조 모델", mcp: "검색 보조 모델", voyage: "Voyage", translation: "참고 번역" }[target];
   const description = "짧은 확인 요청을 보냅니다. 호출 비용이 발생하며 설정은 저장하지 않아요.";
   return `<div class="connection-check settings-action" data-connection-check="${target}"><button type="button" class="btn btn--quiet" data-action="test-connection" data-target="${target}" title="${description}" aria-describedby="connection-help-${target}">연결 확인</button><span class="sr-only" id="connection-help-${target}">${description}</span><span class="connection-result" role="status" aria-live="polite" aria-label="${label} 연결 확인 결과" data-connection-result></span>${trailing}</div>`;
 }

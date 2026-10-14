@@ -1,4 +1,5 @@
-import { prepareAuxiliaryText } from "@rcm/shared";
+import { risuModelSlot } from "./worker.js";
+import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
 import type { RuntimeState, TranslationDisplay, TranslationProvider } from "./types.js";
 import type { MemoryLanguage } from "@rcm/shared";
 import { ServerClient } from "./api-client.js";
@@ -46,13 +47,13 @@ async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-const cacheKey = (source: TranslationSource, hash: string, provider: TranslationProvider): string =>
-  [source.serverInstanceId, source.chatId, source.kind, source.itemId, hash, provider, source.sourceLanguage, "ko"].join("\u001f");
+const cacheKey = (source: TranslationSource, hash: string): string =>
+  [source.serverInstanceId, source.chatId, source.kind, source.itemId, hash, source.sourceLanguage, "ko"].join("\u001f");
 
-async function prepare(records: TranslationSource[], provider: TranslationProvider): Promise<Prepared[]> {
+async function prepare(records: TranslationSource[]): Promise<Prepared[]> {
   return Promise.all(records.map(async (source) => {
     const sourceHash = await sha256(source.text);
-    return { source, sourceHash, key: cacheKey(source, sourceHash, provider) };
+    return { source, sourceHash, key: cacheKey(source, sourceHash) };
   }));
 }
 
@@ -146,66 +147,135 @@ async function translateGoogle(text: string, sourceLanguage: MemoryLanguage, isC
   }
   return translated.join("");
 }
-function extractJson(value: string): unknown {
-  const clean = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const start = clean.indexOf("{"); const end = clean.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("번역 모델이 JSON을 반환하지 않았습니다.");
-  return JSON.parse(clean.slice(start, end + 1));
+export const translationOutputBudget = (state: RuntimeState) => state.settings.translationProvider === "server" ? state.settings.translationServerMaxOutput : state.settings.translationMaxOutput;
+export const backgroundTranslationEnabled = (state: RuntimeState) => state.settings.translationProvider === "google" || state.settings.translationBackground;
+export async function callTranslationBatch(state: RuntimeState, items: import("@rcm/shared").TranslationPart[], provider = state.settings.translationProvider, background = false) {
+  const stats = state.translationStats ??= { calls: 0, items: 0 };
+  stats.calls += 1;
+  state.translationBackgroundRunning = background;
+  state.publishActivity?.(); state.refreshStatusWidget?.();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const call = async () => {
+      if (provider === "server") return clientFor(state).request<{ items: Array<{ id: string; partIndex: number; ko: string }>; usage?: any; model: string }>("/v1/translations/batch", {
+        method: "POST", body: JSON.stringify({ items, model: state.settings.translationServerModel, temperature: state.settings.translationTemperature, thinking: state.settings.translationThinking, maxOutput: state.settings.translationServerMaxOutput }),
+      }, TRANSLATION_TIMEOUT_MS + 5000);
+      const response = await risuai.runLLMModel({ messages: [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
+      if (response?.type !== "success" || typeof response.result !== "string") throw new TranslationError("MODEL_CONNECTION_FAILED", String(response?.result || "Risu 번역 모델 호출 실패"));
+      return { items: validateTranslation(response.result, items, response.finish_reason ?? response.finishReason), usage: response.usage ?? response.usageMetadata, model: state.settings.translationSlot === "static" ? state.settings.translationModel : state.settings.translationSlot };
+    };
+    const result = await Promise.race([call(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TranslationError("TIMEOUT", "참고 번역 호출이 120초를 넘었습니다.")), TRANSLATION_TIMEOUT_MS); })]);
+    const usage = result.usage;
+    const input = usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount;
+    const output = usage?.completion_tokens ?? usage?.output_tokens ?? usage?.candidatesTokenCount;
+    const total = usage?.total_tokens ?? usage?.totalTokenCount ?? (typeof input === "number" && typeof output === "number" ? input + output : undefined);
+    if (typeof total === "number" && Number.isFinite(total)) stats.tokens = (stats.tokens ?? 0) + total;
+    return result;
+  } catch (error) {
+    const code = (error as { code?: string })?.code ?? "MODEL_CONNECTION_FAILED";
+    const detail = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [state.settings.serverToken]);
+    stats.lastError = `${code}: ${detail}`;
+    addLog(state.logs, "warn", `Reference translation failed: ${stats.lastError}`);
+    throw new TranslationError(code, detail);
+  } finally {
+    if (timer) clearTimeout(timer);
+    state.translationBackgroundRunning = false;
+    state.publishActivity?.(); state.refreshStatusWidget?.();
+  }
 }
-async function translateRisuBatch(state: RuntimeState, records: TranslationSource[], isCurrent: () => boolean): Promise<Map<string, string>> {
+async function translateRisuBatch(state: RuntimeState, records: Pick<TranslationSource, "text">[], provider: TranslationProvider, isCurrent: () => boolean, background: boolean, completed: (index: number, text: string, model: string) => Promise<void>): Promise<{ translated: Map<string, string>; model: string }> {
   return withRisuSlot(async () => {
-    const systemPrompt = prepareAuxiliaryText('Translate each text to natural Korean. Preserve proper names, numbers, directions, quotations, and meaning. Return strict JSON only as {"items":[{"id":string,"partIndex":number,"ko":string}]}. Return every supplied part separately with its exact id and partIndex. Source languages: ' + JSON.stringify(Object.fromEntries(records.map(record => [record.itemId, record.sourceLanguage]))));
-    const plan = await clientFor(state).request<{ parts: Array<{ systemPrompt: string; userPrompt: string; items: Array<{ id: string; partIndex: number; partCount: number }> }> }>("/v1/admin/auxiliary/translation-plan", {
-      method: "POST", body: JSON.stringify({ systemPrompt, items: records.map(record => ({ id: record.itemId, text: prepareAuxiliaryText(record.text) })) }),
-    });
-    const translated = new Map<string, Map<number, string>>();
-    const totals = new Map<string, number>();
-    for (const part of plan.parts) {
-      if (!isCurrent()) throw new Error("Translation cancelled");
-      const response = await risuai.runLLMModel({ messages: [{ role: "system", content: part.systemPrompt }, { role: "user", content: part.userPrompt }], mode: "translate", allowPlugins: true });
-      if (response?.type !== "success" || typeof response.result !== "string") throw new Error(response?.result || "Risu 번역 모델 호출에 실패했습니다.");
-      const reason = response?.finish_reason ?? response?.finishReason;
-      if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(reason ?? "").toUpperCase())) throw new Error("번역 응답이 잘려 저장하지 않았습니다.");
-      const parsed = extractJson(response.result) as { items?: Array<{ id?: unknown; partIndex?: unknown; ko?: unknown }> };
-      for (const expected of part.items) {
-        const matches = (parsed.items ?? []).filter(item => item.id === expected.id && (item.partIndex === expected.partIndex || (expected.partCount === 1 && item.partIndex === undefined)));
-        if (matches.length !== 1 || typeof matches[0]!.ko !== "string") throw new Error("번역 응답에 누락되거나 중복된 구간이 있습니다.");
-        const pieces = translated.get(expected.id) ?? new Map<number, string>();
-        if (pieces.has(expected.partIndex)) throw new Error("번역 구간이 중복되었습니다.");
-        pieces.set(expected.partIndex, matches[0]!.ko); translated.set(expected.id, pieces); totals.set(expected.id, expected.partCount);
+    if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
+    if(provider === "server") {
+      const {config}=await clientFor(state).request<{config:import("@rcm/shared").TranslationConnectionPublicConfig}>("/v1/admin/translation/initialize", {
+        method:"POST",body:JSON.stringify({model:state.settings.translationServerModel,temperature:state.settings.translationTemperature,thinking:state.settings.translationThinking,maxOutput:state.settings.translationServerMaxOutput}),
+      });
+      state.settings.translationServerMaxOutput=config.maxOutputTokens;
+    }
+    const batches = planTranslation(records.map((record, index) => ({ id: String(index), text: prepareAuxiliaryText(record.text) })), provider === "server" ? state.settings.translationServerMaxOutput : state.settings.translationMaxOutput);
+    const translated = new Map<string, string>(); let model = "";
+    for (const items of batches) {
+      if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
+      const response = await callTranslationBatch(state, items, provider, background);
+      model = response.model;
+      for (const item of response.items) {
+        translated.set(item.id, (translated.get(item.id) ?? "") + item.ko);
+        const expected = items.find(part => part.id === item.id && part.partIndex === item.partIndex)!;
+        if (item.partIndex === expected.partCount - 1) await completed(Number(item.id), translated.get(item.id)!, model);
       }
     }
-    return new Map(records.map(record => {
-      const pieces = translated.get(record.itemId);
-      if (!pieces || pieces.size !== totals.get(record.itemId)) throw new Error("번역이 끝나지 않은 원문이 있습니다.");
-      return [record.itemId, [...pieces].sort(([left], [right]) => left - right).map(([, text]) => text).join("")];
-    }));
+    return { translated, model };
   });
 }
+// Parse the packet's markup grammar only; never infer prose semantics. Quoted > stays in its tag.
+const packetTag = () => /<!--[\s\S]*?-->|<\/?[A-Za-z_][\w:.-]*(?:[^<>"']|"[^"]*"|'[^']*')*>/g;
+
+/** Explicit, ephemeral translation: deliberately bypasses every cache and prefetch path. */
+export async function translatePacket(state: RuntimeState, packet: string, sourceLanguage: MemoryLanguage, isCurrent: () => boolean = () => true): Promise<string> {
+  const provider = state.settings.translationProvider;
+  try {
+    if (provider === "google") return await translateGoogle(packet, sourceLanguage, isCurrent);
+    const tags = [...packet.matchAll(packetTag())];
+    const pieces: string[] = []; const records: Array<{ text: string }> = []; const positions: number[] = [];
+    let offset = 0;
+    const text = (value: string) => {
+      const match = /^(\s*)([\s\S]*?)(\s*)$/.exec(value)!;
+      pieces.push(match[1]!);
+      if (match[2]) { positions.push(pieces.length); records.push({ text: match[2] }); pieces.push(""); }
+      pieces.push(match[3]!);
+    };
+    for (const tag of tags) { text(packet.slice(offset, tag.index)); pieces.push(tag[0]); offset = tag.index! + tag[0].length; }
+    text(packet.slice(offset));
+    if (!records.length) return packet;
+    const result = await translateRisuBatch(state, records, provider, isCurrent, false, async () => {});
+    positions.forEach((position, index) => {
+      const value = result.translated.get(String(index));
+      if (!value?.trim()) throw new TranslationError("MISSING_ITEMS", "번역 항목 누락");
+      pieces[position] = value;
+    });
+    const translated = pieces.join("");
+    if (JSON.stringify(translated.match(packetTag()) ?? []) !== JSON.stringify(tags.map(tag => tag[0]))) {
+      throw new TranslationError("TAG_SEQUENCE_CHANGED", "태그 변경");
+    }
+    if (state.translationStats) state.translationStats.items += records.length;
+    return translated;
+  } catch (error) {
+    const code = (error as { code?: string })?.code ?? (provider === "google" ? "GOOGLE_TRANSLATION_FAILED" : "MODEL_CONNECTION_FAILED");
+    const detail = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [state.settings.serverToken]);
+    addLog(state.logs, "warn", `Packet translation failed: ${code}: ${detail}`);
+    throw new TranslationError(code, detail);
+  }
+}
+
 function changeActivity(state: RuntimeState, delta: number, error?: string): void {
   aggregatePending = Math.max(0, aggregatePending + delta);
   state.translationActivity = { pending: aggregatePending, ...(error ? { error } : {}) };
   state.publishActivity?.(); state.refreshStatusWidget?.();
 }
 
-async function translateRecordsUnlocked(state: RuntimeState, records: TranslationSource[], provider = state.settings.translationProvider, isCurrent: () => boolean = () => true): Promise<TranslationResult[]> {
+async function translateRecordsUnlocked(state: RuntimeState, records: TranslationSource[], provider = state.settings.translationProvider, isCurrent: () => boolean = () => true, background = false, replaceGoogle = false): Promise<TranslationResult[]> {
   if (!records.length) return [];
   if (records.every((record) => record.sourceLanguage === "ko")) return records.map((source) => ({ ...source, translated: source.text, cached: true }));
   let pendingStarted = 0;
   try {
-    const prepared = await prepare(records, provider);
-    const cachedRows = await clientFor(state).request<{ items: Array<{ key: string; translated: string }> }>("/v1/translations/cache/lookup", {
-      method: "POST", body: JSON.stringify({ keys: prepared.map((item) => item.key) }),
-    }, 8_000).then((result) => result.items).catch(() => []);
-    const cached = new Map(cachedRows.map((row) => [row.key, row.translated]));
+    const prepared = await prepare(records);
+    const cachedRows: Array<{ key: string; translated: string; provider?: string }> = [];
+    for (let offset = 0; offset < prepared.length; offset += 500) {
+      const result = await clientFor(state).request<{ items: typeof cachedRows }>("/v1/translations/cache/lookup", {
+        method: "POST", body: JSON.stringify({ keys: prepared.slice(offset, offset + 500).map(item => item.key) }),
+      }, 8_000);
+      cachedRows.push(...result.items);
+    }
+    const cached = new Map(cachedRows.filter(row => !replaceGoogle || row.provider !== "google").map((row) => [row.key, row.translated]));
     const results = new Map<string, TranslationResult>();
     for (const item of prepared) if (cached.has(item.key)) results.set(item.key, { ...item.source, translated: cached.get(item.key)!, cached: true });
-    const missing = prepared.filter((item) => !cached.has(item.key));
+    const missing = [...new Map(prepared.filter(item => !cached.has(item.key)).map(item => [item.key, item])).values()];
     if (!missing.length) return prepared.map((item) => results.get(item.key)!);
     if (!isCurrent()) return prepared.map(item => results.get(item.key)).filter((item): item is TranslationResult => Boolean(item));
     pendingStarted = missing.length; changeActivity(state, pendingStarted);
     const fresh = new Map<string, string>();
     let batchError: string | undefined;
+    let model = "";
     const fail = (item: Prepared, error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       batchError ??= message;
@@ -220,15 +290,20 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
       });
     } else {
       try {
-        const translated = await translateRisuBatch(state, missing.map((item) => item.source), isCurrent);
-        for (const item of missing) {
-          const value = translated.get(item.source.itemId);
+        const response = await translateRisuBatch(state, missing.map((item) => item.source), provider, isCurrent, background, async (index, text, model) => {
+          const item = missing[index]!;
+          // Persist each completed source before another paid call. A later failure must not erase this work.
+          await clientFor(state).request("/v1/translations/cache/upsert", { method: "POST", body: JSON.stringify({ items: [{ key: item.key, ...item.source, sourceHash: item.sourceHash, provider, model, targetLanguage: "ko", translated: text }] }) }, 8000);
+          fresh.set(item.key, text);
+        });
+        const translated = response.translated; model = response.model;
+        for (const [index, item] of missing.entries()) {
+          const value = translated.get(String(index));
           if (!value) throw new Error(`번역 결과에서 ${item.source.itemId} 항목이 빠졌습니다.`);
           fresh.set(item.key, value);
         }
       } catch (error) {
-        fresh.clear();
-        missing.forEach((item) => fail(item, error));
+        missing.filter(item => !fresh.has(item.key)).forEach((item) => fail(item, error));
       }
     }
     const cacheItems = missing.flatMap((item) => {
@@ -236,16 +311,19 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
       if (!translated) return [];
       results.set(item.key, { ...item.source, translated, cached: false });
       return [{ key: item.key, serverInstanceId: item.source.serverInstanceId, chatId: item.source.chatId, kind: item.source.kind, itemId: item.source.itemId,
-        sourceHash: item.sourceHash, provider, sourceLanguage: item.source.sourceLanguage, targetLanguage: "ko", translated }];
+        sourceHash: item.sourceHash, provider, model, sourceLanguage: item.source.sourceLanguage, targetLanguage: "ko", translated }];
     });
-    if (cacheItems.length && isCurrent()) await clientFor(state).request("/v1/translations/cache/upsert", { method: "POST", body: JSON.stringify({ items: cacheItems }) }, 8_000).catch(() => undefined);
+    if (provider === "google" && isCurrent()) for (let offset = 0; offset < cacheItems.length; offset += 500) {
+      await clientFor(state).request("/v1/translations/cache/upsert", { method: "POST", body: JSON.stringify({ items: cacheItems.slice(offset, offset + 500) }) }, 8_000);
+    }
+    if (provider !== "google" && state.translationStats) state.translationStats.items += cacheItems.length;
     changeActivity(state, -pendingStarted, batchError); pendingStarted = 0;
-    if (batchError) addLog(state.logs, "warn", `Reference translation failed: [오류 원문 제외]`);
+    if (batchError) addLog(state.logs, "warn", `Reference translation failed: ${sanitizeDiagnosticText(batchError ?? "cache request failed", [state.settings.serverToken])}`);
     return prepared.map((item) => results.get(item.key) ?? { ...item.source, translated: item.source.text, cached: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     changeActivity(state, pendingStarted ? -pendingStarted : 0, message);
-    addLog(state.logs, "warn", `Reference translation failed: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Reference translation failed: ${sanitizeDiagnosticText(message, [state.settings.serverToken])}`);
     return records.map((source) => ({ ...source, translated: source.text, cached: false, error: message }));
   }
 }
@@ -266,9 +344,18 @@ export async function translateRecords(state: RuntimeState, records: Translation
   finally { releaseTranslation(); }
 }
 
-/** At most 24 uncached records, two per batch; yield the provider to any reader. */
+/** Google keeps its bounded prefetch; LLM modes pack all pending sources by output budget. */
 export async function prefetchTranslationRecords(state: RuntimeState, records: TranslationSource[], isCurrent: () => boolean): Promise<TranslationSource[]> {
   const provider = state.settings.translationProvider;
+  if (!backgroundTranslationEnabled(state)) return [];
+  if (provider !== "google") {
+    if (translationBusy) return records;
+    translationBusy = true;
+    try {
+      const result = await translateRecordsUnlocked(state, records, provider, () => isCurrent() && backgroundTranslationEnabled(state) && state.settings.translationProvider === provider, true);
+      return result.some(item => item.error) ? records : [];
+    } finally { releaseTranslation(); }
+  }
   const current = () => isCurrent() && state.settings.autoTranslate && state.settings.translationDisplay === "ko"
     && state.settings.translationProvider === provider;
   let translated = 0;
@@ -303,9 +390,12 @@ export async function translationCacheCount(state: RuntimeState): Promise<number
   return (await translationCacheStats(state)).items;
 }
 export async function readCachedTranslations(state: RuntimeState, records: TranslationSource[], provider: TranslationProvider): Promise<TranslationResult[]> {
-  const prepared = await prepare(records, provider);
-  const response = await clientFor(state).request<{ items: Array<{ key: string; translated: string }> }>("/v1/translations/cache/lookup", { method: "POST", body: JSON.stringify({ keys: prepared.map((item) => item.key) }) });
-  const cached = new Map(response.items.map((item) => [item.key, item.translated]));
+  const prepared = await prepare(records);
+  const cached = new Map<string, string>();
+  for (let offset = 0; offset < prepared.length; offset += 500) {
+    const response = await clientFor(state).request<{ items: Array<{ key: string; translated: string }> }>("/v1/translations/cache/lookup", { method: "POST", body: JSON.stringify({ keys: prepared.slice(offset, offset + 500).map(item => item.key) }) });
+    for (const row of response.items) cached.set(row.key, row.translated);
+  }
   return prepared.flatMap((item) => cached.has(item.key) ? [{ ...item.source, translated: cached.get(item.key)!, cached: true }] : []);
 }
 export async function clearTranslationCache(state: RuntimeState): Promise<void> {
@@ -313,4 +403,22 @@ export async function clearTranslationCache(state: RuntimeState): Promise<void> 
 }
 export async function invalidateTranslationCache(state: RuntimeState, match: Partial<Pick<TranslationSource, "serverInstanceId" | "chatId" | "kind" | "itemId">> & { itemIdPrefix?: string }): Promise<void> {
   await clientFor(state).request("/v1/translations/cache/invalidate", { method: "POST", body: JSON.stringify(match) });
+}
+
+/** Explicitly approved replacement uses the same visible background call path, even when automatic prefetch is off. */
+export async function retranslateGoogleRecords(state: RuntimeState, records: TranslationSource[]): Promise<void> {
+  const provider = state.settings.translationProvider;
+  if (provider === "google") return;
+  if (translationBusy) await new Promise<void>(resolve => screenTranslationWaiters.push(resolve)); else translationBusy = true;
+  try { await translateRecordsUnlocked(state, records, provider, () => state.settings.translationProvider === provider, true, true); }
+  finally { releaseTranslation(); }
+}
+export async function googleTranslationRecords(state: RuntimeState, records: TranslationSource[]): Promise<TranslationSource[]> {
+  const prepared = await prepare(records);
+  const keys = new Set<string>();
+  for (let offset = 0; offset < prepared.length; offset += 500) {
+    const response = await clientFor(state).request<{ items: Array<{ key: string; provider: string }> }>("/v1/translations/cache/lookup", { method: "POST", body: JSON.stringify({ keys: prepared.slice(offset, offset + 500).map(item => item.key) }) });
+    for (const row of response.items) if (row.provider === "google") keys.add(row.key);
+  }
+  return prepared.filter(item => keys.has(item.key)).map(item => item.source);
 }

@@ -1,5 +1,5 @@
 import type { QuizAnswerResponse, QuizNextResponse } from "@rcm/shared";
-import { ServerRequestError, isMissingServerRoute } from "./api-client.js";
+import { ServerRequestError, isMissingServerRoute, isServerConnectionFailure } from "./api-client.js";
 import type { QuizView } from "./quiz-chip.js";
 
 export interface QuizSessionDeps {
@@ -7,6 +7,8 @@ export interface QuizSessionDeps {
   chatId(): string | undefined;
   /** 퀴즈 사용 is on and the server has not been found to lack the quiz. */
   enabled(): boolean;
+  connectionReady(): boolean;
+  connectionFailed(error: unknown): void;
   setSupported(supported: boolean): void;
   log(message: string): void;
 }
@@ -43,7 +45,7 @@ export class QuizSession {
   /** Loads the next question. Returns false when the request failed (not when the quiz is simply off). */
   async refresh(): Promise<boolean> {
     const chatId = this.deps.chatId();
-    if (!this.deps.enabled() || !chatId) { this.next = undefined; this.loadFailed = false; return true; }
+    if (!this.deps.enabled() || !this.deps.connectionReady() || !chatId) { this.reset(); return true; }
     const epoch = this.epoch;
     try {
       const next = await this.deps.client.quizNext(chatId);
@@ -55,6 +57,7 @@ export class QuizSession {
     } catch (error) {
       if (epoch !== this.epoch || chatId !== this.deps.chatId()) return true;
       this.next = undefined;
+      if (this.hideConnectionFailure(error)) return true;
       if (error instanceof ServerRequestError && error.code === "CHAT_NOT_FOUND") { this.loadFailed = false; return true; }
       if (isMissingServerRoute(error)) { this.loadFailed = false; this.deps.setSupported(false); return true; }
       this.loadFailed = true;
@@ -95,6 +98,7 @@ export class QuizSession {
       this.view = { mode: "result", question: view.question, answer, index: view.index, total: view.total };
     } catch (error) {
       if (epoch !== this.epoch || chatId !== this.deps.chatId()) return;
+      if (this.hideConnectionFailure(error)) return;
       this.deps.log(`Quiz answer failed: ${String(error)}`);
       this.fail("답을 보내지 못했어요. 연결을 확인하고 다시 시도해 주세요.", async () => { this.view = view; await this.answer(index); });
     } finally {
@@ -120,7 +124,15 @@ export class QuizSession {
     this.view = { mode: "error", message };
   }
 
+  private hideConnectionFailure(error: unknown): boolean {
+    if (!isServerConnectionFailure(error)) return false;
+    this.reset();
+    this.deps.connectionFailed(error);
+    return true;
+  }
+
   private showQuestion(): void {
+    if (!this.deps.connectionReady()) { this.view = undefined; return; }
     const next = this.next;
     this.view = next?.question
       ? { mode: "question", question: next.question, stats: next.stats, index: this.answered + 1, total: this.answered + Math.max(next.remaining, 1) }

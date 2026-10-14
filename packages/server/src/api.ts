@@ -1,3 +1,7 @@
+import { StateOutcomeCapture } from "./state-outcomes.js";
+import { automaticStateCandidates, fundAutomaticState, renderAutomaticState, selectAutomaticState, sharedStateBudget } from "./automatic-state.js";
+import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText } from "@rcm/shared";
+import { requestStructuredProvider } from "./server-llm.js";
 import { connectionFailureReason, type ConnectionFailureCode } from "@rcm/shared";
 import { storySeedCounts } from "./story-seeds.js";
 import { z } from "zod";
@@ -5,8 +9,10 @@ import { deleteLedgerRecord, rememberLedgerEditOrigin } from "./user-deletions.j
 import { QuizAnswerRequestSchema, UserCorrectionEditSchema } from "@rcm/shared";
 import { committedEditOrdinal, correctionView } from "./user-corrections.js";
 import { answerQuiz, completeQuizJob, disableAllQuizzes, nextQuiz, quizStatus, regenerateQuizzes, resetQuizStats, setQuizEnabled } from "./quiz.js";
+import { TranslationLegacySettingsSchema } from "@rcm/shared";
+import { TranslationConnection } from "./translation-connection.js";
 import { McpSelector } from "./mcp-selector.js";
-import { mcpRequestTimeoutMs, structuredStoryTimeEnd } from "@rcm/shared";
+import { INVALID_MEMORY_REF_MESSAGE, mcpRequestTimeoutMs, structuredStoryTimeEnd } from "@rcm/shared";
 import { collectStateEvidence, resolveAssertionHolders } from "./state-evidence.js";
 import { SocialRelationSchema } from "@rcm/shared";
 import { activeSocialRelations, findSocialRelationConflict, isReverseMutualSocialRelation, parseSocialRelation, sameSocialRelationIdentity, socialRelationKnowledge, socialRelationPredicateCollisions } from "./social-relations.js";
@@ -210,6 +216,7 @@ export function createApp(dependencies: Dependencies): Hono {
   const { db, config, embeddings, vectorEnabled } = dependencies;
   const llmStore = dependencies.llmStore ?? new ServerLlmStore(db, config.secretsPath, config.llmApiKeys ?? {}, config.llmTimeoutMs);
   const mcpSelector=new McpSelector(db,config.secretsPath,llmStore);
+  const translationConnection=new TranslationConnection(db,config.secretsPath,llmStore);
   embeddings.setTimeoutMs(llmStore.config.embeddingTimeoutMs);
   const serverWorker = dependencies.serverWorker ?? new ServerExtractionWorker(db, llmStore, embeddings, config.leaseSeconds);
   const reranker = dependencies.reranker ?? new VoyageReranker({ apiKey: () => config.voyageApiKey,
@@ -234,7 +241,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const health = {
       ok: true, version: RCM_SERVER_VERSION, apiRevision: RCM_API_REVISION, instanceId: serverInstanceId,
       vectorEnabled, embeddingReady: embeddings.ready, embedding: embeddings.status, reranker: reranker.status, serverTranslationCache: true, completeMemoryBackup: true,
-      serverLlm: llmStore.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
+      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
     };
     Object.assign(health.capabilities, {
       chatOperationLifecycleV2: true,
@@ -435,7 +442,8 @@ export function createApp(dependencies: Dependencies): Hono {
       mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n")), Math.min(200, Math.floor(parsed.tokenBudget * .1)));
     const maximumStoryBudget = storyBudgetLimit(parsed.tokenBudget);
     const storyProbe = compileStorySpine(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, maximumStoryBudget);
-    const stateCorpus = collectStateEvidence(db, parsed.chatId);
+    const stateTrace = retrievalTrace.isChatEnabled(parsed.chatId) ? new StateOutcomeCapture() : undefined;
+    const stateCorpus = collectStateEvidence(db, parsed.chatId, stateTrace, "shared");
     const stateMemorySources = db.prepare(`WITH sources AS (SELECT value id FROM json_each(?))
       SELECT m.id memory_id,e.value ->> '$.messageId' source_id FROM memories m,json_each(m.evidence_json) e
         JOIN sources s ON s.id=e.value ->> '$.messageId' WHERE m.chat_id=? AND m.active=1
@@ -457,7 +465,6 @@ export function createApp(dependencies: Dependencies): Hono {
     // cannot halve recall depth before duplicate memories are merged.
     const perPerspective = Math.max(128, retrievalBudget);
     const perspectiveSections: Array<{ name: string; data: string }> = [];
-    const anchors: string[] = [];
     const structuredManifests: PacketManifest[] = [];
     const eligibleAtoms = new Map<string, MemoryContextItem>();
     const directAtomKeys = new Set<string>();
@@ -496,13 +503,13 @@ export function createApp(dependencies: Dependencies): Hono {
         promptSourceMessageIds: trustedPromptSourceMessageIds,
         activePerspectives: retrievalPerspectives.filter((name) => name !== "__shared__"),
         collectDiagnostics: retrievalTrace.enabled,
+        stateOutcomeCapture: stateTrace,
       });
       if (result.perspectiveData) {
         const name = perspective === "__shared__" ? "shared" : perspective;
         perspectiveSections.push({ name, data: result.perspectiveData });
         structuredManifests.push(result.structuredManifest);
       }
-      if (result.stableAnchors) anchors.push(result.stableAnchors);
       for (const item of result.eligibleCandidates) {
         const existing = eligibleAtoms.get(item.id);
         eligibleAtoms.set(item.id, existing ? mergeMemoryContextItems(existing, item) : item);
@@ -553,7 +560,7 @@ export function createApp(dependencies: Dependencies): Hono {
       if (!selectedRoles.has(item.id)) selectedRoles.set(item.id, metadata?.core ? "core" : metadata?.typedDetailIds.length ? "association" : "longterm");
       if (!selectedCandidateClasses.has(item.id)) selectedCandidateClasses.set(item.id, metadata?.core ? "core" : metadata?.typedDetailIds.length ? "associative" : "unclassified");
     }
-    const renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, storyBudget, retrievalTrace.enabled);
+    let renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, storyBudget, retrievalTrace.enabled);
     // Trim only removes atoms. Resolve their original support IDs once, then
     // recompute exclusions from the atoms still present on every render.
     const dialogueSupportIds = new Map<MemoryContextItem["keyDialogues"][number], string>();
@@ -590,9 +597,17 @@ export function createApp(dependencies: Dependencies): Hono {
       const end = structuredStoryTimeEnd(row.story_time);
       return end === undefined ? latest : latest === undefined ? end : Math.max(latest, end);
     }, undefined);
+    const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives,
+      activeNames: namesPresent, query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
+      covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
+      namesRecognitionIds: new Set(sceneNames.recognitionIds) });
+    const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(parsed.tokenBudget);
+    const selectedState = selectAutomaticState(stateCandidates, stateBudget);
+    const ceilingDroppedState = new Set<string>();
     const rebuildPacket = () => {
-      emittedManifest = mergePacketManifests(structuredManifests);
-      const body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, perspectiveSections, selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
+      const state = renderAutomaticState(selectedState);
+      emittedManifest = mergePacketManifests([...structuredManifests, state.manifest]);
+      const body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
       const deliveredDetails = selectedItems.flatMap(item => item.details
         .filter(detail => emittedManifest.atomKeys.includes(memoryDetailAtomKey(detail))).map(detail => detail.text));
       const deliveredDialogueEvidence = selectedItems.flatMap(item => item.keyDialogues
@@ -620,12 +635,13 @@ export function createApp(dependencies: Dependencies): Hono {
       cueAnchor.decision.cueViewIndex = cueAnchor.cueViewIndex;
     }
     const completedTurn = Number((db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(parsed.chatId) as { completed_turn_count?: number } | undefined)?.completed_turn_count ?? 0);
-    const deliveredStateIds = new Set(mergePacketManifests(structuredManifests).stateEvidenceIds);
+    const deliveredStateIds = new Set(selectedState.map(row => row.item.id));
     const portfolioStory = renderStory();
     const portfolio = selectAutomaticPortfolio({ candidates: [...selectedItems], metadata: portfolioMetadata, policy: atomPolicy,
       stateSourceIds: new Set(stateCorpus.flatMap(state => state.current && deliveredStateIds.has(state.id) ? stateSources(state) : [])),
       storySupportIds: new Set(portfolioStory.supportMemoryIds ?? []), storySupportAtomIds: new Set(portfolioStory.supportItemIds ?? []), activeParticipants: activeTurnPerspectives,
       lastDelivered: automaticDeliveryHistory(db, parsed.chatId), completedTurn, hardTokenCeiling,
+      stateTokens: renderAutomaticState(selectedState).tokens,
       renderTokens: items => { selectedItems.splice(0, selectedItems.length, ...items); finalStory = compileStoryForSelection(); return estimateTokens(rebuildPacket()); } });
     selectedItems.splice(0, selectedItems.length, ...portfolio.items);
     for (const [id, role] of portfolio.roles) selectedRoles.set(id, role);
@@ -641,25 +657,68 @@ export function createApp(dependencies: Dependencies): Hono {
       finalStory = compileStoryForSelection();
       packet = rebuildPacket();
     };
-    while (selectedItems.length > 0 && estimateTokens(packet) > hardTokenCeiling) {
+    const protectedScene = (item: MemoryContextItem) => focusLeaderIdSet.has(item.id) || portfolioMetadata.get(item.id)?.core
+      || item.details.some(detail => cueAnchorKeys.has(memoryDetailAtomKey(detail)))
+      || item.keyDialogues.some(dialogue => cueAnchorKeys.has(memoryDialogueAtomKey(item.id, dialogue)));
+    const peripheralMemory = (item: MemoryContextItem) => !protectedScene(item)
+      && (portfolio.reasons.get(item.id)?.kind === "not_recalled_for"
+        || ["association", "serendipity"].includes(selectedRoles.get(item.id) ?? ""));
+    const dropState = (index: number) => {
+      ceilingDroppedState.add(selectedState.splice(index, 1)[0]!.item.id); packet = rebuildPacket();
+    };
+    while (estimateTokens(packet) > hardTokenCeiling) {
+      // 1. Peripheral memories yield before any current-state row.
+      const peripheral = lastMatchingIndex(selectedItems, item => !protectedScene(item)
+        && ["longterm", "association", "serendipity"].includes(selectedRoles.get(item.id) ?? ""));
+      if (peripheral >= 0) { removeAt(peripheral); continue; }
+      // 2. State outside the active scene yields before older continuity.
+      const outside = lastMatchingIndex(selectedState, row => !row.active);
+      if (outside >= 0) { dropState(outside); continue; }
+      // 3. Oldest continuity first, including historical structured records.
+      const continuity = selectedItems.filter(item => !protectedScene(item) && selectedRoles.get(item.id) === "continuity")
+        .sort((a, b) => (a.sourceOrdinal ?? 0) - (b.sourceOrdinal ?? 0))[0];
+      if (continuity) { removeAt(selectedItems.indexOf(continuity)); continue; }
+      if (finalStory.xml) {
+        const reducedBudget = Math.max(0, finalStory.tokens - (estimateTokens(packet) - hardTokenCeiling) - 1);
+        renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, reducedBudget, retrievalTrace.enabled);
+        finalStory = compileStoryForSelection(); packet = rebuildPacket(); continue;
+      }
+      if (perspectiveSections.length) {
+        // These sections contain only physical/relationship history now; the
+        // current ledger is independently selected and cannot be popped here.
+        perspectiveSections.splice(0); structuredManifests.splice(0); packet = rebuildPacket(); continue;
+      }
+      const ordinary = lastMatchingIndex(selectedItems, item => !protectedScene(item));
+      if (ordinary >= 0) { removeAt(ordinary); continue; }
+      // 4. Only protected scene and active-participant state remain.
       if (trimAutomaticAtom(selectedItems, directAtomKeys, true, atomPolicy, atomDecisions, "hard_ceiling")) {
-        finalStory = compileStoryForSelection(); packet = rebuildPacket(); continue;
+        packet = rebuildPacket(); continue;
       }
-      const continuityIndex = lastMatchingIndex(selectedItems, (item) => !focusLeaderIdSet.has(item.id) && !continuityBridgeIdSet.has(item.id) && !["association", "serendipity"].includes(selectedRoles.get(item.id) ?? ""));
-      if (continuityIndex >= 0) { removeAt(continuityIndex); continue; }
-      if (estimateTokens(packet) > hardTokenCeiling && trimAutomaticAtom(selectedItems, directAtomKeys, true, atomPolicy, atomDecisions)) {
-        finalStory = compileStoryForSelection(); packet = rebuildPacket(); continue;
-      }
-      const nonFocusIndex = lastMatchingIndex(selectedItems, (item) => !focusLeaderIdSet.has(item.id));
-      const index = continuityIndex >= 0 ? continuityIndex : nonFocusIndex >= 0 ? nonFocusIndex : selectedItems.length - 1;
-      removeAt(index);
+      const unpinned = lastMatchingIndex(selectedState, row => !row.pinned);
+      if (unpinned >= 0) { dropState(unpinned); continue; }
+      if (selectedItems.length) { removeAt(selectedItems.length - 1); continue; }
+      if (sourceEvidence.items.length) { sourceEvidence.items.pop(); packet = rebuildPacket(); continue; }
+      sceneNames.text = ""; sceneNames.omittedCount += sceneNames.pairCount; sceneNames.pairCount = 0;
+      packet = rebuildPacket();
+      break;
     }
-    // Enforce the same ceiling even if a pathological metadata-only packet remains.
-    while (estimateTokens(packet) > hardTokenCeiling && perspectiveSections.length) {
-      perspectiveSections.pop(); structuredManifests.pop(); packet = rebuildPacket();
-    }
-    if (estimateTokens(packet) > hardTokenCeiling && finalStory.xml) {
-      finalStory = { ...finalStory, xml: "", nodeIds: [], tokens: 0 }; packet = rebuildPacket();
+    const fundedFrom = fundAutomaticState({ candidates: stateCandidates.filter(row => !ceilingDroppedState.has(row.item.id)),
+      tokenBudget: parsed.tokenBudget,
+      longtermMemoryIds: selectedItems.filter(item => selectedRoles.get(item.id) === "longterm")
+        .sort((a, b) => Number(portfolio.reasons.get(b.id)?.kind === "open_seed") - Number(portfolio.reasons.get(a.id)?.kind === "open_seed"))
+        .map(item => item.id),
+      selected: selectedState, memories: selectedItems, canYield: peripheralMemory, hardTokenCeiling,
+      renderTokens: () => { finalStory = compileStoryForSelection(); return estimateTokens(rebuildPacket()); } });
+    for (const decision of atomDecisions) if (fundedFrom.includes(decision.memoryId) && decision.outcome === "retained") decision.outcome = "memory_removed";
+    finalStory = compileStoryForSelection(); packet = rebuildPacket();
+    // Only genuinely unused capacity goes to remaining, non-scene state rows.
+    let sharedBudgetUsed = Math.max(stateBudget, renderAutomaticState(selectedState).tokens);
+    for (const row of stateCandidates) {
+      if (selectedState.includes(row) || ceilingDroppedState.has(row.item.id)) continue;
+      selectedState.push(row); const expanded = rebuildPacket();
+      if (estimateTokens(expanded) <= hardTokenCeiling) {
+        packet = expanded; sharedBudgetUsed = Math.max(sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
+      } else { selectedState.pop(); packet = rebuildPacket(); }
     }
     // Refill whole detail/dialogue units in rounds. Already selected connection
     // scenes keep their places; omitted records must fit as readable bundles.
@@ -688,13 +747,27 @@ export function createApp(dependencies: Dependencies): Hono {
       else { refillRejected.atomBudget++; selectedItems[index]=previous; finalStory=compileStoryForSelection(); packet=rebuildPacket(); }
     }
     if (parsed.memoryReferenceMode === "none") packet = packet.replace(/\s+id="[^"]+"/g, "");
+    const keptPeripheralIds = selectedItems.filter(peripheralMemory).map(item => item.id);
+    if (!sceneNames.text) for (const entry of stateTrace?.snapshot().entries ?? []) {
+      if (entry.rendered === "folded_into_names") for (const perspective of entry.perspectives) {
+        stateTrace?.record(perspective, entry, "final_ceiling");
+      }
+    }
+    for (const row of stateCandidates) for (const [index, perspective] of row.perspectives.entries()) {
+      stateTrace?.record(perspective, row.item, selectedState.includes(row) ? index ? "deduped" : "delivered"
+        : ceilingDroppedState.has(row.item.id) ? "final_ceiling" : "budget", { rank: row.rank,
+          ...(!selectedState.includes(row) ? { keptPeripheralMemoryIds: keptPeripheralIds } : {}) });
+    }
+    stateTrace?.budget("shared", sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
     const assemblyFinishedAt = performance.now();
     const finalSelectedIds = new Set(selectedItems.map((item) => item.id));
     for (const retrieval of retrievalDiagnostics) for (const candidate of retrieval.candidates) if (finalSelectedIds.has(candidate.id)) {
       candidate.selectionRole = selectedRoles.get(candidate.id);
       candidate.roleReason = portfolio.reasons.get(candidate.id);
     }
-    const finalManifest = { ...injectionManifest(packet, emittedManifest, perspectiveSections.map((item) => item.name), finalStory.nodeIds), sourceEvidenceIds: deliveredSources.map((item) => item.id) };
+    const deliveredPerspectives = [...new Set([...perspectiveSections.map(item => item.name), ...selectedState.flatMap(row => row.perspectives)])]
+      .map(name => name === "__shared__" ? "shared" : name);
+    const finalManifest = { ...injectionManifest(packet, emittedManifest, deliveredPerspectives, finalStory.nodeIds), sourceEvidenceIds: deliveredSources.map((item) => item.id) };
     finalManifest.atomKeys.push(...deliveredSources.map(sourceEvidenceAtomKey));
     if (parsed.memoryGeneration) memoryReferences.deliver(parsed.chatId, parsed.memoryGeneration, [...packet.matchAll(/ref="(m[0-9]+)"/g)].map(match => match[1]!));
     const deliveredActivationAtoms = new Set(finalManifest.atomKeys);
@@ -709,7 +782,7 @@ export function createApp(dependencies: Dependencies): Hono {
         return delivered ? [delivered] : [];
       }),
     );
-    const stableAnchors = [...new Set(anchors)].join("\n");
+    const stableAnchors = [renderAutomaticState(selectedState).xml, ...perspectiveSections.map(section => section.data)].filter(Boolean).join("\n");
     const finalCandidateClassCounts = { core: 0, associative: 0, continuity: 0, unclassified: 0 };
     for (const item of selectedItems) finalCandidateClassCounts[selectedCandidateClasses.get(item.id) ?? "unclassified"] += 1;
     const finalRoleCounts: Record<RetrievalSelectionRole, number> = { focus: 0, core: 0, continuity: 0, association: 0, serendipity: 0, longterm: 0, filler: 0 };
@@ -789,6 +862,7 @@ export function createApp(dependencies: Dependencies): Hono {
     };
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) void retrievalTrace.record({
       atomPreservation, roleTokens,
+      currentState: stateTrace?.snapshot(),
       timings,
       syncTimings,
       requestBytes: Buffer.byteLength(requestBody, "utf8"),
@@ -1218,7 +1292,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ answers, packet: renderMcpAnswer(answers), selected: [], deliveredAtomKeys: [], deliveredSourceRanges: [],
         archiveEmpty: true, timings: { serverMs: performance.now() - handlerStarted, rerankCalls: 0, rerankTotalTokens: 0 } });
     }
-    if (body.memoryGeneration && !memoryReferences.ensure(context.req.param("id"), body.memoryGeneration)) return context.json({ answers: [], code: "INVALID_MEMORY_REF", error: "The generation is no longer current." });
+    if (body.memoryGeneration && !memoryReferences.ensure(context.req.param("id"), body.memoryGeneration)) return context.json({ answers: [], opportunityError: "stale_turn", newAtomCount: 0, error: "The request generation is no longer current." });
     const embeddingStarted = performance.now();
     const semanticResults = await embeddings.searchBatchDetailed([body.query], context.req.param("id"));
     const embeddingMs = performance.now() - embeddingStarted;
@@ -1336,21 +1410,33 @@ export function createApp(dependencies: Dependencies): Hono {
     const started = performance.now();
     const body = ExpandRequestSchema.parse(await context.req.json());
     const chatId = context.req.param("id");
-    const memoryId = memoryReferences.resolve(chatId, body.memoryGeneration, body.ref);
-    if (!memoryId) return context.json({ answers: [], error: "This memory ref is invalid or belongs to an earlier generation. Use a ref supplied in the current response.", code: "INVALID_MEMORY_REF" });
+    const reject = async (code: string, reason: string, error: string) => {
+      if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
+        id: randomUUID(), kind: "mcp_delivery", chatId, traceContext: body.traceContext,
+        toolName: "expand_rp_memory", ref: body.ref, query: body.focus ?? "", intent: "expand",
+        outcome: "rejected", reason, origin: "server", selectedIds: [], response: error,
+        elapsedMs: performance.now() - started,
+      });
+      return context.json({ answers: [], code, error });
+    };
+    const memoryId = memoryReferences.resolve(chatId, body.ref);
+    if (!memoryId) return reject("INVALID_MEMORY_REF", "invalid_ref", INVALID_MEMORY_REF_MESSAGE);
+    const version = memoryReferences.version(chatId, memoryId);
     const result = retrieve(db, { chatId, query: body.focus ?? "", perspective: body.perspective,
       memoryOnlyInjection: body.memoryOnlyInjection,
       tokenBudget: body.tokenBudget, seedMemoryId: memoryId, followAllDetails: true,
       reinforce: true, deferReinforcement: true, mcpCandidatesOnly: true,
       activePerspectives: body.activePerspectives, collectDiagnostics: retrievalTrace.enabled });
     result.eligibleCandidates = result.eligibleCandidates.filter(item => item.id === memoryId);
+    if (!result.eligibleCandidates.length) return reject("INVALID_MEMORY_REF", "invalid_ref", INVALID_MEMORY_REF_MESSAGE);
     result.answers = [];
     const involved = [...new Set(result.eligibleCandidates.flatMap(item => item.participants))];
     const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
     await finalizeMcpAnswer(db, chatId, result, { archiveView: ["narrator", "omniscient", "omniscient narrator"].includes(body.perspective.trim().toLowerCase()), query: body.focus ?? "",
       tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives ?? [body.perspective], excludedAtoms: [],
       semantic: [], seedMemoryId: memoryId });
-    if (!memoryReferences.resolve(chatId, body.memoryGeneration, body.ref)) return context.json({ answers: [], error: "The memory changed during expansion.", code: "INVALID_MEMORY_REF" });
+    // A change before the request is allowed; a change during assembly is not.
+    if (version !== memoryReferences.version(chatId, memoryId)) return reject("MEMORY_SNAPSHOT_CHANGED", "snapshot_changed", "The memory changed during this request. Retry against the current chat.");
     for (const answer of result.answers ?? []) for (const evidence of answer.evidence) if (evidence.memoryId === memoryId) evidence.ref = body.ref;
     const names = renderSceneNames(db, chatId, [body.perspective, ...involved], involved,
       mentionedCharacters(db, chatId, body.focus ?? ""), namesBudget);
@@ -1377,7 +1463,8 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ error: "Invalid memory delivery receipt" }, 400);
     }
     recordAutomaticDelivery(db, body.chatId, body.memoryIds);
-    return context.body(null, 204);
+    // Risu plugin API v3 rebuilds responses as new Response(body, init); a 204 with any body throws there.
+    return context.json({ ok: true });
   });
 
   if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) app.post("/v1/diagnostics/retrieval-events", async (context) => {
@@ -1387,7 +1474,8 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ error: "Invalid retrieval trace event" }, 400);
     }
     await retrievalTrace.record(body);
-    return context.body(null, 204);
+    // Risu plugin API v3 rebuilds responses as new Response(body, init); a 204 with any body throws there.
+    return context.json({ ok: true });
   });
 
   app.get("/v1/admin/chats", (context) => context.json({ items: listAdminChats(db, retrievalTrace.dashboardAvailable) }));
@@ -1418,7 +1506,7 @@ export function createApp(dependencies: Dependencies): Hono {
   let connectionTestBusy = false;
   app.post("/v1/admin/connection-test", async context => {
     const body = await context.req.json().catch(() => null);
-    if (!body || !["voyage", "server", "mcp"].includes(body.target)) return context.json({ error: "연결 확인 대상을 선택해 주세요." }, 400);
+    if (!body || !["voyage", "server", "mcp", "translation"].includes(body.target)) return context.json({ error: "연결 확인 대상을 선택해 주세요." }, 400);
     if (connectionTestBusy) return context.json({ error: "다른 연결 확인이 끝난 뒤 다시 시도해 주세요." }, 409);
     connectionTestBusy = true;
     const started = performance.now();
@@ -1432,6 +1520,8 @@ export function createApp(dependencies: Dependencies): Hono {
         await embeddings.testConnection(body.apiKey?.trim() || undefined);
       } else if (body.target === "server") {
         await llmStore.testConnection(ServerLlmConfigSchema.parse(body.config), signal);
+      } else if (body.target === "translation") {
+        await translationConnection.testConnection(body.config, signal);
       } else {
         await mcpSelector.testConnection(body.config, signal);
       }
@@ -1451,6 +1541,15 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ ok: false, code, message: connectionFailureReason(code), ...(detail ? { detail } : {}), ...(status ? { status } : {}), elapsedMs: Math.round(performance.now() - started) });
     } finally { connectionTestBusy = false; }
   });
+  app.post("/v1/admin/translation/initialize",async context=>{
+    try{return context.json({config:translationConnection.initialize(await context.req.json())});}
+    catch{return context.json({code:"INVALID_CONFIG",error:"Invalid translation settings"},400);}
+  });
+  app.put("/v1/admin/translation",async context=>{
+    try{return context.json({config:translationConnection.update(await context.req.json())});}
+    catch(error){return context.json({code:"INVALID_CONFIG",error:error instanceof Error?error.message:"Invalid translation settings"},400);}
+  });
+  app.delete("/v1/admin/translation-key",context=>{translationConnection.clearDedicatedKey();return context.json({config:translationConnection.publicConfig});});
   app.get("/v1/admin/mcp-selector",context=>context.json({config:mcpSelector.publicConfig}));
   app.put("/v1/admin/mcp-selector",async context=>{
     try{return context.json({config:mcpSelector.update(await context.req.json())});}
@@ -1458,48 +1557,35 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.delete("/v1/admin/mcp-selector-key",context=>{mcpSelector.clearDedicatedKey();return context.json({config:mcpSelector.publicConfig});});
   app.get("/v1/admin/server-llm", (context) => context.json({ config: llmStore.publicConfig, worker: serverWorker.status }));
-  app.post("/v1/admin/auxiliary/translation-plan", async (context) => {
-    const body = await context.req.json().catch(() => undefined) as { systemPrompt?: unknown; items?: unknown } | undefined;
-    if (typeof body?.systemPrompt !== "string" || !Array.isArray(body.items)) return context.json({ error: "systemPrompt and items are required" }, 400);
-    const systemPrompt = body.systemPrompt;
-    const items = body.items.flatMap((item) => item && typeof item === "object" && typeof (item as any).id === "string" && typeof (item as any).text === "string"
-      ? [{ id: String((item as any).id), text: String((item as any).text) }] : []);
-    if (items.length !== body.items.length || items.length > 10_000) return context.json({ error: "Invalid translation items" }, 400);
-    const budget = { maxInputTokens: llmStore.config.maxInputTokens, maxOutputTokens: llmStore.config.maxOutputTokens };
-    const render = (batch: Array<{ id: string; partIndex: number; partCount: number; text: string }>) => JSON.stringify({ items: batch });
-    const available = budget.maxInputTokens - estimateTokens(JSON.stringify([{ role: "system", content: systemPrompt }, { role: "user", content: JSON.stringify({ items: [] }) }]));
-    if (available < 1) return context.json({ error: "Translation instruction exceeds the configured input budget", budget }, 422);
-    const expanded = items.flatMap((item) => {
-      let tokenTarget = Math.max(1, available - estimateTokens(JSON.stringify({ id: item.id, partIndex: 0, partCount: 1, text: "" })));
-      let pieces = splitAuxiliarySource(item.text, estimateTokens, tokenTarget);
-      while (pieces.some((part) => !measureAuxiliaryPrompt([{ role: "system", content: systemPrompt },
-        { role: "user", content: render([{ id: item.id, partIndex: 0, partCount: pieces.length, text: part.text }]) }], estimateTokens, budget).fits)) {
-        if (tokenTarget === 1) throw new Error(`Translation item ${item.id} cannot fit the configured input budget`);
-        tokenTarget = Math.max(1, Math.floor(tokenTarget * .75));
-        pieces = splitAuxiliarySource(item.text, estimateTokens, tokenTarget);
-      }
-      return pieces.map((part, partIndex) => ({ id: item.id, partIndex, partCount: pieces.length, text: part.text }));
-    });
-    const batches: typeof expanded[] = [];
-    let current: typeof expanded = [];
-    for (const item of expanded) {
-      const trial = [...current, item];
-      const measured = measureAuxiliaryPrompt([{ role: "system", content: systemPrompt }, { role: "user", content: render(trial) }], estimateTokens, budget);
-      if (!measured.fits && current.length) {
-        batches.push(current);
-        const solo = measureAuxiliaryPrompt([{ role: "system", content: systemPrompt }, { role: "user", content: render([item]) }], estimateTokens, budget);
-        if (!solo.fits) return context.json({ error: `Translation item ${item.id} cannot fit the configured input budget`, budget }, 422);
-        current = [item];
-      }
-      else if (!measured.fits) return context.json({ error: `Translation item ${item.id} cannot fit the configured input budget`, budget }, 422);
-      else current = trial;
+  app.post("/v1/admin/auxiliary/translation-plan", async context => {
+    const body = await context.req.json();
+    const parsed = z.object({ items: z.array(z.object({ id: z.string(), text: z.string() })).max(10000), maxOutput: z.number().int().min(256).max(128000).default(8000) }).safeParse(body);
+    if (!parsed.success) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation plan" }, 400);
+    const batches = planTranslation(parsed.data.items, parsed.data.maxOutput);
+    return context.json({ parts: batches.map(items => ({ systemPrompt: translationSystemPrompt, userPrompt: JSON.stringify({ items }), items })) });
+  });
+  app.post("/v1/translations/batch", async context => {
+    const parsed = TranslationLegacySettingsSchema.extend({
+      items: z.array(z.object({ id: z.string().max(512), text: z.string(), partIndex: z.number().int().nonnegative(), partCount: z.number().int().positive() })).min(1).max(10000),
+    }).safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation batch" }, 400);
+    const body = parsed.data;
+    let apiKey = "";
+    try {
+      const resolved = translationConnection.resolve(body);
+      const config = resolved.config; apiKey = resolved.apiKey;
+      if (!apiKey) throw new TranslationError("AUTH_FAILED", "번역 연결의 인증정보가 없습니다.");
+      if (estimateTokens(JSON.stringify({ items: body.items })) > Math.floor(config.maxOutputTokens / 1.5)) throw new TranslationError("INVALID_CONFIG", "Translation batch exceeds output budget");
+      const result = await requestStructuredProvider(llmStore, config, apiKey,
+        [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items: body.items }) }],
+        AbortSignal.any([context.req.raw.signal, AbortSignal.timeout(TRANSLATION_TIMEOUT_MS)]), config.maxOutputTokens);
+      return context.json({ items: validateTranslation(result.content, body.items, result.finishReason), usage: result.usage, model: config.model });
+    } catch (error) {
+      const code = error instanceof TranslationError ? error.code : error instanceof ProviderRequestError
+        ? error.kind === "timeout" ? "TIMEOUT" : error.kind === "json" ? "INVALID_RESPONSE" : error.kind === "transport" ? "NETWORK_ERROR" : error.status === 401 || error.status === 403 ? "AUTH_FAILED" : error.status === 429 ? "RATE_LIMITED" : "PROVIDER_HTTP_ERROR"
+        : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "TIMEOUT" : "INVALID_CONFIG";
+      return context.json({ code, error: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [apiKey]) }, 502);
     }
-    if (current.length) batches.push(current);
-    return context.json({ budget, estimatedItems: items.length, plannedParts: batches.length, parts: batches.map((batch, index) => {
-      const userPrompt = render(batch);
-      const measurement = measureAuxiliaryPrompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], estimateTokens, budget);
-      return { index, systemPrompt, userPrompt, items: batch.map(({ id, partIndex, partCount }) => ({ id, partIndex, partCount })), estimatedInputTokens: measurement.estimatedInputTokens };
-    }) });
   });
   app.put("/v1/admin/server-llm", async (context) => {
     const input = ServerLlmConfigSchema.parse(await context.req.json());
@@ -2365,12 +2451,13 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   // Every quiz operation can materialize quiz_state. Unknown chats must stop before ensureState.
   app.use("/v1/chats/:id/quiz/*", async (context, next) => {
+    if (context.req.method === "GET" && context.req.path.endsWith("/quiz/next")) return next();
     if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(context.req.param("id"))) return context.json({ error: "Chat not found", code: "CHAT_NOT_FOUND" }, 404);
     await next();
   });
   app.get("/v1/chats/:id/quiz/next", (context) => {
     const result = nextQuiz(db, context.req.param("id"));
-    if (result.generating) serverWorker.wake();
+    if (quizStatus(db, context.req.param("id")).generating) serverWorker.wake();
     return context.json(result);
   });
   app.post("/v1/chats/:id/quiz/:itemId/answer", async (context) => {
@@ -2387,7 +2474,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const body = z.object({ enabled: z.boolean() }).parse(await context.req.json());
     setQuizEnabled(db, context.req.param("id"), body.enabled);
     const result = nextQuiz(db, context.req.param("id"));
-    if (result.generating) serverWorker.wake();
+    if (quizStatus(db, context.req.param("id")).generating) serverWorker.wake();
     return context.json(result);
   });
   app.get("/v1/chats/:id/quiz/status", (context) => context.json(quizStatus(db, context.req.param("id"))));

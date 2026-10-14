@@ -7,6 +7,7 @@ import type { RecallPathObservation } from "./recall-path.js";
 import type { AtomPath } from "./atom-path-search.js";
 
 export interface TraceEvent {
+  currentState?: import("./state-outcomes.js").StateOutcomeReport;
   selector?: import("./mcp-selector.js").SelectorDiagnostic;
   schema?: string;
   id?: string;
@@ -61,7 +62,7 @@ const nonnegativeNumber = (value: unknown): number | undefined => typeof value =
 const ordinal = (value: unknown): number | null | undefined => value === null ? null : Number.isInteger(value) ? nonnegativeNumber(value) : undefined;
 
 function latencyBand(elapsedMs: unknown, outcome: string | undefined): LatencyBand {
-  if (["timeout", "error", "failed"].includes(outcome ?? "")) return "failed";
+  if (["timeout", "error", "failed", "rejected"].includes(outcome ?? "")) return "failed";
   const elapsed = nonnegativeNumber(elapsedMs);
   if (elapsed === undefined || !["fresh", "reused", "delivered"].includes(outcome ?? "")) return "unmeasured";
   return elapsed > 10_000 ? "over_limit" : elapsed > 5_000 ? "slow" : "within_target";
@@ -83,6 +84,7 @@ export interface TurnAnalysis {
   prepare: { outcome?: string; elapsedMs?: number; latency: LatencyBand; timeoutMs?: number; fallbackTokens?: number; clientTimings?: Record<string, number> };
   timings?: Record<string, number>;
   syncTimings?: Record<string, number>;
+  currentState?: import("./state-outcomes.js").StateOutcomeReport;
   manifestStatus: "기록됨" | "미기록";
   atomPreservation?: { roleTokens: Record<string, number>; focusExpected: number; focusDelivered: number;
     injectedRoleTokens?: Record<string, number>; focusInjected?: number; cueAnchorExpected: number; cueAnchorDelivered: number;
@@ -95,7 +97,7 @@ export interface TurnAnalysis {
   targetTokens: number;
   hardTokenCeiling: number;
   toolSummary: string;
-  mcpTimings: Array<{ requestId?: string; toolName?: string; outcome?: string; latency: LatencyBand; server?: Record<string, number>; selector?: import("./mcp-selector.js").SelectorDiagnostic; requestMs?: number; elapsedMs?: number; cacheHit: boolean }>;
+  mcpTimings: Array<{ requestId?: string; toolName?: string; outcome?: string; reason?: string; ref?: string; origin?: string; latency: LatencyBand; server?: Record<string, number>; selector?: import("./mcp-selector.js").SelectorDiagnostic; requestMs?: number; elapsedMs?: number; cacheHit: boolean }>;
   elapsedMs?: number;
   status: "정상" | "확인 필요";
   warnings: string[];
@@ -149,7 +151,7 @@ export function parseTrace(content: string): TraceParseResult {
   for (const line of content.split(/\r?\n/u).filter(Boolean)) {
     try {
       const event = JSON.parse(line) as TraceEvent;
-      if (event.schema !== "rcm.retrieval-trace.v18") { unsupportedLines += 1; continue; }
+      if (event.schema !== "rcm.retrieval-trace.v19") { unsupportedLines += 1; continue; }
       if (!event.chatId || !event.kind) { invalidLines += 1; continue; }
       events.push(event);
     } catch { invalidLines += 1; }
@@ -255,7 +257,10 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
   if (missingIds.length) warnings.push(`선택된 기억 ${missingIds.length}개가 실제 주입 manifest에 없습니다.`);
   const exposures = events.filter((event) => event.kind === "tool_exposure");
   const mcpSearches = events.filter((event) => event.kind === "mcp_search");
-  const deliveries = events.filter((event) => event.kind === "mcp_delivery");
+  const clientRequestIds = new Set(events.filter(event => event.kind === "mcp_delivery" && event.origin === "client")
+    .map(event => event.traceContext?.requestId).filter(Boolean));
+  const deliveries = events.filter(event => event.kind === "mcp_delivery"
+    && !(event.origin === "server" && event.traceContext?.requestId && clientRequestIds.has(event.traceContext.requestId)));
   const opportunity = search?.toolOpportunity;
   const opportunityCount = idList(opportunity?.recallCandidateMemoryIds).length + (Array.isArray(opportunity?.followCandidates) ? opportunity.followCandidates.length : 0);
   if (opportunityCount > 0 && exposures.length === 0) warnings.push("기억 도구 후보가 있지만 호스트 노출 기록이 없습니다.");
@@ -285,6 +290,8 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
   if (exposureFailures.length) warnings.push(`기억 도구 노출 문제 ${exposureFailures.length}건이 있습니다.`);
   if (exposureUnknown.length) warnings.push(`기억 도구 등록 확인이 늦어 실제 provider 노출 여부를 확인할 수 없는 기록이 ${exposureUnknown.length}건 있습니다.`);
   const mcpErrors = events.filter((event) => event.kind?.startsWith("mcp_") && ["timeout", "error", "failed"].includes(String(event.outcome)));
+  const rejected = deliveries.filter(event => event.outcome === "rejected");
+  if (rejected.length) warnings.push(`MCP 거절/중단 ${rejected.length}건이 있습니다.`);
   if (mcpErrors.length) warnings.push(`MCP 오류 ${mcpErrors.length}건이 있습니다.`);
   const knownMcpSearchIds = new Set(mcpSearches.flatMap((event) => [event.id, event.traceContext?.requestId]).filter((value): value is string => Boolean(value)));
   const unlinkedDeliveries = deliveries.filter((event) => event.searchRequestId && !knownMcpSearchIds.has(event.searchRequestId));
@@ -328,8 +335,8 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
           : injection?.omitted ? "주입 생략"
             : injection?.prepareOutcome === "skipped" ? "준비 생략"
               : search ? injection ? "정상" : "클라이언트 결과 미기록" : "검색 없음",
-    mcpTimings: deliveries.map(delivery => ({requestId:delivery.searchRequestId as string | undefined,
-      toolName: delivery.toolName, outcome: delivery.outcome, latency: latencyBand(delivery.elapsedMs, delivery.outcome),
+    mcpTimings: deliveries.map(delivery => ({requestId:delivery.traceContext?.requestId ?? delivery.searchRequestId,
+      toolName: delivery.toolName, outcome: delivery.outcome, reason: delivery.reason as string | undefined, ref: delivery.ref as string | undefined, origin: delivery.origin as string | undefined, latency: latencyBand(delivery.elapsedMs, delivery.outcome),
       server: ((delivery.searchRequestId ? mcpSearches.find(event => event.id === delivery.searchRequestId || event.traceContext?.requestId === delivery.searchRequestId)?.timings : undefined) ?? delivery.serverTimings) as Record<string, number> | undefined,
       selector: delivery.searchRequestId ? mcpSearches.find(event => event.id === delivery.searchRequestId || event.traceContext?.requestId === delivery.searchRequestId)?.selector : undefined,
       requestMs: nonnegativeNumber(delivery.requestMs),
@@ -354,6 +361,7 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
         && (atom.cueAnchor || (atom.role === "focus" && (atom.bundle || atom.direct)) || (atom.role === "continuity" && atom.bundle))).length,
       decisions: search.atomPreservation,
     } : undefined,
+    currentState: search?.currentState,
     candidates, eligible, selected: selectedIds.length, packetTokens, preparedPacketTokens, targetTokens, hardTokenCeiling, toolSummary,
     elapsedMs: elapsedValues.length ? Math.max(...elapsedValues) : undefined,
     status: warnings.length ? "확인 필요" : "정상", warnings, selectedMemories: [...selectedCandidateMap.values()],
@@ -433,9 +441,10 @@ function presentationSummary(events: TraceEvent[]): string[] {
     const packet = injection.packet as string;
     const states = [...packet.matchAll(/<recorded_state\b[^>]*>([\s\S]*?)<\/recorded_state>/g)]
       .flatMap(match => match[1]!.split("\n").filter(line => line.startsWith("- ")));
-    lines.push(`- 실제 출력 표기: 지식 범위 ${(packet.match(/Known by |Authorial record;/g) ?? []).length}회 / Observed ${(packet.match(/Observed[: (]/g) ?? []).length}회 / 동일 상태 줄 중복 ${states.length - new Set(states).size}개`);
+    const compactScopes = states.filter(line => /^- .* \[[^\]]+\]: /u.test(line)).length;
+    lines.push(`- 실제 출력 표기: 지식 범위 ${(packet.match(/Known by |Authorial record;/g) ?? []).length + compactScopes}회 / Observed ${(packet.match(/Observed[: (]/g) ?? []).length}회 / 동일 상태 줄 중복 ${states.length - new Set(states).size}개`);
   }
-  for (const event of events.filter(event => event.kind === "mcp_delivery" && typeof event.response === "string")) {
+  for (const event of events.filter(event => event.kind === "mcp_delivery" && event.outcome !== "rejected" && typeof event.response === "string")) {
     lines.push(`- MCP 실제 반환: 상세 기록 ${(String(event.response).match(/^Record /gm) ?? []).length}개 / 정확 원문 ${(String(event.response).match(/^- Exact source/gm) ?? []).length}개 · 문맥 충분성은 본문 수동 검토`);
   }
   const observed = [...events].reverse().find(event => event.kind === "tool_exposure" && event.transport === "provider_request");
@@ -495,6 +504,27 @@ function assemblySummary(budget: TurnAnalysis["budget"]): string[] {
   ];
 }
 
+function currentStateBlock(state: import("./state-outcomes.js").StateOutcomeReport | undefined, detail: boolean): string[] {
+  if (!state) return ["", "**현재 항목**", "", "- 미기록", ""];
+  const counts = new Map<string, number>();
+  for (const [outcome, count] of Object.entries(state.nonCandidateCounts ?? {})) counts.set(outcome, count);
+  for (const entry of state.entries) counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
+  const lines = ["", "**현재 항목**", "", "- 서버 준비 패킷 기준 · 상태/관점별 판정 (실제 주입은 같은 request ID로 별도 확인)",
+    `- 결과: ${[...counts].map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "후보 없음"}`,
+    `- 기록 상한으로 생략: ${state.omittedCount}개${state.omittedCount ? " (위 집계는 기록된 항목만 포함)" : ""}`,
+    ...state.budgets.map(budget => budget.perspective === "shared"
+      ? `- state budget (shared): ${budget.budgetTokens}토큰 / 사용 ${budget.usedTokens}토큰 (동일 행 1회 계산)`
+      : `- ${escapeCell(budget.perspective)} 상태 예산: ${budget.budgetTokens}토큰 / 사용 ${budget.usedTokens}토큰 (병합 전 상태 줄)`), ""];
+  if (detail) for (const outcome of counts.keys()) {
+    if (outcome === "delivered" || !state.entries.some(entry => entry.outcome === outcome)) continue;
+    lines.push(`**${escapeCell(outcome)}**`, "");
+    for (const entry of state.entries.filter(entry => entry.outcome === outcome)) lines.push(
+      `- ${escapeCell(entry.id)} · ${escapeCell(entry.kind)} · 관점 ${escapeCell(entry.perspectives.join(", "))}${entry.rank === undefined ? "" : ` · 순위 ${entry.rank}`}${entry.rendered ? ` · 표시 ${escapeCell(entry.rendered)}` : ""}${entry.reason ? ` · ${escapeCell(entry.reason)}` : ""}${typeof entry.title === "string" ? ` · ${escapeCell(entry.title)}` : ""}${entry.keptPeripheralMemoryIds ? ` · 함께 남은 주변 기억: ${entry.keptPeripheralMemoryIds.length ? entry.keptPeripheralMemoryIds.map(id => escapeCell(id)).join(", ") : "없음"}` : ""}`);
+    lines.push("");
+  }
+  return lines;
+}
+
 export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): string {
   const lines = [
     "# 진단 보고서", "",
@@ -548,7 +578,7 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
       ...presentationSummary(turn.events),
       ...(turn.budget.overflowTokens > 0 && (turn.packetTokens ?? 0) <= turn.hardTokenCeiling ? [`- 실제 주입은 내부 추정기로 설정 예산보다 ${turn.budget.overflowTokens}토큰 높으며, 15% 토크나이저 보정 범위 안입니다.`] : []),
       `- 기억 도구: ${turn.toolSummary}`,
-      ...turn.mcpTimings.map(timing => `- ${escapeCell(timing.toolName ?? "MCP")} (${escapeCell(timing.requestId ?? "검색 ID 미기록")}): 반환 결과 ${escapeCell(timing.outcome ?? "미기록")} / ${latencyLabels[timing.latency]}`),
+      ...turn.mcpTimings.map(timing => `- ${escapeCell(timing.toolName ?? "MCP")} (${escapeCell(timing.requestId ?? "검색 ID 미기록")}): ${timing.origin === "server" ? "서버 거절 관측 (클라이언트 반환 미기록)" : "반환 결과"} ${escapeCell(timing.outcome ?? "미기록")}${timing.reason ? ` · 사유 ${escapeCell(timing.reason)}` : ""}${timing.ref ? ` · ref ${escapeCell(timing.ref)}` : ""} / ${latencyLabels[timing.latency]}`),
       ...turn.mcpTimings.map(({selector:s,server,cacheHit}) => `- MCP 보조모델: ${cacheHit ? "동일 요청 캐시 · 추가 호출 없음" : s ? `${escapeCell(s.provider)} / ${escapeCell(s.model)} · ${s.calls}회 · ${s.elapsedMs.toFixed(2)}ms · ${s.outcome}${s.failure?` (${escapeCell(s.failure)})`:""} · 후보 ${s.candidates}개 → 사용 근거 ${s.selectedIds.length}개 · 자연어 ${s.answerChars??"미보고"}자 · provider 입력 ${s.promptTokens??"미보고"} / 출력 ${s.completionTokens??"미보고"}토큰` : server?.selectorCalls===0 ? "호출 없음" : "미기록"}`),
       ...turn.mcpTimings.map(timing => `- MCP ${timing.requestId ?? "검색 ID 미기록"}: ${timing.cacheHit ? "동일 요청 캐시" : `서버 ${timing.server?.serverMs?.toFixed(2) ?? "미기록"}ms (임베딩 ${timing.server?.embeddingMs?.toFixed(2) ?? "미기록"}, 검색 ${timing.server?.retrievalMs?.toFixed(2) ?? "미기록"}, 로컬 후보 압축 ${timing.server?.rerankMs?.toFixed(2) ?? "미기록"}, 로컬 원문 발췌 ${timing.server?.spanRerankMs?.toFixed(2) ?? "미기록"}, 근거·예산 정리 ${timing.server?.finalizationMs?.toFixed(2) ?? "미기록"}), Voyage rerank ${timing.server?.rerankTotalTokens?.toLocaleString() ?? "미보고"}토큰 (${timing.server?.rerankUsageCalls?.toLocaleString() ?? "0"}회 + 원문 ${timing.server?.spanRerankUsageCalls?.toLocaleString() ?? "0"}회), 클라이언트 요청 왕복 ${timing.requestMs?.toFixed(2) ?? "미기록"}ms`}; 도구 반환까지 ${timing.elapsedMs?.toFixed(2) ?? "미기록"}ms. 반환 이후 provider 대기는 관측하지 않음; Gateway 원인은 해당 로그로만 판단.`),
       ...(turn.pathFates.length ? [`- typed path 운명: ${turn.pathFates.map((path) => `${path.perspective || "관점 미기록"}/${path.endpointId} ${path.retrievalOutcome}${path.finalRole ? ` → ${path.finalRole}` : ""}${path.atomOutcomes.length ? ` [${path.atomOutcomes.map((atom) => `${atom.atomKey}:${atom.outcome}${atom.delivered === undefined ? "" : atom.delivered ? ":전달" : ":미전달"}`).join(", ")}]` : " [최종 atom 미기록]"}`).join(" · ")}`] : []),
@@ -557,6 +587,7 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
         return `- 도구 등록: ${entry.outcome} / requestId=${info.requestId ?? "미기록"} / 전송 완료=${info.postMs ?? "미기록"}ms / 확인 대기=${info.ackWaitMs ?? "미기록"}ms`;
       }),
       ...(turn.warnings.length ? turn.warnings.map((warning) => `- 확인: ${warning}`) : ["- 확인 결과: 특이사항 없음"]), "",
+      ...currentStateBlock(turn.currentState, detail),
       candidateTable(turn), "", ...(blocks ? [blocks, ""] : []), "</details>", "");
   }
   return lines.join("\n");

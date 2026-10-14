@@ -1,6 +1,6 @@
 // "이번 턴에 전달한 기억": the home widget and its full view. Counts follow the tabs (기억/인물/현재),
 // never the atoms inside a scene, so 24 scenes with 61 details reads as 24, not 85.
-import { escapeHtml, icon } from "./film/ui.js";
+import { escapeHtml, icon, btn } from "./film/ui.js";
 
 export type SentScene = {
   memoryId: string;
@@ -36,7 +36,8 @@ export type SentData = {
   packet: string;
 };
 
-export type SentView = { open: boolean; more: Set<string> };
+export type PacketTranslationView = { key: string; source: string; google: boolean; pending?: boolean; translated?: string; showing?: boolean; error?: string };
+export type SentView = { open: boolean; more: Set<string>; packetTranslation?: PacketTranslationView };
 
 const CLARITY_LABEL = { hazy: "흐릿하게", faint: "어렴풋이" } as const;
 const FALLBACK_NOTE = "검색이 끝나지 않아 기본 기억만 보냈어요. 항목별 목록은 없어요.";
@@ -109,7 +110,9 @@ export function sentPage(data: SentData, view: SentView): string {
     ${data.memoryOnly ? off : data.now.length ? `<ul class="sent-list">${data.now.map((row) => `<li><button type="button" class="sent-row" data-action="tab" data-tab="world"><span class="sent-row__k">${escapeHtml(row.tag)}</span><span class="sent-row__t is-text"><span class="who">${row.whoHtml}</span> · ${row.textHtml}</span>${chevron}</button></li>`).join("")}</ul>` : '<p class="sent-off">이번에는 현재 기록을 보내지 않았어요.</p>'}`;
   const searchSection = data.searches.length ? `<h2 class="sent__h">답변 중 찾아본 기억 <span class="n">${data.searches.length}번</span></h2>
     <ul class="sent-list">${data.searches.map((search) => `<li><div class="sent-q">${icon("search")}<span><q>${escapeHtml(search.query)}</q><small>${search.scenes.length ? `장면 ${search.scenes.length}개를 가져감` : "장면 밖의 기록을 가져감"}</small></span></div>${search.scenes.map((scene) => sceneRow(scene, scene.already ? '<span class="pill">이미 전달됨</span> ' : "")).join("")}</li>`).join("")}</ul>` : "";
-  const raw = data.packet ? `<details class="sent-raw"><summary>원문 보기<small>메인 모델이 받은 그대로</small>${icon("chevron")}</summary><pre class="packet">${escapeHtml(data.packet)}</pre></details>` : "";
+  const translation = view.packetTranslation;
+  const controls = `<div class="sent-raw__tools">${translation?.google ? '<small>Google 번역은 태그도 함께 번역돼요</small>' : ""}${btn(translation?.pending ? "번역 중…" : translation?.showing ? "원문으로" : "번역해서 보기", { kind: "quiet", action: "translate-sent-packet", disabled: translation?.pending })}</div>${translation?.error ? `<p class="sent-raw__error" role="status">번역하지 못했어요 · ${escapeHtml(translation.error)}</p>` : ""}`;
+  const raw = data.packet ? `<details class="sent-raw" data-preserve-open="sent-raw"><summary>원문 보기<small>메인 모델이 받은 그대로</small><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary>${controls}<pre class="packet">${escapeHtml(translation?.showing ? translation.translated ?? data.packet : data.packet)}</pre></details>` : "";
   return `<div class="sent">
     <div class="sent__top"><button type="button" class="back" data-action="close-sent">${icon("back")}홈</button></div>
     <div class="sent__head">

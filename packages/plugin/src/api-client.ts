@@ -77,8 +77,21 @@ export class ServerRequestError extends Error {
   constructor(message: string, readonly status: number, readonly code?: string) { super(message); this.name = "ServerRequestError"; }
 }
 
+export class ServerConnectionError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "ServerConnectionError";
+  }
+}
+
 export function isMissingServerRoute(error: unknown): boolean {
   return error instanceof ServerRequestError && error.status === 404 && error.code !== "CHAT_NOT_FOUND";
+}
+
+export function isServerConnectionFailure(error: unknown): boolean {
+  return (error instanceof ServerRequestError && [401, 403].includes(error.status))
+    || error instanceof ServerConnectionError
+    || error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
 }
 
 export class ServerClient {
@@ -215,7 +228,7 @@ export class ServerClient {
         timeoutError.name = "AbortError";
         throw timeoutError;
       }
-      throw error;
+      throw error instanceof ServerRequestError ? error : new ServerConnectionError(error);
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", abortFromExternal);

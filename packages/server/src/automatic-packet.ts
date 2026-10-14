@@ -42,6 +42,7 @@ export function selectAutomaticPortfolio(options: {
   lastDelivered: ReadonlyMap<string, number>;
   completedTurn: number;
   hardTokenCeiling: number;
+  stateTokens?: number;
   renderTokens: (items: MemoryContextItem[]) => number;
 }): { items: MemoryContextItem[]; roles: Map<string, RetrievalSelectionRole>; reasons: Map<string, AutomaticRoleReason> } {
   const { candidates, metadata, policy, renderTokens } = options;
@@ -52,9 +53,16 @@ export function selectAutomaticPortfolio(options: {
   const cueIds = new Set(candidates.filter(item => automaticAtoms(item).some(atom => policy.cueAnchorKeys?.has(atom.key))).map(item => item.id));
   cueIds.forEach(id => protectedIds.add(id));
   const emptyTokens = renderTokens([]);
-  const memoryBudget = Math.max(0, options.hardTokenCeiling - emptyTokens);
+  const stateTokens = options.stateTokens ?? 0;
+  const memoryBudget = Math.max(0, options.hardTokenCeiling - emptyTokens + stateTokens);
   const budgets = { scene: memoryBudget * AUTOMATIC_ROLE_SHARES.scene, continuity: memoryBudget * AUTOMATIC_ROLE_SHARES.continuity,
     association: memoryBudget * AUTOMATIC_ROLE_SHARES.association, longterm: memoryBudget * AUTOMATIC_ROLE_SHARES.longterm };
+  // Charge actual shared state use to peripheral lanes first. An empty ledger
+  // reserves nothing; scene and continuity keep their original token shares.
+  let stateCost = stateTokens;
+  for (const lane of ["longterm", "association", "continuity", "scene"] as const) {
+    const take = Math.min(stateCost, budgets[lane]); budgets[lane] -= take; stateCost -= take;
+  }
   const selectedIds = new Set<string>();
   const redundancy = (item: MemoryContextItem) => {
     const signature = metadata.get(item.id)?.similarity;

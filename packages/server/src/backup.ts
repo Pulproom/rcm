@@ -8,11 +8,11 @@ import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { createHash, randomUUID } from "node:crypto";
 import { deleteDerivedRows } from "./derived-state.js";
-import { pruneTranslationCache, translationCacheKey } from "./translation-cache.js";
+import { migrateTranslationKeys, pruneTranslationCache, translationCacheKey } from "./translation-cache.js";
 import { ledgerEditOriginsKey, readRemovedAliases, readUserDeletions, removedAliasesKey, userDeletionsKey, type Deletion, type RemovedAliases } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 
-export const BACKUP_VERSION = 31 as const;
+export const BACKUP_VERSION = 32 as const;
 
 export class BackupValidationError extends Error {
   readonly code = "BACKUP_VALIDATION_FAILED";
@@ -42,8 +42,8 @@ function insertRows(db: RcmDatabase, table: string, rows: Row[]): void {
 type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
-  version: typeof BACKUP_VERSION;
-  schemaVersion: 46;
+  version: 31 | typeof BACKUP_VERSION;
+  schemaVersion: 46 | 47 | 48;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -116,12 +116,12 @@ function chatTableWhere(db: RcmDatabase, table: string): string {
   const owner=indirectChatOwners[table];
   if (owner) return `${owner[0]} IN (SELECT id FROM ${owner[1]} WHERE chat_id=?)`;
   // Chat-owned keys, including access edits and pending dialogue identities. Keep restore
-  // validation and admin deletion aligned.
-  if (table === "server_meta") return "key IN ('retrieval_trace_chat:' || ?, 'memory_bookmarks:' || ?, 'view_preferences:' || ?, 'user_deletions:' || ?, 'persona_hint:' || ?, 'ledger_edit_origins:' || ?, 'removed_aliases:' || ?, 'detail_access_edits:' || ?, 'dialogue_access_identity:' || ?)";
+  // validation aligned; admin deletion retains reference counters and tombstones.
+  if (table === "server_meta") return "key IN ('retrieval_trace_chat:' || ?, 'memory_bookmarks:' || ?, 'view_preferences:' || ?, 'user_deletions:' || ?, 'persona_hint:' || ?, 'ledger_edit_origins:' || ?, 'removed_aliases:' || ?, 'detail_access_edits:' || ?, 'dialogue_access_identity:' || ?, 'quiz_history_boundary:' || ?, 'memory_ref_sequence:' || ?)";
   throw new Error(`Chat backup ownership is not defined: ${table}`);
 }
 
-const chatTableBindings = (table: string, chatId: string): string[] => table === "server_meta" ? Array(9).fill(chatId) : [chatId];
+const chatTableBindings = (table: string, chatId: string): string[] => table === "server_meta" ? Array(11).fill(chatId) : [chatId];
 
 export function exportCompleteArchive(db: RcmDatabase, privateData: CompleteBackupPrivateData = {}): Uint8Array {
   return exportArchive(db, privateData);
@@ -152,7 +152,7 @@ function exportArchive(db: RcmDatabase, privateData: CompleteBackupPrivateData, 
   const instanceId = String((db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value?: string } | undefined)?.value ?? "");
   const chats = (db.prepare(`SELECT id,COALESCE(chat_title,'') AS title,character_id AS characterId FROM chats${chatId ? " WHERE id=?" : ""} ORDER BY updated_at DESC`).all(...(chatId ? [chatId] : [])) as CompleteManifest["chats"]);
   const manifest: CompleteManifest = {
-    format: "risu-cognitive-memory-complete", scope:chatId ? "chat" : "complete", version: BACKUP_VERSION, schemaVersion: 46, exportedAt: Date.now(), instanceId, chats,
+    format: "risu-cognitive-memory-complete", scope:chatId ? "chat" : "complete", version: BACKUP_VERSION, schemaVersion: 48, exportedAt: Date.now(), instanceId, chats,
     tables: Object.fromEntries(tables.map((table) => [table, (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)])),
     files: Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, checksum(bytes)])),
   };
@@ -165,7 +165,10 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || manifest.version !== BACKUP_VERSION || manifest.schemaVersion !== 46) throw new BackupValidationError("Unsupported backup format (requires backup 31 / schema 46)");
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 32 && manifest.schemaVersion === 48
+    || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
+    throw new BackupValidationError("Unsupported backup format (accepts backup 31 / schema 46 or 47, or backup 32 / schema 48)");
+  }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
   for (const table of Object.keys(manifest.tables)) if (!manifest.files[`tables/${table}.jsonl`]) throw new BackupValidationError(`Backup table is missing: ${table}`);
@@ -198,10 +201,11 @@ function archiveTables(files: Record<string, Uint8Array>): Record<string, Row[]>
 }
 
 function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): void {
-  const current = persistentTables(db);
-  if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError("Backup database contract does not match schema 46");
+  const current = persistentTables(db).filter(table => manifest.version !== 31 || table !== "memory_references");
+  if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError(`Backup database contract does not match schema ${manifest.schemaVersion}`);
   for (const table of current) {
-    const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name);
+    const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
+      .filter(column => !(manifest.schemaVersion === 46 && table === "translation_cache" && column === "model"));
     // Rows are inserted by column name. Physical column order is not a backup contract.
     const archived = manifest.tables[table];
     if (!Array.isArray(archived) || archived.length !== columns.length || new Set(archived).size !== columns.length
@@ -265,13 +269,67 @@ function rebuildSearch(db: RcmDatabase): void {
   }
 }
 
+/** Merge address tombstones, rejecting forks that assigned an existing address or
+ * memory differently. Unknown pre-upgrade numbers below the high-water stay reserved. */
+function mergeMemoryReferences(db: RcmDatabase, tables: Record<string, Row[]>, manifest: CompleteManifest, chatId?: string): Map<string, bigint> {
+  const highWater = memoryReferenceHighWater(db);
+  const local = db.prepare(`SELECT * FROM memory_references${chatId ? " WHERE chat_id=?" : ""}`).all(...(chatId ? [chatId] : [])) as Row[];
+  const imported = tables.memory_references ?? [];
+  const byRef = new Map(local.map(row => [JSON.stringify([row.chat_id, row.ref]), row]));
+  const byMemory = new Map(local.map(row => [JSON.stringify([row.chat_id, row.memory_id]), row]));
+  for (const row of imported) {
+    if (typeof row.chat_id !== "string" || typeof row.memory_id !== "string" || typeof row.ref !== "string" || !/^m[1-9][0-9]*$/.test(row.ref)) {
+      throw new BackupValidationError("Invalid memory reference in backup");
+    }
+    const prior = byRef.get(JSON.stringify([row.chat_id, row.ref]));
+    const memory = byMemory.get(JSON.stringify([row.chat_id, row.memory_id]));
+    if ((prior && prior.memory_id !== row.memory_id) || (memory && memory.ref !== row.ref)
+      || (!prior && BigInt(row.ref.slice(1)) <= (highWater.get(`memory_ref_sequence:${row.chat_id}`) ?? 0n))) {
+      throw new BackupValidationError("Memory reference conflict: restore would reassign a previously issued address");
+    }
+    byRef.set(JSON.stringify([row.chat_id, row.ref]), row);
+    byMemory.set(JSON.stringify([row.chat_id, row.memory_id]), row);
+  }
+  tables.memory_references = [...byRef.values()];
+  for (const row of tables.memory_references) {
+    const key = `memory_ref_sequence:${row.chat_id}`;
+    const value = BigInt(String(row.ref).slice(1));
+    if (value > (highWater.get(key) ?? 0n)) highWater.set(key, value);
+  }
+  if (manifest.version === 31) {
+    const metadata = tables.server_meta ?? [];
+    const global = BigInt(String(metadata.find(row => row.key === "memory_ref_sequence")?.value ?? "0"));
+    for (const chat of manifest.chats) {
+      const key = `memory_ref_sequence:${chat.id}`;
+      const counter = metadata.find(row => row.key === key);
+      // Before counters, refs used 8 random bytes rendered as 16 hex characters.
+      // Reserve every all-decimal address that allocator could emit. Counter-based
+      // releases persisted every issuance; preserve their exact high-water too.
+      const imported = counter ? BigInt(String(counter.value)) : 10_000_000_000_000_000n;
+      highWater.set(key, [highWater.get(key) ?? 0n, imported, global].reduce((a, b) => a > b ? a : b));
+    }
+    tables.server_meta = metadata.filter(row => row.key !== "memory_ref_sequence");
+    tables.memory_references = [];
+  }
+  return highWater;
+}
+
+function preserveReferenceHighWater(db: RcmDatabase, highWater: Map<string, bigint>): void {
+  const restored = memoryReferenceHighWater(db);
+  for (const [key, value] of highWater) {
+    const previous = restored.get(key) ?? 0n;
+    db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(key, String(value > previous ? value : previous));
+  }
+}
+
 export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { inspection: CompleteBackupInspection; vectorsRestored: number; privateData: CompleteBackupPrivateData } {
   const parsed = readCompleteArchive(archive);
   if (parsed.manifest.scope !== "complete") throw new Error("Use chat restore for a chat backup");
   validateCurrentSchema(db, parsed.manifest);
   const tables = archiveTables(parsed.files);
   const currentTables = persistentTables(db);
-  const refHighWater = memoryReferenceHighWater(db);
+  const refHighWater = mergeMemoryReferences(db, tables, parsed.manifest);
   let vectorsRestored = 0;
   db.pragma("foreign_keys = OFF");
   try {
@@ -279,12 +337,10 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
       try { db.prepare("DELETE FROM embedding_vectors_v4_chat").run(); } catch { /* vector extension optional */ }
       for (const table of [...currentTables].reverse()) db.prepare(`DELETE FROM ${table}`).run();
       for (const table of currentTables) insertRows(db, table, tables[table] ?? []);
-      const restoredHighWater = memoryReferenceHighWater(db);
-      for (const [key, value] of refHighWater) {
-        const restored = restoredHighWater.get(key) ?? 0n;
-        db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, String(value > restored ? value : restored));
-      }
+      preserveReferenceHighWater(db, refHighWater);
       vectorsRestored = restoreVectors(db, parsed.files);
+      migrateTranslationKeys(db);
+      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }
@@ -304,12 +360,13 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
     Object.entries(indirectChatOwners).map(([table,[column,parent]])=>[table,[column,ownedIds(parent,"id")]]));
   for (const [table,rows] of Object.entries(tables)) for (const row of rows) {
     const valid=table==="chats" ? row.id===chatId : table==="server_meta" ? [
-      `retrieval_trace_chat:${chatId}`, `memory_bookmarks:${chatId}`, `view_preferences:${chatId}`, `user_deletions:${chatId}`, `persona_hint:${chatId}`, ledgerEditOriginsKey(chatId), removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId),
+      `retrieval_trace_chat:${chatId}`, `memory_bookmarks:${chatId}`, `view_preferences:${chatId}`, `user_deletions:${chatId}`, `persona_hint:${chatId}`, ledgerEditOriginsKey(chatId), removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `memory_ref_sequence:${chatId}`,
     ].includes(String(row.key))
       : Object.hasOwn(row,"chat_id") ? row.chat_id===chatId : Object.hasOwn(row,"child_chat_id") ? row.child_chat_id===chatId
       : owners[table]?.[1].has(row[owners[table]![0]]);
     if (!valid) throw new Error(`Chat backup contains out-of-scope rows: ${table}`);
   }
+  const refHighWater = mergeMemoryReferences(db, tables, parsed.manifest, chatId);
   let vectorsRestored=0;
   db.pragma("foreign_keys = OFF");
   try {
@@ -324,8 +381,11 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
         });
         insertRows(db,table,rows);
       }
+      preserveReferenceHighWater(db, refHighWater);
       if ((db.pragma("foreign_key_check") as unknown[]).length) throw new Error("Chat backup failed foreign key validation");
       vectorsRestored=restoreVectors(db,parsed.files);
+      migrateTranslationKeys(db);
+      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }

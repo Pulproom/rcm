@@ -1,5 +1,5 @@
 declare const __RCM_DISTRIBUTION__: boolean;
-import { MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, memoryGuidanceBlock } from "@rcm/shared";
+import { INVALID_MEMORY_REF_MESSAGE, MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, memoryGuidanceBlock } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
 import { readCurrentChatId, readCurrentContext, sha256 } from "./context.js";
 import { isChatMemoryEnabled } from "./settings.js";
@@ -111,71 +111,55 @@ export async function executeMemoryTool(
 ): Promise<string> {
   const toolStarted = performance.now();
   const toolStartedAt = Date.now();
-  if (state.internalModelCall) return '<rp_memory_result>Memory tools are unavailable during an RCM auxiliary call. Answer using only the supplied input; do not call memory tools again.</rp_memory_result>';
-  if (!memoryToolFunctions.some((tool) => tool.name === toolName)) {
-    throw new Error(`Unknown memory tool: ${toolName}`);
-  }
-  if (!state.settings.memoryToolsEnabled) {
-    return '<rp_memory_result>RCM memory tools are disabled in the dashboard.</rp_memory_result>';
-  }
-  const chatId = await readCurrentChatId();
-  if (!isChatMemoryEnabled(state.settings, chatId)) {
-    return '<rp_memory_result>RCM is disabled for the current chat. Continue without RCM memory tools.</rp_memory_result>';
-  }
-  if (!await currentMemoryToolsAvailable(state, client, chatId)) {
-    return '<rp_memory_result>No processed long-term memory is available for this chat yet. Continue without calling RCM memory tools.</rp_memory_result>';
-  }
-  const context = await readCurrentContext(state);
-  const snapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
-  if (state.memoryReferenceSnapshot && state.memoryReferenceSnapshot !== snapshot) {
-    return '<rp_memory_result>The chat changed after these memories were prepared. References from that generation are no longer valid.</rp_memory_result>';
-  }
   const generation = state.mcpTurnKey;
-
-  // Tool calls search the archive rather than trusting a model-authored name as
-  // an authorization boundary. Per-record `known_by` metadata remains in the
-  // result so the main model can preserve character knowledge correctly.
-  const perspective = "omniscient narrator";
-  const intent = "recall" as const;
   const expanding = toolName === "expand_rp_memory";
   const ref = typeof args?.ref === "string" ? args.ref.trim() : "";
   const query = String(expanding ? args?.focus ?? "" : args?.query ?? "").trim();
   const aspects = undefined;
-  if (expanding ? !ref : !query) return '<rp_memory_result>Provide a non-empty query for recall or a current ref for expansion.</rp_memory_result>';
+  const intent = "recall" as const;
+  const perspective = "omniscient narrator";
+  let chatId = state.current?.chatId ?? state.memoryToolOpportunity?.chatId ?? "unknown";
   state.mcpTraceCalls = (state.mcpTraceCalls ?? 0) + 1;
   const traceContext = {
     requestId: crypto.randomUUID(),
-    turnKey: state.memoryToolOpportunity?.turnKey ?? state.mcpTurnKey,
-    latestMessageId: context.snapshot.at(-1)?.id,
+    turnKey: state.memoryToolOpportunity?.turnKey ?? generation,
+    latestMessageId: state.current?.snapshot?.at(-1)?.id,
     callIndex: state.mcpTraceCalls,
   };
   let requestMs: number | undefined;
   let serverTimings: Record<string, number> | undefined;
-  const traceDelivery = (response: string, cacheHit: boolean, selectedIds: string[] = [], searchRequestId: string | undefined = traceContext.requestId, deliverySource?: string, newAtomCount?: number, opportunityError?: string): void => {
+  const traceDelivery = (response: string, cacheHit: boolean, selectedIds: string[] = [], searchRequestId: string | undefined = traceContext.requestId, deliverySource?: string, newAtomCount?: number, opportunityError?: string, reason?: string): void => {
     if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return;
-  if (!state.retrievalTraceEnabled) return;
+    if (!state.retrievalTraceEnabled) return;
     void client.traceRetrieval({
-      id: crypto.randomUUID(),
-      kind: "mcp_delivery",
-      chatId: context.chatId,
-      traceContext,
-      searchRequestId,
-      toolName,
-      query,
-      aspects,
-      intent,
-      cacheHit,
-      deliverySource,
-      newAtomCount,
-      opportunityError,
-      selectedIds,
-      response,
-      elapsedMs: performance.now() - toolStarted,
-      requestMs, serverTimings,
-      postDeliveryWait: "not_observed",
-      outcome: ["transport_error", "invalid_packet", "budget_rejected"].includes(deliverySource ?? "") ? "error" : "delivered",
+      id: crypto.randomUUID(), kind: "mcp_delivery", chatId, traceContext,
+      searchRequestId: reason ? undefined : searchRequestId,
+      toolName, query, ref: expanding ? ref : undefined, aspects, intent, cacheHit,
+      deliverySource, newAtomCount, opportunityError, selectedIds, response,
+      elapsedMs: performance.now() - toolStarted, requestMs, serverTimings,
+      postDeliveryWait: "not_observed", origin: "client", reason,
+      outcome: reason ? "rejected" : ["transport_error", "invalid_packet", "budget_rejected"].includes(deliverySource ?? "") ? "error" : "delivered",
     }).catch(() => undefined);
   };
+  const reject = (reason: string, message: string): string => {
+    const response = `<rp_memory_result>${message}</rp_memory_result>`;
+    traceDelivery(response, false, [], undefined, undefined, 0, undefined, reason);
+    return response;
+  };
+  if (state.internalModelCall) return reject("auxiliary_call", "Memory tools are unavailable during an RCM auxiliary call. Answer using only the supplied input; do not call memory tools again.");
+  if (!memoryToolFunctions.some((tool) => tool.name === toolName)) throw new Error(`Unknown memory tool: ${toolName}`);
+  if (!state.settings.memoryToolsEnabled) return reject("tools_disabled", "RCM memory tools are disabled in the dashboard.");
+  chatId = await readCurrentChatId();
+  if (!isChatMemoryEnabled(state.settings, chatId)) return reject("chat_disabled", "RCM is disabled for the current chat. Continue without RCM memory tools.");
+  if (expanding ? !ref : !query) return reject(expanding ? "empty_ref" : "empty_query", "Provide a non-empty query for recall or a previously supplied ref for expansion.");
+  if (!await currentMemoryToolsAvailable(state, client, chatId)) return reject("no_memory", "No processed long-term memory is available for this chat yet. Continue without calling RCM memory tools.");
+  const context = await readCurrentContext(state);
+  traceContext.latestMessageId = context.snapshot.at(-1)?.id;
+  const snapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
+  if (context.chatId !== chatId || (state.memoryReferenceSnapshot && state.memoryReferenceSnapshot !== snapshot)) {
+    return reject("chat_changed", "The chat changed after this request was prepared. Retry from the current chat; previously supplied refs still identify the same memories.");
+  }
+  if (state.mcpTurnKey !== generation) return reject("earlier_generation", "The request belongs to an earlier generation and was discarded.");
   const timing = startTiming(state, {
     chatId: context.chatId,
     kind: "mcp",
@@ -193,7 +177,7 @@ export async function executeMemoryTool(
     ? "" : memoryGuidanceBlock;
   const responseReserve = estimateTokens(common) + 24;
   if (responseReserve >= callBudget) {
-    return '<rp_memory_result>Ask a shorter question so the result fits its budget.</rp_memory_result>';
+    return reject("budget_rejected", "Ask a shorter question so the result fits its budget.");
   }
   const shared = { perspective, intent, tokenBudget: callBudget - responseReserve, excludeMemoryIds: [], excludeMemorySignatures: [],
     memoryOnlyInjection: state.settings.memoryOnlyInjection[context.chatId] ?? false,
@@ -213,10 +197,17 @@ export async function executeMemoryTool(
     { method: "POST", body: JSON.stringify(body), signal },
     expanding ? 15000 : state.lastPrepare?.mcpRequestTimeoutMs ?? MCP_REQUEST_TIMEOUT_MS,
   ).catch((error) => { if (signal?.aborted) throw error; return null; });
-  if (state.mcpTurnKey !== generation) return '<rp_memory_result>The response belongs to an earlier generation and was discarded.</rp_memory_result>';
-  if (result?.code === "INVALID_MEMORY_REF") return '<rp_memory_result>This ref is invalid, changed, or expired. Use a ref supplied in the current response.</rp_memory_result>';
   requestMs = performance.now() - requestStarted;
   serverTimings = result?.timings;
+  if (state.mcpTurnKey !== generation) return reject("earlier_generation", "The response belongs to an earlier generation and was discarded.");
+  const latestContext = await readCurrentContext(state);
+  const latestSnapshot = await sha256(JSON.stringify(latestContext.snapshot.map(message => [message.id, message.content, message.generationId])));
+  if (state.mcpTurnKey !== generation) return reject("earlier_generation", "The response belongs to an earlier generation and was discarded.");
+  if (latestContext.chatId !== chatId || snapshot !== latestSnapshot) {
+    return reject("chat_changed", "The chat changed during this request. Retry from the current chat.");
+  }
+  if (result?.code === "INVALID_MEMORY_REF") return reject("invalid_ref", INVALID_MEMORY_REF_MESSAGE);
+  if (result?.code === "MEMORY_SNAPSHOT_CHANGED") return reject("snapshot_changed", "The memory changed during this request. Retry against the current chat.");
   if (!result) {
     const response = "<rp_memory_result>The memory search request could not complete. This is a communication failure, not a search miss; continue with available context.</rp_memory_result>";
     traceDelivery(response, false, [], traceContext.requestId, "transport_error", 0);
@@ -224,7 +215,7 @@ export async function executeMemoryTool(
   }
   if (result.opportunityError === "stale_turn" && !result.newAtomCount) {
     const response = '<rp_memory_result>The prepared memory opportunity belongs to an earlier RP turn. Continue from the current prompt.</rp_memory_result>';
-    traceDelivery(response, false, [], traceContext.requestId, result.deliverySource, 0, result.opportunityError);
+    traceDelivery(response, false, [], traceContext.requestId, result.deliverySource, 0, result.opportunityError, "earlier_generation");
     return response;
   }
   const serverPacket = result.packet?.trim();

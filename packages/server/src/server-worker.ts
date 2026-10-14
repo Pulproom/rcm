@@ -84,6 +84,8 @@ export class ServerExtractionWorker {
     const quiz = [...this.#active.values()].find(item => item.job.kind === "quiz" && (!chatId || item.job.chatId === chatId));
     return {
       state,
+      ...(engine === "server" ? { modelConfigured: this.store.modelReady } : {}),
+      embeddingConfigured: this.embeddings.status?.configured,
       activeCalls: visible.length,
       ...(quiz ? { quizGenerating: { chatId: quiz.job.chatId, startedAt: quiz.startedAt } } : {}),
       ...(controlled ? { controlLeaseUntil: this.#controlLeaseUntil } : {}),
@@ -163,7 +165,7 @@ export class ServerExtractionWorker {
 
   #canFinishActive(): boolean {
     return this.store.config.engine === "server"
-      && Boolean(this.store.apiKey)
+      && this.store.modelReady
       && !this.#manualPaused
       && !this.#faulted;
   }

@@ -1,10 +1,8 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
 import { McpSelectorConfigSchema, defaultMcpSelectorConfig, estimateTokens,
   type McpSelectorConfig, type McpSelectorPublicConfig } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { saveSecret } from "./admin.js";
-import { ServerLlmStore, validateEndpoint, normalizeDirectGeminiThinking, parseVertexServiceAccount,
+import { ConnectionCredentials } from "./connection-credentials.js";
+import { ServerLlmStore, validateEndpoint, normalizeDirectGeminiThinking,
   requestStructuredProvider, testProviderConnection, ProviderRequestError } from "./server-llm.js";
 
 type Config = Omit<McpSelectorConfig,"apiKey">;
@@ -53,20 +51,13 @@ function citedBundleIds(text:string,allowed:Set<string>):string[] {
  * request and optional credentials bound to this exact provider/endpoint. */
 export class McpSelector {
   private config:Config;
-  constructor(private db:RcmDatabase, private secretsPath:string, private llm:ServerLlmStore) {
+  private credentials:ConnectionCredentials;
+  constructor(private db:RcmDatabase, secretsPath:string, private llm:ServerLlmStore) {
+    this.credentials=new ConnectionCredentials(secretsPath,"MCP",llm);
     const row=db.prepare("SELECT value FROM server_meta WHERE key='mcp_selector_config'").get() as {value:string}|undefined;
     this.config=row ? McpSelectorConfigSchema.omit({apiKey:true}).parse({...defaultMcpSelectorConfig,...JSON.parse(row.value)}) : {...defaultMcpSelectorConfig};
   }
-  private secretName(config:Config):`RCM_${string}` {
-    return `RCM_MCP_API_KEY_${createHash("sha256").update(`${config.provider}\0${config.endpoint}`).digest("hex").slice(0,24).toUpperCase()}`;
-  }
-  private dedicatedKey(config:Config):string {
-    if(!existsSync(this.secretsPath))return "";
-    const prefix=this.secretName(config)+"=";
-    return readFileSync(this.secretsPath,"utf8").split(/\r?\n/).find(line=>line.startsWith(prefix))?.slice(prefix.length).trim()??"";
-  }
-  private key(config:Config):string { return config.credentialSource==="shared"?this.llm.apiKeyFor(config.provider):this.dedicatedKey(config); }
-  get publicConfig():McpSelectorPublicConfig { return {...this.config,keyConfigured:Boolean(this.key(this.config)),dedicatedKeyConfigured:Boolean(this.dedicatedKey(this.config))}; }
+  get publicConfig():McpSelectorPublicConfig { return {...this.config,keyConfigured:Boolean(this.credentials.resolve(this.config)),dedicatedKeyConfigured:Boolean(this.credentials.dedicated(this.config))}; }
   private prepareConfig(input:unknown) {
     const parsed=McpSelectorConfigSchema.parse(input);
     parsed.endpoint=validateEndpoint(parsed.provider,parsed.endpoint);
@@ -74,9 +65,7 @@ export class McpSelector {
     if((parsed.provider==="gemini_api"||parsed.provider==="ollama_cloud"||parsed.provider==="copilot")&&parsed.serviceTier!=="standard")throw new Error("This provider supports Standard only");
     if(parsed.provider==="vertex"&&parsed.serviceTier!=="standard"&&new URL(parsed.endpoint).hostname!=="aiplatform.googleapis.com")throw new Error("Vertex Flex/Priority requires the global endpoint");
     const {apiKey,...config}=parsed;
-    if(apiKey&&config.credentialSource!=="dedicated")throw new Error("Choose dedicated credentials to save a separate key");
-    if(apiKey&&parsed.provider!=="vertex"&&/[\r\n]/.test(apiKey))throw new Error("API key contains line breaks");
-    const key=apiKey?(parsed.provider==="vertex"?JSON.stringify(parseVertexServiceAccount(apiKey)):apiKey):this.key(config);
+    const key=this.credentials.input(config,apiKey);
     if(config.enabled&&!key)throw new Error("MCP provider credentials are not configured");
     return {config,key,saveKey:Boolean(apiKey)};
   }
@@ -86,13 +75,13 @@ export class McpSelector {
   }
   update(input:unknown):McpSelectorPublicConfig {
     const {config,key,saveKey}=this.prepareConfig(input);
-    if(saveKey)saveSecret(this.secretsPath,this.secretName(config),key);
+    if(saveKey)this.credentials.save(config,key);
     this.db.prepare("INSERT INTO server_meta(key,value) VALUES('mcp_selector_config',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(config));
     this.config=config;return this.publicConfig;
   }
-  clearDedicatedKey():void {saveSecret(this.secretsPath,this.secretName(this.config),null);}
+  clearDedicatedKey():void {this.credentials.save(this.config,null);}
   async select(query:string,candidates:SelectorCandidate[],signal:AbortSignal,answerTokenBudget?:number):Promise<{ids?:string[];answer?:string;diagnostic:SelectorDiagnostic}> {
-    const config={...this.config}, apiKey=this.key(config), started=performance.now();
+    const config={...this.config}, apiKey=this.credentials.resolve(config), started=performance.now();
     const diagnostic:SelectorDiagnostic={enabled:config.enabled,outcome:"disabled",provider:config.provider,model:config.model,calls:0,elapsedMs:0,candidates:candidates.length,inputTokens:0,selectedIds:[]};
     if(!config.enabled)return {diagnostic};
     const messages:Array<{role:"system"|"user";content:string}>=[{role:"system",content:selectorSystemPrompt},{role:"user",content:selectorInput(query,candidates)}];

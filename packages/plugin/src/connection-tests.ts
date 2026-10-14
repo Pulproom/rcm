@@ -1,3 +1,4 @@
+import { readTranslationConnectionSettings } from "./translation-connection-settings.js";
 import { connectionFailureReason, type ServerLlmPublicConfig, type ConnectionFailureCode } from "@rcm/shared";
 import { providerCapability } from "./provider-settings.js";
 import { rememberDiagnosticSecrets } from "./settings.js";
@@ -17,7 +18,7 @@ export function readServerModelConnection(form: FormData) {
 }
 
 export async function testSettingsConnection(state: RuntimeState, form: FormData, target: string, voyageKey = ""): Promise<number> {
-  rememberDiagnosticSecrets([state.settings.serverToken, ...["serverToken", "serverLlmApiKey", "mcpApiKey"].map(name => String(form.get(name) ?? "")), voyageKey]);
+  rememberDiagnosticSecrets([state.settings.serverToken, ...["serverToken", "serverLlmApiKey", "mcpApiKey", "translationServerApiKey"].map(name => String(form.get(name) ?? "")), voyageKey]);
   const started = performance.now();
   if (target === "risu") {
     if (state.risuConnectionTestRunning || state.workerBusy || state.internalModelCall || state.activeModelRequest || state.translationActivity?.pending) {
@@ -49,10 +50,11 @@ export async function testSettingsConnection(state: RuntimeState, form: FormData
   const connection = { ...state.settings, serverUrl: String(form.get("serverUrl") ?? "").trim(), serverToken: String(form.get("serverToken") ?? "").trim() };
   if (!isServerConfigured(connection)) throw Object.assign(new Error("먼저 서버 주소와 토큰을 설정하고 연결을 확인해 주세요."), { code: "SERVER_SETUP_REQUIRED" });
   const client = new ServerClient(() => connection);
-  const endpoint = form.get(target === "mcp" ? "mcpEndpoint" : "serverLlmEndpoint");
+  const endpoint = form.get(target === "mcp" ? "mcpEndpoint" : target === "translation" ? "translationServerEndpoint" : "serverLlmEndpoint");
   if (target !== "voyage" && !String(endpoint ?? "").trim()) throw new ServerRequestError(connectionFailureReason("ENDPOINT_MISSING"), 0, "ENDPOINT_MISSING");
   let body;
   try { body = target === "voyage" ? { target, ...(voyageKey.trim() ? { apiKey: voyageKey.trim() } : {}) }
+    : target === "translation" ? { target, config: readTranslationConnectionSettings(form) }
     : target === "mcp" ? { target, config: readMcpSelectorSettings(form) }
     : { target: "server", config: { engine: "server", ...readServerModelConnection(form), apiKey: String(form.get("serverLlmApiKey") ?? "").trim() || undefined } };
   } catch { throw new ServerRequestError(connectionFailureReason("INVALID_CONFIG"), 0, "INVALID_CONFIG"); }

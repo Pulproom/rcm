@@ -17,7 +17,7 @@ import {
   SIGNED_RELATIONSHIP_BASELINE_VALUES,
 } from "./structured-contract-values.js";
 export { sanitizeDiagnosticText, CONNECTION_FAILURE_LABELS, connectionFailureReason, type ConnectionFailureCode } from "./support-diagnostics.js";
-export const RCM_API_REVISION = 88;
+export const RCM_API_REVISION = 89;
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const UserCorrectionViewSchema = z.object({ userEdited: z.boolean(), userEditOrdinal: z.number().int().nullable(), locked: z.boolean() });
 export const STATE_KIND_VALUES = ["condition", "goal", "secret"] as const;
@@ -40,7 +40,7 @@ import { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "
 export { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "./dialogue-source-guidance.js";
 import { STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
 export { ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
-export { MEMORY_GUIDANCE, memoryGuidanceBlock, withMemoryGuidance, memoryEvidenceKind } from "./memory-presentation.js";
+export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, withMemoryGuidance, memoryEvidenceKind } from "./memory-presentation.js";
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
@@ -1584,6 +1584,33 @@ export const defaultAuxiliaryModelConfig = {
   model: "gemini-3.8-flash", temperature: 1, thinking: "low",
 } as const;
 
+/** Provider defaults shared by connection forms and server-side model resolution. */
+export const SERVER_LLM_DEFAULT_MODELS: Record<ServerLlmProvider, string> = {
+  llm_gateway: defaultAuxiliaryModelConfig.model, openai_compatible: "",
+  vertex: "gemini-3.8-flash", gemini_api: "gemini-3.8-flash",
+  vercel: "google/gemini-3.8-flash", ollama_cloud: "glm-5.3", copilot: "gemini-3.8-flash",
+};
+export const TranslationConnectionConfigSchema = ServerLlmConfigSchema.pick({
+  provider:true, endpoint:true, temperature:true, thinking:true, serviceTier:true, apiKey:true,
+}).extend({
+  model: z.string().trim().max(240).default(""),
+  credentialSource: z.enum(["shared", "dedicated"]).default("shared"),
+  maxOutputTokens: z.number().int().min(256).max(128000).default(8000),
+});
+export type TranslationConnectionConfig = z.output<typeof TranslationConnectionConfigSchema>;
+export type TranslationConnectionPublicConfig = Omit<TranslationConnectionConfig,"apiKey"> & { keyConfigured:boolean; dedicatedKeyConfigured:boolean };
+/** One-time import of the translation fields shipped in 1f3ec17. */
+export const TranslationLegacySettingsSchema = z.object({
+  model: z.string().trim().max(240).default(""), temperature: z.number().min(0).max(2).default(.3),
+  thinking: ThinkingLevelSchema.default("default"), maxOutput: z.number().int().min(256).max(128000).default(8000),
+});
+export function initialTranslationConnection(extraction: Pick<ServerLlmPublicConfig,"provider"|"endpoint"|"serviceTier">,
+  legacy: z.input<typeof TranslationLegacySettingsSchema> = {}): Omit<TranslationConnectionConfig,"apiKey"> {
+  const settings = TranslationLegacySettingsSchema.parse(legacy);
+  return { provider:extraction.provider, endpoint:extraction.endpoint, serviceTier:extraction.serviceTier,
+    credentialSource:"shared", model:settings.model, temperature:settings.temperature, thinking:settings.thinking, maxOutputTokens:settings.maxOutput };
+}
+
 export const McpSelectorConfigSchema = ServerLlmConfigSchema.omit({ engine:true, embeddingTimeoutMs:true, rerankTimeoutMs:true }).extend({
   enabled: z.boolean().default(true),
   credentialSource: z.enum(["shared", "dedicated"]).default("shared"),
@@ -1622,6 +1649,8 @@ export interface ServerLlmPublicConfig {
 }
 
 export interface ServerWorkerStatus {
+  modelConfigured?: boolean;
+  embeddingConfigured?: boolean;
   state: "risu" | "standby" | "running" | "paused" | "faulted";
   activeCalls: number;
   controlLeaseUntil?: number;
@@ -1895,3 +1924,5 @@ export { projectMemoryScene, renderMemoryScene, type MemoryScene } from "./memor
 export { SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
 
 export { ANNIVERSARY_KINDS, DEFAULT_ALWAYS_INJECT_KINDS, landmarkAlwaysInjected } from "./landmark-injection.js";
+
+export * from "./reference-translation.js";

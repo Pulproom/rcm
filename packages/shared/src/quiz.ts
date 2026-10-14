@@ -8,13 +8,13 @@ export type QuizFormat = "choice4" | "ox";
 export type QuizDifficulty = "easy" | "medium" | "hard";
 export interface QuizDraftItem { format: QuizFormat; difficulty: QuizDifficulty; question: string; options: string[]; answerIndex: number; explanation: string; quote?: string; memoryRef: string }
 export interface QuizJobMeta { refs: Record<string, string>; sceneCount: number; fingerprints?: Record<string, string>; limits?: Record<string, number>; targetCount?: number }
-export interface QuizRegenerateResponse { retired: number; enqueued: boolean; reason?: "generating" | "disabled" | "no_material" }
+export interface QuizRegenerateResponse { retired: number; enqueued: boolean; reason?: "generating" | "disabled" | "no_material" | "model_not_configured" }
 export interface QuizStatus { unanswered: number; generating: boolean }
 export interface QuizStats { streak: number; bestStreak: number; answered: number; correct: number }
 export interface QuizQuestion { id: string; attemptToken: string; retry: boolean; format: QuizFormat; difficulty: QuizDifficulty; question: string; options: string[]; storyTime?: string }
 export const QuizAnswerRequestSchema = z.object({ chosenIndex: z.number().int().min(0), attemptToken: z.string().min(1) });
 export type QuizAnswerRequest = z.infer<typeof QuizAnswerRequestSchema>;
-export interface QuizNextResponse { enabled: boolean; available: boolean; remaining: number; generating: boolean; question: QuizQuestion | null; stats: QuizStats }
+export interface QuizNextResponse { enabled: boolean; available: boolean; remaining: number; generating: boolean; question: QuizQuestion | null; stats: QuizStats; waitingReason?: "model_not_configured" | "conversation_too_short" | "material_exhausted" }
 export interface QuizSceneRef { memoryId: string; title: string; sceneNumber?: number; storyTime?: string; location?: string }
 export interface QuizAnswerResponse { correct: boolean; chosenIndex: number; answerIndex: number; explanation: string; quote?: string; scene: QuizSceneRef | null; stats: QuizStats; remaining: number }
 

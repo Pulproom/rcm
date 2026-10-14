@@ -37,6 +37,14 @@ export const defaults: PluginSettings = {
   postExtractionReview: false,
   staticModel: "",
   translationProvider: "google",
+  translationSlot: "translate",
+  translationModel: "",
+  translationMaxOutput: 8000,
+  translationServerModel: "",
+  translationServerMaxOutput: 8000,
+  translationTemperature: 0.3,
+  translationThinking: "default",
+  translationBackground: false,
   translationDisplay: "ko",
   autoTranslate: true,
   dashboardTheme: "light",
@@ -124,6 +132,14 @@ export async function loadSettings(): Promise<PluginSettings> {
     postExtractionReview: stored?.postExtractionReview ?? defaults.postExtractionReview,
     staticModel: stored?.staticModel ?? defaults.staticModel,
     translationProvider: stored?.translationProvider ?? defaults.translationProvider,
+    translationSlot: stored?.translationSlot ?? defaults.translationSlot,
+    translationModel: stored?.translationModel ?? defaults.translationModel,
+    translationMaxOutput: stored?.translationMaxOutput ?? defaults.translationMaxOutput,
+    translationServerModel: stored?.translationServerModel ?? defaults.translationServerModel,
+    translationServerMaxOutput: stored?.translationServerMaxOutput ?? defaults.translationServerMaxOutput,
+    translationTemperature: stored?.translationTemperature ?? defaults.translationTemperature,
+    translationThinking: stored?.translationThinking ?? defaults.translationThinking,
+    translationBackground: stored?.translationBackground === true,
     translationDisplay,
     autoTranslate: translationDisplay === "ko",
     dashboardTheme: stored?.dashboardTheme ?? defaults.dashboardTheme,
@@ -170,6 +186,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.postExtractionReview === right.postExtractionReview
     && left.staticModel === right.staticModel
     && left.translationProvider === right.translationProvider
+    && ["translationSlot", "translationModel", "translationMaxOutput", "translationServerModel", "translationServerMaxOutput", "translationTemperature", "translationThinking", "translationBackground"].every(key => left[key as keyof PluginSettings] === right[key as keyof PluginSettings])
     && left.translationDisplay === right.translationDisplay
     && left.autoTranslate === right.autoTranslate
     && left.dashboardTheme === right.dashboardTheme

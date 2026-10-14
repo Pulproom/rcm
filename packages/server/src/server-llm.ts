@@ -134,6 +134,14 @@ function parseStoredConfig(db: RcmDatabase): StoredServerLlmConfig {
   }
 }
 
+const stores = new WeakMap<RcmDatabase, ServerLlmStore>();
+
+/** Risu owns its credentials; only the server engine can be checked here. */
+export function auxiliaryModelReady(db: RcmDatabase): boolean {
+  const store = stores.get(db);
+  return (store?.config ?? parseStoredConfig(db)).engine === "risu" || store?.modelReady === true;
+}
+
 export class ServerLlmStore {
   #config: StoredServerLlmConfig;
   #apiKeys: Partial<Record<ServerLlmProvider, string>>;
@@ -155,9 +163,18 @@ export class ServerLlmStore {
     try { hasStoredLlmTimeout = Object.prototype.hasOwnProperty.call(JSON.parse(storedRow?.value ?? "{}"), "llmTimeoutMs"); } catch { /* malformed stored config is replaced by defaults */ }
     if (!hasStoredLlmTimeout && requestTimeoutMs !== 300_000) this.#config.llmTimeoutMs = requestTimeoutMs;
     this.#apiKeys = { ...apiKeys };
+    stores.set(db, this);
   }
 
   get config(): Readonly<StoredServerLlmConfig> { return this.#config; }
+  get modelReady(): boolean {
+    if (!this.apiKey.trim() || !ServerLlmConfigSchema.omit({ apiKey: true }).safeParse(this.config).success) return false;
+    try {
+      validateEndpoint(this.config.provider, this.config.endpoint);
+      if (this.config.provider === "vertex") parseVertexServiceAccount(this.apiKey);
+      return true;
+    } catch { return false; }
+  }
   snapshotJob(jobId: string): Readonly<StoredServerLlmConfig> {
     let snapshot = this.#jobConfigs.get(jobId);
     if (!snapshot) {
@@ -378,6 +395,11 @@ function thinkingBudget(level: ThinkingLevel): number | undefined {
   return { off: 0, low: 1_024, medium: 4_096, high: 8_192 }[level];
 }
 
+function openAiGenerationTuning(thinking: ThinkingLevel, temperature: number): Record<string, unknown> {
+  const reasoningEffort = thinking === "default" ? undefined : thinking === "off" ? "none" : thinking;
+  return { temperature, ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}) };
+}
+
 function geminiGenerationTuning(model: string, thinking: ThinkingLevel, temperature: number): Record<string, unknown> {
   if (usesGeminiFlashThinkingLevel(model)) {
     const thinkingLevel = thinking === "default" ? undefined : thinking === "high" ? "HIGH" : thinking === "medium" ? "MEDIUM" : "LOW";
@@ -418,12 +440,17 @@ const copilotHeaders = {
   "Copilot-Integration-Id": "vscode-chat", "User-Agent": "RCM",
 };
 
-// Never persist an authentication response body or an echoed bearer in job errors.
-async function copilotFetchJson(url: string, init: RequestInit, signal: AbortSignal, timeoutMs: number) {
+// Authentication details stay private; inference details redact both credentials before logging.
+async function copilotFetchJson(url: string, init: RequestInit, signal: AbortSignal, timeoutMs: number, inferenceSecrets?: readonly string[]) {
   try { return await fetchJson(url, init, signal, timeoutMs); }
   catch (error) {
-    if (error instanceof ProviderRequestError) throw new ProviderRequestError(error.kind, error.status,
-      error.kind === "http" ? `Copilot HTTP ${error.status} · 토큰 권한, 구독 및 모델 사용 가능 여부를 확인해 주세요.` : `Copilot ${error.kind} failure`);
+    if (error instanceof ProviderRequestError) {
+      const detail = inferenceSecrets ? sanitizeDiagnosticText(error.providerMessage ?? "", inferenceSecrets) : "";
+      const failure = new ProviderRequestError(error.kind, error.status,
+        error.kind === "http" ? `Copilot HTTP ${error.status} · ${detail || "토큰 권한, 구독 및 모델 사용 가능 여부를 확인해 주세요."}` : `Copilot ${error.kind} failure`);
+      if (detail) failure.providerMessage = detail;
+      throw failure;
+    }
     throw error;
   }
 }
@@ -659,9 +686,9 @@ export async function requestStructuredProvider(
       const result = await copilotFetchJson(configuredEndpoint === SERVER_LLM_DEFAULT_ENDPOINTS.copilot ? credential.endpoint : configuredEndpoint, {
         method: "POST", redirect: "error",
         headers: { ...copilotHeaders, "Content-Type": "application/json", Authorization: `Bearer ${credential.accessToken}`, "X-Initiator": "agent" },
-        // Copilot model capabilities vary. Use prompt-based JSON and provider tuning defaults.
-        body: JSON.stringify({ model: config.model, messages, max_tokens: limit, stream: false }),
-      }, signal, Math.max(1, deadline - Date.now()));
+        // JSON uses the prompt; unsupported tuning fails without a parameter fallback.
+        body: JSON.stringify({ model: config.model, messages, ...openAiGenerationTuning(config.thinking, config.temperature), max_tokens: limit, stream: false }),
+      }, signal, Math.max(1, deadline - Date.now()), [apiKey, credential.accessToken]);
       return { content: String(result.choices?.[0]?.message?.content ?? ""), finishReason: result.choices?.[0]?.finish_reason, usage: result.usage };
     }
     if (config.provider === "gemini_api" || config.provider === "vertex") {
@@ -716,7 +743,6 @@ export async function requestStructuredProvider(
       return { content:String(result.message?.content ?? ""), finishReason:result.done_reason, usage:{prompt_tokens:result.prompt_eval_count,completion_tokens:result.eval_count} };
     }
 
-    const reasoningEffort = config.thinking === "default" ? undefined : config.thinking === "off" ? "none" : config.thinking;
     // LLM Gateway has no Gemma route that accepts JSON mode and rejects the request outright;
     // the prompt already asks for JSON and structured repair covers malformed output.
     const jsonMode = outputFormat === "json" && !/gemma/i.test(config.model);
@@ -726,12 +752,11 @@ export async function requestStructuredProvider(
       body: JSON.stringify({
         model: config.model,
         messages,
-        temperature: config.temperature,
+        ...openAiGenerationTuning(config.thinking, config.temperature),
         max_tokens: limit,
         stream: false,
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
         ...(config.serviceTier === "standard" || config.provider === "vercel" ? {} : { service_tier: config.serviceTier }),
-        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       }),
     } satisfies RequestInit;
     onRequest();

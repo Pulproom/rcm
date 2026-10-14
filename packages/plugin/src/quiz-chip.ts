@@ -19,11 +19,16 @@ const buttonBase = (skin: ChipSkin): string =>
   `box-sizing:border-box;width:100%;min-height:36px;margin-top:6px;padding:8px 12px;border:0;border-radius:${skin.buttonRadius};font-family:inherit;font-size:13px;font-weight:600;line-height:1.4;cursor:pointer;text-align:${skin.buttonAlign}`;
 const primaryButton = (skin: ChipSkin): string => `${buttonBase(skin)};background:${skin.accent};color:${skin.accentInk}`;
 const quietButton = (skin: ChipSkin): string => `${buttonBase(skin)};background:${skin.button};color:${skin.ink}`;
+const waitingCopy = {
+  model_not_configured: "보조 모델을 설정하면 퀴즈를 만들 수 있어요.",
+  conversation_too_short: "대화가 몇 턴 더 쌓이면 퀴즈가 생겨요.",
+  material_exhausted: "다음 장면이 쌓이거나 지난 장면이 다시 열리면 새 퀴즈가 생겨요.",
+};
 
 /** Quiz action or preparation guidance above 대시보드 열기; hidden when unavailable or off. */
 export function quizEntryButton(next: QuizNextResponse | undefined, skin: ChipSkin, waiting: boolean): string {
   if (!next?.enabled) return "";
-  if (!next.available || !next.question) return `<p role="status" style="margin:8px 0 0;font-size:12px;line-height:1.5;color:${skin.ink3};overflow-wrap:anywhere">${next.generating ? "새 퀴즈를 만들고 있어요." : "다음 장면이 쌓이거나 지난 장면이 다시 열리면 새 퀴즈가 생겨요."}</p>`;
+  if (!next.available || !next.question) return `<p role="status" style="margin:8px 0 0;font-size:12px;line-height:1.5;color:${skin.ink3};overflow-wrap:anywhere">${next.waitingReason ? waitingCopy[next.waitingReason] : next.generating ? "새 퀴즈를 만들고 있어요." : "퀴즈가 순서를 기다리고 있어요."}</p>`;
   const count = next.remaining > 0 ? next.remaining : 1;
   const centred = skin.buttonAlign === "center";
   const layout = centred ? "display:block" : "display:flex;justify-content:space-between;align-items:baseline;gap:8px";

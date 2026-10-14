@@ -107,15 +107,16 @@ function parseWorkerJson(state: RuntimeState, text: string, purpose: WorkerJsonP
   return normalizeStructuredModelOptionals(parsed.value);
 }
 
+export function risuModelSlot(slot: import("./types.js").AuxiliaryMode | "translate", model: string) {
+  return { mode: slot === "main" || slot === "static" ? "model" : slot, staticModel: slot === "static" ? model : undefined, allowPlugins: true };
+}
+
 async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose): Promise<string> {
   const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
     if (state.currentJob?.kind === "quiz") return;
     try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
     catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`); }
   };
-  const mode = state.settings.auxiliaryMode === "main" || state.settings.auxiliaryMode === "static"
-    ? "model"
-    : state.settings.auxiliaryMode;
   state.internalModelCall = true;
   const timing = state.currentJob?.kind !== "quiz" && state.currentJob
     ? startTiming(state, { chatId: state.currentJob.chatId, kind: "auxiliary_llm", label: `보조 모델 · ${purpose}` })
@@ -128,9 +129,7 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     if (state.currentJob?.kind !== "quiz") await modelCallRecorders.get(state)?.(purpose, "started");
     const response = await risuai.runLLMModel({
       messages: preparedMessages,
-      mode,
-      staticModel: state.settings.auxiliaryMode === "static" ? state.settings.staticModel : undefined,
-      allowPlugins: true,
+      ...risuModelSlot(state.settings.auxiliaryMode, state.settings.staticModel),
     });
     if (state.currentJob?.kind !== "quiz" && response?.type === "fail" && typeof response.result === "string") await modelDraftRecorders.get(state)?.(response.result);
     const output = responseText(response);

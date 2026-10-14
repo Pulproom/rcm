@@ -569,11 +569,21 @@ button.scene__title:hover { color: var(--accent-text); }
 .lock__notes > .notice, .lock__notes > .msg { border-radius: 18px; }
 /* Notification body never outranks its title: both sit at the UI size, the title carries the weight. */
 .msg__body p { font-size: var(--t-ui); line-height: 1.5; }
-.home-backfill__meta { gap: var(--s3) var(--s5); }
-.home-backfill__action { height: 32px; padding: 0 var(--s4); border-radius: 999px; background: var(--tungsten-dim); color: var(--accent-text); font-size: var(--t-meta); }
+/* App notices on the lock screen read as notifications: the same square app icon and column as .noti. */
+.lock__notes > .msg { grid-template-columns: 38px minmax(0, 1fr); gap: 1px 10px; margin: 0; padding: 12px 14px 13px; border-radius: 22px; color: var(--lock-ink); }
+.lock__notes > .msg > .msg__icon { grid-row: span 2; align-self: start; display: grid; place-items: center; width: 38px; height: 38px; padding: 0; border-radius: 9px; color: #fff; background: var(--k-gray); }
+.lock__notes > .msg--warning > .msg__icon, .lock__notes > .msg--danger > .msg__icon { background: var(--k-red); color: #fff; }
+.lock__notes > .msg--success > .msg__icon { background: var(--k-green); color: #fff; }
+.lock__notes > .msg > .msg__icon .i { width: 21px; height: 21px; stroke-width: 2; }
+.lock__notes > .msg .msg__body p { margin-top: 1px; color: var(--lock-ink); }
+.lock__notes > .msg .msg__acts { margin-top: 10px; }
+.home-backfill__details.fold > summary { min-height: 32px; padding: 0; border-radius: 0; background: none; color: var(--lock-ink-2); font-size: var(--t-meta); }
+.home-backfill__details.fold[open] > summary { border-radius: 0; }
+.home-backfill__calls { border-radius: 12px; background: color-mix(in srgb, var(--lock-ink) 6%, transparent); color: var(--lock-ink-2); font-size: var(--t-meta); }
+.lock__notes > .msg .msg__body .home-backfill__calls p { margin: 0; color: inherit; font-size: inherit; line-height: inherit; }
+.lock__notes > .msg .msg__body p.home-backfill__hint { color: var(--lock-ink-2); font-size: var(--t-meta); }
+.home-backfill__action { height: 32px; padding: 0 14px; border-radius: 16px; background: var(--tungsten-dim); color: var(--accent-text); font-size: var(--t-meta); }
 .home-backfill__action:hover, .home-backfill__action.is-hover { background: color-mix(in srgb, var(--tungsten-dim) 100%, var(--tungsten) 10%); }
-.home-backfill__details { margin-top: 0; }
-.home-backfill__details.fold > summary { padding-inline: 0; border-radius: 0; background: none; color: var(--accent-text); font-size: var(--t-meta); }
 .lw, .noti, .wg, .lock__notes > .notice, .lock__notes > .msg { background: var(--lock-glass); box-shadow: inset 0 0 0 .5px var(--lock-edge); }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .lw, .noti, .wg, .lock__notes > .notice, .lock__notes > .msg { -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8); }
@@ -677,6 +687,11 @@ button.sent-row:hover .sent-row__t { color: inherit; }
 .sent-q { padding: 12px 16px 4px; }
 .sent-q + .sent-row { padding-top: 6px; }
 .sent-raw > summary { padding: 12px 16px; border: 0; border-radius: 12px; background: var(--screen); }
+/* Opened, the summary, its translate tools and the packet read as one card. */
+.sent-raw[open] > .sent-raw__tools, .sent-raw[open] > .sent-raw__error { margin: 0; padding: 0 16px 4px; background: var(--screen); }
+.sent-raw[open] > .sent-raw__tools .btn { min-height: 32px; padding-inline: 0; background: none; }
+.sent-raw[open] > .sent-raw__tools small, .sent-raw[open] > .sent-raw__error { font-size: var(--t-meta); }
+.sent-raw[open] > .packet { margin: 0; border-radius: 0 0 12px 12px; box-shadow: inset 0 .5px 0 var(--sep); }
 @media (min-width: 900px) { .sent { padding: 16px 0 56px; } }
 /* 현재: one pinned bar (range, kinds as Reminders-coloured chips, sort, add), then rows read alike */
 .nowbook { --kc: var(--tungsten); }
@@ -823,7 +838,7 @@ button.sent-row:hover .sent-row__t { color: inherit; }
 .people-group[open] > summary .chev { margin-left: auto; }
 /* phones: lists fade out under the floating tab bar instead of being cut by it */
 @media (max-width: 899px) {
-  .film:not(:has(.lock))::after { content: ""; position: fixed; left: 0; right: 0; bottom: 0; z-index: 19; height: calc(96px + env(safe-area-inset-bottom)); background: linear-gradient(color-mix(in srgb, var(--house) 0%, transparent), var(--house) 78%); pointer-events: none; }
+  .film:not(:has(.lock)):not(.dialog)::after { content: ""; position: fixed; left: 0; right: 0; bottom: 0; z-index: 19; height: calc(96px + env(safe-area-inset-bottom)); background: linear-gradient(color-mix(in srgb, var(--house) 0%, transparent), var(--house) 78%); pointer-events: none; }
 }
 /* ---- iOS fidelity ---- */
 /* the system face first: SF Pro and Apple SD Gothic Neo on Apple devices, Pretendard elsewhere */

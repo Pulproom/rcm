@@ -1,3 +1,4 @@
+import { migrateTranslationKeys } from "./translation-cache.js";
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID } from "node:crypto";
@@ -886,6 +887,7 @@ CREATE TRIGGER IF NOT EXISTS source_fts_delete AFTER DELETE ON messages BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS translation_cache (
+  model TEXT NOT NULL DEFAULT '',
   cache_key TEXT PRIMARY KEY,
   server_instance_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
@@ -924,6 +926,14 @@ CREATE TABLE IF NOT EXISTS quiz_items (
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_quiz_items_open ON quiz_items(chat_id, answered_at, retired_at, created_at, position);
+-- Keep reference tombstones after memory/chat deletion: an address is never reassigned.
+CREATE TABLE IF NOT EXISTS memory_references (
+  chat_id TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  memory_id TEXT NOT NULL,
+  PRIMARY KEY(chat_id, ref),
+  UNIQUE(chat_id, memory_id)
+);
 CREATE TABLE IF NOT EXISTS quiz_state (
   chat_id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 0,
@@ -951,16 +961,26 @@ export function openDatabase(path: string): DatabaseHandle {
   const hasSchemaLedger = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get());
   if (hasSchemaLedger) {
     const version = Number((db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number | null }).version ?? 0);
-    if (version !== 46) {
+    if (version === 46) {
+      db.transaction(() => {
+        db.exec("ALTER TABLE translation_cache ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+        migrateTranslationKeys(db);
+        db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
+      })();
+    }
+    if (version !== 46 && version !== 47 && version !== 48) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
   }
-  db.exec(schema);
+  db.transaction(() => {
+    db.exec(schema);
+    db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
+  })();
   if (!hasSchemaLedger) {
-    db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(46,?)").run(Date.now());
     db.prepare("INSERT OR IGNORE INTO server_meta(key,value) VALUES('instance_id',?)").run(randomUUID());
   }
+  migrateTranslationKeys(db);
   let currentVectorEnabled = false;
   try {
     sqliteVec.load(db);

@@ -312,6 +312,10 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
     if (existingChat && (request.forceBackfill || request.backfillApproved === true) && existingChat.ingestion_state === "historical_pending") {
       db.prepare("UPDATE chats SET ingestion_state='managed' WHERE id=?").run(request.chatId);
     }
+    if (!existingChat && initialIngestionState === "historical_pending") {
+      db.prepare("INSERT OR REPLACE INTO server_meta(key,value) VALUES(?,?)")
+        .run(`quiz_history_boundary:${request.chatId}`, String(Math.max(-1, ...request.messages.map(message => message.ordinal), ...(request.messageVisibility ?? []).map(message => message.ordinal))));
+    }
 
     // Card and lore projection hashes can change as activation keys toggle.
     // They are context metadata, not an actionable contradiction in the RP

@@ -15,7 +15,8 @@ export interface RetrievalTraceConfig {
 export const RETRIEVAL_TRACE_CHAT_PREFIX = "retrieval_trace_chat:";
 
 export interface RetrievalTraceEvent {
-  schema?: "rcm.retrieval-trace.v18";
+  schema?: "rcm.retrieval-trace.v19";
+  currentState?: import("./state-outcomes.js").StateOutcomeReport;
   id: string;
   at?: number;
   kind: "automatic_search" | "automatic_injection" | "mcp_search" | "mcp_delivery" | "tool_exposure";
@@ -111,7 +112,7 @@ export class RetrievalTraceWriter {
     }));
     const sanitized: Record<string, unknown> = {
       ...event,
-      schema: "rcm.retrieval-trace.v18",
+      schema: "rcm.retrieval-trace.v19",
       at: event.at ?? Date.now(),
       source: this.sourcePosition(event.chatId, event.traceContext?.latestMessageId),
       query: full ? boundedText(event.query, 32_000) : redactText(event.query),
@@ -124,6 +125,9 @@ export class RetrievalTraceWriter {
       retrieval: redactDiagnostics(event.retrieval),
       retrievals: redactDiagnostics(event.retrievals),
       story: redactDiagnostics(event.story),
+      currentState: event.currentState ? { ...event.currentState,
+        entries: event.currentState.entries.map(({ title, ...entry }) => ({ ...entry, ...(full && title ? { title } : {}) })),
+      } : undefined,
     };
     for (const key of ["query", "aspects", "querySignals", "packet", "response"] as const) if (sanitized[key] === undefined) delete sanitized[key];
     return sanitized;

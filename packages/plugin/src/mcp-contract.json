@@ -21,7 +21,7 @@
     {
       "id": "expand_rp_memory",
       "name": "expand_rp_memory",
-      "description": "Expand one clearly chosen memory ref with its details, dialogue, and source evidence. Use this after a supplied record is known to be the right one; do not expand several refs as a general continuity check. Optional focus narrows the result to locally matching evidence inside that memory and may return no match; it never searches other memories. If several records might answer, use recall_rp_memory instead. Use a currently supplied ref.",
+      "description": "Expand one clearly chosen memory ref with its details, dialogue, and source evidence. Use this after a supplied record is known to be the right one; do not expand several refs as a general continuity check. Optional focus narrows the result to locally matching evidence inside that memory and may return no match; it never searches other memories. If several records might answer, use recall_rp_memory instead. Refs from earlier responses in this chat remain valid; current access rules apply.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

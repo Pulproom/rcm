@@ -866,15 +866,15 @@ function cloneLineage(
       return remapped === itemId ? undefined : remapped;
     };
     const serverInstanceId = String((db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value?: string } | undefined)?.value ?? "");
-    const insertTranslation = db.prepare(`INSERT OR IGNORE INTO translation_cache(cache_key,server_instance_id,chat_id,item_kind,item_id,source_hash,provider,source_language,target_language,translated,used_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const insertTranslation = db.prepare(`INSERT OR IGNORE INTO translation_cache(cache_key,server_instance_id,chat_id,item_kind,item_id,source_hash,provider,source_language,target_language,translated,used_at,created_at,model)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const row of db.prepare("SELECT * FROM translation_cache WHERE chat_id=? ORDER BY created_at").all(parent) as any[]) {
       const itemId = remapTranslationItemId(row.item_kind, row.item_id);
       if (!itemId) continue;
       const cacheKey = translationCacheKey({ serverInstanceId, chatId: child, kind: row.item_kind, itemId,
         sourceHash: row.source_hash, provider: row.provider, sourceLanguage: row.source_language, targetLanguage: row.target_language });
       const inserted = insertTranslation.run(cacheKey, serverInstanceId, child, row.item_kind, itemId, row.source_hash, row.provider,
-        row.source_language, row.target_language, row.translated, row.used_at, row.created_at).changes;
+        row.source_language, row.target_language, row.translated, row.used_at, row.created_at, row.model ?? "").changes;
       counts.translations = (counts.translations ?? 0) + inserted;
     }
     pruneTranslationCache(db);

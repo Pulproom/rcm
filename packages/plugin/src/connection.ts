@@ -18,6 +18,10 @@ type MutableConnectionState = {
   serverConnectionLastFailureAt?: number;
 };
 
+export function isServerConnectionReady(state: MutableConnectionState & { activityReady?: boolean; settings: Pick<PluginSettings, "serverUrl" | "serverToken"> }): boolean {
+  return state.activityReady === true && !state.serverConnectionIssue && !state.activityStatusError && isServerConfigured(state.settings);
+}
+
 export function isServerConfigured(settings: Pick<PluginSettings, "serverUrl" | "serverToken">): boolean {
   const token = settings.serverToken.trim();
   return Boolean(settings.serverUrl.trim() && token && token !== "change-me");

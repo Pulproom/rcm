@@ -1,7 +1,9 @@
+import { StateOutcomeCapture } from "./state-outcomes.js";
 import { accessibleStorySeed } from "./story-seeds.js";
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
 import { knownByLabels } from "./item-access.js";
-import { collectStateEvidence, selectStateEvidence, stateMcpEvidence, stateKindLabel } from "./state-evidence.js";
+import { collectStateEvidence, selectStateEvidence, stateMcpEvidence } from "./state-evidence.js";
+import { renderStateLine, sharedStateBudget } from "./automatic-state.js";
 import { parseSocialRelation, socialRelationKnowledge } from "./social-relations.js";
 import { projectMemoryScene, renderMemoryScene } from "@rcm/shared";
 import { loadResidualActivations, type AutomaticActivationObservation } from "./recall-activation.js";
@@ -130,6 +132,7 @@ export interface RetrievalCandidateTrace {
 }
 
 export interface RetrievalDiagnostics {
+  currentState?: import("./state-outcomes.js").StateOutcomeReport;
   mcpQuestions?: Array<{question:string; candidates:Array<{memoryId:string; rankScore:number; detailIds:string[]; dialogueKeys:string[]; rawAtomHits:SemanticMemoryHit[]}>}>;
   atomPathSearch?: StoredAtomPathSearchStats;
   elapsedMs: number;
@@ -915,22 +918,26 @@ function stableAnchors(
   tokenBudget: number, intent: RecallIntent, signals: SearchQuerySignal[],
   coverage?: PromptCoverage, answerOnly = false, activePerspectives: string[] = [],
   archiveView = false, manifest = emptyPacketManifest(), excluded: ReadonlySet<string> = new Set(),
-  stateHits: StateEvidenceHit[] = [], relevance?: LedgerRelevance, semantic?: Map<string, number>,
+  stateHits: StateEvidenceHit[] = [], relevance?: LedgerRelevance, semantic?: Map<string, number>, trace?: StateOutcomeCapture,
 ): string {
-  const candidates = selectStateEvidence(collectStateEvidence(db, chatId), signals.map(signal => signal.text).join("\n"), {
-    perspective, archive: archiveView, continuity: !answerOnly, history: answerOnly || intent === "promise" || intent === "relationship", activeNames: activePerspectives, semantic,
+  const candidates = selectStateEvidence(collectStateEvidence(db, chatId, trace, perspective), signals.map(signal => signal.text).join("\n"), {
+    trace, perspective, archive: archiveView, continuity: !answerOnly, history: answerOnly || intent === "promise" || intent === "relationship", activeNames: activePerspectives, semantic,
   });
   const lines: string[] = [];
-  for (const item of candidates) {
-    if (!answerOnly && intent === "world_state" && item.kind === "belief") continue;
+  for (const [index, item] of candidates.entries()) {
+    const rank = index + 1;
+    if (!answerOnly && intent === "world_state" && item.kind === "belief") { trace?.record(perspective, item, "not_current", { reason: "world_state_excludes_belief", rank }); continue; }
     const evidence = stateMcpEvidence(item);
     const hit: StateEvidenceHit = { text: item.text, presentation: evidence.text, knownBy: item.holders,
       atomKey: evidence.atomKey, delivered: false, alreadyPresent: excluded.has(evidence.atomKey), section: "recorded_state" };
     stateHits.push(hit);
-    if (hit.alreadyPresent || item.sourceIds.length && item.sourceIds.every(id => coverage?.covered.has(id))) continue;
-    const scope = item.holders.length ? `Known by ${(evidence.knownByLabels ?? item.holders).join(", ")}` : "Authorial record; character access not specified";
-    const line = `- ${stateKindLabel(item.kind, item.stateKind)}: ${escapeXml(item.text.replace(/\r?\n/g, " "))} [${escapeXml(scope)}]`;
-    if (estimateTokens(lines.concat(line).join("\n")) > tokenBudget) continue;
+    if (hit.alreadyPresent || item.sourceIds.length && item.sourceIds.every(id => coverage?.covered.has(id))) {
+      trace?.record(perspective, item, "prompt_covered", { rank, ...(hit.alreadyPresent ? { reason: "excluded_atom" } : {}) }); continue;
+    }
+    const line = renderStateLine(item);
+    if (estimateTokens(lines.concat(line).join("\n")) > tokenBudget) { trace?.record(perspective, item, "budget", { rank }); continue; }
+    trace?.record(perspective, item, "delivered", { rank });
+    trace?.emitted(perspective, item.id, line);
     lines.push(line); hit.delivered = true; manifest.atomKeys.push(hit.atomKey); manifest.stateEvidenceIds.push(item.id);
     const id = item.id.slice(item.kind.length + 1);
     if (["world_fact", "basic_relation"].includes(item.kind)) manifest.assertionIds.push(id);
@@ -938,6 +945,7 @@ function stableAnchors(
     if (item.kind === "promise") manifest.promiseIds.push(id);
     if (item.relationship) manifest.relationshipPairs.push(item.relationship);
   }
+  trace?.budget(perspective, tokenBudget, estimateTokens(lines.join("\n")));
   return lines.length ? `<recorded_state as_of="last_processed_history">\n${lines.join("\n")}\n</recorded_state>` : "";
 }
 
@@ -1111,6 +1119,7 @@ export interface RetrieveOptions {
   excludeAtomKeys?: string[];
   activePerspectives?: string[];
   collectDiagnostics?: boolean;
+  stateOutcomeCapture?: StateOutcomeCapture;
   deferAutomaticBudget?: boolean;
   structuredBudgetScale?: number;
   semanticAtomHits?: Map<string, SemanticMemoryHit[]>;
@@ -1272,6 +1281,7 @@ export function consolidateMemoryPacket(
   manifest?: PacketManifest,
   latestStoryTime?: number,
   sceneNames = "",
+  stateTrace?: StateOutcomeCapture,
 ): string {
   const language = (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(chatId) as { memory_language?: string } | undefined)?.memory_language ?? "en";
   const recalledMap = new Map<string, MemoryContextItem>();
@@ -1335,7 +1345,10 @@ export function consolidateMemoryPacket(
   const anchors = new Set<string>();
   for (const [name, data] of combinedPerspectives) {
     combinedPerspectives.set(name, data.replace(/<recorded_state as_of="last_processed_history">\n([\s\S]*?)\n<\/recorded_state>/g, (_block, lines: string) => {
-      for (const line of lines.split("\n")) if (line.trim()) anchors.add(line);
+      for (const line of lines.split("\n")) if (line.trim()) {
+        stateTrace?.assembled(name, line, anchors.has(line));
+        anchors.add(line);
+      }
       return "";
     }).trim());
   }
@@ -2105,9 +2118,14 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const detailLimit = mcpAnswerMode ? 12 : options.tokenBudget >= 10_000 ? 36 : options.tokenBudget >= 7_000 ? 24 : options.tokenBudget >= 5_000 ? 18 : 12;
   const packetOverhead = 100;
   const structuredScale = options.structuredBudgetScale ?? 1;
-  const anchorSceneBudget = mcpAnswerMode ? (structuredMcpAnswer ? Math.min(1_100, Math.floor(options.tokenBudget * 0.55)) : 0) : Math.floor(options.tokenBudget * 0.10 * structuredScale);
+  const anchorSceneBudget = mcpAnswerMode ? (structuredMcpAnswer ? Math.min(1_100, Math.floor(options.tokenBudget * 0.55)) : 0) : sharedStateBudget(options.tokenBudget);
   const spineBudget = mcpAnswerMode ? 0 : Math.floor(Math.min(800, options.tokenBudget * 0.15) * structuredScale);
   const anchorManifest = emptyPacketManifest();
+  const stateTrace = !mcpAnswerMode && options.collectDiagnostics ? options.stateOutcomeCapture ?? new StateOutcomeCapture() : undefined;
+  if (options.memoryOnlyInjection && stateTrace && !options.deferAutomaticBudget) {
+    for (const item of collectStateEvidence(db, options.chatId, stateTrace, perspective)) stateTrace.record(perspective, item, "memory_only");
+    stateTrace.budget(perspective, anchorSceneBudget, 0);
+  }
   // Entity names locate participants; they cannot alone justify every ledger row.
   const ledgerOverlap = (text: string, requested = signals): number => requested.reduce((score, signal) =>
     score + overlapScore(contentTokensForAspect(signal.text, searchTokens(signal.text), entities), text) * signal.weight, 0);
@@ -2117,7 +2135,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   }));
   const stateHits: StateEvidenceHit[] = [];
   const openManifest = emptyPacketManifest();
-  const anchors = options.memoryOnlyInjection ? "" : stableAnchors(
+  const anchors = options.memoryOnlyInjection || options.deferAutomaticBudget ? "" : stableAnchors(
     db,
     options.chatId,
     perspective,
@@ -2128,12 +2146,17 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     coverage,
     mcpAnswerMode,
     options.activePerspectives ?? [],
-    archiveView, anchorManifest, excludedAtomKeys, stateHits, mcpAnswerMode ? ledgerRelevance : undefined, options.stateScores,
+    archiveView, anchorManifest, excludedAtomKeys, stateHits, mcpAnswerMode ? ledgerRelevance : undefined, options.stateScores, stateTrace,
   );
   const openThreads = ""; // Open promises share the canonical state selector and budget.
-  const physical: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderPhysicalIntimacy(db, options.chatId, perspective, options.activePerspectives ?? [], Math.min(mcpAnswerMode ? 700 : 520, (mcpAnswerMode ? Math.floor(options.tokenBudget * .45) : Math.max(0, Math.floor(options.tokenBudget * .15 * structuredScale) - estimateTokens(anchors)))), physicalMcpAnswer, archiveView, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
+  // Historical milestones retain a small separate allowance; current rows are
+  // charged once by the shared compiler when automatic budgeting is deferred.
+  const historyBudget = options.deferAutomaticBudget ? Math.floor(options.tokenBudget * .05 * structuredScale)
+    : Math.max(0, Math.floor(options.tokenBudget * .15 * structuredScale) - estimateTokens(anchors));
+  const physical: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderPhysicalIntimacy(db, options.chatId, perspective, options.activePerspectives ?? [],
+    Math.min(mcpAnswerMode ? 700 : 520, mcpAnswerMode ? Math.floor(options.tokenBudget * .45) : historyBudget), physicalMcpAnswer, archiveView, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
   const relationshipLandmarks: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderRelationshipLandmarks(db, options.chatId, perspective, options.activePerspectives ?? [], chat.profile,
-      Math.min(mcpAnswerMode ? 520 : 360, (mcpAnswerMode ? Math.floor(options.tokenBudget * .3) : Math.max(0, Math.floor(options.tokenBudget * .15 * structuredScale) - estimateTokens(anchors) - estimateTokens(physical.xml)))), coverage, mcpAnswerMode, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
+    Math.min(mcpAnswerMode ? 520 : 360, mcpAnswerMode ? Math.floor(options.tokenBudget * .3) : Math.max(0, historyBudget - estimateTokens(physical.xml))), coverage, mcpAnswerMode, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
   const spineParts = [openThreads].filter(Boolean);
   const spine = spineParts.length ? `<continuity_spine>\n${spineParts.join("\n")}\n</continuity_spine>` : "";
   const stable = [anchors, relationshipLandmarks.xml, physical.xml].filter(Boolean).join("\n");
@@ -2510,6 +2533,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const selectedRoleCounts: Record<RetrievalSelectionRole, number> = { focus: 0, core: 0, continuity: 0, association: 0, serendipity: 0, longterm: 0, filler: 0 };
   for (const role of Object.values(selectedRoleMap)) selectedRoleCounts[role] += 1;
   const diagnostics: RetrievalDiagnostics = {
+    ...(!options.stateOutcomeCapture && stateTrace ? { currentState: stateTrace.snapshot() } : {}),
     ...(pathSnapshot ? { atomPathSearch: pathSnapshot.stats } : {}),
     elapsedMs: Math.round(performance.now() - started),
     perspective,

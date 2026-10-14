@@ -1,4 +1,4 @@
-import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS, type ServerLlmProvider } from "@rcm/shared";
+import { SERVER_LLM_DEFAULT_MODELS, SERVER_LLM_DEFAULT_ENDPOINTS, type ServerLlmProvider } from "@rcm/shared";
 
 interface ProviderCapability {
   serviceTier: boolean; temperature: boolean; thinking: boolean;
@@ -6,13 +6,13 @@ interface ProviderCapability {
 }
 const apiKey = { credentialLabel: "API 키", credentialPlaceholder: "API 키" };
 export const PROVIDER_CAPABILITIES: Record<ServerLlmProvider, ProviderCapability> = {
-  llm_gateway: { ...apiKey, serviceTier: true, temperature: true, thinking: true, defaultModel: defaultAuxiliaryModelConfig.model },
-  openai_compatible: { ...apiKey, serviceTier: true, temperature: true, thinking: true, defaultModel: "" },
-  vertex: { credentialLabel: "서비스 계정 JSON", credentialPlaceholder: "서비스 계정 JSON", serviceTier: true, temperature: true, thinking: true, defaultModel: "gemini-3.8-flash" },
-  gemini_api: { ...apiKey, serviceTier: false, temperature: true, thinking: true, defaultModel: "gemini-3.8-flash" },
-  vercel: { ...apiKey, serviceTier: false, temperature: true, thinking: true, defaultModel: "google/gemini-3.8-flash" },
-  ollama_cloud: { ...apiKey, serviceTier: false, temperature: true, thinking: true, defaultModel: "glm-5.3" },
-  copilot: { credentialLabel: "GitHub 토큰", credentialPlaceholder: "Copilot 권한이 있는 GitHub 토큰", serviceTier: false, temperature: false, thinking: false, defaultModel: "gemini-3.8-flash" },
+  llm_gateway: { ...apiKey, serviceTier: true, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.llm_gateway },
+  openai_compatible: { ...apiKey, serviceTier: true, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.openai_compatible },
+  vertex: { credentialLabel: "서비스 계정 JSON", credentialPlaceholder: "서비스 계정 JSON", serviceTier: true, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.vertex },
+  gemini_api: { ...apiKey, serviceTier: false, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.gemini_api },
+  vercel: { ...apiKey, serviceTier: false, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.vercel },
+  ollama_cloud: { ...apiKey, serviceTier: false, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.ollama_cloud },
+  copilot: { credentialLabel: "GitHub 토큰", credentialPlaceholder: "Copilot 권한이 있는 GitHub 토큰", serviceTier: false, temperature: true, thinking: true, defaultModel: SERVER_LLM_DEFAULT_MODELS.copilot },
 };
 export function providerCapability(provider: string): ProviderCapability {
   return PROVIDER_CAPABILITIES[provider as ServerLlmProvider] ?? PROVIDER_CAPABILITIES.llm_gateway;
@@ -20,11 +20,11 @@ export function providerCapability(provider: string): ProviderCapability {
 export function providerModelOnChange(value: string, previous: string, next: string): string {
   return !value.trim() || value === providerCapability(previous).defaultModel ? providerCapability(next).defaultModel : value;
 }
-/** One policy for extraction and MCP; hidden controls retain their saved values. */
-export function updateProviderFields(root: HTMLElement, prefix: "serverLlm" | "mcp"): void {
+/** One policy for extraction, MCP and translation; hidden controls retain their saved values. */
+export function updateProviderFields(root: HTMLElement, prefix: "serverLlm" | "mcp" | "translationServer"): void {
   const select = root.querySelector<HTMLSelectElement>(`[name="${prefix}Provider"]`);
   if (!select) return;
-  const result = root.querySelector<HTMLElement>(`[data-connection-check="${prefix === "mcp" ? "mcp" : "server"}"] [data-connection-result]`);
+  const result = root.querySelector<HTMLElement>(`[data-connection-check="${prefix === "mcp" ? "mcp" : prefix === "translationServer" ? "translation" : "server"}"] [data-connection-result]`);
   if (result) { result.replaceChildren(); result.classList.remove("is-error"); }
   const capability = providerCapability(select.value);
   const model = root.querySelector<HTMLInputElement>(`[name="${prefix}Model"]`);

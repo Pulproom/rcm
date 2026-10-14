@@ -1,5 +1,5 @@
 import { prefetchCurrentChatTranslations } from "./dashboard.js";
-import { googleTranslationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
+import { backgroundTranslationEnabled, googleTranslationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
 import { readCurrentChatId, readOptionalDashboardContext } from "./context.js";
 import { SERVER_STATUS_TIMEOUT_MS, type ServerClient } from "./api-client.js";
 import type { RuntimeState } from "./types.js";
@@ -117,7 +117,6 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         state.serverConnectionFailureCount = 0;
         state.serverConnectionLastFailureAt = undefined;
       } else {
-        if (state.settings.quizEnabled) await syncQuizEnabled(state, client);
         if (!state.current) state.quizSynced = undefined;
         const now = Date.now();
         // Release discovery is advisory and must never make the memory server look offline.
@@ -156,7 +155,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         state.episodeActivity = result.episode ?? null;
         const serverUrl = state.settings.serverUrl;
         const revision = JSON.stringify([serverUrl, result.serverInstanceId, chatId, result.translationRevision, state.settings.translationProvider]);
-        if (!prefetchBusy && now >= prefetchNextAt && state.settings.autoTranslate && state.settings.translationDisplay === "ko"
+        if (backgroundTranslationEnabled(state) && !prefetchBusy && now >= prefetchNextAt && state.settings.autoTranslate && state.settings.translationDisplay === "ko"
           && result.memoryLanguage !== "ko" && Number(result.progress?.memories ?? 0) > 0 && result.serverInstanceId
           && (revision !== prefetchRevision || prefetchPending.length > 0)
           && !(state.settings.translationProvider === "google" && googleTranslationCooldownMs())) {
@@ -182,6 +181,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         state.activityReady = true;
         noteServerConnectionSuccess(state);
         }
+        if (state.settings.quizEnabled) await syncQuizEnabled(state, client);
         if (state.updateStatus?.restartRequired && !state.updateApplying && now >= (state.updateLocalRecheckAt ?? 0)) {
           state.updateLocalRecheckAt = now + 4_000;
           void refreshUpdateStatus(state, client, { remote: false, force: true });

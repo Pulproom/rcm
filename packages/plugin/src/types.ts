@@ -4,7 +4,7 @@ import type { CanonicalizationPolicy, ChatLineageHint, ExtractionEngine, Lineage
 import type { ServerConnectionIssue } from "./connection.js";
 
 export type AuxiliaryMode = "main" | "memory" | "otherAx" | "static";
-export type TranslationProvider = "google" | "risu";
+export type TranslationProvider = "google" | "risu" | "server";
 export type TranslationDisplay = "ko" | "en";
 export type DashboardTheme = "dark" | "light";
 export type DashboardSkin = "film" | "phone";
@@ -39,6 +39,14 @@ export interface PluginSettings {
   postExtractionReview: boolean;
   staticModel: string;
   translationProvider: TranslationProvider;
+  translationSlot: AuxiliaryMode | "translate";
+  translationModel: string;
+  translationMaxOutput: number;
+  translationServerModel: string;
+  translationServerMaxOutput: number;
+  translationTemperature: number;
+  translationThinking: import("@rcm/shared").ThinkingLevel;
+  translationBackground: boolean;
   translationDisplay: TranslationDisplay;
   autoTranslate: boolean;
   dashboardTheme: DashboardTheme;
@@ -235,6 +243,8 @@ export interface RuntimeState {
     episode?: EpisodeActivity | null;
   };
   episodeActivity?: EpisodeActivity | null;
+  translationStats?: { calls: number; items: number; tokens?: number; lastError?: string };
+  translationBackgroundRunning?: boolean;
   translationActivity?: { pending: number; error?: string };
   activitySubscribers?: Set<(summary: RuntimeState["statusSummary"]) => void>;
   activityRevision?: number;
@@ -268,6 +278,7 @@ export interface RuntimeState {
   risuConnectionTestRunning?: boolean;
   timingEvents?: import("./timing.js").TimingEvent[];
   openDashboard?: () => void;
+  dashboardFocusSettings?: "model" | "embedding";
   /** Set by the chip's quiz before openDashboard: the memory the dashboard opens on. */
   dashboardFocusMemoryId?: string;
   lineageProbe?: { key: string; status: "checking" | "ready" | "failed"; result?: LineageProbeResponse; selectedParentId?: string; error?: string };

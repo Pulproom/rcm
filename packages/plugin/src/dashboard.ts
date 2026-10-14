@@ -1,3 +1,8 @@
+import { translationConnectionSettings, readTranslationConnectionSettings, updateTranslationConnectionControls } from "./translation-connection-settings.js";
+import { auxiliaryModelMissing, MODEL_SETUP_DETAIL, EMBEDDING_SETUP_DETAIL } from "./attention.js";
+import type { TranslationConnectionPublicConfig } from "@rcm/shared";
+import { planTranslation, estimateTokens as estimateTranslationTokens } from "@rcm/shared";
+import { backgroundTranslationEnabled, callTranslationBatch, googleTranslationRecords, retranslateGoogleRecords, translationOutputBudget } from "./translation.js";
 import { sanitizeDiagnosticText } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_PROVIDER_OPTIONS } from "@rcm/shared";
 import { diagnosticReason, shareDiagnostic, supportFailure, supportJobs, supportTime } from "./support-diagnostics.js";
@@ -16,7 +21,7 @@ import { connectionCheck } from "./dashboard/film/ui.js";
 import { updateWorkerMenuButton, widgetState } from "./attention.js";
 import { createOrganizationView, memoryOrganization, toggleOrganizationRange, type OrganizationData } from './memory-organization.js';
 import { subscribeActivity } from "./activity.js";
-import { clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
+import { translatePacket, clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
 import { inheritLineageSettings } from "./lineage-settings.js";
 import {exportChatSettings,restoreChatSettings} from "./backup-settings.js";
 import { describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, SERVER_RESPONSE_DELAYED, type ServerConnectionIssue } from "./connection.js";
@@ -282,6 +287,7 @@ export interface DashboardData {
     embedding?: { configured: boolean; ready: boolean; model: string; dimension: number; pendingBlocks: number; failedBlocks: number; lastError?: string };
     serverLlm?: ServerLlmPublicConfig;
     mcpSelector?:McpSelectorPublicConfig;
+    translationConnection?:TranslationConnectionPublicConfig;
     serverWorker?: ServerWorkerStatus;
     capabilities?: { recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; sourceLedgerInspection?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
   };
@@ -648,17 +654,18 @@ export function triggerBackupDownload(
 
 /** Shared themed messages; native dialog supplies focus trapping and Escape. */
 /** Film dialog markup; buttons stack on phones (cancel below). A destructive confirm names its verb and uses danger-solid. */
-export function dialogHtml(opts: { id: string; title: string; body: string; confirm: string; cancel?: string; danger?: boolean; notice?: boolean }): string {
-  const confirm = `<button type="button" class="btn ${opts.danger ? "btn--danger-solid" : "btn--primary"}" value="confirm"${opts.notice ? " autofocus" : ""}>${escapeHtml(opts.confirm)}</button>`;
-  const cancel = opts.notice ? "" : `<button type="button" class="btn btn--quiet" value="cancel" autofocus>${escapeHtml(opts.cancel ?? "취소")}</button>`;
+/** `keep` marks a dialog whose safe default is the cancel choice (e.g. an optional paid action): cancel carries the emphasis. */
+export function dialogHtml(opts: { id: string; title: string; body: string; confirm: string; cancel?: string; danger?: boolean; notice?: boolean; keep?: boolean }): string {
+  const confirm = `<button type="button" class="btn ${opts.danger ? "btn--danger-solid" : opts.keep ? "btn--secondary" : "btn--primary"}" value="confirm"${opts.notice ? " autofocus" : ""}>${escapeHtml(opts.confirm)}</button>`;
+  const cancel = opts.notice ? "" : `<button type="button" class="btn ${opts.keep ? "btn--primary" : "btn--quiet"}" value="cancel" autofocus>${escapeHtml(opts.cancel ?? "취소")}</button>`;
   return `<h3 id="${opts.id}">${escapeHtml(opts.title)}</h3>${opts.body}<div class="dialog__actions">${cancel}${confirm}</div>`;
 }
 
-export async function confirmDashboard(message: string, notice = false, labels: { confirm?: string; cancel?: string; title?: string; danger?: boolean } = {}): Promise<boolean> {
+export async function confirmDashboard(message: string, notice = false, labels: { confirm?: string; cancel?: string; title?: string; danger?: boolean; keep?: boolean; bodyHtml?: string; className?: string } = {}): Promise<boolean> {
   const dialog = document.createElement("dialog");
-  dialog.className = "dialog film";
+  dialog.className = `dialog film${labels.className ? ` ${labels.className}` : ""}`;
   dialog.setAttribute("aria-labelledby", "rcm-message-title");
-  dialog.innerHTML = dialogHtml({ id: "rcm-message-title", title: labels.title ?? (notice ? "RCM 안내" : "작업 확인"), body: `<p class="dialog__text">${escapeHtml(message)}</p>`, confirm: labels.confirm ?? "확인", cancel: labels.cancel, danger: labels.danger, notice });
+  dialog.innerHTML = dialogHtml({ id: "rcm-message-title", title: labels.title ?? (notice ? "RCM 안내" : "작업 확인"), body: labels.bodyHtml ?? `<p class="dialog__text">${escapeHtml(message)}</p>`, confirm: labels.confirm ?? "확인", cancel: labels.cancel, danger: labels.danger, keep: labels.keep, notice });
   document.body.append(dialog);
   try {
     return await new Promise<boolean>((resolve) => {
@@ -721,6 +728,21 @@ export function formatReleaseNotes(value: string): string {
     .join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Release notes as a quiet, scrollable list: bullets become list items, other lines short paragraphs. */
+export function releaseNotesHtml(message: string): string {
+  const blocks: string[] = [];
+  let items: string[] = [];
+  const flush = () => { if (items.length) blocks.push(`<ul>${items.join("")}</ul>`); items = []; };
+  for (const raw of message.split("\n")) {
+    const line = raw.trim();
+    if (!line) { flush(); continue; }
+    if (line.startsWith("• ")) items.push(`<li>${escapeHtml(line.slice(2))}</li>`);
+    else { flush(); blocks.push(`<p>${escapeHtml(line)}</p>`); }
+  }
+  flush();
+  return `<div class="dialog__notes" tabindex="0">${blocks.join("")}</div>`;
+}
+
 export function completedProductReleaseNotice(
   status: RuntimeState["updateStatus"],
   currentPluginVersion = RCM_PLUGIN_VERSION,
@@ -740,7 +762,7 @@ async function showCompletedProductReleaseNotice(state: RuntimeState): Promise<v
   if (!notice) return;
   const acknowledgement = await loadStoredJson<{ version?: string }>(RELEASE_NOTES_ACK_KEY);
   if (releaseNotesAcknowledged(acknowledgement, notice.version)) return;
-  const acknowledged = await confirmDashboard(notice.message, true, { title: `RCM ${notice.version} 업데이트`, confirm: "확인" });
+  const acknowledged = await confirmDashboard(notice.message, true, { title: `RCM ${notice.version} 업데이트`, confirm: "확인", bodyHtml: releaseNotesHtml(notice.message), className: "dialog--notes" });
   if (acknowledged) await saveStoredJson(RELEASE_NOTES_ACK_KEY, { version: notice.version });
 }
 
@@ -1047,8 +1069,9 @@ function backfillNotice(state: RuntimeState, data: DashboardData): string {
   const calls = estimateBackfillAuxiliaryCalls(state, data);
   return homeMessage({
     title,
-    bodyHtml: `<p>${detail}</p><dl class="home-backfill__meta"><div><dt>Risu 원문</dt><dd>${pocketCount.toLocaleString()}<small>개</small></dd></div><div><dt>서버</dt><dd>${syncedCount.toLocaleString()}<small>개</small></dd></div><div><dt>정리 묶음</dt><dd><small>약 </small>${calls.extractionGroups.toLocaleString()}</dd></div></dl><small class="home-backfill__hint">${icon("alert")}<span>로어북에 과거 줄거리 요약이 있다면 잠시 끈 뒤 시작해 주세요.</span></small>`,
-    actionsHtml: `<button class="btn btn--primary home-backfill__action" data-action="approve-backfill">과거 대화로 기억 생성</button><details class="home-backfill__details" data-preserve-open="home-backfill-calls"><summary>호출 수 자세히</summary><p>기본은 묶음마다 장면 추출과 상태 추출·대조, 두 번의 호출입니다. 관계·줄거리 정리에도 보조 모델을 호출합니다. 전체 호출 수는 추출 결과에 따라 늘어납니다.</p><ul><li>${calls.groupTurns}턴씩 기억 정리 · 장면·상태 합계 약 ${(calls.extractionGroups * 2).toLocaleString()}회</li><li>초기 장부 ${calls.initialCalls}회 · 줄거리 정리 약 ${calls.storyCalls.toLocaleString()}회</li><li>관계 상태·마지막 장부 대조: 추출 결과에 따라 추가</li><li>재검수: 선택 시 묶음마다 1회 추가${calls.reviewIncluded ? " · 현재 기본값 켜짐" : ""}</li><li>형식·근거 보완, 이어서 추출, 재시도는 필요할 때 추가됩니다.</li></ul>${context.estimatedSourceTokens === undefined ? "" : `<p>원문 약 ${context.estimatedSourceTokens.toLocaleString()}토큰</p>`}<p>원문 토큰은 실제 전송량이나 청구량이 아닙니다. 진행 화면에서 후처리를 포함한 실제 호출 수를 확인할 수 있습니다.</p></details>`,
+    bodyHtml: `<p>${detail}</p><details class="home-backfill__details" data-preserve-open="home-backfill-calls"><summary><span>Risu 원문 ${pocketCount.toLocaleString()}개 · 서버 ${syncedCount.toLocaleString()}개 · 정리 묶음 약 ${calls.extractionGroups.toLocaleString()}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="home-backfill__calls"><p>기본은 묶음마다 장면 추출과 상태 추출·대조, 두 번의 호출입니다. 관계·줄거리 정리에도 보조 모델을 호출합니다. 전체 호출 수는 추출 결과에 따라 늘어납니다.</p><ul><li>${calls.groupTurns}턴씩 기억 정리 · 장면·상태 합계 약 ${(calls.extractionGroups * 2).toLocaleString()}회</li><li>초기 장부 ${calls.initialCalls}회 · 줄거리 정리 약 ${calls.storyCalls.toLocaleString()}회</li><li>관계 상태·마지막 장부 대조: 추출 결과에 따라 추가</li><li>재검수: 선택 시 묶음마다 1회 추가${calls.reviewIncluded ? " · 현재 기본값 켜짐" : ""}</li><li>형식·근거 보완, 이어서 추출, 재시도는 필요할 때 추가됩니다.</li></ul>${context.estimatedSourceTokens === undefined ? "" : `<p>원문 약 ${context.estimatedSourceTokens.toLocaleString()}토큰</p>`}<p>원문 토큰은 실제 전송량이나 청구량이 아닙니다. 진행 화면에서 후처리를 포함한 실제 호출 수를 확인할 수 있습니다.</p></div></details><p class="home-backfill__hint">로어북에 과거 줄거리 요약이 있다면 잠시 끈 뒤 시작해 주세요.</p>`,
+    actionsHtml: `<button class="btn btn--primary home-backfill__action" data-action="approve-backfill">과거 대화로 기억 생성</button>`,
+    className: "home-backfill",
   });
 }
 
@@ -1342,7 +1365,11 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
       scenes: search.memoryIds.flatMap((id) => { const scene = toSentScene(id); return scene ? [{ ...scene, already: injectedIds.has(id) }] : []; }) })),
     note: sentNote, packet,
   };
-  if (sentView?.open && hasInjection) return sentPage(sentData, sentView);
+  if (sentView?.open && hasInjection) {
+    const key = JSON.stringify([currentInstanceId, currentChatId, injectionAt, packet, state.settings.translationProvider]);
+    if (sentView.packetTranslation?.key !== key) sentView.packetTranslation = { key, source: packet, google: state.settings.translationProvider === "google" };
+    return sentPage(sentData, sentView);
+  }
   const injection = hasInjection
     ? phoneHome ? sentWidget(sentData, true) : `<section class="sent-home">${sentWidget(sentData, false)}</section>`
     : phoneHome ? `<h2 class="wg__h">${icon("arrow-right")}이번 턴에 전달한 기억</h2><p class="wg__empty">아직 없어요 · 다음 답변부터 보여요</p>`
@@ -3090,11 +3117,13 @@ export function operations(state: RuntimeState, data: DashboardData): string {
   if (completedCount) menuItems.push({ label: `완료 기록 ${completedCount}건 정리`, icon: "check", action: "clear-completed-jobs" });
   if (removableCount) menuItems.push({ label: `대기열 ${removableCount}건 삭제`, icon: "delete", action: "delete-queue", danger: true });
   const serverUnavailable = !data.health?.ok;
+  const modelMissing = !serverUnavailable && auxiliaryModelMissing({ ...state, serverWorker });
+  const embeddingMissing = !serverUnavailable && data.health?.embedding?.configured === false;
   const workerFaulted = serverMode && serverWorker?.state === "faulted";
   const stalled = blockingFailed > 0 && !state.settings.workerPaused && !serverUnavailable && !workerFaulted;
-  const operationTone = state.settings.workerPaused ? "is-paused" : serverUnavailable || workerFaulted || stalled ? "is-error" : (serverMode ? serverWorker?.state === "running" : state.workerBusy) ? "is-running" : "is-idle";
-  const operationTitle = state.settings.workerPaused ? "일시정지됨" : serverUnavailable ? "서버 연결 확인 필요" : workerFaulted ? "처리 오류" : stalled ? "멈춤" : (serverMode ? serverWorker?.state === "running" : state.workerBusy) ? "기억 처리 중" : "정상 작동";
-  const operationCopy = serverUnavailable ? (data.error || "RCM 서버 상태를 확인할 수 없습니다.") : stalled ? `실패한 작업 ${failedCount}건 때문에 뒤의 ${queued}건이 기다리고 있어요.` : workerState;
+  const operationTone = serverUnavailable ? "is-error" : modelMissing ? "is-paused" : state.settings.workerPaused ? "is-paused" : workerFaulted || stalled ? "is-error" : (serverMode ? serverWorker?.state === "running" : state.workerBusy) ? "is-running" : "is-idle";
+  const operationTitle = serverUnavailable ? "서버 연결 확인 필요" : modelMissing ? "설정 필요" : state.settings.workerPaused ? "일시정지됨" : workerFaulted ? "처리 오류" : stalled ? "멈춤" : (serverMode ? serverWorker?.state === "running" : state.workerBusy) ? "기억 처리 중" : "정상 작동";
+  const operationCopy = serverUnavailable ? (data.error || "RCM 서버 상태를 확인할 수 없습니다.") : modelMissing ? MODEL_SETUP_DETAIL : stalled ? `실패한 작업 ${failedCount}건 때문에 뒤의 ${queued}건이 기다리고 있어요.` : workerState;
   const progress = data.coldStartProgress;
   const retryAction = failedCount ? btn(`실패 ${failedCount}건 다시 시도`, { kind: "primary", action: "retry-failed", disabled: !chatEnabled }) : "";
   const pageActions = `${workerAction}${drainAction}${retryAction}${menuItems.length ? menu({ label: "처리 작업", items: menuItems }) : ""}`;
@@ -3121,8 +3150,9 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     ${state.episodeActivity?.status === "holding" ? homeMessage({ title: "이전 수동 보류가 남아 있습니다", bodyHtml: '<p>기억 정리에서 보류를 해제할 수 있습니다. 이미 처리된 기억은 그대로 유지됩니다.</p>', actionsHtml: btn("기억 정리 열기", { kind: "secondary", action: "organization-open" }), tone: "warning" }) : ""}
     ${workerAttentionNotice(state)}
     ${progressPanel}
-    <div class="opstate">${statusList([{ tone: stateTone, text: operationTitle }])}<p class="sub">${escapeHtml(operationCopy)}</p><span class="n">${activeJobCount ? `진행 ${activeJobCount}개` : completedCount ? `완료 기록 ${completedCount}개` : "대기열 비어 있음"}</span></div>
+    <div class="opstate">${statusList([{ tone: stateTone, text: operationTitle }])}<p class="sub">${escapeHtml(operationCopy)}</p>${modelMissing ? btn("모델 설정 열기", { kind: "quiet", action: "tab", data: { tab: "settings", settingsSection: "model" } }) : ""}${embeddingMissing ? `<p class="sub">${EMBEDDING_SETUP_DETAIL}</p>${btn("검색 임베딩 설정 열기", { kind: "quiet", action: "embedding-settings" })}` : ""}<span class="n">${activeJobCount ? `진행 ${activeJobCount}개` : completedCount ? `완료 기록 ${completedCount}개` : "대기열 비어 있음"}</span></div>
     ${jobs || empty(data.jobsError ? "작업 목록을 확인할 수 없습니다" : "처리할 작업이 없습니다", data.jobsError ? "서버 연결을 확인해 주세요." : "새 대화가 모이면 여기에 작업이 쌓입니다.")}
+    ${state.settings.translationProvider !== "google" ? `<section><h3 class="sec">참고 번역</h3><div class="opstate">${statusList([{ tone: state.translationStats?.lastError ? "bad" : "ok", text: `호출 ${state.translationStats?.calls ?? 0}회 · 번역 ${state.translationStats?.items ?? 0}개 · ${state.translationStats?.tokens === undefined ? "토큰 미제공" : `${state.translationStats.tokens.toLocaleString()}토큰`}` }])}<p class="sub">이 실행 세션 기준${state.translationStats?.lastError ? ` · 마지막 오류: ${escapeHtml(state.translationStats.lastError)}` : ""}</p></div></section>` : ""}
     ${fold("고급 진단 · 이 기기의 플러그인 기록", `<section><h3 class="sec">현재 상태</h3><ul class="entries"><li class="entry"><span class="entry__k">도구 연결</span><div class="entry__v">Provider Manager · ${!state.settings.memoryToolsEnabled ? memoryToolRegistrationLabels.disabled : state.memoryToolRegistration ? memoryToolRegistrationLabels[state.memoryToolRegistration.status] : "등록 상태 확인 전"}</div></li></ul></section><section><div class="diagnostic-heading"><h3 class="sec">플러그인 기록</h3>${state.logs.length ? `<div class="diagnostic-actions"><button type="button" class="iconbtn hit" data-action="copy-plugin-diagnostics" aria-label="진단 정보 복사" title="버전·연결 상태·기록 전체를 복사합니다. 키·주소·채팅 내용은 제외합니다.">${icon("copy")}</button><button type="button" class="iconbtn hit" data-action="clear-plugin-logs" aria-label="기록 비우기">${icon("delete")}</button></div>` : ""}</div><ul class="entries">${logs || '<li class="entry"><div class="entry__v">런타임 로그가 없습니다.</div></li>'}</ul></section>`, { role: "section", preserveKey: "operations-diagnostics" })}</div>`;
 }
 
@@ -3342,6 +3372,12 @@ export function serverLlmUpdateRequiredForSettingsSave(
   return serverLlmUpdateRequired(current, next, apiKey);
 }
 
+function translationSettings(values: Record<string, FormDataEntryValue>): Pick<PluginSettings, "translationProvider" | "translationSlot" | "translationModel" | "translationServerModel" | "translationMaxOutput" | "translationServerMaxOutput" | "translationTemperature" | "translationThinking" | "translationBackground"> {
+  return { translationProvider: values.translationProvider === "server" ? "server" : values.translationProvider === "risu" ? "risu" : "google",
+    translationSlot: String(values.translationSlot ?? "translate") as PluginSettings["translationSlot"], translationModel: String(values.translationModel ?? ""), translationServerModel: String(values.translationServerModel ?? ""),
+    translationMaxOutput: Number(values.translationMaxOutput ?? 8000), translationServerMaxOutput: Number(values.translationServerMaxOutput ?? 8000), translationTemperature: Number(values.translationServerTemperature ?? .3), translationThinking: String(values.translationServerThinking ?? "default") as PluginSettings["translationThinking"], translationBackground: values.translationBackground === "on" };
+}
+
 export function settingsConnectionNeedsHealthProbe(
   current: Pick<PluginSettings, "serverUrl" | "serverToken">,
   next: Pick<PluginSettings, "serverUrl" | "serverToken">,
@@ -3428,7 +3464,7 @@ export function settingsV2(
   const configuredProviders = new Set(serverLlm.configuredProviders ?? []);
   const serverLlmStatus = serverLlm.keyConfigured ? "인증정보 저장됨" : "인증정보 없음";
   const pluginUpdateAvailable = pluginUpdateNeeded(state.updateStatus);
-  const nav: Array<[SettingsSection, string, string]> = [["chat", "현재 채팅", "이 대화에만 적용"], ["memory", "기억", "주입 · 보호 · 원문 정리"], ["display", "화면", "테마 · 상태 칩 · 번역"], ["model", "모델", "추출 · 검색 · 임베딩"], ["server", "서버", "연결 · 업데이트"]];
+  const nav: Array<[SettingsSection, string, string]> = [["chat", "현재 채팅", "이 대화에만 적용"], ["memory", "기억", "주입 · 보호 · 원문 정리"], ["display", "화면", "테마 · 상태 칩 · 번역"], ["model", "모델", "추출 · 검색 · 임베딩 · 번역"], ["server", "서버", "연결 · 업데이트"]];
   // A pane is its groups only: the section's name is already on the tab or the row that opened it.
   const pane = (key: SettingsSection, title: string, content: string) => `<section data-settings-pane="${key}" ${section === key ? "" : "hidden"}><h2 class="${lex().skin === "phone" ? "settings-pane__title" : "sr-only"}">${title}</h2>${content}</section>`;
   const group = (title: string, body: string, extra = "") => `<div class="setting-group"${extra}>${title ? `<h3>${title}</h3>` : ""}${body}</div>`;
@@ -3479,10 +3515,8 @@ export function settingsV2(
       ${check("quizEnabled", "퀴즈 사용", settings.quizEnabled === true, "답변을 기다리는 동안 칩에서 풉니다. 보조 모델 호출이 조금 늘어납니다.")}
       ${hasCurrentChat && data.health?.capabilities?.quizManagement ? `<div class="field"><span>이 채팅 퀴즈</span><div class="decide" data-quiz-controls>${btn("남은 퀴즈 새로 만들기", { kind: "quiet", action: "quiz-regenerate", hit: true, disabled: quizGenerating })}${btn("점수 초기화", { kind: "quiet", action: "quiz-reset-stats", hit: true, disabled: quizGenerating })}</div></div>` : ""}
     </div>`)}
-    ${group("참고 번역", `<div class="form__row">
-      <label class="field"><span>번역 서비스</span><select name="translationProvider"><option value="google" ${settings.translationProvider === "google" ? "selected" : ""}>Google Translate</option><option value="risu" ${settings.translationProvider === "risu" ? "selected" : ""}>Yumi / Risu translator</option></select></label>
-      <div class="field"><span>번역 캐시</span><div class="settings-cache-row"><span class="sub">${cacheStats.items.toLocaleString()}개 · ${(cacheStats.bytes / 1024 / 1024).toFixed(1)} MiB</span><button class="iconbtn hit settings-cache-clear" type="button" data-action="clear-translation-cache" aria-label="번역 캐시 비우기" title="번역 캐시 비우기">${icon("delete")}</button></div></div>
-    </div>`)}`);
+    ${group("참고 번역", `<label class="field"><span>표시</span><select name="translationDisplay"><option value="ko" ${settings.translationDisplay === "ko" ? "selected" : ""}>한국어 참고</option><option value="en" ${settings.translationDisplay === "en" ? "selected" : ""}>원문</option></select></label>`)}`);
+
 
   const capability = providerCapability(serverLlm.provider);
   const model = pane("model", "모델", `
@@ -3499,7 +3533,7 @@ export function settingsV2(
       <label class="field"><span>${capability.credentialLabel}</span>${secretInput("serverLlmApiKey", capability.credentialLabel, { placeholder: capability.credentialPlaceholder })}</label>
       <label class="field"><span>모델 ID</span><input name="serverLlmModel" placeholder="${capability.defaultModel}" value="${escapeHtml(serverLlm.model)}"></label>
       <label class="field" ${capability.temperature ? "" : "hidden"}><span>Temperature</span><input name="serverLlmTemperature" type="number" min="0" max="2" step="0.05" value="${serverLlm.temperature}"></label>
-      <label class="field" ${capability.thinking ? "" : "hidden"}><span>Thinking</span><select name="serverLlmThinking">${[["default", "Provider default"], ["off", "Off"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]].map(([value, label]) => `<option value="${value}" ${serverLlm.thinking === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+      <label class="field" ${capability.thinking ? "" : "hidden"}><span>Thinking</span><select name="serverLlmThinking">${[["default", "기본값"], ["off", "Off"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]].map(([value, label]) => `<option value="${value}" ${serverLlm.thinking === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
       <label class="field" ${capability.serviceTier ? "" : "hidden"}><span>처리 등급</span><select name="serverLlmServiceTier"><option value="standard" ${serverLlm.serviceTier === "standard" ? "selected" : ""}>Standard</option><option value="flex" ${serverLlm.serviceTier === "flex" ? "selected" : ""}>Flex · 저렴하지만 느림</option><option value="priority" ${serverLlm.serviceTier === "priority" ? "selected" : ""}>Priority · 비싸지만 우선 처리</option></select></label>
     ${connectionCheck("server", serverConnectionReady && configuredProviders.size ? `<span class="settings-action__end" data-remove-server-row ${serverLlm.keyConfigured ? "" : "hidden"}><button class="btn btn--danger" type="button" data-action="remove-server-llm-key">현재 인증정보 제거</button></span>` : "")}</div>`, ` data-engine-fields="server" ${settings.extractionEngine === "server" ? "" : "hidden"}`)}
     ${group("처리량", `<div class="form__row">
@@ -3527,7 +3561,17 @@ export function settingsV2(
       <label class="field"><span>서버 토큰</span>${secretInput("serverToken", "서버 토큰", { value: settings.serverToken })}</label>
     </div>`)}
     ${installedVersions}${update}`);
-  const voyage = `<div class="setting-group" data-settings-voyage ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">검색 임베딩</h3><form id="voyage-form" class="connection-card"><label class="field"><span>Voyage API 키</span>${secretInput("voyageApiKey", "Voyage API 키", { placeholder: embedding?.configured ? "저장된 키 유지" : "키 입력", disabled: voyageBusy })}</label>${connectionCheck("voyage", embedding?.configured ? '<span class="settings-action__end"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></span>' : "")}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}</div></div>` : ""}</form></div>`;
+  const voyage = `<div class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">검색 임베딩</h3><form id="voyage-form" class="connection-card"><label class="field"><span>Voyage API 키</span>${secretInput("voyageApiKey", "Voyage API 키", { placeholder: embedding?.configured ? "저장된 키 유지" : "키 입력", disabled: voyageBusy })}</label>${connectionCheck("voyage", embedding?.configured ? '<span class="settings-action__end"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></span>' : "")}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}</div></div>` : ""}</form></div>`;
+  const translation = `<section class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">참고 번역</h3><div class="form__row connection-card" data-translation-card>
+    <label class="field"><span>번역 방식</span><select form="settings-form" name="translationProvider">${[["google", "Google 번역 (무료)"], ["risu", "Risu 보조 모델"], ["server", "RCM 서버 모델"]].map(([v, label]) => `<option value="${v}" ${settings.translationProvider === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="field" data-translation-mode="risu" ${settings.translationProvider === "risu" ? "" : "hidden"}><span>모델 슬롯</span><select form="settings-form" name="translationSlot">${[["translate", "Risu 번역 슬롯"], ["main", "Main"], ["memory", "Memory"], ["otherAx", "Other AX"], ["static", "고정 모델 ID"]].map(([v, label]) => `<option value="${v}" ${settings.translationSlot === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="field" data-translation-static ${settings.translationProvider === "risu" && settings.translationSlot === "static" ? "" : "hidden"}><span>고정 모델 ID</span><input form="settings-form" name="translationModel" value="${escapeHtml(settings.translationModel)}"></label>
+    ${translationConnectionSettings(settings,serverLlm,data.health?.translationConnection)}
+    <label class="field" data-translation-mode="risu" ${settings.translationProvider === "risu" ? "" : "hidden"}><span>호출당 최대 출력</span><input form="settings-form" name="translationMaxOutput" type="number" min="256" max="128000" step="1" value="${settings.translationMaxOutput}"></label>
+    <label class="field field--check" data-translation-llm ${settings.translationProvider === "google" ? "hidden" : ""}><span><input form="settings-form" name="translationBackground" type="checkbox" ${settings.translationBackground ? "checked" : ""}> 백그라운드 자동 번역</span><small class="sub">꺼두면 보고 있는 항목만 번역해요.</small></label>
+    <div class="settings-action-wrap" data-translation-llm ${settings.translationProvider === "google" ? "hidden" : ""}>${connectionCheck("translation", `<span class="settings-action__end" data-remove-translation-row ${settings.translationProvider === "server" && data.health?.translationConnection?.credentialSource === "dedicated" && data.health.translationConnection.dedicatedKeyConfigured ? "" : "hidden"}><button class="btn btn--danger" type="button" data-action="remove-translation-key">저장된 키 제거</button></span>`)}</div>
+    <div class="field"><span>번역 캐시</span><div class="settings-cache-row"><span class="sub">${cacheStats.items.toLocaleString()}개 · ${(cacheStats.bytes / 1024 / 1024).toFixed(1)} MiB</span></div></div><div class="settings-action-wrap"><div class="settings-action">${btn("이 채팅 비우기", { kind: "quiet", action: "clear-chat-translation-cache", disabled: !hasCurrentChat })}${btn("전체 비우기", { kind: "quiet", action: "clear-translation-cache" })}</div></div>
+  </div></section>`;
   const saveAction = btn(voyageBusy ? "저장 중…" : "설정 저장", { kind: "primary", icon: "save", action: "save-settings", disabled: voyageBusy });
   // The phone skin lists the sections like the Settings app; on a phone a section opens as its own screen.
   const phone = lex().skin === "phone";
@@ -3535,7 +3579,7 @@ export function settingsV2(
   // Both skins list the sections; the film skin styles it as a quiet side list, not a second tab strip.
   const sectionNav = `<nav class="settings-nav" aria-label="설정 구간">${nav.map(([key, title, hint]) => `<button type="button" class="settings-nav__row" data-action="settings-section" data-section="${key}"${section === key ? ' aria-current="true"' : ""}><span class="settings-nav__ic settings-nav__ic--${sectionIcons[key][1]}">${icon(sectionIcons[key][0])}</span><span class="settings-nav__t">${title}<small>${hint}</small></span>${icon("chevron")}</button>`).join("")}</nav>`;
   const back = phone ? `<button type="button" class="back hit settings-back" data-action="settings-back">${icon("back")}<span>설정</span></button>` : "";
-  return `<div class="settingspage${phone && sectionOpen ? " is-open" : ""}">${pageHeader("설정", "")}${sectionNav}<div class="settings-panel">${back}<form id="settings-form" class="form">${currentChat}${memory}${display}${model}${server}</form>${voyage}<div class="form__bar settings-bar">${saveAction}</div></div></div>`;
+  return `<div class="settingspage${phone && sectionOpen ? " is-open" : ""}">${pageHeader("설정", "")}${sectionNav}<div class="settings-panel">${back}<form id="settings-form" class="form">${currentChat}${memory}${display}${model}${server}</form>${voyage}${translation}<div class="form__bar settings-bar">${saveAction}</div></div></div>`;
 }
 
 export function memoryTranslationRecords(memory: any, data: Pick<DashboardData, "messages" | "relationshipEvents" | "physicalIntimacy">): StructuredTranslationRecord[] {
@@ -3655,7 +3699,7 @@ function resolveDashboardPersonaEntity(context: RuntimeState["current"], entitie
   })), typeof viewPreferences?.personaEntity === "string" ? viewPreferences.personaEntity : null);
 }
 
-export async function prefetchCurrentChatTranslations(state: RuntimeState, client: ServerClient, chatId: string,
+export async function loadCurrentChatTranslationSources(state: RuntimeState, client: ServerClient, chatId: string,
   scope: { serverInstanceId: string; memoryLanguage: MemoryLanguage }, isCurrent: () => boolean): Promise<TranslationSource[]> {
   if (!isCurrent() || scope.memoryLanguage === "ko") return [];
   const chat = encodeURIComponent(chatId);
@@ -3674,8 +3718,14 @@ export async function prefetchCurrentChatTranslations(state: RuntimeState, clien
     data.messages = (await client.request<any>(`/v1/chats/${chat}/messages`)).items;
   }
   if (!isCurrent()) return [];
-  return prefetchTranslationRecords(state, backgroundTranslationRecords(state, data).map(record => ({ ...record,
-    serverInstanceId: scope.serverInstanceId, chatId, sourceLanguage: scope.memoryLanguage })), isCurrent);
+  return backgroundTranslationRecords(state, data).map(record => ({ ...record,
+    serverInstanceId: scope.serverInstanceId, chatId, sourceLanguage: scope.memoryLanguage }));
+}
+
+export async function prefetchCurrentChatTranslations(state: RuntimeState, client: ServerClient, chatId: string,
+  scope: { serverInstanceId: string; memoryLanguage: MemoryLanguage }, isCurrent: () => boolean): Promise<TranslationSource[]> {
+  if (!backgroundTranslationEnabled(state)) return [];
+  return prefetchTranslationRecords(state, await loadCurrentChatTranslationSources(state, client, chatId, scope, isCurrent), isCurrent);
 }
 
 export async function loadDashboardData(
@@ -3889,7 +3939,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   document.body.innerHTML = '<div id="app" class="app" aria-busy="true"></div>';
   const root = document.getElementById("app")!;
   installMenuController(root);
-  let activeTab: Tab = "overview";
+  let focusSettings = state.dashboardFocusSettings;
+  state.dashboardFocusSettings = undefined;
+  let activeTab: Tab = focusSettings ? "settings" : "overview";
   let nowFilter: NowFilter = "all";
   let nowSort: NowSort = "recent";
   const nowView: NowView = { mode: "now", selected: "", mobileDetail: false, listOnly: false };
@@ -3939,9 +3991,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   let connectionCheckBusy = false;
   let voyageSaveBusy = false;
   const attentionView: AttentionViewState = { selectedId: "", query: "", filter: "all", mobileDetail: false };
-  let settingsSection: SettingsSection = "chat";
+  let settingsSection: SettingsSection = focusSettings ? "model" : "chat";
   /** Phone skin on a phone: a settings section shows as its own screen over the section list. */
-  let settingsSectionOpen = false;
+  let settingsSectionOpen = Boolean(focusSettings);
   let data = emptyData();
   let dashboardOpen = true;
   let refreshGeneration = 0;
@@ -4124,10 +4176,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     maskSecretInputs(root);
     const formData = new FormData(form);
     const values = Object.fromEntries(formData);
-    rememberDiagnosticSecrets(["serverToken", "serverLlmApiKey", "mcpApiKey"].map(name => String(formData.get(name) ?? "")));
+    rememberDiagnosticSecrets(["serverToken", "serverLlmApiKey", "mcpApiKey", "translationServerApiKey"].map(name => String(formData.get(name) ?? "")));
     if (!isServerConfigured({ serverUrl: String(values.serverUrl ?? ""), serverToken: String(values.serverToken ?? "") })) {
       throw Object.assign(new Error(SERVER_SETUP_REQUIRED), { code: "SERVER_SETUP_REQUIRED" });
     }
+    const nextTranslation=formData.has("translationServerProvider")?readTranslationConnectionSettings(formData):undefined;
     const nextMcp=formData.has("mcpModel")?readMcpSelectorSettings(formData):undefined;
     const includeUserMessages = formData.has("includeUserMessages");
     const chatEnabled = formData.has("chatEnabled");
@@ -4204,9 +4257,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if (state.settings.extractionEngine === "risu" && extractionEngine === "server" && state.workerBusy) {
       throw new Error("현재 Risu 보조모델 호출이 끝난 뒤 처리 방식을 변경하세요. 실행 중인 Risu 호출은 API로 취소할 수 없습니다.");
     }
+    const previousTranslationProvider = state.settings.translationProvider;
     const memoryToolsWereEnabled = state.settings.memoryToolsEnabled;
     const quizWasEnabled = state.settings.quizEnabled === true;
-    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), translationProvider: values.translationProvider === "risu" ? "risu" : "google", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
+    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
     if (state.current) {
       state.current.includeUserMessages = includeUserMessages;
       state.current.memoryOnlyInjection = memoryOnlyByChat[state.current.chatId] ?? false;
@@ -4255,6 +4309,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       });
       state.serverWorker = result.worker;
     }
+    if(serverConfigured&&nextTranslation) {
+      const current=data.health?.translationConnection;
+      if(Boolean(nextTranslation.apiKey)||!current||Object.entries(nextTranslation).some(([key,value])=>key!=="apiKey"&&(current as any)[key]!==value)) {
+        const response=await client.request<{config:TranslationConnectionPublicConfig}>("/v1/admin/translation",{method:"PUT",body:JSON.stringify(nextTranslation)});
+        if(data.health)data.health.translationConnection=response.config;
+        const key=root.querySelector<HTMLInputElement>('[name="translationServerApiKey"]');if(key)key.value="";
+      }
+    }
     if(serverConfigured&&nextMcp) {
       const currentMcp=data.health?.mcpSelector;
       const changed=Boolean(nextMcp.apiKey)||!currentMcp||Object.entries(nextMcp).some(([key,value])=>key!=="apiKey"&&(currentMcp as any)[key]!==value);
@@ -4267,6 +4329,21 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     }
     if (serverConfigured && state.current && chatWasEnabled && isChatMemoryEnabled(state.settings, state.current.chatId)) {
       state.lastPrepare = await client.prepare(makePrepareRequest(await readCurrentContext(state), 0, { deferExtraction: false }), 5_000);
+    }
+    if (previousTranslationProvider !== state.settings.translationProvider) {
+      translations.clear(); translationRequested.clear();
+      if (previousTranslationProvider === "google" && state.settings.translationProvider !== "google" && state.current && data.health?.instanceId) {
+        const chatId = state.current.chatId;
+        const records = await loadCurrentChatTranslationSources(state, client, chatId, { serverInstanceId: data.health.instanceId, memoryLanguage: dashboardCanonicalLanguage(state, chatId, data.adminChats) }, () => state.current?.chatId === chatId);
+        const google = await googleTranslationRecords(state, records);
+        if (google.length) {
+          const calls = planTranslation(google.map((r, i) => ({ id: String(i), text: r.text })), translationOutputBudget(state)).length;
+          const tokens = google.reduce((sum, r) => sum + estimateTranslationTokens(r.text), 0);
+          if (await confirmDashboard(`이미 Google로 번역된 항목이 ${google.length}개 있어요. 보조 모델로 다시 번역할까요? 예상: 호출 약 ${calls}회 · 원문 약 ${tokens.toLocaleString()}토큰`, false, { title: "참고 번역", cancel: "그대로 두기", confirm: "다시 번역", keep: true })) {
+            void retranslateGoogleRecords(state, google).then(() => { translations.clear(); translationRequested.clear(); render(); });
+          }
+        }
+      }
     }
     if (serverConfigured && !state.settings.workerPaused) void drainWorker(state, client);
   };
@@ -4669,6 +4746,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       renderedPageContent = pageContent;
       deferredPageRender = false;
       replacedPage = true;
+      if (focusSettings === "embedding" && !refreshing) {
+        focusSettings = undefined;
+        requestAnimationFrame(() => { root.querySelector("#voyage-form")?.scrollIntoView({ block: "center" }); root.querySelector<HTMLInputElement>('[name="voyageApiKey"]')?.focus({ preventScroll: true }); });
+      }
     } else if (!pageUnchanged) {
       deferredPageRender = true;
     }
@@ -5068,7 +5149,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       status.textContent = target.dataset.target === "risu" ? "Risu 응답 확인 중… 호스트의 대기 시간과 출력 설정을 따릅니다." : "응답 확인 중…";
       target.setAttribute("aria-busy", "true");
       try {
-        const elapsed = await testSettingsConnection(state, new FormData(form), target.dataset.target ?? "", root.querySelector<HTMLInputElement>('[name="voyageApiKey"]')?.value ?? "");
+        const started = Date.now();
+        if (target.dataset.target === "translation" && new FormData(form).get("translationProvider") !== "server") {
+          state.translationStats ??= { calls: 0, items: 0 };
+          const probe = { ...state, settings: { ...state.settings, ...translationSettings(Object.fromEntries(new FormData(form))) } };
+          await callTranslationBatch(probe, [{ id: "connection", text: "Hello", partIndex: 0, partCount: 1 }]);
+          state.translationStats = probe.translationStats;
+        } else await testSettingsConnection(state, new FormData(form), target.dataset.target ?? "", root.querySelector<HTMLInputElement>('[name="voyageApiKey"]')?.value ?? "");
+        const elapsed = Date.now() - started;
         if (status.isConnected) { status.classList.remove("is-error"); status.innerHTML = `${icon("check")}<span>응답 ${(elapsed / 1000).toFixed(1)}초</span>`; }
         addLog(state.logs, "info", `Connection check succeeded (${target.dataset.target})`);
       } catch (error) {
@@ -5146,6 +5234,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if (action === "close") {
       if (organizationView.open && !await discardReadyOrganizationCandidate()) return;
       dashboardOpen = false;
+      sentView.packetTranslation = undefined;
       if (translationRetryTimer !== undefined) clearTimeout(translationRetryTimer);
       translationRetryTimer = undefined;
       unsubscribeActivity?.();
@@ -5232,6 +5321,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       formDirty = true;
       return;
     }
+    if (action === "embedding-settings") {
+      activeTab = "settings";
+      settingsSection = "model";
+      settingsSectionOpen = true;
+      focusSettings = "embedding";
+      render(false);
+      return;
+    }
     if (action === "settings-section") {
       const next = target.dataset.section as SettingsSection;
       if (!(SETTINGS_SECTIONS as readonly string[]).includes(next)) return;
@@ -5242,8 +5339,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       root.querySelectorAll<HTMLElement>('.settingspage .tab[data-action="settings-section"]').forEach((button) => button.setAttribute("aria-selected", String(button.dataset.section === next)));
       root.querySelectorAll<HTMLElement>(".settings-nav__row").forEach((row) => { if (row.dataset.section === next) row.setAttribute("aria-current", "true"); else row.removeAttribute("aria-current"); });
       root.querySelector(".settingspage")?.classList.add("is-open");
-      const voyage = root.querySelector<HTMLElement>("[data-settings-voyage]");
-      if (voyage) voyage.hidden = next !== "model";
+      root.querySelectorAll<HTMLElement>("[data-settings-model-extra]").forEach(element => { element.hidden = next !== "model"; });
       if (next === "server" && target.closest(".notice")) root.querySelector<HTMLInputElement>('[name="serverUrl"]')?.focus({ preventScroll: true });
       documentScroller(root)?.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       return;
@@ -5773,11 +5869,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       if (memory) void queueMemoryTranslation(memory, true);
       return;
     }
-    if (action === "clear-translation-cache") {
-      await clearTranslationCache(state);
+    if (action === "clear-translation-cache" || action === "clear-chat-translation-cache") {
+      if (action === "clear-chat-translation-cache") { if (!state.current) return; await invalidateTranslationCache(state, { chatId: state.current.chatId, serverInstanceId: data.health?.instanceId }); }
+      else await clearTranslationCache(state);
       translations.clear();
       translationRequested.clear();
-      cacheStats = { ...cacheStats, items: 0, bytes: 0 };
+      cacheStats = await translationCacheStats(state);
       render();
       return;
     }
@@ -5802,8 +5899,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         if (!await confirmDashboard(message, false, { title: "이 채팅 퀴즈", confirm: regenerate ? "새로 만들기" : "점수 초기화" }) || state.current?.chatId !== chatId) return;
         if (regenerate) {
           const result = await client.quizRegenerate(chatId);
-          const reasons = { no_material: "새로 낼 재료가 아직 없어요", generating: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요.", disabled: "퀴즈 사용을 켜고 저장한 뒤 다시 시도해 주세요." };
-          showActionSaveState({ kind: result.enqueued || result.reason === "no_material" ? "success" : "error",
+          const reasons = { model_not_configured: "보조 모델을 설정하면 퀴즈를 만들 수 있어요.", no_material: "새로 낼 재료가 아직 없어요", generating: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요.", disabled: "퀴즈 사용을 켜고 저장한 뒤 다시 시도해 주세요." };
+          showActionSaveState({ kind: result.enqueued || result.reason === "no_material" || result.reason === "model_not_configured" ? "success" : "error",
             message: result.enqueued ? "새 퀴즈 만들기를 시작했어요." : reasons[result.reason ?? "no_material"] });
         } else {
           await client.quizResetStats(chatId);
@@ -5976,6 +6073,20 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       void queueStructuredTranslations();
       return;
     }
+    if (action === "translate-sent-packet") {
+      const packet = sentView.packetTranslation;
+      if (!packet || packet.pending) return;
+      if (packet.translated !== undefined) { packet.showing = !packet.showing; render(); return; }
+      packet.pending = true; packet.error = undefined; render();
+      try {
+        const translated = await translatePacket(state, packet.source, activeCanonicalLanguage(), () => dashboardOpen && sentView.packetTranslation === packet);
+        if (dashboardOpen && sentView.packetTranslation === packet) { packet.translated = translated; packet.showing = true; }
+      } catch (error) {
+        const code = (error as { code?: string })?.code ?? "MODEL_CONNECTION_FAILED";
+        packet.error = ({ TAG_SEQUENCE_CHANGED: "태그 변경", MISSING_ITEMS: "번역 항목 누락", TIMEOUT: "응답 시간 초과", ABORTED_OR_TIMEOUT: "번역 취소", INVALID_CONFIG: "번역 설정 확인 필요", INVALID_RESPONSE: "응답 형식 오류", MODEL_OUTPUT_TRUNCATED: "번역 응답 잘림", GOOGLE_TRANSLATION_FAILED: "Google 응답 실패", MODEL_CONNECTION_FAILED: "모델 연결 실패" } as Record<string, string>)[code] ?? code;
+      } finally { packet.pending = false; if (dashboardOpen) render(); }
+      return;
+    }
     if (action === "close-sent") {
       sentView.open = false;
       render(); return;
@@ -6111,6 +6222,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         addLog(state.logs, "info", "Voyage API key removed from the server");
         await refresh();
       } catch (error) { data.error = String(error); render(); }
+      return;
+    }
+    if(action === "remove-translation-key") {
+      try {
+        const response=await client.request<{config:TranslationConnectionPublicConfig}>("/v1/admin/translation-key",{method:"DELETE"});
+        if(data.health)data.health.translationConnection=response.config;
+        render();
+      }catch(error){showActionSaveState({kind:"error",message:`번역 인증정보 제거 실패 · ${String(error)}`});}
       return;
     }
     if(action === "remove-mcp-key") {
@@ -7068,6 +7187,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       if (confirm) confirm.disabled = !input.checked;
       return;
     }
+    if (["translationProvider", "translationSlot", "translationServerProvider", "translationServerEndpoint", "translationServerCredentialSource"].includes(input.name)) {
+      updateTranslationConnectionControls(root,input.name);return;
+    }
     if (input.name === "extractionEngine") {
       root.querySelectorAll<HTMLElement>("[data-engine-fields]").forEach((element) => { element.hidden = element.dataset.engineFields !== input.value; });
       const auxiliary = root.querySelector<HTMLSelectElement>('select[name="auxiliaryMode"]');
@@ -7189,6 +7311,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       await refresh();
     } while (dashboardOpen && activityRefreshPending);
   };
+  let lastTranslationStatsSignature = JSON.stringify(state.translationStats);
   unsubscribeActivity = subscribeActivity(state, () => {
     if (!dashboardOpen) return;
     const summary = state.statusSummary;
@@ -7201,6 +7324,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     lastLiveDataSignature = nextLiveDataSignature;
     updateTopbar();
     updateNavBadges();
+    const translationStatsSignature = JSON.stringify(state.translationStats);
+    if (translationStatsSignature !== lastTranslationStatsSignature) {
+      lastTranslationStatsSignature = translationStatsSignature;
+      if (activeTab === "operations") render();
+    }
     const nextToolRegistrationSignature = toolRegistrationSignature();
     if (nextToolRegistrationSignature !== lastToolRegistrationSignature) {
       lastToolRegistrationSignature = nextToolRegistrationSignature;

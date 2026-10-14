@@ -9,6 +9,9 @@ import { canAutomaticallyChange, committedEditOrdinal, correctionView, UNCORRECT
 import { invalidateStorySupports, storyMemorySupportIds } from "./story-spine.js";
 
 export type SocialKnowledgeLevel = "aware_of" | "interacted";
+export const socialKnowledgeLevelLabel: Record<SocialKnowledgeLevel, string> = {
+  aware_of: "by name only; no meeting recorded", interacted: "interacted; not necessarily in person",
+};
 type SocialEvidence = { messageId: string; quote?: string } | { sourceKind: "setup"; setupFingerprint: string; sourceIndex: number; quote: string };
 type IngestedSocialKnowledge = Omit<SocialKnowledge, "addressTerms"> & { addressTerms?: string[] };
 
@@ -355,7 +358,7 @@ export function mentionedCharacters(db: RcmDatabase, chatId: string, text: strin
     })).map(entity => entity.name);
 }
 
-export interface SceneNames { text: string; pairCount: number; omittedCount: number }
+export interface SceneNames { text: string; pairCount: number; omittedCount: number; recognitionIds: string[] }
 
 /** One stable, holder-scoped renderer shared by automatic packets and MCP. */
 export function renderSceneNames(db: RcmDatabase, chatId: string, holders: string[], present: string[], mentioned: string[], tokenBudget = 200): SceneNames {
@@ -378,16 +381,19 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
       || a.holder.localeCompare(b.holder) || a.subject.localeCompare(b.subject));
   const quote = (value: string) => JSON.stringify(value);
   const lines: string[] = [];
+  const recognitionIds: string[] = [];
   const render = () => lines.length ? ("Names in this scene:\n" + lines.join("\n")).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;") : "";
   for (const item of pairs.slice(0, 8)) {
     // Never use an alias or canonical identity the holder has not learned.
     const label = item.knownAs.find(name => normalizeEntityName(name) === normalizeEntityName(item.subject)) ?? item.knownAs[0] ?? "unnamed person";
     const fields = [item.knownAs.length ? "knows as " + item.knownAs.map(quote).join(", ") : "",
       item.addressTerms.length ? "calls " + item.addressTerms.map(quote).join(", ") : ""].filter(Boolean);
-    lines.push("- " + item.holder + " → " + label + ": " + fields.join("; "));
+    lines.push("- " + item.holder + " → " + label + ": " + fields.join("; ")
+      + (item.level === "aware_of" ? ` (${socialKnowledgeLevelLabel[item.level]})` : ""));
     if (estimateTokens(render()) > Math.min(200, tokenBudget)) { lines.pop(); break; }
+    recognitionIds.push(`recognition:${item.holder}:${item.subject}`);
   }
-  return { text: render(), pairCount: lines.length, omittedCount: pairs.length - lines.length };
+  return { text: render(), pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds };
 }
 
 /** Insert inside the product-owned MCP envelope consumed by all adapters. */
