@@ -4,8 +4,8 @@ import type { PluginSettings } from "./types.js";
 
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 15_000;
 export const SERVER_STATUS_TIMEOUT_MS = 12_000;
-// Preparation waits for the complete packet; latency is measured, not a send deadline.
-export const TURN_PREPARE_TIMEOUT_MS: null = null;
+// Allow slow valid retrieval, but bound the send path including response-body read.
+export const TURN_PREPARE_TIMEOUT_MS = null;
 
 function serverErrorDetail(error: unknown): string {
   if (typeof error !== "string") return "";
@@ -99,9 +99,6 @@ export class ServerClient {
 
   async request<T>(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<T> {
     const controller = new AbortController();
-    const abort = () => controller.abort(init.signal?.reason);
-    if (init.signal?.aborted) abort();
-    else init.signal?.addEventListener("abort", abort, { once: true });
     let active = true;
     let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let phase: "requestMs" | "bodyMs" | "parseMs" = "requestMs";
@@ -109,6 +106,14 @@ export class ServerClient {
     const finishPhase = () => { if (active && timings) timings[phase] = performance.now() - phaseStartedAt; };
     let rejectDeadline!: (error: Error) => void;
     const deadline = new Promise<never>((_, reject) => { rejectDeadline = reject; });
+    const abort = () => {
+      const reason = init.signal?.reason ?? new DOMException("Request cancelled", "AbortError");
+      controller.abort(reason);
+      rejectDeadline(reason);
+      void bodyReader?.cancel(reason).catch(() => undefined);
+    };
+    if (init.signal?.aborted) abort();
+    else init.signal?.addEventListener("abort", abort, { once: true });
     const timer = timeoutMs === null ? undefined : setTimeout(() => {
       const error = new Error(`Request timed out after ${timeoutMs}ms: ${(init.method ?? "GET").toUpperCase()} ${path}`);
       error.name = "AbortError";
@@ -235,7 +240,7 @@ export class ServerClient {
     }
   }
 
-  async prepare(body: TurnPrepareRequest, timeoutMs: number | null = TURN_PREPARE_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<TurnPrepareResponse> {
+  async prepare(body: TurnPrepareRequest, timeoutMs: number | null = TURN_PREPARE_TIMEOUT_MS, timings?: PrepareClientTimings, signal?: AbortSignal): Promise<TurnPrepareResponse> {
     const startedAt = performance.now();
     if (timings) {
       timings.responseStage = "not_received";
@@ -245,7 +250,7 @@ export class ServerClient {
     }
     const serialized = JSON.stringify(body);
     if (timings) timings.serializeMs = performance.now() - startedAt;
-    const response = await this.request<unknown>("/v1/turn/prepare", { method: "POST", body: serialized }, timeoutMs, timings);
+    const response = await this.request<unknown>("/v1/turn/prepare", { method: "POST", body: serialized, signal }, timeoutMs, timings);
     const schemaStartedAt = performance.now();
     const parsed = TurnPrepareResponseSchema.safeParse(response);
     if (timings) timings.schemaMs = performance.now() - schemaStartedAt;

@@ -317,7 +317,7 @@ export function renderNowPage(
   const due = past ? [] : overduePromiseEntries(page);
   const ordered = [...due.map(({ row }) => row), ...page.groups.flatMap((group) => group.rows.filter((row) => !row.overdue))];
   // On a wide screen the reader shows the first record until another is chosen, unless the list was asked for alone.
-  const selected = view.listOnly ? "" : ordered.some((row) => row.key === view.selected) ? view.selected : ordered[0]?.key ?? "";
+  const selected = view.listOnly ? "" : view.selected || ordered[0]?.key || "";
   const rowOpts = (row: NowRow, verbsVisible: boolean) => ({ verbsVisible, sceneAt, selected: row.key === selected, past });
   const dueSection = due.length
     ? `<section class="who who--due"><h2 class="who-h">기한 지난 약속<span class="n">${due.length}</span></h2>${due.map(({ row, owner }) => renderRow(row, owner, busy(row), translations, display, rowOpts(row, true))).join("")}</section>`
@@ -337,12 +337,12 @@ export function renderNowPage(
   const body = dueSection + groups;
   const hint = past ? `<p class="now-hint">끝난 기록이에요. 이어지는 기록의 지난 모습은 각 기록 안에 있어요.</p>` : "";
   const emptyList = past ? empty("끝난 기록이 없습니다", "상태·인식이 끝나거나 약속이 마무리되면 여기에 모입니다.") : empty("표시할 현재 기록이 없습니다", "대화에서 약속·인식·상태가 생기면 인물별로 모입니다.");
-  const chain = page.chains.get(selected);
+  const chain = ordered.some(row => row.key === selected) ? page.chains.get(selected) : undefined;
   const detail = chain ? renderRecordDetail(chain, data, { translations, display, back: past ? "지난 기록" : "현재", actions: detailActions(chain, data, busy), fact: beliefFact(chain, data) }) : "";
   // Title, then the range and kinds as one pinned bar, then the list and the record scrolling on their own.
   const bar = `<div class="now-bar">${modes}${chips}<span class="now-bar__end">${sortControl}${past ? "" : ledgerMenu}</span></div>`;
-  const state = `${view.mobileDetail && detail ? " is-detail" : ""}${view.listOnly ? " is-list-only" : ""}`;
-  return `<div class="worldbook nowbook${state}"><h1 class="pagetitle">현재</h1>${bar}<div class="split"><div class="listcol"><div class="now-rows" data-preserve-scroll="now-list:${view.mode}">${attention}${hint}${body || emptyList}</div></div><div class="readercol">${detail || empty("기록을 고르세요", "목록에서 기록을 고르면 지금 내용과 변화가 열립니다.")}</div></div></div>`;
+  const state = `${view.mobileDetail && (detail || view.selected) ? " is-detail" : ""}${view.listOnly ? " is-list-only" : ""}`;
+  return `<div class="worldbook nowbook${state}"><h1 class="pagetitle">현재</h1>${bar}<div class="split"><div class="listcol"><div class="now-rows" data-preserve-scroll="now-list:${view.mode}">${attention}${hint}${body || emptyList}</div></div><div class="readercol">${detail || (view.selected ? empty("기록이 바뀌었거나 더 이상 없어요", "현재 목록에서 다른 기록을 고를 수 있어요.") : empty("기록을 고르세요", "목록에서 기록을 고르면 지금 내용과 변화가 열립니다."))}</div></div></div>`;
 }
 
 /** The verbs of the open record: a live one is edited or ended in place; a finished one can only be deleted when it was wrong. */

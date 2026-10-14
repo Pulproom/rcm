@@ -684,6 +684,16 @@ button.sent-row:hover .sent-row__t { color: inherit; }
 .pill { padding: 1px 7px; background: var(--fill); }
 .pill--haze { background: color-mix(in srgb, var(--tungsten) 12%, transparent); }
 .sent-more { padding: 12px 16px; }
+/* A call's raw response is a quiet disclosure under its question, aligned with the question text. */
+.sent-call__kind { font-size: var(--t-meta); }
+.sent-call__memory { color: var(--accent-text); font-weight: 600; text-decoration: none; }
+.sent-call__raw { margin: 0 16px 10px 39px; }
+.sent-call__raw.fold > summary { min-height: 36px; padding: 6px 0; gap: 6px; border-radius: 0; background: none; font-size: var(--t-meta); color: var(--ink-3); }
+.sent-call__raw.fold > summary small { margin-left: 2px; font-size: inherit; }
+.sent-call__raw.fold > summary .chev { margin-left: 0; }
+.sent-call__raw.fold[open] > summary { border-radius: 0; }
+.sent-call__raw .packet { margin: 2px 0 0; background: var(--fill); }
+.sent-q small.is-fail { color: var(--cut); }
 .sent-q { padding: 12px 16px 4px; }
 .sent-q + .sent-row { padding-top: 6px; }
 .sent-raw > summary { padding: 12px 16px; border: 0; border-radius: 12px; background: var(--screen); }
@@ -1327,6 +1337,10 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 .film .settingspage .settings-action .btn { padding: 0 4px; margin: 0; background: transparent; box-shadow: none; border: 0; text-align: left; }
 .film .settingspage .settings-action .btn--danger { color: var(--cut); }
 .film .settingspage .settings-action .btn--quiet { color: var(--accent-text); }
+/* Inside a memory-tool call everything hangs from the question's text edge: no empty number column. */
+.sent-call .sent-row { grid-template-columns: minmax(0, 1fr) auto; padding-left: 39px; }
+.sent-call .sent-row__k { display: none; }
+.sent-call .sent-row__m { grid-column: 1; }
 `;
 
 export const PHONE_CSS: string = FILM_CSS + PHONE_SKIN_CSS;

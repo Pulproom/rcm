@@ -1,6 +1,6 @@
 import { prefetchCurrentChatTranslations } from "./dashboard.js";
 import { backgroundTranslationEnabled, googleTranslationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
-import { readCurrentChatId, readOptionalDashboardContext } from "./context.js";
+import { observeCurrentHostGeneration, readCurrentChatId, readOptionalDashboardContext } from "./context.js";
 import { SERVER_STATUS_TIMEOUT_MS, type ServerClient } from "./api-client.js";
 import type { RuntimeState } from "./types.js";
 import { reconcileAutomaticServerPause } from "./worker.js";
@@ -91,6 +91,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
   const poll = async () => {
     if (unloaded) return;
     try {
+      if (state.mainGeneration) await observeCurrentHostGeneration(state);
       // Chat switches need to update visibility even without a new RP request.
       const selection = await (async () => {
         const character = await risuai.getCurrentCharacterIndex();

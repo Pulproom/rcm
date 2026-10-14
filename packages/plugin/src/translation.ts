@@ -1,4 +1,4 @@
-import { risuModelSlot } from "./worker.js";
+import { risuModelSlot, runRisuModel } from "./worker.js";
 import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
 import type { RuntimeState, TranslationDisplay, TranslationProvider } from "./types.js";
 import type { MemoryLanguage } from "@rcm/shared";
@@ -160,11 +160,12 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
       if (provider === "server") return clientFor(state).request<{ items: Array<{ id: string; partIndex: number; ko: string }>; usage?: any; model: string }>("/v1/translations/batch", {
         method: "POST", body: JSON.stringify({ items, model: state.settings.translationServerModel, temperature: state.settings.translationTemperature, thinking: state.settings.translationThinking, maxOutput: state.settings.translationServerMaxOutput }),
       }, TRANSLATION_TIMEOUT_MS + 5000);
-      const response = await risuai.runLLMModel({ messages: [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
+      const response = await runRisuModel(state, { messages: [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
       if (response?.type !== "success" || typeof response.result !== "string") throw new TranslationError("MODEL_CONNECTION_FAILED", String(response?.result || "Risu 번역 모델 호출 실패"));
       return { items: validateTranslation(response.result, items, response.finish_reason ?? response.finishReason), usage: response.usage ?? response.usageMetadata, model: state.settings.translationSlot === "static" ? state.settings.translationModel : state.settings.translationSlot };
     };
-    const result = await Promise.race([call(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TranslationError("TIMEOUT", "참고 번역 호출이 120초를 넘었습니다.")), TRANSLATION_TIMEOUT_MS); })]);
+    // Risu's shared call deadline also owns stream cancellation and call-ID cleanup.
+    const result = provider === "server" ? await Promise.race([call(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TranslationError("TIMEOUT", "참고 번역 호출이 120초를 넘었습니다.")), TRANSLATION_TIMEOUT_MS); })]) : await call();
     const usage = result.usage;
     const input = usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount;
     const output = usage?.completion_tokens ?? usage?.output_tokens ?? usage?.candidatesTokenCount;

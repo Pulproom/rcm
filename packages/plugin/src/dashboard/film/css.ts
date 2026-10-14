@@ -1233,6 +1233,17 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .sent-q .i { flex: none; width: 15px; height: 15px; margin-top: 3px; color: var(--accent-text); }
 .sent-q q { quotes: "“" "”"; font-weight: 600; }
 .sent-q small { display: block; font-size: var(--t-micro); color: var(--ink-3); }
+.sent-call__kind, .sent-call__memory, .sent-q q { display: block; }
+.sent-call__kind { font-size: var(--t-micro); color: var(--ink-3); font-weight: 400; }
+.sent-call__memory { padding: 0; border: 0; background: none; color: var(--ink); font: inherit; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; overflow-wrap: anywhere; }
+.sent-call__raw { margin: 8px 0 12px; }
+.sent-call__raw > summary { cursor: pointer; font-size: var(--t-small); padding: 8px 2px; }
+.sent-call__raw > summary small { margin-left: 8px; color: var(--ink-3); font-size: var(--t-micro); }
+.sent-call__raw .packet { margin-top: 4px; }
+.sent-q small.is-fail { color: var(--cut); }
+.sent-call__raw { margin-left: 25px; }
+.sent-call__raw.fold > summary { min-height: 32px; border-bottom: 0; font-weight: 400; color: var(--ink-3); }
+.sent-call__raw.fold > summary .chev { margin-left: 4px; }
 .sent-raw { margin-top: 28px; }
 .sent-raw > summary { display: flex; align-items: center; gap: 6px; padding: 10px 2px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: var(--t-ui); font-weight: 600; list-style: none; cursor: pointer; }
 .sent-raw > summary::-webkit-details-marker { display: none; }
@@ -1349,4 +1360,8 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .acq__tag--call { border-color: color-mix(in srgb, var(--tungsten) 60%, transparent); background: var(--tungsten-dim); color: var(--sub); }
 .acq__memo { margin: 10px 0 0; max-width: 62ch; font-size: var(--t-body); line-height: 1.7; color: var(--ink-2); }
 
+/* Inside a memory-tool call everything hangs from the question's text edge: no empty number column. */
+.sent-call .sent-row { grid-template-columns: minmax(0, 1fr) auto; padding-left: 25px; }
+.sent-call .sent-row__k { display: none; }
+.sent-call .sent-row__m { grid-column: 1; }
 `;

@@ -12,7 +12,7 @@ export async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function messageRole(message: any): "user" | "assistant" | "system" {
+export function messageRole(message: any): "user" | "assistant" | "system" {
   if (message?.role === "user") return "user";
   if (message?.role === "system") return "system";
   return "assistant";
@@ -357,7 +357,9 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
 
 /** Dashboard/status identity: no source decoding, hashing, lore or all-bot database read. */
 export async function readDashboardContext(state: RuntimeState): Promise<DashboardContext> {
+  const generation = state.mainGeneration;
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  generation?.observe(chatId, chat);
   const database = await risuai.getDatabase(["personas", "selectedPersona"]);
   const identity = chatIdentityFields(characterIndex, character, chatIndex, chat);
   const characterName = String(character?.name ?? "Character");
@@ -398,8 +400,45 @@ export async function readOptionalDashboardContext(state: RuntimeState): Promise
   }
 }
 
-export async function readCurrentChatId(): Promise<string> {
-  return (await readCurrentChatIdentity()).chatId;
+export async function readCurrentChatId(state?: RuntimeState): Promise<string> {
+  const generation = state?.mainGeneration;
+  const { chatId, chat } = await readCurrentChatIdentity();
+  generation?.observe(chatId, chat);
+  if (generation && state?.mainGeneration?.id === generation.id) {
+    const hashes = await Promise.all((Array.isArray(chat.message) ? chat.message : []).map((message: any, ordinal: number) => {
+      const id = String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`);
+      return sha256(`${messageRole(message)}\0${String(message?.data ?? message?.content ?? "")}`).then(displayContentHash => ({ id, displayContentHash }));
+    }));
+    generation.observe(chatId, chat, hashes);
+  }
+  return chatId;
+}
+
+/** Existing host snapshots only: false before headers is not a generation-end signal. */
+export async function observeCurrentHostGeneration(state: RuntimeState): Promise<{ chatId: string; chat: any } | undefined> {
+  const generation = state.mainGeneration;
+  if (!generation) return;
+  try {
+    const { chatId, chat } = await readCurrentChatIdentity();
+    generation.observe(chatId, chat);
+    if (state.mainGeneration?.id === generation.id) {
+      // Exact source-revision checks reuse the display hash contract. Only the
+      // existing source prefix is hashed; streaming output is excluded.
+      const messages = Array.isArray(chat.message) ? chat.message : [];
+      const hashes = await Promise.all(messages.flatMap((message: any, ordinal: number) => {
+        const id = String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`);
+        if (!generation.sources?.has(id) || id === generation.outputId) return [];
+        const role = messageRole(message), content = String(message?.data ?? message?.content ?? "");
+        return [sha256(`${role}\0${content}`).then(displayContentHash => ({ id, displayContentHash }))];
+      }));
+      generation.observe(chatId, chat, hashes);
+    }
+    return { chatId, chat };
+  } catch (error) {
+    if (isNoActiveChatError(error)) generation.observe(undefined, undefined);
+    // A failed host read supplies no evidence of a stop.
+    return undefined;
+  }
 }
 
 export async function readOptionalCurrentContext(
@@ -419,10 +458,12 @@ export async function readCurrentContext(
   state: RuntimeState,
   options: { snapshotMode?: "auto" | "full" | "tail" } = {},
 ): Promise<CurrentContext> {
+  const generation = state.mainGeneration;
   // PocketRisu may throw inside getCurrentChatIndex() while its home screen has
   // no selected character. Resolve the character first so that this normal UI
   // state does not masquerade as a server failure in callers such as Dashboard.
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  generation?.observe(chatId, chat);
   const [lore, database] = await Promise.all([
     risuai.getCurrentLorebookEntries(),
     risuai.getDatabase(["personas", "selectedPersona", "characters"]),
@@ -452,6 +493,7 @@ export async function readCurrentContext(
     startOrdinal = selectTailStart(messageContents, TAIL_MESSAGE_LIMIT, TAIL_TOKEN_LIMIT);
   }
   const messageVisibility = await sourceMessageVisibility(chatId, messages, messageSources, state.settings.canonicalizationPolicy);
+  generation?.observe(chatId, chat, messageVisibility);
   const snapshot: CurrentContext["snapshot"] = messages.slice(startOrdinal).map((message: any, localOrdinal: number) => {
     const ordinal = startOrdinal + localOrdinal;
     const content = messageContents[ordinal] ?? "";

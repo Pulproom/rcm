@@ -6,7 +6,7 @@ import { drainWorker, heartbeatServerWorker } from "./worker.js";
 import { registerMemoryToolAdapters } from "./tool-adapters.js";
 import { installStatusWidget, updateWorkerMenuButton, registerDashboardSetting } from "./attention.js";
 import { installActivityCoordinator } from "./activity.js";
-import { readOptionalDashboardContext } from "./context.js";
+import { observeCurrentHostGeneration, readOptionalDashboardContext } from "./context.js";
 import { isServerConfigured } from "./connection.js";
 declare const __RCM_DISTRIBUTION__: boolean;
 
@@ -39,7 +39,7 @@ void (async () => {
   await updateWorkerMenuButton(state);
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void drainWorker(state, client);
+    if (document.visibilityState === "visible") void observeCurrentHostGeneration(state).then(() => drainWorker(state, client));
   });
   window.addEventListener("online", () => void drainWorker(state, client));
   state.serverHeartbeatTimer = window.setInterval(() => void heartbeatServerWorker(state, client), 15_000);

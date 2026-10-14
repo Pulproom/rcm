@@ -27,7 +27,7 @@ import {exportChatSettings,restoreChatSettings} from "./backup-settings.js";
 import { describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, SERVER_RESPONSE_DELAYED, type ServerConnectionIssue } from "./connection.js";
 import { syncQuizSettings } from "./quiz-sync.js";
 import { installServerUpdate, pluginUpdateNeeded, refreshUpdateStatus } from "./updates.js";
-import { createDashboardNavigationController, dashboardScrollOwner, documentScroller, handleDashboardNavigationAction, NavigationStack, type DashboardNavigationRefresh, type ViewSnapshot } from "./dashboard/navigation.js";
+import { createDashboardNavigationController, dashboardScrollOwner, documentScroller, handleDashboardNavigationAction, handleSentNowNavigation, NavigationStack, type DashboardNavigationRefresh, type ViewSnapshot } from "./dashboard/navigation.js";
 import { matchPersonaEntity } from "./persona.js";
 import { buildPairs, entityForName, entityProminence, milestoneLabel, pairKey, PERSON_PROMINENCE_OPTIONS, relationshipLabelTranslationKey, relationshipSummaryLabel } from "./dashboard/pairs.js";
 import { pairOpenPromises, pairSceneCount, renderRelationshipRow, renderPairDetail, type PairDiaryFilter, type PairDiarySort } from "./dashboard/pair-detail.js";
@@ -976,6 +976,7 @@ function requireChatMemoryEnabled(state: RuntimeState, chatId: string): void {
 }
 
 export function clearDeletedChatState(state: RuntimeState, chatId: string, clearActivation = true): void {
+  if (state.lastTurnSearches?.chatId === chatId) state.lastTurnSearches = undefined;
   for (const scope of Object.keys(state.settings.backfillApproved)) if (scope.endsWith(`:${chatId}`)) delete state.settings.backfillApproved[scope];
   if (clearActivation) {
     delete state.settings.chatEnabled[chatId];
@@ -1187,10 +1188,19 @@ export function dashboardLiveDataSignature(summary: RuntimeState["statusSummary"
   return JSON.stringify({ progress: summary?.progress, initialCalibration: summary?.initialCalibration?.status });
 }
 
+function currentInjection(state: RuntimeState, instanceId?: string): RuntimeState["lastInjection"] {
+  const injection = state.lastInjection;
+  if (!injection) return undefined;
+  // Explicit omission is a local delivery fact; it has no prepare response/instance.
+  return injection.chatId === state.current?.chatId && (!instanceId || state.lastPrepare?.serverInstanceId === instanceId
+    || (injection.omitted && injection.blocked === false && injection.prepareOutcome === "skipped")) ? injection : undefined;
+}
+
 function homeInjectionManifest(state: RuntimeState, instanceId?: string): InjectionManifest | undefined {
   const chatId = state.current?.chatId;
   if (!chatId) return undefined;
-  if (state.lastInjection?.chatId === chatId && (!instanceId || state.lastPrepare?.serverInstanceId === instanceId)) return state.lastInjection.manifest;
+  const injection = currentInjection(state, instanceId);
+  if (injection) return injection.manifest;
   const cached = state.cache[chatId];
   return cached && (!instanceId || cached.serverInstanceId === instanceId) ? cached.lastInjectionManifest : undefined;
 }
@@ -1227,8 +1237,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const failed = blockingFailed + advisoryFailed;
   const currentChatId = state.current?.chatId ?? "";
   const currentInstanceId = data.health?.instanceId;
-  const liveInjection = state.lastInjection?.chatId === currentChatId
-    && (!currentInstanceId || state.lastPrepare?.serverInstanceId === currentInstanceId) ? state.lastInjection : undefined;
+  const liveInjection = currentInjection(state, currentInstanceId);
   const cachedState = state.cache[currentChatId];
   const compatibleCache = cachedState && (!currentInstanceId || cachedState.serverInstanceId === currentInstanceId) ? cachedState : undefined;
   const cachedPacket = compatibleCache?.lastPacket ?? "";
@@ -1343,12 +1352,13 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   for (const pair of manifest?.relationshipPairs ?? []) if (!sentPairs.has(pairKey(pair.from, pair.to))) sentPairs.set(pairKey(pair.from, pair.to), { a: pair.from, b: pair.to });
   const sentPeople: SentPerson[] = [...sentPairs.values()].map(({ a, b }) => {
     const match = homePairs.find((pair) => pairKey(pair.a, pair.b) === pairKey(a, b));
-    return { key: match?.key, namesHtml: `${nameHtml(a)} &amp; ${nameHtml(b)}`, meta: "",
+    return { key: [a, b].sort().join("|"), namesHtml: `${nameHtml(a)} &amp; ${nameHtml(b)}`, meta: "",
       labelHtml: match?.label ? displayText(match.label, translations.get(relationshipLabelTranslationKey(match)), translationDisplay) : "" };
   });
   const intimacyCount = manifest?.intimacyMilestoneIds?.length ?? 0;
   if (intimacyCount) sentPeople.push({ namesHtml: "스킨십 기록", labelHtml: `${intimacyCount}개`, meta: "" });
   const sentNote = !liveInjection ? "마지막으로 준비한 기억이에요. 이번 답변에 실제로 들어갔는지는 확인하지 못했어요."
+    : liveInjection.omitted && liveInjection.blocked === false ? "기억 없이 보냄"
     : liveInjection.evidenceInjected === false && liveInjection.guidanceInjected === true ? "이번에는 기억 없이 안내만 건넸어요."
       : liveInjection.evidenceInjected === false && liveInjection.guidanceInjected === false ? "이번에는 RCM 내용을 건네지 않았어요."
         : "답변을 쓰기 전에 메인 모델에게 건넨 기억이에요.";
@@ -1361,8 +1371,9 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
     spine: manifest?.storySpineNodeIds?.length ?? 0,
     people: sentPeople, peopleCount: sentPairs.size + intimacyCount,
     now: manifest ? injectedStateRows(manifest, data, translations, translationDisplay) : [],
-    searches: (compatibleCache?.lastTurnSearches ?? []).map((search) => ({ query: search.query,
-      scenes: search.memoryIds.flatMap((id) => { const scene = toSentScene(id); return scene ? [{ ...scene, already: injectedIds.has(id) }] : []; }) })),
+    searches: (state.lastTurnSearches?.chatId === currentChatId ? state.lastTurnSearches.calls : []).map((search) => ({ ...search,
+      expandedMemory: search.expandedMemoryId ? toSentScene(search.expandedMemoryId) ?? undefined : undefined,
+      scenes: search.memoryIds.flatMap((id) => { const scene = toSentScene(id); return scene ? [{ ...scene, already: injectedIds.has(id) || search.alreadyProvidedIds.includes(id) }] : []; }) })),
     note: sentNote, packet,
   };
   if (sentView?.open && hasInjection) {
@@ -5533,6 +5544,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       anniversaryEditorEntryId = `pick:${target.dataset.key ?? ""}`;
       render();
       root.querySelector<HTMLElement>('[data-pair-section="diary"]')?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      return;
+    }
+    if (action === "open-sent-now") {
+      nowFilter = "all";
+      await handleSentNowNavigation(target, { navigation, getData: () => data, view: nowView, render });
+      root.querySelector<HTMLElement>('[data-action="select-now-record"][aria-current="true"]')?.scrollIntoView({ block: "nearest" });
+      root.querySelector<HTMLElement>(".readercol")?.scrollIntoView({ block: "start" });
       return;
     }
     if (action === "open-now-record") {

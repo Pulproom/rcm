@@ -1,6 +1,6 @@
 import { supportFailure } from "./support-diagnostics.js";
 import type { ServerClient } from "./api-client.js";
-import { currentTurnMemoryToolNames, executeMemoryTool, MCP_REQUEST_TIMEOUT_MS, memoryToolFunctions, traceMemoryToolExposure, type MemoryToolName } from "./mcp.js";
+import { currentTurnMemoryToolNames, executeMemoryTool, MEMORY_TOOL_CANCELLED_MESSAGE, MCP_REQUEST_TIMEOUT_MS, memoryToolFunctions, traceMemoryToolExposure, type MemoryToolName } from "./mcp.js";
 import { addLog } from "./settings.js";
 import type { RuntimeState } from "./types.js";
 
@@ -321,7 +321,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
         const cancelled = controller.signal.aborted;
         await respond(requestMessage, undefined, {
           code: cancelled ? "CANCELLED" : "TOOL_EXECUTION_FAILED",
-          message: cancelled ? "The memory tool call was cancelled. Do not retry unless still needed." : String(error),
+          message: cancelled ? MEMORY_TOOL_CANCELLED_MESSAGE : String(error),
           retryable: !cancelled,
         });
       } finally {

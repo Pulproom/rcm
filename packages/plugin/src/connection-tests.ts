@@ -6,7 +6,7 @@ import { ServerClient, ServerRequestError } from "./api-client.js";
 import { isServerConfigured } from "./connection.js";
 import type { RuntimeState } from "./types.js";
 import { readMcpSelectorSettings } from "./mcp-selector-settings.js";
-import { responseText } from "./worker.js";
+import { AuxiliaryModelTimeoutError, mainGenerationOpen, responseText, runRisuModel } from "./worker.js";
 
 export function readServerModelConnection(form: FormData) {
   const provider = String(form.get("serverLlmProvider")) as ServerLlmPublicConfig["provider"];
@@ -21,7 +21,7 @@ export async function testSettingsConnection(state: RuntimeState, form: FormData
   rememberDiagnosticSecrets([state.settings.serverToken, ...["serverToken", "serverLlmApiKey", "mcpApiKey", "translationServerApiKey"].map(name => String(form.get(name) ?? "")), voyageKey]);
   const started = performance.now();
   if (target === "risu") {
-    if (state.risuConnectionTestRunning || state.workerBusy || state.internalModelCall || state.activeModelRequest || state.translationActivity?.pending) {
+    if (state.risuConnectionTestRunning || state.workerBusy || state.internalModelCalls?.size || mainGenerationOpen(state) || state.translationActivity?.pending) {
       throw new Error("진행 중인 응답·기억 처리·번역 또는 연결 확인이 끝난 뒤 다시 시도해 주세요.");
     }
     const selected = String(form.get("auxiliaryMode"));
@@ -29,21 +29,20 @@ export async function testSettingsConnection(state: RuntimeState, form: FormData
     const staticModel = String(form.get("staticModel") ?? "").trim();
     if (selected === "static" && !staticModel) throw new Error("고정 모델 ID를 입력해 주세요.");
     state.risuConnectionTestRunning = true;
-    state.internalModelCall = true;
     try {
-      const response = await risuai.runLLMModel({
+      const response = await runRisuModel(state, {
         messages: [{ role: "user", content: "Connection check. Reply with OK only. Do not call any tools." }],
         mode: selected === "main" || selected === "static" ? "model" : selected as "memory" | "otherAx",
         ...(selected === "static" ? { staticModel } : {}), allowPlugins: true,
       });
-      if (typeof response !== "string" && !["result", "content", "text"].some(key => typeof (response as any)?.[key] === "string")) throw new Error("Empty response");
-      if (!responseText(response).trim()) throw new Error("Empty response");
+      if (typeof response !== "string" && response?.type !== "streaming" && !["result", "content", "text"].some(key => typeof response?.[key] === "string")) throw new Error("Empty response");
+      if (!(await responseText(response)).trim()) throw new Error("Empty response");
       return performance.now() - started;
-    } catch {
+    } catch (error) {
       // Host/provider errors can include submitted credentials or response text.
-      throw new Error("Risu 모델 응답을 확인하지 못했어요. 선택한 슬롯의 모델·키·출력 설정을 확인해 주세요.");
+      throw Object.assign(new Error("Risu 모델 응답을 확인하지 못했어요. 선택한 슬롯의 모델·키·출력 설정을 확인해 주세요."),
+        error instanceof AuxiliaryModelTimeoutError ? { code: error.code } : {});
     } finally {
-      state.internalModelCall = false;
       state.risuConnectionTestRunning = false;
     }
   }

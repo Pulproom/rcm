@@ -1,3 +1,4 @@
+import { buildRecordChains } from "./record-history.js";
 import type { Tab } from "../dashboard.js";
 
 export type ViewSnapshot = {
@@ -178,4 +179,23 @@ export async function handleDashboardNavigationAction(
     return true;
   }
   return false;
+}
+
+/** Resolve the exact delivered ID after refresh; a replaced record must never select its successor. */
+export async function handleSentNowNavigation(target: NavigationActionTarget, context: {
+  navigation: DashboardNavigationController;
+  getData(): import("../dashboard.js").DashboardData;
+  view: import("./now.js").NowView;
+  render(): void;
+}): Promise<boolean> {
+  if (target.dataset.action !== "open-sent-now") return false;
+  if (!await context.navigation.navigate({ tab: "world" }, { push: true })) return true;
+  await context.navigation.waitForRefresh();
+  const data = context.getData();
+  const kind = target.dataset.kind === "world_fact" ? "assertion" : target.dataset.kind;
+  const chains = buildRecordChains(data);
+  const chain = [...chains.values()].find(row => row.kind === kind && String(row.current?.id) === target.dataset.id);
+  Object.assign(context.view, { mode: "now", selected: chain?.key ?? `missing:${kind}:${target.dataset.id}`, mobileDetail: true, listOnly: false });
+  context.render();
+  return true;
 }

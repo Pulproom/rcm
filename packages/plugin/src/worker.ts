@@ -55,13 +55,76 @@ export async function reconcileAutomaticServerPause(
   return flight;
 }
 
-export function responseText(response: any): string {
+export class AuxiliaryStreamError extends Error {
+  readonly code = "AUXILIARY_STREAM_UNREADABLE";
+  constructor(cause?: unknown) { super("Auxiliary model stream could not be read", { cause }); this.name = "AuxiliaryStreamError"; }
+}
+
+export const RISU_AUXILIARY_TIMEOUT_MS = 300_000;
+
+export class AuxiliaryModelTimeoutError extends Error {
+  readonly code = "AUXILIARY_MODEL_TIMEOUT";
+  constructor(timeoutMs: number) {
+    super(`AUXILIARY_MODEL_TIMEOUT: Risu model call and stream exceeded ${timeoutMs}ms`);
+    this.name = "AuxiliaryModelTimeoutError";
+  }
+}
+
+async function readModelStream(stream: any, signal?: AbortSignal): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = "";
+  const append = (chunk: unknown) => {
+    if (typeof chunk === "string") text += decoder.decode() + chunk;
+    else if (chunk instanceof Uint8Array || chunk instanceof ArrayBuffer) text += decoder.decode(chunk, { stream: true });
+    // Risu/PocketRisu StreamResponseChunk is an alternative-index map of
+    // cumulative text, not a delta. Keep the primary alternative's latest value.
+    else if (chunk && typeof chunk === "object" && Object.keys(chunk).every(key => /^\d+$/.test(key))) {
+      const values = Object.values(chunk);
+      if (!values.every(value => typeof value === "string")) throw new AuxiliaryStreamError();
+      if (values.length) text = String((chunk as Record<string, string>)["0"] ?? values[0]);
+    } else throw new AuxiliaryStreamError();
+  };
+  let reader: any, iterator: any, abort: (() => void) | undefined;
+  const cancel = (reason: unknown) => {
+    try { void Promise.resolve(reader ? reader.cancel(reason) : iterator?.return?.()).catch(() => undefined); } catch { /* Host cleanup cannot hold the deadline open. */ }
+  };
+  try {
+    if (typeof stream?.getReader === "function") reader = stream.getReader();
+    else if (typeof stream?.[Symbol.asyncIterator] === "function") iterator = stream[Symbol.asyncIterator]();
+    else throw new AuxiliaryStreamError();
+    const interrupted = new Promise<never>((_, reject) => {
+      abort = () => { cancel(signal?.reason); reject(signal?.reason); };
+      if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+    });
+    const consume = async () => {
+      for (;;) {
+        if (signal?.aborted) throw signal.reason;
+        const chunk = await (reader ? reader.read() : iterator.next());
+        if (signal?.aborted) throw signal.reason;
+        if (chunk.done) break;
+        append(chunk.value);
+      }
+      return text + decoder.decode();
+    };
+    return await Promise.race([consume(), interrupted]);
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    cancel(error);
+    throw error instanceof AuxiliaryStreamError ? error : new AuxiliaryStreamError(error);
+  } finally {
+    if (abort) signal?.removeEventListener("abort", abort);
+    try { reader?.releaseLock(); } catch { /* A broken host reader may ignore cancellation. */ }
+  }
+}
+
+export async function responseText(response: any, signal?: AbortSignal): Promise<string> {
   if (typeof response === "string") return response;
   if (response?.type === "fail") throw new Error(`Auxiliary model failed: ${String(response.result ?? "unknown provider error")}`);
+  if (response?.type === "streaming") return readModelStream(response.result, signal);
   if (typeof response?.result === "string") return response.result;
   if (typeof response?.content === "string") return response.content;
   if (typeof response?.text === "string") return response.text;
-  if (Array.isArray(response)) return response.map(responseText).join("");
+  if (Array.isArray(response)) return (await Promise.all(response.map(value => responseText(value, signal)))).join("");
   return String(response ?? "");
 }
 
@@ -111,28 +174,173 @@ export function risuModelSlot(slot: import("./types.js").AuxiliaryMode | "transl
   return { mode: slot === "main" || slot === "static" ? "model" : slot, staticModel: slot === "static" ? model : undefined, allowPlugins: true };
 }
 
+const INTERNAL_CALL_ATTRIBUTE = "rcm:model-call:";
+
+export function isInternalModelRequest(state: RuntimeState, messages: OpenAIChat[]): boolean {
+  return messages.some(message => message.attr?.some(attribute => attribute.startsWith(INTERNAL_CALL_ATTRIBUTE)
+    && state.internalModelCalls?.has(attribute.slice(INTERNAL_CALL_ATTRIBUTE.length))));
+}
+
+export async function runRisuModel(state: RuntimeState, options: Parameters<typeof risuai.runLLMModel>[0]): Promise<any> {
+  if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
+  const id = crypto.randomUUID();
+  const calls = state.internalModelCalls ??= new Set();
+  calls.add(id);
+  const controller = new AbortController();
+  const timeoutMs = modelJobBudgets.get(state)?.llmTimeoutMs ?? RISU_AUXILIARY_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new AuxiliaryModelTimeoutError(timeoutMs);
+      controller.abort(error); reject(error);
+    }, timeoutMs);
+  });
+  try {
+    const messages = options.messages.map((message, index) => index ? message
+      : { ...message, attr: [...(message.attr ?? []), `${INTERNAL_CALL_ATTRIBUTE}${id}`] });
+    const call = async () => {
+      const response = await risuai.runLLMModel({ ...options, messages });
+      // Even a late header must have its stream cancelled, never delivered.
+      if (response?.type === "streaming") return { ...response, type: "success", result: await responseText(response, controller.signal) };
+      if (controller.signal.aborted) throw controller.signal.reason;
+      return response;
+    };
+    return await Promise.race([call(), deadline]);
+  } finally { clearTimeout(timer!); calls.delete(id); }
+}
+
+export const MAIN_GENERATION_TIMEOUT_MS = 3 * 60_000;
+
+export function clearMainGeneration(state: RuntimeState): void {
+  clearTimeout(state.mainGenerationTimer);
+  state.mainGenerationTimer = undefined;
+  state.mainGeneration = undefined;
+  const waiters = state.mainGenerationWaiters;
+  state.mainGenerationWaiters = undefined;
+  for (const resume of waiters ?? []) resume();
+}
+
+export function mainGenerationOpen(state: RuntimeState): boolean {
+  if (state.mainGeneration && state.mainGeneration.expiresAt <= Date.now()) endMainGeneration(state, state.mainGeneration.id);
+  return Boolean(state.mainGeneration);
+}
+
+export function beginMainGeneration(state: RuntimeState, client: ServerClient): string {
+  clearTimeout(state.mainGenerationTimer);
+  if (state.settings.extractionEngine === "risu" && state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = undefined; }
+  const id = crypto.randomUUID();
+  state.mainGeneration = { id, expiresAt: Date.now() + MAIN_GENERATION_TIMEOUT_MS, resume: () => scheduleWorker(state, client),
+    observe: (chatId, chat, hashes) => observeMainGeneration(state, id, chatId, chat, hashes) };
+  armMainGeneration(state, id);
+  return id;
+}
+
+function armMainGeneration(state: RuntimeState, id: string): void {
+  if (state.mainGeneration?.id !== id) return;
+  clearTimeout(state.mainGenerationTimer);
+  state.mainGeneration.expiresAt = Date.now() + MAIN_GENERATION_TIMEOUT_MS;
+  state.mainGenerationTimer = setTimeout(() => {
+    if (state.mainGeneration?.id !== id) return;
+    addLog(state.logs, "warn", "No main generation activity was observed for 3 minutes; auxiliary scheduling resumed");
+    endMainGeneration(state, id);
+  }, MAIN_GENERATION_TIMEOUT_MS);
+}
+
+function observeMainGeneration(state: RuntimeState, id: string, chatId: string | undefined, chat: any, hashes?: Array<{ id: string; displayContentHash?: string }>): void {
+  const generation = state.mainGeneration;
+  if (!generation || generation.id !== id) return;
+  if (!chatId || (generation.chatId && generation.chatId !== chatId)) { endMainGeneration(state, id, "invalidated"); return; }
+  generation.chatId = chatId;
+  const messages = (Array.isArray(chat?.message) ? chat.message : []).map((message: any, ordinal: number) => ({
+    id: String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`),
+    role: message?.role === "user" || message?.role === "system" ? message.role : "assistant",
+    generationId: message?.generationInfo?.generationId ? String(message.generationInfo.generationId) : undefined,
+    visibility: message?.disabled === false || message?.disabled == null ? "" : String(message.disabled),
+    chars: typeof message?.data === "string" ? message.data.length : typeof message?.content === "string" ? message.content.length : 0,
+  }));
+  const latest = messages.at(-1);
+  const sources = generation.sources;
+  const preparing = state.mainRequest?.id === id && state.mainRequest.preparing;
+  // The first snapshot belongs to request start, not to this request's output.
+  // An already-running old stream cannot become a new stream merely by observation.
+  if (!preparing && sources && chat.isStreaming === true && generation.lastStreaming === false) generation.streamingSeen = true;
+  if (!preparing && sources && latest?.role === "assistant" && (generation.streamingSeen || !sources.has(latest.id) || sources.get(latest.id)?.generationId !== latest.generationId)) {
+    generation.outputId = latest.id;
+  }
+  if (sources) {
+    const current = new Map<string, typeof latest>(messages.map((message: any) => [message.id, message]));
+    const sourceHashes = new Map(hashes?.map(message => [message.id, message.displayContentHash]));
+    for (const [sourceId, source] of sources) {
+      const message = current.get(sourceId);
+      if (!message) { endMainGeneration(state, id, "invalidated"); return; }
+      if (sourceId === generation.outputId) continue; // continuation/stream updates are output, not source edits
+      const hash = sourceHashes.get(sourceId);
+      if (source.role !== message.role || source.generationId !== message.generationId || source.visibility !== message.visibility || (hash && source.hash && hash !== source.hash)) {
+        endMainGeneration(state, id, "invalidated"); return;
+      }
+      if (hash) source.hash = hash;
+    }
+    if (messages.some((message: any) => (preparing || message.role !== "assistant") && !sources.has(message.id))) { endMainGeneration(state, id, "invalidated"); return; }
+  } else {
+    generation.sources = new Map(messages.map((message: any) => [message.id, { role: message.role, generationId: message.generationId, visibility: message.visibility,
+      hash: hashes?.find(source => source.id === message.id)?.displayContentHash }]));
+  }
+  if ((generation.streamingSeen && chat.isStreaming === false) || (generation.outputId && chat.isStreaming === false)) {
+    endMainGeneration(state, id); return;
+  }
+  generation.lastStreaming = chat.isStreaming;
+  const signature = JSON.stringify([chat.isStreaming, latest?.id, latest?.generationId, latest?.chars]);
+  if (signature !== generation.activitySignature) { generation.activitySignature = signature; armMainGeneration(state, id); }
+}
+
+export function endMainGeneration(state: RuntimeState, id: string | undefined, reason: "completed" | "invalidated" = "completed"): void {
+  if (!id || state.mainGeneration?.id !== id) return;
+  if (reason === "invalidated" && state.mainRequest?.id === id) {
+    state.mainRequest.cancel();
+    state.modelRequestEpoch = (state.modelRequestEpoch ?? 0) + 1;
+    state.automaticTurnPacket = undefined;
+    if (state.activeModelRequest?.requestId === id) state.activeModelRequest = undefined;
+    if (state.pendingOutputSyncRequestId === id) {
+      state.pendingOutputSyncChatId = undefined; state.pendingOutputSyncRequestId = undefined;
+      clearTimeout(state.postResponseTimer); state.postResponseTimer = undefined;
+    }
+  }
+  const resume = state.mainGeneration.resume;
+  clearMainGeneration(state);
+  resume();
+}
+
+async function waitForMainGeneration(state: RuntimeState): Promise<void> {
+  while (mainGenerationOpen(state)) await new Promise<void>(resolve => (state.mainGenerationWaiters ??= new Set()).add(resolve));
+}
+
 async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose): Promise<string> {
   const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
     if (state.currentJob?.kind === "quiz") return;
     try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
     catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`); }
   };
-  state.internalModelCall = true;
   const timing = state.currentJob?.kind !== "quiz" && state.currentJob
     ? startTiming(state, { chatId: state.currentJob.chatId, kind: "auxiliary_llm", label: `보조 모델 · ${purpose}` })
     : undefined;
   try {
+    while (mainGenerationOpen(state)) await waitForMainGeneration(state);
+    if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
     const preparedMessages = messages.map(message => ({ ...message, content: typeof message.content === "string" ? prepareAuxiliaryText(message.content) : message.content }));
     const budget = modelJobBudgets.get(state) ?? { maxInputTokens: 80000, maxOutputTokens: 24000, llmTimeoutMs: 300000 };
     const measurement = measureAuxiliaryPrompt(preparedMessages, estimateTokens, budget);
     if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${measurement.estimatedInputTokens}/${budget.maxInputTokens} input tokens; source retained for replanning`);
     if (state.currentJob?.kind !== "quiz") await modelCallRecorders.get(state)?.(purpose, "started");
-    const response = await risuai.runLLMModel({
+    // Main beforeRequest may arrive during progress reporting. Check again at
+    // the dispatch boundary; the main path never waits for this worker.
+    while (mainGenerationOpen(state)) await waitForMainGeneration(state);
+    if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
+    const response = await runRisuModel(state, {
       messages: preparedMessages,
       ...risuModelSlot(state.settings.auxiliaryMode, state.settings.staticModel),
     });
     if (state.currentJob?.kind !== "quiz" && response?.type === "fail" && typeof response.result === "string") await modelDraftRecorders.get(state)?.(response.result);
-    const output = responseText(response);
+    const output = await responseText(response);
     if (state.currentJob?.kind !== "quiz") await modelDraftRecorders.get(state)?.(output);
     const finishReason = response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.candidates?.[0]?.finishReason;
     if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase())) {
@@ -150,8 +358,6 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     await reportOutcome("failed", error);
     if (timing) finishTiming(state, timing, "failed");
     throw error;
-  } finally {
-    state.internalModelCall = false;
   }
 }
 
@@ -481,16 +687,17 @@ async function consolidateStorySpine(state: RuntimeState, job: LeasedJob): Promi
 
 export function scheduleWorker(state: RuntimeState, client: ServerClient): void {
   if (state.idleTimer) clearTimeout(state.idleTimer);
-  if (state.settings.workerPaused || !isServerConfigured(state.settings)) return;
+  if (state.unloaded || state.settings.workerPaused || !isServerConfigured(state.settings)) return;
   if (state.settings.extractionEngine === "server") {
     state.idleTimer = window.setTimeout(() => void heartbeatServerWorker(state, client), 500);
     return;
   }
+  if (mainGenerationOpen(state)) return;
   state.idleTimer = window.setTimeout(() => void drainWorker(state, client), 15_000);
 }
 
 export async function heartbeatServerWorker(state: RuntimeState, client: ServerClient): Promise<void> {
-  if (state.settings.workerPaused || state.settings.extractionEngine !== "server" || !isServerConfigured(state.settings)) return;
+  if (state.unloaded || state.settings.workerPaused || state.settings.extractionEngine !== "server" || !isServerConfigured(state.settings)) return;
   try {
     state.serverWorker = await client.heartbeat(state.workerId, state.current && isChatMemoryEnabled(state.settings, state.current.chatId) ? state.current.chatId : undefined);
     state.serverConnectionIssue = undefined;
@@ -508,23 +715,29 @@ export async function heartbeatServerWorker(state: RuntimeState, client: ServerC
 }
 
 export async function drainWorker(state: RuntimeState, client: ServerClient): Promise<void> {
-  if (!isServerConfigured(state.settings)) return;
+  if (state.unloaded || !isServerConfigured(state.settings)) return;
   if (state.settings.extractionEngine === "server") {
     await heartbeatServerWorker(state, client);
     return;
   }
-  if (state.settings.workerPaused || state.workerBusy || state.risuConnectionTestRunning) return;
+  if (state.settings.workerPaused || state.workerBusy || state.risuConnectionTestRunning || mainGenerationOpen(state)) return;
   state.workerBusy = true;
   try {
     for (;;) {
-      if (state.settings.workerPaused) break;
+      if (state.unloaded || state.settings.workerPaused || mainGenerationOpen(state)) break;
       const job = await client.lease(state.workerId);
+      if (state.unloaded) break;
       state.serverConnectionIssue = undefined;
       state.activityStatusError = undefined;
       if (!job) break;
       const leaseHeartbeat = globalThis.setInterval(() => {
         void client.renewLease(job.id, state.workerId).catch((error) => addLog(state.logs, "warn", `작업 lease 갱신 실패: [오류 원문 제외]`));
       }, 20_000);
+      state.leaseHeartbeatTimer = leaseHeartbeat;
+      // A send can race the lease HTTP response. Retain/renew the lease while
+      // waiting, without starting its job or charging another model call.
+      while (mainGenerationOpen(state)) await waitForMainGeneration(state);
+      if (state.unloaded) { clearInterval(leaseHeartbeat); state.leaseHeartbeatTimer = undefined; break; }
       const firstStage = job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction";
       const llmCallStats: OperationLlmCallStats = { total: job.llmCallStats?.total ?? 0, repairs: job.llmCallStats?.repairs ?? 0, byPurpose: { ...(job.llmCallStats?.byPurpose ?? {}) } };
       let repairBudgetUsed = job.repairBudgetUsed ?? (llmCallStats.repairs > (llmCallStats.byPurpose.state_response_repair ?? 0));
@@ -653,6 +866,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         continue;
       } finally {
         clearInterval(leaseHeartbeat);
+        state.leaseHeartbeatTimer = undefined;
         modelDraftRecorders.delete(state);
         validatedPartRecorders.delete(state);
         modelJobBudgets.delete(state);

@@ -68,7 +68,6 @@ export interface CachedChatState {
   /** Clarity and attached detail counts of the scenes in that manifest. */
   lastInjectionScenes?: InjectedScene[];
   /** Memory-tool searches the model ran since that injection. */
-  lastTurnSearches?: TurnSearch[];
   lastInjectedTokens?: number;
   lastInjectionAt?: number;
 }
@@ -195,13 +194,27 @@ export interface RuntimeState {
     at: number;
   };
   modelRequestEpoch?: number;
-  activeModelRequest?: { chatId: string; turnKey?: string; latestMessageId?: string; startedAt?: number; packet?: string; plannedTools?: string[] };
+  unloaded?: boolean;
+  mainRequest?: { id: string; signal: AbortSignal; preparing: boolean; cancel: () => void };
+  pendingPrepare?: { requestId: string; chatId: string; startedAt: number; visible: boolean; choose: (choice: "omit" | "block") => void };
+  activeModelRequest?: { chatId: string; requestId?: string; turnKey?: string; latestMessageId?: string; startedAt?: number; packet?: string; plannedTools?: string[] };
+  mainGeneration?: {
+    id: string; chatId?: string; expiresAt: number; resume: () => void;
+    observe: (chatId: string | undefined, chat: any, hashes?: Array<{ id: string; displayContentHash?: string }>) => void;
+    sources?: Map<string, { role: string; generationId?: string; visibility: string; hash?: string }>;
+    streamingSeen?: boolean; outputId?: string; activitySignature?: string;
+    lastStreaming?: boolean;
+  };
+  mainGenerationTimer?: ReturnType<typeof setTimeout>;
+  mainGenerationWaiters?: Set<() => void>;
   retryCounts: Record<string, number>;
   workerId: string;
   idleTimer?: number;
   postResponseTimer?: number;
   pendingOutputSyncChatId?: string;
+  pendingOutputSyncRequestId?: string;
   serverHeartbeatTimer?: number;
+  leaseHeartbeatTimer?: ReturnType<typeof setInterval>;
   statusWidgetTimer?: number;
   activityTimer?: number;
   updateNextCheckAt?: number;
@@ -261,6 +274,8 @@ export interface RuntimeState {
   syncMemoryToolRegistration?: (enabled: boolean) => Promise<void>;
   restoreMemoryToolDiscoveryRegistration?: () => Promise<void>;
   setStatusWidgetHidden?: (hidden: boolean) => Promise<void>;
+  /** Latest turn only: MCP questions and exact delivery responses, never serialized. */
+  lastTurnSearches?: { chatId: string; turnKey: string; calls: TurnSearch[] };
   mcpTurnKey: string;
   mcpTraceCalls?: number;
   mcpReturnedMemoryIds?: string[];
@@ -274,7 +289,7 @@ export interface RuntimeState {
   memoryToolOpportunity?: { chatId: string; turnKey: string; referenceTurnKey: string; value: MemoryToolOpportunity };
   memoryToolExposureKeys?: Record<string, boolean>;
   lastPromptSourceMessageIds?: string[];
-  internalModelCall: boolean;
+  internalModelCalls?: Set<string>;
   risuConnectionTestRunning?: boolean;
   timingEvents?: import("./timing.js").TimingEvent[];
   openDashboard?: () => void;

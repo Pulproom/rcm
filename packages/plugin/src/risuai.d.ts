@@ -4,6 +4,8 @@ interface OpenAIChat {
   name?: string;
   /** PocketRisu preserves the source chat message ID here through translation. */
   memo?: string;
+  /** Host-preserved request metadata; never part of the model prompt text. */
+  attr?: string[];
 }
 
 interface LocalStorageApi {

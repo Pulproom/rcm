@@ -64,6 +64,7 @@ export function completedTimingSeconds(elapsedMs = 0): string {
 }
 
 export function shouldShowStatusWidget(state: RuntimeState, dashboardHidden = false): boolean {
+  if (state.pendingPrepare?.visible) return true;
   return state.settings.statusWidgetVisible !== false && !dashboardHidden && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId);
 }
 
@@ -218,6 +219,7 @@ function activeStartedAt(state: RuntimeState): number | undefined {
 }
 
 export function widgetState(state: RuntimeState): FloatingWidgetState {
+  if (state.pendingPrepare?.visible) return { kind: "prepare-choice", label: "기억 준비 중", detail: "기다리면 기억을 담아 보내요. 3분이 지나도 끝나지 않으면 보내지 않아요.", startedAt: state.pendingPrepare.startedAt };
   const summary = state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 };
   if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId)) return { kind: "disabled", label: "꺼짐", detail: "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않습니다." };
   const connectionIssue = state.serverConnectionIssue ?? describeServerConnectionIssue(state.settings);
@@ -496,7 +498,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const tone: keyof typeof STATUS_ICON_PATHS = current.kind === "disabled" ? "off"
         : current.kind === "model-setup" ? "wait"
         : current.kind === "error" || ["paused", "review", "queued", "holding", "checking", "setup", "connection"].includes(current.kind) ? "bad"
-          : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz"].includes(current.kind) ? "wait" : "ok";
+          : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz", "prepare-choice"].includes(current.kind) ? "wait" : "ok";
       const skin = chipSkin(state.settings);
       const color = current.kind === "quiz" ? skin.ink3 : tone === "bad" ? skin.cut : tone === "wait" ? skin.wait : tone === "off" ? skin.ink3 : skin.ok;
       return { current, color, tone };
@@ -517,7 +519,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const startedAt = current.startedAt ?? 0;
       const observedAt = Date.now();
       const updates: Promise<void>[] = [];
-      if (elapsedLabelElement) updates.push(elapsedLabelElement.setTextContent(startedAt ? ` · ${statusElapsedLabel(startedAt, observedAt)}` : ""));
+      if (elapsedLabelElement) updates.push(elapsedLabelElement.setTextContent(startedAt ? ` · ${statusElapsedLabel(startedAt, observedAt)}` : ""));
       const rows = activeStatusTimingRows(state);
       for (let index = 0; index < Math.min(rows.length, elapsedRowElements.length); index += 1) {
         updates.push(elapsedRowElements[index]!.setTextContent(statusElapsedLabel(rows[index]!.startedAt, observedAt)));
@@ -631,12 +633,15 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       await syncVisibility();
       await keepInViewport();
       const { current, color, tone } = currentVisual();
+      const pendingPrepare = state.pendingPrepare;
+      if (current.kind === "prepare-choice") expanded = true;
       const skin = await applySkin();
       renderedStatusKey = `${statusVisualKey(current)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}`;
       const compactButtonStyle = `min-width:0;min-height:32px;border:0;border-radius:${skin.buttonRadius};background:${skin.button};color:${skin.ink};cursor:pointer;text-align:${skin.buttonAlign};font-family:inherit;font-size:12px;font-weight:600;line-height:1.5;white-space:normal;word-break:keep-all;overflow-wrap:anywhere;padding:6px 10px`;
       const activeRows = activeStatusTimingRows(state);
       const showDetail = !activeRows.some(event => event.label === current.detail);
       let body = showDetail ? `<div data-rcm-status-detail="true" style="color:${skin.ink2}">${escapeHtml(current.detail)}</div>` : "";
+      if (current.kind === "prepare-choice" && pendingPrepare) body += `<div style="display:flex;gap:6px;margin-top:8px"><button data-rcm-prepare-omit="${escapeHtml(pendingPrepare.requestId)}" style="${compactButtonStyle};flex:1 1 0">기억 없이 보내기</button><button data-rcm-prepare-block="${escapeHtml(pendingPrepare.requestId)}" style="${compactButtonStyle};flex:1 1 0">보내지 않기</button></div>`;
       if (current.kind === "model-setup") body += `<button data-rcm-model-settings="true" style="${compactButtonStyle};width:100%;margin-top:6px">모델 설정 열기</button>`;
       if (quizConnectionReady() && state.serverWorker?.embeddingConfigured === false) body += `<p style="margin:8px 0 0;color:${skin.ink3};overflow-wrap:anywhere">${EMBEDDING_SETUP_DETAIL}</p><button data-rcm-embedding-settings="true" style="${compactButtonStyle};width:100%;margin-top:6px">검색 임베딩 설정 열기</button>`;
       const observedAt = Date.now();
@@ -650,12 +655,13 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const quizEntry = quizStart || (quizOn() && quiz.loadFailed ? quizReloadRow(skin) : "");
       const quizReady = quizOn() && quiz.next?.available && quiz.next.question;
       const dashboardTone = quizReady ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
-      body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
-      if (quizOn() && quiz.view) body = quizViewHtml(quiz.view, skin);
+      // While the user decides how to send, the decision is the only action; the dashboard can wait.
+      if (current.kind !== "prepare-choice") body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
+      if (current.kind !== "prepare-choice" && quizOn() && quiz.view) body = quizViewHtml(quiz.view, skin);
       if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
       await widget.setAttribute("x-rcm-expanded", String(expanded));
       await widget.setAttribute(STATUS_TIMED_ATTRIBUTE, current.startedAt ? "true" : "false");
-      await widget.setInnerHTML(`<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);overflow:auto;box-sizing:border-box">${body}</div>` : ""}`);
+      await widget.setInnerHTML(`<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);overflow:auto;box-sizing:border-box">${body}</div>` : ""}`);
       await cacheElapsedClockElements(expanded ? activeStatusTimingRows(state).length : 0);
       await syncElapsedClocks(current);
       await keepInViewport();
@@ -674,7 +680,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     type WidgetAction = { key: string; selector: string; run: () => void | Promise<void> };
     const closeQuiz = async (): Promise<void> => { quiz.close(); await quiz.refresh(); await render(); };
     const widgetActions = (): WidgetAction[] => {
+      const pending = state.pendingPrepare;
       const actions: WidgetAction[] = [
+        ...(pending?.visible ? (["omit", "block"] as const).map(choice => ({ key: `prepare-${choice}`, selector: `[data-rcm-prepare-${choice}="${pending.requestId}"]`, run: () => pending.choose(choice) })) : []),
         { key: "toggle", selector: '[data-rcm-toggle="true"]', run: toggleExpanded },
         { key: "open", selector: '[data-rcm-open="true"]', run: () => state.openDashboard?.() },
         ...["model", "embedding"].map((section): WidgetAction => ({ key: `${section}-settings`, selector: `[data-rcm-${section}-settings="true"]`, run: () => { state.dashboardFocusSettings = section as "model" | "embedding"; state.openDashboard?.(); } })),
@@ -731,7 +739,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const next = currentVisual().current;
       const nextKey = `${statusVisualKey(next)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}`;
       // An open quiz is not rebuilt by status polls; only a chat or skin change redraws it.
-      const quizHolds = quizOn() && Boolean(quiz.view) && nextKey.split("")[2] === renderedStatusKey.split("")[2];
+      const quizHolds = next.kind !== "prepare-choice" && quizOn() && Boolean(quiz.view) && nextKey.split("")[2] === renderedStatusKey.split("")[2];
       if (widgetChatId !== state.current?.chatId || (nextKey !== renderedStatusKey && !quizHolds)) {
         renderedStatusKey = nextKey;
         void render().then(scheduleElapsedTick, reportElapsedClockError);

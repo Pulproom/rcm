@@ -4,7 +4,7 @@ import { displayText } from "../translation.js";
 import { buildAnniversaries, daysSinceFirstMet } from "./diary.js";
 import { recentScenes, storyScenes } from "./scenes.js";
 import { buildNowPage, overduePromiseEntries } from "./now.js";
-import { buildPairs, normalizeName, type PairSummary } from "./pairs.js";
+import { buildPairs, pairKey, normalizeName, type PairSummary } from "./pairs.js";
 import { formatStoryTime, compareParsedStoryTimes, parseStoryTime } from "@rcm/shared";
 
 export type InjectionManifest = NonNullable<RuntimeState["cache"][string]["lastInjectionManifest"]>;
@@ -16,29 +16,46 @@ const byId = <T extends { id?: unknown }>(items: T[] | undefined, id: unknown): 
   (items ?? []).find((item) => String(item?.id ?? "") === String(id ?? ""));
 const safeText = (value: unknown): string => displayText(text(value), undefined, "en");
 
-export type InjectedStateRow = { tag: string; whoHtml: string; textHtml: string };
+export type InjectedStateRow = import("./sent.js").SentState;
 
 /** Every 현재 record that went this turn, in the 현재 tab's order: states, beliefs, promises. */
 export function injectedStateRows(
   manifest: InjectionManifest,
-  data: Pick<DashboardData, "assertions" | "promises" | "beliefs">,
+  data: Pick<DashboardData, "assertions" | "promises" | "beliefs"> & Partial<Pick<DashboardData, "relationships" | "socialKnowledge">>,
   translations: ReadonlyMap<string, string>,
   display: TranslationDisplay = "ko",
 ): InjectedStateRow[] {
-  return [
-    ...manifest.assertionIds.flatMap((id) => {
-      const item: any = byId(data.assertions as any[], id);
-      return item ? [{ tag: "상태", whoHtml: safeText(item.subject), textHtml: displayText(text(item.value), translations.get(`assertion:${item.id}`), display) }] : [];
-    }),
-    ...(manifest.beliefIds ?? []).flatMap((id) => {
-      const item: any = byId(data.beliefs as any[], id);
-      return item ? [{ tag: "인식", whoHtml: `${safeText(item.holder)} → ${safeText(item.subject)}`, textHtml: displayText(text(item.value), translations.get(`belief:${item.id}`), display) }] : [];
-    }),
-    ...manifest.promiseIds.flatMap((id) => {
-      const item: any = byId(data.promises as any[], id);
-      return item ? [{ tag: "약속", whoHtml: `${safeText(item.promisor)} → ${safeText(item.promisee)}`, textHtml: displayText(text(item.content), translations.get(`promise:${item.id ?? item.promise_key}`), display) }] : [];
-    }),
-  ];
+  const rows: InjectedStateRow[] = [];
+  const append = (kind: InjectedStateRow["kind"], id: string) => {
+    if (rows.some(row => row.kind === kind && row.id === id)) return;
+    const item: any = byId(kind === "belief" ? data.beliefs : kind === "promise" ? data.promises : data.assertions, id);
+    if (kind === "world_fact" || kind === "basic_relation") {
+      const relation = item?.socialRelation;
+      rows.push({ kind: relation ? "basic_relation" : kind, id, ...(relation ? { key: pairKey(item.subject, relation.target) } : {}),
+        tag: relation ? "관계" : "상태", whoHtml: safeText(item?.subject),
+        textHtml: item ? displayText(text(item.value), translations.get(`assertion:${id}`), display) : "기록이 바뀌었거나 더 이상 없어요." });
+    } else if (kind === "belief" || kind === "promise") {
+      rows.push({ kind, id, tag: kind === "belief" ? "인식" : "약속",
+        whoHtml: item ? `${safeText(item.holder ?? item.promisor)} → ${safeText(item.subject ?? item.promisee)}` : "",
+        textHtml: item ? displayText(text(item.value ?? item.content), translations.get(`${kind}:${id}`), display) : "기록이 바뀌었거나 더 이상 없어요." });
+    } else if (kind === "relationship") {
+      const pair = (data.relationships ?? []).find((row: any) => `${row.from ?? row.from_entity}:${row.to ?? row.to_entity}` === id);
+      const from = pair?.from ?? pair?.from_entity, to = pair?.to ?? pair?.to_entity;
+      rows.push({ kind, id, key: pair ? pairKey(from, to) : undefined, tag: "관계",
+        whoHtml: pair ? `${safeText(from)} → ${safeText(to)}` : "", textHtml: pair ? safeText(pair.summary) : "기록이 바뀌었거나 더 이상 없어요." });
+    } else {
+      const person: any = (data.socialKnowledge ?? []).find((row: any) => `${row.holder}:${row.subject}` === id);
+      rows.push({ kind, id, key: person?.subject, tag: "인지", whoHtml: person ? `${safeText(person.holder)} → ${safeText(person.subject)}` : "",
+        textHtml: person ? safeText((person.cognition ?? []).map((detail: any) => detail.text).join(" ")) : "기록이 바뀌었거나 더 이상 없어요." });
+    }
+  };
+  // Manifest IDs are product-owned typed addresses, never prose to interpret.
+  const typed = (manifest.stateEvidenceIds ?? []).map(value => { const colon = value.indexOf(":"); return { kind: value.slice(0, colon), id: value.slice(colon + 1) }; });
+  for (const id of manifest.assertionIds) append(typed.some(row => row.kind === "basic_relation" && row.id === id) ? "basic_relation" : "world_fact", id);
+  for (const id of manifest.beliefIds ?? []) append("belief", id);
+  for (const id of manifest.promiseIds) append("promise", id);
+  for (const row of typed) if (["world_fact", "basic_relation", "belief", "promise", "relationship", "recognition"].includes(row.kind)) append(row.kind as InjectedStateRow["kind"], row.id);
+  return rows;
 }
 
 /** The poster scene and the three before it, newest first. */
