@@ -1,12 +1,22 @@
+import { RCM_API_REVISION } from "@rcm/shared";
 import type { PluginSettings } from "./types.js";
 
-export type ServerConnectionIssueKind = "unconfigured" | "unauthorized" | "unavailable";
+export type ServerConnectionIssueKind = "unconfigured" | "unauthorized" | "unavailable" | "incompatible";
 
 export interface ServerConnectionIssue {
   kind: ServerConnectionIssueKind;
   title: string;
   detail: string;
   technical?: string;
+  requiredUpdate?: "plugin" | "server";
+}
+
+/** Health is reachable; the memory protocol still requires an exact revision. */
+export class ServerCompatibilityError extends Error {
+  readonly code = "API_REVISION_MISMATCH";
+  constructor(readonly receivedRevision: number, readonly expectedRevision = RCM_API_REVISION) {
+    super(`RCM API revision mismatch: expected ${expectedRevision}, received ${receivedRevision}`);
+  }
 }
 
 export const SERVER_RESPONSE_DELAYED = "서버 응답이 잠시 늦어지고 있습니다. 다시 확인하고 있습니다.";
@@ -17,6 +27,10 @@ type MutableConnectionState = {
   serverConnectionFailureCount?: number;
   serverConnectionLastFailureAt?: number;
 };
+
+export function isServerApiIncompatible(state: MutableConnectionState): boolean {
+  return state.serverConnectionIssue?.kind === "incompatible";
+}
 
 export function isServerConnectionReady(state: MutableConnectionState & { activityReady?: boolean; settings: Pick<PluginSettings, "serverUrl" | "serverToken"> }): boolean {
   return state.activityReady === true && !state.serverConnectionIssue && !state.activityStatusError && isServerConfigured(state.settings);
@@ -30,6 +44,7 @@ export function isServerConfigured(settings: Pick<PluginSettings, "serverUrl" | 
 export function describeServerConnectionIssue(
   settings: Pick<PluginSettings, "serverUrl" | "serverToken">,
   error?: unknown,
+  previous?: ServerConnectionIssue,
 ): ServerConnectionIssue | undefined {
   if (!isServerConfigured(settings)) return {
     kind: "unconfigured",
@@ -38,6 +53,23 @@ export function describeServerConnectionIssue(
   };
   if (error === undefined) return undefined;
   const technical = error instanceof Error ? error.message : String(error);
+  if (error instanceof ServerCompatibilityError || (error as { code?: string } | null)?.code === "API_REVISION_MISMATCH") {
+    const received = error instanceof ServerCompatibilityError ? error.receivedRevision
+      : Number((error as { expectedApiRevision?: number }).expectedApiRevision);
+    const expected = error instanceof ServerCompatibilityError ? error.expectedRevision : RCM_API_REVISION;
+    const knownDirection = Number.isInteger(received) && received > 0 && received !== expected;
+    if (!knownDirection && previous?.kind === "incompatible" && previous.requiredUpdate) return previous;
+    const requiredUpdate = knownDirection ? received < expected ? "server" : "plugin" : undefined;
+    const serverOlder = requiredUpdate === "server";
+    return {
+      kind: "incompatible",
+      requiredUpdate,
+      title: !requiredUpdate ? "서버·플러그인 업데이트 필요" : serverOlder ? "서버 업데이트 필요" : "플러그인 업데이트 필요",
+      detail: !requiredUpdate ? "서버와 플러그인 버전을 확인한 뒤 함께 업데이트해 주세요." : serverOlder ? "서버에는 연결되지만 서버 버전이 맞지 않습니다. 서버를 업데이트하면 다시 연결됩니다."
+        : "서버에는 연결되지만 플러그인 버전이 맞지 않습니다. Risu 플러그인 메뉴의 + 버튼으로 플러그인을 업데이트하면 다시 연결됩니다.",
+      technical,
+    };
+  }
   if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden/i.test(technical)) return {
     kind: "unauthorized",
     title: "서버 연결 정보를 확인해 주세요",
@@ -66,12 +98,12 @@ export function noteServerConnectionFailure(
   confirmationThreshold = 2,
   now = Date.now(),
 ): ServerConnectionIssue | undefined {
-  const issue = describeServerConnectionIssue(settings, error);
+  const issue = describeServerConnectionIssue(settings, error, state.serverConnectionIssue);
   if (!issue) {
     noteServerConnectionSuccess(state);
     return undefined;
   }
-  if (issue.kind === "unconfigured" || issue.kind === "unauthorized") {
+  if (issue.kind === "unconfigured" || issue.kind === "unauthorized" || issue.kind === "incompatible") {
     state.serverConnectionFailureCount = confirmationThreshold;
     state.serverConnectionLastFailureAt = now;
     state.serverConnectionIssue = issue;

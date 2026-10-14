@@ -262,7 +262,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const token = context.req.header("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
     if (!equalToken(token, config.token)) return context.json({ error: "Unauthorized" }, 401);
     const revision = context.req.header("X-RCM-API-Revision");
-    if ((revision !== undefined || context.req.header("X-RCM-Plugin-Version")) && revision !== String(RCM_API_REVISION)) {
+    // Health and authenticated read-only update discovery remain usable across API changes.
+    const updateDiscovery = context.req.method === "GET" && context.req.path === "/v1/update/status";
+    if (!updateDiscovery && (revision !== undefined || context.req.header("X-RCM-Plugin-Version")) && revision !== String(RCM_API_REVISION)) {
       return context.json({ error: "RCM API revision mismatch; update the plugin and server together", code: "API_REVISION_MISMATCH", expectedApiRevision: RCM_API_REVISION }, 409);
     }
     await next();
@@ -333,9 +335,10 @@ export function createApp(dependencies: Dependencies): Hono {
     const parsed = TurnPrepareRequestSchema.parse(JSON.parse(requestBody));
     finishSyncPhase("requestParseMs");
     const lineage = ensureChatLineage(db, parsed, true);
+    const lineagePending = ["ambiguous", "choice_required"].includes(lineage.status);
     finishSyncPhase("lineageMs");
     const effectiveBackfillApproved = parsed.backfillApproved === true && parsed.serverInstanceId === serverInstanceId;
-    const sync = syncSnapshot(db, { ...parsed, backfillApproved: effectiveBackfillApproved });
+    const sync = syncSnapshot(db, { ...parsed, forceBackfill: parsed.forceBackfill && !lineagePending, backfillApproved: effectiveBackfillApproved && !lineagePending });
     db.prepare(`INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
       WHERE server_meta.value<>excluded.value`).run(chatPacketBudgetKey(parsed.chatId), String(parsed.tokenBudget));
     if (parsed.memoryGeneration) memoryReferences.begin(parsed.chatId, parsed.memoryGeneration);
@@ -350,7 +353,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const continuingColdStart = initialCalibration.status === "awaiting_setup" && initialCalibration.origin === "cold_start";
     const mayStartInitialCalibration = parsed.forceBackfill || continuingColdStart || isTrueNewRootOpening;
     const operationRunId = parsed.forceBackfill || continuingColdStart ? randomUUID() : undefined;
-    if (lineage.status !== "inherited" && mayStartInitialCalibration && (parsed.resolvedSetup || parsed.forceBackfill) && ["unseeded", "awaiting_setup"].includes(initialCalibration.status)) {
+    if (!lineagePending && lineage.status !== "inherited" && mayStartInitialCalibration && (parsed.resolvedSetup || parsed.forceBackfill) && ["unseeded", "awaiting_setup"].includes(initialCalibration.status)) {
       initialCalibration = beginInitialCalibration(db, parsed.chatId, parsed.forceBackfill || continuingColdStart ? "cold_start" : "new_root", parsed.resolvedSetup, {
         confirmationRequired: parsed.forceBackfill || continuingColdStart,
         forceBackfill: parsed.forceBackfill || continuingColdStart,
@@ -363,18 +366,18 @@ export function createApp(dependencies: Dependencies): Hono {
       }
     }
     finishSyncPhase("calibrationMs");
-    syncEpisodeMembership(db, parsed.chatId);
+    if (!lineagePending) syncEpisodeMembership(db, parsed.chatId);
     finishSyncPhase("episodeMembershipMs");
     // Keep the pre-enqueue freshness signal without computing dashboard token statistics.
     const bufferedSource = hasBufferedSource(db, parsed.chatId, languageState.ingestion_state);
     finishSyncPhase("ingestionMs");
-    const deferExtraction = parsed.deferExtraction || ["ambiguous", "choice_required"].includes(lineage.status) || (!parsed.forceBackfill && languageState.ingestion_state !== "managed");
+    const deferExtraction = parsed.deferExtraction || lineagePending || (!parsed.forceBackfill && languageState.ingestion_state !== "managed");
     const extractionSourceMode = lineage.status === "inherited" ? "ledger" : "current";
     const queued = !deferExtraction
       ? enqueueExtractionJobs(db, parsed.chatId, parsed.profile, parsed.forceBackfill, parsed.includeUserMessages !== false, parsed.extractionGroupTurns ?? 6, extractionSourceMode, effectiveExtractionReview)
       : 0;
     finishSyncPhase("extractionEnqueueMs");
-    const projectionQueued = flushRelationshipProjectionQueue(db, parsed.chatId);
+    const projectionQueued = lineagePending ? 0 : flushRelationshipProjectionQueue(db, parsed.chatId);
     finishSyncPhase("projectionQueueMs");
     if (queued > 0 || projectionQueued > 0) serverWorker.wake();
     if (queued > 0) setTimeout(() => void embeddings.indexPending(parsed.chatId), 1_500);

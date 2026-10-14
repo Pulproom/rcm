@@ -74,7 +74,7 @@ export type MemoryDetailApiItem = import("@rcm/shared").MemoryContextItem["detai
 };
 
 export class ServerRequestError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) { super(message); this.name = "ServerRequestError"; }
+  constructor(message: string, readonly status: number, readonly code?: string, readonly expectedApiRevision?: number) { super(message); this.name = "ServerRequestError"; }
 }
 
 export class ServerConnectionError extends Error {
@@ -217,14 +217,16 @@ export class ServerClient {
         const detail = (await response.text()).trim();
         let readable = detail.slice(0, 240);
         let code: string | undefined;
+        let expectedApiRevision: number | undefined;
         try {
-          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string };
+          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string; expectedApiRevision?: number };
           code = parsed.code;
+          if (Number.isInteger(parsed.expectedApiRevision) && Number(parsed.expectedApiRevision) > 0) expectedApiRevision = parsed.expectedApiRevision;
           const summary = typeof parsed.summary === "string" ? parsed.summary.trim().slice(0, 240) : "";
           const reason = serverErrorDetail(parsed.error);
           readable = [summary, reason && !summary.includes(reason) ? reason : "", parsed.code ? `(${parsed.code})` : "", parsed.existingId ? `existingId=${parsed.existingId}` : ""].filter(Boolean).join(" ");
         } catch { /* retain a bounded non-JSON error response */ }
-        throw new ServerRequestError(`Server request failed: ${method} ${path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code);
+        throw new ServerRequestError(`Server request failed: ${method} ${path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code, expectedApiRevision);
       }
       return response;
     } catch (error) {

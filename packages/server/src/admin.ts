@@ -21,6 +21,8 @@ export interface ChatAdminSummary {
   updatedAt: number;
   messages: number;
   committedMessages: number;
+  activeMessages: number;
+  hasImportedMemory: boolean;
   clientPrunedMessages: number;
   disabledMessages: number;
   memories: number;
@@ -61,6 +63,8 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
     SELECT c.id,c.chat_title,c.character_id,c.profile,c.memory_language,c.pending_memory_language,c.static_json,c.ingestion_state,c.updated_at,
       l.status AS lineage_status,l.kind AS lineage_kind,l.parent_chat_id,l.parent_title,l.fork_ordinal,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id) AS messages,
+      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.source_kind<>'archive' AND m.host_visibility='active' AND m.lifecycle IN ('committed','pending')) AS active_messages,
+      EXISTS(SELECT 1 FROM messages m WHERE m.chat_id=c.id AND m.source_kind='archive') AS has_imported_memory,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle='committed') AS committed_messages,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle='client_pruned') AS client_pruned_messages,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.host_visibility IN ('disabled','comment')) AS disabled_messages,
@@ -83,7 +87,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
     FROM chats c LEFT JOIN chat_lineage l ON l.child_chat_id=c.id ORDER BY c.updated_at DESC
   `).all() as Array<{
     id: string; chat_title: string | null; character_id: string; profile: string; memory_language: "en" | "ko" | "ja" | "zh"; pending_memory_language: "en" | "ko" | "ja" | "zh" | null; static_json: string | null; ingestion_state: "historical_pending" | "managed" | "cleared"; updated_at: number;
-    messages: number; committed_messages: number; client_pruned_messages: number; disabled_messages: number; memories: number; relationships: number; assertions: number; beliefs: number; promises: number; pending_reviews: number; pending_conflicts: number; embeddings: number; jobs: number; retrieval_diagnostics_enabled: number; reprocessable_messages: number; buffered_messages: number; waiting_for_assistant: number; recoverable_messages: number; approximate_bytes: number;
+    messages: number; active_messages: number; has_imported_memory: number; committed_messages: number; client_pruned_messages: number; disabled_messages: number; memories: number; relationships: number; assertions: number; beliefs: number; promises: number; pending_reviews: number; pending_conflicts: number; embeddings: number; jobs: number; retrieval_diagnostics_enabled: number; reprocessable_messages: number; buffered_messages: number; waiting_for_assistant: number; recoverable_messages: number; approximate_bytes: number;
     lineage_status: string | null; lineage_kind: string | null; parent_chat_id: string | null; parent_title: string | null; fork_ordinal: number | null;
   }>;
   return rows.map((row) => {
@@ -103,6 +107,8 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       ...(includeRetrievalDiagnostics ? { retrievalDiagnosticsEnabled: row.retrieval_diagnostics_enabled > 0 } : {}),
       updatedAt: row.updated_at,
       messages: row.messages,
+      activeMessages: row.active_messages,
+      hasImportedMemory: Boolean(row.has_imported_memory),
       committedMessages: row.committed_messages,
       clientPrunedMessages: row.client_pruned_messages,
       disabledMessages: row.disabled_messages,

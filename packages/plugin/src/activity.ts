@@ -4,7 +4,7 @@ import { observeCurrentHostGeneration, readCurrentChatId, readOptionalDashboardC
 import { SERVER_STATUS_TIMEOUT_MS, type ServerClient } from "./api-client.js";
 import type { RuntimeState } from "./types.js";
 import { reconcileAutomaticServerPause } from "./worker.js";
-import { describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess } from "./connection.js";
+import { ServerCompatibilityError, isServerApiIncompatible, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess } from "./connection.js";
 import { syncQuizEnabled } from "./quiz-sync.js";
 import { isChatMemoryEnabled } from "./settings.js";
 import { refreshUpdateStatus } from "./updates.js";
@@ -121,8 +121,14 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         if (!state.current) state.quizSynced = undefined;
         const now = Date.now();
         // Release discovery is advisory and must never make the memory server look offline.
-        void refreshUpdateStatus(state, client);
-        if (state.current?.chatId && isChatMemoryEnabled(state.settings, state.current.chatId)) {
+        if (!isServerApiIncompatible(state)) void refreshUpdateStatus(state, client);
+        if (isServerApiIncompatible(state)) {
+          const health = await client.request<{ apiRevision: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+          const mismatch = new ServerCompatibilityError(health.apiRevision);
+          if (mismatch.receivedRevision !== mismatch.expectedRevision) throw mismatch;
+          state.activityReady = true;
+          noteServerConnectionSuccess(state);
+        } else if (state.current?.chatId && isChatMemoryEnabled(state.settings, state.current.chatId)) {
         const chatId = state.current.chatId;
         const startedRevision = state.statusSummaryRevision ?? 0;
         const result = await client.request<StatusResponse>(`/v1/chats/${encodeURIComponent(chatId)}/status`, {}, SERVER_STATUS_TIMEOUT_MS);
@@ -178,11 +184,15 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         state.activityReady = true;
         noteServerConnectionSuccess(state);
         } else {
-        await client.request("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+        const health = await client.request<{ apiRevision?: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+        if (health.apiRevision !== undefined) {
+          const mismatch = new ServerCompatibilityError(health.apiRevision);
+          if (mismatch.receivedRevision !== mismatch.expectedRevision) throw mismatch;
+        }
         state.activityReady = true;
         noteServerConnectionSuccess(state);
         }
-        if (state.settings.quizEnabled) await syncQuizEnabled(state, client);
+        if (!isServerApiIncompatible(state) && state.settings.quizEnabled) await syncQuizEnabled(state, client);
         if (state.updateStatus?.restartRequired && !state.updateApplying && now >= (state.updateLocalRecheckAt ?? 0)) {
           state.updateLocalRecheckAt = now + 4_000;
           void refreshUpdateStatus(state, client, { remote: false, force: true });
@@ -190,6 +200,12 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
       }
     } catch (error) {
       state.activityReady = true;
+      if (!(error instanceof ServerCompatibilityError) && (error as { code?: string })?.code === "API_REVISION_MISMATCH") {
+        try {
+          const health = await client.request<{ apiRevision: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+          error = new ServerCompatibilityError(health.apiRevision);
+        } catch { /* Keep the authenticated protocol rejection if health is unavailable. */ }
+      }
       noteServerConnectionFailure(state, state.settings, error);
     }
     const next = signature(state);
@@ -197,7 +213,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
       previous = next;
       publishActivity(state);
     } else state.refreshStatusWidget?.();
-    if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), isActive(state) ? 1_000 : 4_000);
+    if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), isServerApiIncompatible(state) ? 4_000 : isActive(state) ? 1_000 : 4_000);
   };
   void poll();
   void risuai.onUnload(() => { unloaded = true; if (state.activityTimer) clearTimeout(state.activityTimer); });

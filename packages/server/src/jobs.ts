@@ -37,6 +37,7 @@ export interface PendingMessage {
 }
 
 export interface ExtractionBufferStats {
+  backfillMessages: number;
   bufferedTurns: number;
   protectedTurns: number;
   bufferedSourceTokens: number;
@@ -233,6 +234,7 @@ export function extractionBufferStats(db: RcmDatabase, chatId: string): Extracti
   const pendingUnits = extractionUnits(pending, includeUserMessages);
   const units = extractionUnits(pending.filter((message) => !protectedMessageIds.has(message.message_id)), includeUserMessages);
   return {
+    backfillMessages: pendingUnits.flat().length,
     bufferedTurns: units.length,
     protectedTurns: Math.max(0, pendingUnits.length - units.length),
     bufferedSourceTokens: units.flat().reduce((sum, message) => sum + estimateTokens(modelContent(message)), 0),

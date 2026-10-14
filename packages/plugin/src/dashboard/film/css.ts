@@ -147,9 +147,9 @@ export const FILM_CSS = `
 
 /* menu: the one "더보기" — popover on desktop, sheet on phones */
 .menu { position: relative; display: inline-block; }
-.menu__list { min-width: 200px; padding: 5px; border-radius: 4px; background: var(--screen-3); box-shadow: var(--shadow), 0 0 0 1px var(--rule); }
+.menu__list { min-width: 220px; padding: 6px; border-radius: 4px; background: var(--screen-3); box-shadow: var(--shadow), 0 0 0 1px var(--rule); }
 .menu__pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; }
-.menu__item { width: 100%; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: var(--r); font-size: var(--t-ui); color: var(--ink); text-align: left; }
+.menu__item { width: 100%; display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 7px 10px; line-height: 1.35; border-radius: var(--r); font-size: var(--t-ui); color: var(--ink); text-align: left; }
 .menu__item .i { color: var(--ink-3); }
 .menu__item:hover, .menu__item.is-hover { background: var(--rule); }
 .menu__item:disabled { opacity: .45; cursor: not-allowed; background: none; }
@@ -159,7 +159,7 @@ export const FILM_CSS = `
 .sheet { position: fixed; inset: auto 0 0 0; z-index: 50; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); background: var(--screen-3); border-radius: 12px 12px 0 0; box-shadow: 0 -20px 40px -10px rgba(0,0,0,.7); }
 .sheet__grab { width: 36px; height: 4px; margin: 2px auto 10px; border-radius: 2px; background: var(--rule-2); }
 .sheet__title { padding: 2px 12px 8px; font-size: var(--t-small); color: var(--ink-3); }
-.sheet .menu__item { height: 48px; font-size: var(--t-body); padding: 0 12px; }
+.sheet .menu__item { min-height: 48px; font-size: var(--t-body); padding: 0 12px; }
 .sheet__cancel { width: 100%; height: 48px; margin-top: 6px; border-radius: 8px; background: var(--screen-2); font-weight: 600; }
 .scrim { position: fixed; inset: 0; z-index: 40; background: var(--scrim); }
 
@@ -260,7 +260,7 @@ export const FILM_CSS = `
 @media (max-width: 760px) {
   .menu[open] > .menu__pop { position: fixed; inset: auto 0 0 0; z-index: 50; min-width: 0; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); border-radius: 12px 12px 0 0; }
   .menu[open]::before { content: ""; position: fixed; inset: 0; z-index: 49; background: var(--scrim); }
-  .menu[open] > .menu__pop .menu__item { height: 48px; font-size: var(--t-body); }
+  .menu[open] > .menu__pop .menu__item { min-height: 48px; font-size: var(--t-body); }
   .menu[open] > .menu__pop .menu__title { display: block; }
 }
 .menu__title { display: none; padding: 2px 12px 8px; font-size: var(--t-small); color: var(--ink-3); }

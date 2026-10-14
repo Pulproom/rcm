@@ -144,7 +144,7 @@ export const PHONE_SKIN_CSS = `
 :is(.row, .pairrow, .entry, .scene, .acquaintance):not(:is(.row, .pairrow, .entry, .scene, .acquaintance) + *) { border-top-left-radius: 12px; border-top-right-radius: 12px; }
 :is(.row, .pairrow, .entry, .scene, .acquaintance):not(:has(+ :is(.row, .pairrow, .entry, .scene, .acquaintance))) { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
 .list > li { background: var(--screen); }
-:is(.row, .pairrow):hover, :is(.row, .pairrow).is-hover { background-color: color-mix(in srgb, var(--screen) 92%, var(--ink)); }
+:is(.row, .pairrow):hover, :is(.row, .pairrow).is-hover { --row-fill: color-mix(in srgb, var(--screen) 92%, var(--ink)); background-color: var(--row-fill); }
 .row__slug { font-size: var(--t-meta); color: var(--ink-3); }
 .row__slug b { color: var(--ink-3); font-weight: 400; }
 .row__title { font-size: var(--t-ui); font-weight: 600; line-height: 1.35; }
@@ -152,10 +152,10 @@ export const PHONE_SKIN_CSS = `
 .row__end { color: var(--ink-3); }
 /* selection is shown only where list and detail sit side by side */
 @media (min-width: 900px) {
-  :is(.row, .pairrow)[aria-current="true"] { background-color: var(--tungsten); }
+  :is(.row, .pairrow)[aria-current="true"] { --row-fill: var(--tungsten); background-color: var(--row-fill); }
   :is(.row, .pairrow)[aria-current="true"] :is(.row__title, .row__slug, .row__slug b, .row__sub, .row__end, .names, .meta, .meta__who, .meta__text, .row__count, .x, .name, .mecard__k, .tc, .row__signals) { color: #fff; }
 }
-@media (max-width: 899px) { :is(.row, .pairrow)[aria-current="true"] { background-color: var(--screen); } }
+@media (max-width: 899px) { :is(.row, .pairrow)[aria-current="true"] { --row-fill: var(--screen); background-color: var(--row-fill); } }
 .day { margin: 22px 4px 7px; font-size: var(--t-meta); color: var(--ink-3); }
 .day b { color: var(--ink-3); font-weight: 400; }
 .tl-rows > .day:first-child { margin-top: 8px; }
@@ -266,7 +266,7 @@ export const PHONE_SKIN_CSS = `
 .contact-row { display: flex; align-items: center; gap: 12px; }
 .contact-row__avs { display: flex; flex: none; align-items: center; }
 .contact-row__avs .av { width: 34px; height: 34px; font-size: var(--t-ui); }
-.contact-row__avs .av + .av { margin-left: -12px; box-shadow: 0 0 0 2px var(--screen); }
+.contact-row__avs .av + .av { margin-left: -12px; box-shadow: 0 0 0 2px var(--row-fill, var(--screen)); }
 .contact-row__body { flex: 1; min-width: 0; }
 .contact-row .row__title { display: block; font-size: var(--t-ui); font-weight: 600; }
 .contact-row .row__title .name, .contact-row .row__title .name.is-cjk { font-size: var(--t-ui); font-weight: 600; }
@@ -278,7 +278,7 @@ export const PHONE_SKIN_CSS = `
 .pairrow .names { align-items: center; gap: 2px 8px; font-size: var(--t-ui); }
 .pairrow .names .name { font-weight: 600; }
 .names .av { width: 28px; height: 28px; font-size: var(--t-cap); }
-.names .av + .av { margin-left: -12px; box-shadow: 0 0 0 2px var(--screen); }
+.names .av + .av { margin-left: -12px; box-shadow: 0 0 0 2px var(--row-fill, var(--screen)); }
 .pairrow .x { color: var(--ink-3); }
 .pairrow .meta { font-size: var(--t-meta); }
 .pairrow .meta.is-label { color: var(--ink-3); font-weight: 400; }

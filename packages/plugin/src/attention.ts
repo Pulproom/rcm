@@ -224,8 +224,8 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
   if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId)) return { kind: "disabled", label: "꺼짐", detail: "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않습니다." };
   const connectionIssue = state.serverConnectionIssue ?? describeServerConnectionIssue(state.settings);
   if (connectionIssue) return {
-    kind: connectionIssue.kind === "unconfigured" ? "setup" : "connection",
-    label: connectionIssue.kind === "unconfigured" ? "서버 연결 필요" : "연결 정보 확인",
+    kind: ["unconfigured", "incompatible"].includes(connectionIssue.kind) ? "setup" : "connection",
+    label: connectionIssue.kind === "incompatible" ? connectionIssue.title : connectionIssue.kind === "unconfigured" ? "서버 연결 필요" : "연결 정보 확인",
     detail: connectionIssue.detail,
   };
   if (state.activityStatusError === SERVER_RESPONSE_DELAYED) return {

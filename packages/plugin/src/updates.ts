@@ -1,7 +1,7 @@
 import type { ServerClient } from "./api-client.js";
-import { isServerConfigured } from "./connection.js";
+import { isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, ServerCompatibilityError } from "./connection.js";
 import type { RuntimeState } from "./types.js";
-import { compareNumericVersions, RCM_PLUGIN_VERSION } from "@rcm/shared";
+import { compareNumericVersions, RCM_PLUGIN_VERSION, RCM_API_REVISION } from "@rcm/shared";
 
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 
@@ -66,9 +66,12 @@ export async function installServerUpdate(
   for (let attempt = 0; attempt < (options.attempts ?? 90); attempt += 1) {
     await wait(1_000);
     try {
-      const health = await client.request<{ version?: string; ok?: boolean }>("/v1/health", {}, 3_000);
+      const health = await client.request<{ version?: string; ok?: boolean; apiRevision?: number }>("/v1/health", {}, 3_000);
       if (health.ok && health.version === targetVersion) {
         state.updateApplying = undefined;
+        if (health.apiRevision !== undefined && health.apiRevision !== RCM_API_REVISION) {
+          noteServerConnectionFailure(state, state.settings, new ServerCompatibilityError(health.apiRevision));
+        } else noteServerConnectionSuccess(state);
         state.updateNextCheckAt = 0;
         // Refresh the release manifest as well as local state so a plugin-only
         // follow-up remains visible after the server has restarted.

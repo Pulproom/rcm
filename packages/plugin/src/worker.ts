@@ -10,7 +10,7 @@ import type { ServerClient } from "./api-client.js";
 import { addLog, saveSettings } from "./settings.js";
 import type { RuntimeState } from "./types.js";
 import { showWorkerPauseNotice, updateWorkerMenuButton } from "./attention.js";
-import { describeServerConnectionIssue, isServerConfigured } from "./connection.js";
+import { noteServerConnectionFailure, isServerApiIncompatible, isServerConfigured } from "./connection.js";
 import { finishTiming, startTiming } from "./timing.js";
 
 const attentionReconciliationFlights = new WeakMap<RuntimeState, Promise<boolean>>();
@@ -697,25 +697,26 @@ export function scheduleWorker(state: RuntimeState, client: ServerClient): void 
 }
 
 export async function heartbeatServerWorker(state: RuntimeState, client: ServerClient): Promise<void> {
-  if (state.unloaded || state.settings.workerPaused || state.settings.extractionEngine !== "server" || !isServerConfigured(state.settings)) return;
+  if (state.unloaded || isServerApiIncompatible(state) || state.settings.workerPaused || state.settings.extractionEngine !== "server" || !isServerConfigured(state.settings)) return;
   try {
     state.serverWorker = await client.heartbeat(state.workerId, state.current && isChatMemoryEnabled(state.settings, state.current.chatId) ? state.current.chatId : undefined);
-    state.serverConnectionIssue = undefined;
-    state.activityStatusError = undefined;
+    if (!isServerApiIncompatible(state)) {
+      state.serverConnectionIssue = undefined;
+      state.activityStatusError = undefined;
+    }
     state.publishActivity?.();
     if (state.serverWorker.state === "faulted") {
       await pauseWithAttention(state, state.serverWorker.lastError ?? "Server extraction worker faulted");
     }
   } catch (error) {
-    state.serverConnectionIssue = describeServerConnectionIssue(state.settings, error);
-    state.activityStatusError = state.serverConnectionIssue?.detail;
+    noteServerConnectionFailure(state, state.settings, error);
     state.publishActivity?.();
     addLog(state.logs, "warn", `Server worker heartbeat failed: [오류 원문 제외]`, supportFailure("worker_heartbeat", error));
   }
 }
 
 export async function drainWorker(state: RuntimeState, client: ServerClient): Promise<void> {
-  if (state.unloaded || !isServerConfigured(state.settings)) return;
+  if (state.unloaded || isServerApiIncompatible(state) || !isServerConfigured(state.settings)) return;
   if (state.settings.extractionEngine === "server") {
     await heartbeatServerWorker(state, client);
     return;
@@ -876,8 +877,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       }
     }
   } catch (error) {
-    state.serverConnectionIssue = describeServerConnectionIssue(state.settings, error);
-    state.activityStatusError = state.serverConnectionIssue?.detail;
+    noteServerConnectionFailure(state, state.settings, error);
     addLog(state.logs, "warn", `Worker queue connection failed without pausing processing: [오류 원문 제외]`, supportFailure("worker_queue", error));
   } finally {
     state.workerBusy = false;
