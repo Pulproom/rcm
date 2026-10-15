@@ -1,11 +1,12 @@
 import { maybeEnqueueQuiz } from "./quiz.js";
+import { completeMemoryAddition } from './memory-addition.js';
 import { ExtractionAggregateSchema, validSourcePassageAccess, validateSourceRecoveryPatch } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { storeSourcePassages } from "./source-evidence.js";
 import { ExtractionDraftResultSchema, ExtractionResultSchema, type ExtractionAuditSubmission, type ExtractionDraftResult, type ReconciliationSubmission, type StructuredIssue } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { applyMemoryRecallObservations, dedupeKeyDialogues, ingestExtraction, validateDialogueEvidence, normalizePromiseMemoryAssociations, replaceItemAccess, validateExtractionSources } from "./ingest.js";
-import { markJobComplete } from "./jobs.js";
+import { markJobComplete, recordSourceRecoveryOutcome } from "./jobs.js";
 import { applyExtractionAuditPatch, recordExtractionAudit } from "./extraction-audit.js";
 import { socialOnlyResult } from "./social-knowledge.js";
 import { flushRelationshipProjectionQueue, queueLaggingRelationshipProjections } from "./relationship-projections.js";
@@ -51,6 +52,7 @@ export function completeExtractionJob(
     | { chat_id: string; type: string; payload_json: string }
     | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
+  if (job.type === 'memory_addition') return completeMemoryAddition(db, jobId, workerId, result, reconciliation, audit);
   const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; resolvedSetup?: { messages?: Array<{ content: string }> }; postExtractionReview?: boolean; sourceRecovery?: boolean; dialogueRecovery?: DialogueRecoveryCandidate[]; retryOfAuditId?: string; retryOfJobId?: string; continuationDraft?: ExtractionDraftResult; continuationHistory?: string[]; batchId?: string; regenerationRunId?: string; backfillRunId?: string; recallCandidates?: Array<{ memoryId: string; accessibleTo: string[] }>; recallAtomRefs?: RecallAtomReference[] };
   if (payload.regenerationRunId) {
     const run = db.prepare("SELECT status FROM regeneration_runs WHERE id=? AND chat_id=?").get(payload.regenerationRunId, job.chat_id) as { status: string } | undefined;
@@ -184,7 +186,7 @@ export function completeExtractionJob(
     if (payload.sourceRecovery) {
       const passages = audited.result.sourcePassages ?? [];
       if (passages.some((item) => !sourceMessageIds.includes(item.messageId))) throw new Error("Recovery passage cites a source outside this job");
-      storeSourcePassages(db, job.chat_id, passages, payload.batchId, sourceMessageIds);
+      const passagesAdded = storeSourcePassages(db, job.chat_id, passages, payload.batchId, sourceMessageIds);
       let unresolvedDialogues = 0;
       const pendingDialogues: DialogueRecoveryCandidate[] = [];
       for (const recovery of payload.dialogueRecovery ?? []) {
@@ -235,6 +237,9 @@ export function completeExtractionJob(
       recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, retained, audit, verified ? "applied" : "pending_review",
         verified ? undefined : "Source or dialogue evidence remains unverified", payload.sourceFingerprint);
       pendingReconciliations = verified ? 0 : Math.max(1, unresolvedDialogues + rejectedExcerpts + reviewed.pendingRefs.length);
+      recordSourceRecoveryOutcome(db, jobId, verified
+        ? { outcome: passagesAdded ? "added" : "no_excerpt", passagesAdded }
+        : { outcome: "failed", failureCode: "SOURCE_RECOVERY_EVIDENCE_UNVERIFIED" });
       if (verified) markJobComplete(db, jobId, workerId);
       else db.prepare("UPDATE jobs SET status='failed',lease_owner=NULL,leased_until=NULL,last_error='Source or dialogue evidence remains unverified; review required',updated_at=? WHERE id=?")
         .run(Date.now(), jobId);

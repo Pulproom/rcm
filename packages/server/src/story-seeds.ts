@@ -35,7 +35,7 @@ export function validateSeedResolutions(db: RcmDatabase, chatId: string, resolut
     if (!seed || seed.status !== "open" && (seed.status !== patch.status || JSON.stringify(seed.closureEvidence) !== JSON.stringify(patch.evidence))) throw new Error("Seed resolution target is not open");
     for (const evidence of patch.evidence) {
       const source = db.prepare(`SELECT ordinal,canonical_content,canonical_hash FROM messages WHERE chat_id=? AND message_id=?
-        AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`).get(chatId,evidence.messageId) as {ordinal:number;canonical_content:string;canonical_hash:string}|undefined;
+        AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).get(chatId,evidence.messageId) as {ordinal:number;canonical_content:string;canonical_hash:string}|undefined;
       if (sourceIds && !sourceIds.includes(evidence.messageId) || !source || source.ordinal <= row.source_end_ordinal || !evidence.quote
         || source.canonical_hash !== evidence.canonicalHash || evidence.startOffset === undefined || evidence.endOffset === undefined
         || source.canonical_content.slice(evidence.startOffset,evidence.endOffset) !== evidence.quote) throw new Error("Seed resolution needs exact later canonical source evidence");

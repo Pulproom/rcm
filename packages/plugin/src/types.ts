@@ -67,6 +67,7 @@ export interface CachedChatState {
   lastInjectionManifest?: NonNullable<TurnPrepareResponse["injectionManifest"]>;
   /** Clarity and attached detail counts of the scenes in that manifest. */
   lastInjectionScenes?: InjectedScene[];
+  lastInjectionStateSnapshots?: TurnPrepareResponse["stateSnapshots"];
   /** Memory-tool searches the model ran since that injection. */
   lastInjectedTokens?: number;
   lastInjectionAt?: number;
@@ -134,6 +135,8 @@ export interface RuntimeState {
     failures: number;
   };
   current?: CurrentContext | DashboardContext;
+  /** Identity already read by normal context sync; diagnostics only verify selection indices. */
+  hostChatIdentity?: { characterIndex: number; chatIndex: number; chatId: string };
   lastPrepare?: TurnPrepareResponse;
   lastResolvedSetup?: { chatId: string; projection: ResolvedSetupProjection };
   activeMemoryLanguages?: Record<string, MemoryLanguage>;
@@ -186,6 +189,7 @@ export interface RuntimeState {
     /** Whether the packet contained a record beyond the common guidance. */
     evidenceInjected?: boolean;
     manifest: NonNullable<TurnPrepareResponse["injectionManifest"]>;
+    stateSnapshots?: TurnPrepareResponse["stateSnapshots"];
     at: number;
   };
   lastPromptValidation?: {
@@ -244,13 +248,16 @@ export interface RuntimeState {
     error?: string;
   };
   workerBusy: boolean;
-  currentJob?: { id: string; chatId: string; attempt: number; sourceMessageCount: number; sourceTurnCount?: number; startedAt: number; kind?: string; sourceRecovery?: boolean; phase?: "first_extraction" | "initial_calibration" | "relationship_projection" | "story_consolidation" | "social_backfill" | "capsule" | "post_extraction_audit" | "state_reconciliation" | "ledger_consistency" | "storing" };
+  currentJob?: { id: string; chatId: string; attempt: number; sourceMessageCount: number; sourceTurnCount?: number; startedAt: number; kind?: string; sourceRecovery?: boolean; sourceRecoveryMetadata?: import("@rcm/shared").SourceRecoveryMetadata; phase?: Exclude<import("@rcm/shared").WorkerPhase, "idle" | "faulted" | "paused"> };
   serverWorker?: ServerWorkerStatus;
   statusSummary?: {
     queuedJobs: number; failedJobs: number; blockingFailedJobs?: number; advisoryFailedJobs?: number; pendingReviews: number; pendingReconciliations?: number;
     waitingForAssistant?: number; bufferedMessages?: number; bufferedTurns?: number; bufferedSourceTokens?: number;
     extractionGroupTurns?: number; recoverableMessages?: number; historicalBackfillMessages?: number;
     ingestionState?: "historical_pending" | "managed" | "cleared"; pendingEmbeddings: number; failedEmbeddings: number;
+    auxiliaryAuthFailed?: boolean;
+    modelResponseDiagnostic?: import("@rcm/shared").ModelResponseDiagnostic;
+    lastJobSourceRecovery?: import("@rcm/shared").SourceRecoveryMetadata;
     progress?: ActivityProgress;
     initialCalibration?: InitialCalibrationActivity;
     episode?: EpisodeActivity | null;
@@ -300,6 +307,8 @@ export interface RuntimeState {
 }
 
 export interface ActivityProgress {
+  manualRetry?: boolean;
+  excludedMessages?: number;
   processedMessages: number;
   totalMessages: number;
   processedGroups: number;

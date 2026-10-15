@@ -5,7 +5,7 @@ import { buildAnniversaries, daysSinceFirstMet } from "./diary.js";
 import { recentScenes, storyScenes } from "./scenes.js";
 import { buildNowPage, overduePromiseEntries } from "./now.js";
 import { buildPairs, pairKey, normalizeName, type PairSummary } from "./pairs.js";
-import { formatStoryTime, compareParsedStoryTimes, parseStoryTime } from "@rcm/shared";
+import { formatStoryTime, compareParsedStoryTimes, parseStoryTime, type TurnPrepareResponse } from "@rcm/shared";
 
 export type InjectionManifest = NonNullable<RuntimeState["cache"][string]["lastInjectionManifest"]>;
 export type HomeTranslationRecord = { kind: string; itemId: string; text: string };
@@ -15,6 +15,7 @@ const text = (value: unknown): string => String(value ?? "").trim();
 const byId = <T extends { id?: unknown }>(items: T[] | undefined, id: unknown): T | undefined =>
   (items ?? []).find((item) => String(item?.id ?? "") === String(id ?? ""));
 const safeText = (value: unknown): string => displayText(text(value), undefined, "en");
+const unavailableDelivery = "전달 당시 기록을 불러오지 못했어요.";
 
 export type InjectedStateRow = import("./sent.js").SentState;
 
@@ -24,6 +25,7 @@ export function injectedStateRows(
   data: Pick<DashboardData, "assertions" | "promises" | "beliefs"> & Partial<Pick<DashboardData, "relationships" | "socialKnowledge">>,
   translations: ReadonlyMap<string, string>,
   display: TranslationDisplay = "ko",
+  snapshots: TurnPrepareResponse["stateSnapshots"] = [],
 ): InjectedStateRow[] {
   const rows: InjectedStateRow[] = [];
   const append = (kind: InjectedStateRow["kind"], id: string) => {
@@ -33,20 +35,21 @@ export function injectedStateRows(
       const relation = item?.socialRelation;
       rows.push({ kind: relation ? "basic_relation" : kind, id, ...(relation ? { key: pairKey(item.subject, relation.target) } : {}),
         tag: relation ? "관계" : "상태", whoHtml: safeText(item?.subject),
-        textHtml: item ? displayText(text(item.value), translations.get(`assertion:${id}`), display) : "기록이 바뀌었거나 더 이상 없어요." });
+        textHtml: item ? displayText(text(item.value), translations.get(`assertion:${id}`), display) : unavailableDelivery });
     } else if (kind === "belief" || kind === "promise") {
       rows.push({ kind, id, tag: kind === "belief" ? "인식" : "약속",
         whoHtml: item ? `${safeText(item.holder ?? item.promisor)} → ${safeText(item.subject ?? item.promisee)}` : "",
-        textHtml: item ? displayText(text(item.value ?? item.content), translations.get(`${kind}:${id}`), display) : "기록이 바뀌었거나 더 이상 없어요." });
+        textHtml: item ? displayText(text(item.value ?? item.content), translations.get(`${kind}:${id}`), display) : unavailableDelivery });
     } else if (kind === "relationship") {
       const pair = (data.relationships ?? []).find((row: any) => `${row.from ?? row.from_entity}:${row.to ?? row.to_entity}` === id);
       const from = pair?.from ?? pair?.from_entity, to = pair?.to ?? pair?.to_entity;
       rows.push({ kind, id, key: pair ? pairKey(from, to) : undefined, tag: "관계",
-        whoHtml: pair ? `${safeText(from)} → ${safeText(to)}` : "", textHtml: pair ? safeText(pair.summary) : "기록이 바뀌었거나 더 이상 없어요." });
+        whoHtml: pair ? `${safeText(from)} → ${safeText(to)}` : "", textHtml: pair ? safeText(pair.summary) : unavailableDelivery });
     } else {
       const person: any = (data.socialKnowledge ?? []).find((row: any) => `${row.holder}:${row.subject}` === id);
+      const cognition = text((person?.cognition ?? []).map((detail: any) => detail.text).join(" "));
       rows.push({ kind, id, key: person?.subject, tag: "인지", whoHtml: person ? `${safeText(person.holder)} → ${safeText(person.subject)}` : "",
-        textHtml: person ? safeText((person.cognition ?? []).map((detail: any) => detail.text).join(" ")) : "기록이 바뀌었거나 더 이상 없어요." });
+        textHtml: cognition ? safeText(cognition) : unavailableDelivery });
     }
   };
   // Manifest IDs are product-owned typed addresses, never prose to interpret.
@@ -55,7 +58,15 @@ export function injectedStateRows(
   for (const id of manifest.beliefIds ?? []) append("belief", id);
   for (const id of manifest.promiseIds) append("promise", id);
   for (const row of typed) if (["world_fact", "basic_relation", "belief", "promise", "relationship", "recognition"].includes(row.kind)) append(row.kind as InjectedStateRow["kind"], row.id);
-  return rows;
+  // These are product-owned XML-escaped renderer lines, not arbitrary HTML.
+  // The receipt takes precedence even if the current row still has the same ID.
+  return rows.map(row => {
+    const snapshot = snapshots.find(item => item.id === `${row.kind}:${row.id}`);
+    if (!snapshot) return row;
+    const line = snapshot.text.replace(/^- /, '').replace(/&(amp|lt|gt);/g,
+      (_, entity: string) => ({ amp: '&', lt: '<', gt: '>' })[entity]!);
+    return { ...row, whoHtml: '', textHtml: safeText(line) };
+  });
 }
 
 /** The poster scene and the three before it, newest first. */

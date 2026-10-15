@@ -84,7 +84,7 @@ export async function finalizeExtractPage(options: FinalizeExtractPageOptions) {
     if (audit?.patch) draft = applyExtractionAuditPatch(db, job.chatId, job.sourceMessageIds, draft, audit.patch).result;
     const grounded = !audit?.patch?.keepPendingItemRefs.length
       && !inspectDraftEvidence(db, job.chatId, job.sourceMessageIds, draft).some(issue => issue.blocking);
-    const prepared = grounded ? prepareStateExtraction(db, job.chatId, job.sourceMessageIds, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000)
+    const prepared = grounded ? prepareStateExtraction(db, job.chatId, job.sourceMessageIds, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000, job.memoryAddition)
       : { required: false, candidateSetHash: "", systemPrompt: "", userPrompt: "" };
     const accessPlan = store.canRepair(job.id) && !audit?.patch?.keepPendingItemRefs.length
       ? planSourceAccessRepair(draft, job.sourceUnits ?? [], job.auditSourceMessages ?? []) : undefined;

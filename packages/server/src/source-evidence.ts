@@ -48,11 +48,11 @@ export function invalidateSourcePassageAccess(db: RcmDatabase, chatId: string, m
   }
 }
 
-export function storeSourcePassages(db: RcmDatabase, chatId: string, passages: SourcePassage[] = [], batchId?: string, sourceMessageIds?: string[]): void {
+export function storeSourcePassages(db: RcmDatabase, chatId: string, passages: SourcePassage[] = [], batchId?: string, sourceMessageIds?: string[]): number {
   const deleted = deletionGuard(db, chatId);
   const resolve = buildEntityIdentityResolver(db, chatId);
   const source = db.prepare(`SELECT canonical_content,canonical_hash,role FROM messages WHERE chat_id=? AND message_id=?
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`);
+    AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`);
   const includeUser = (db.prepare("SELECT include_user_messages value FROM chats WHERE id=?").get(chatId) as { value: number }).value !== 0;
   const batch = batchId ? db.prepare("SELECT source_message_ids_json FROM extraction_batches WHERE id=? AND chat_id=?").get(batchId, chatId) as { source_message_ids_json: string } | undefined : undefined;
   const allowedIds: string[] = sourceMessageIds ?? (batch ? JSON.parse(batch.source_message_ids_json) : passages.map((passage) => passage.messageId));
@@ -63,6 +63,7 @@ export function storeSourcePassages(db: RcmDatabase, chatId: string, passages: S
   }
   const insert = db.prepare(`INSERT INTO source_passages(id,chat_id,message_id,canonical_hash,start_offset,end_offset,quote,speaker,epistemic,access_json,source_batch_id)
     VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET access_json=excluded.access_json,epistemic=excluded.epistemic,speaker=excluded.speaker,active=1`);
+  let added = 0;
   for (const passage of passages) {
     const row = source.get(chatId, passage.messageId) as { canonical_content: string | null; canonical_hash: string; role: string } | undefined;
     if (!row?.canonical_content || (!includeUser && row.role === "user") || presentationOnlySourcePassage(passage.quote)) continue;
@@ -75,9 +76,12 @@ export function storeSourcePassages(db: RcmDatabase, chatId: string, passages: S
       return holder.ambiguous || !deleted("entity", holder.variants.map(normalizeEntityName), grant.evidence.length ? grant.evidence : [{ messageId: passage.messageId }]);
     });
     const id = createHash("sha256").update(`${chatId}\0${passage.messageId}\0${row.canonical_hash}\0${start}\0${passage.quote.length}`).digest("hex");
+    const prior = db.prepare("SELECT active FROM source_passages WHERE id=?").get(id) as { active: number } | undefined;
     insert.run(id, chatId, passage.messageId, row.canonical_hash, start, start + passage.quote.length, passage.quote,
       passage.speaker ?? null, passage.epistemic, JSON.stringify(grants), batchId ?? null);
+    if (!prior?.active) added++;
   }
+  return added;
 }
 
 export interface SourceEvidenceItem {
@@ -97,14 +101,34 @@ export interface SourceRecoveryCandidate {
   matchedPhrases: string[];
 }
 
+export interface DeliveredSourceEvidence {
+  messageId: string; canonicalHash?: string; quote?: string; startOffset?: number; endOffset?: number;
+}
+
+/** Only exact provenance of atoms surviving final packet trimming counts as coverage. */
+function recoveryCovered(candidate: SourceRecoveryCandidate, content: string, hash: string, evidence: DeliveredSourceEvidence[]): boolean {
+  const excerpts = evidence.filter(item => item.messageId === candidate.messageId && (!item.canonicalHash || item.canonicalHash === hash))
+    .flatMap(item => {
+      const start = item.startOffset ?? (item.quote ? content.indexOf(item.quote) : -1);
+      const end = item.endOffset ?? start + (item.quote?.length ?? 0);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > content.length) return [];
+      if (item.quote !== undefined && content.slice(start, end) !== item.quote) return [];
+      if (item.startOffset === undefined && item.quote && content.indexOf(item.quote, start + 1) >= 0) return [];
+      return [normalized(content.slice(start, end)).replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/gu, " ").trim()];
+    });
+  return excerpts.length > 0 && candidate.matchedPhrases.every(phrase => excerpts.some(excerpt => excerpt.includes(phrase)));
+}
+
 /** One bounded recovery attempt per unchanged processed source, using the existing audit queue. */
-export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates: Array<string | SourceRecoveryCandidate>, query = ""): number {
+export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates: Array<string | SourceRecoveryCandidate>, query = "", deliveredEvidence: DeliveredSourceEvidence[] = []): number {
   for (const candidate of candidates) {
     const messageId = typeof candidate === "string" ? candidate : candidate.messageId;
-    const row = db.prepare(`SELECT m.canonical_hash,m.role,c.include_user_messages,c.memory_language FROM messages m JOIN chats c ON c.id=m.chat_id
-      WHERE m.chat_id=? AND m.message_id=? AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before')
-      AND m.extraction_state IN ('done','encapsulated')`).get(chatId, messageId) as { canonical_hash: string; role: string; include_user_messages: number; memory_language: string } | undefined;
+    const row = db.prepare(`SELECT m.ordinal,m.canonical_hash,m.canonical_content,m.role,c.include_user_messages,c.memory_language FROM messages m JOIN chats c ON c.id=m.chat_id
+      WHERE m.chat_id=? AND m.message_id=? AND m.lifecycle IN ('committed','client_pruned') AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')
+      AND m.extraction_state IN ('done','encapsulated')`).get(chatId, messageId) as { ordinal: number; canonical_hash: string; canonical_content: string; role: string; include_user_messages: number; memory_language: string } | undefined;
     if (!row || (row.role === "user" && row.include_user_messages === 0)) continue;
+    if (recoveryCovered(typeof candidate === "string" ? { messageId, matchKinds: [], matchedPhrases: [] } : candidate,
+      row.canonical_content, row.canonical_hash, deliveredEvidence)) continue;
     const id = `source-recovery:${createHash("sha256").update(`${chatId}\0${messageId}\0${row.canonical_hash}`).digest("hex")}`;
     const sourceRecoveryContext = typeof candidate === "string" ? undefined : {
       ...(query.trim() ? { query: query.trim().slice(0, 2000) } : {}),
@@ -112,6 +136,7 @@ export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates:
       matchedPhrases: candidate.matchedPhrases.slice(0, 8),
     };
     const payload = { sourceMessageIds: [messageId], sourceFingerprint: sourceFingerprint(db, chatId, [messageId]), sourceRecoveryContext,
+      sourceRecoveryMetadata: { targets: [{ messageId, ordinal: row.ordinal }], matchKinds: typeof candidate === "string" ? [] : candidate.matchKinds },
       sourceRecovery: true, postExtractionReview: true, auditDraft: { language: row.memory_language, entities: [], memories: [], stateObservations: [] } };
     const added = db.prepare(`INSERT OR IGNORE INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
       VALUES(?,?,'audit_retry','queued',?,0,?,?)`).run(id, chatId, JSON.stringify(payload), Date.now(), Date.now()).changes;
@@ -142,15 +167,16 @@ export function retrieveSourceEvidence(db: RcmDatabase, chatId: string, query: s
   const source = db.prepare(`SELECT p.*,m.ordinal,m.canonical_content FROM source_passages p JOIN messages m
     ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash
     WHERE p.chat_id=? AND p.message_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned')
-      AND m.host_visibility IN ('active','all_before') ORDER BY p.start_offset`);
+      AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before') ORDER BY p.start_offset`);
   const ranked: SourceEvidenceItem[] = [];
   const recoveryCandidates: SourceRecoveryCandidate[] = [];
   const messageContent = db.prepare(`SELECT canonical_content FROM messages WHERE chat_id=? AND message_id=?
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`);
+    AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`);
   for (const [messageId, sourceScore] of candidates) {
     if (promptIds.includes(messageId)) continue;
     const rows = source.all(chatId, messageId) as Array<{ id: string; canonical_hash:string; quote: string; speaker: string | null; epistemic: string; access_json: string; ordinal: number; canonical_content: string; start_offset: number; end_offset: number }>;
     const content = (messageContent.get(chatId, messageId) as { canonical_content: string } | undefined)?.canonical_content ?? "";
+    if (!content) continue;
     const normalizedContent = normalized(content).replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/gu, " ").trim();
     const matchedPhrases = recoveryPhrases.filter((phrase) => normalizedContent.includes(phrase));
     const strongSemantic = (semanticScores.get(messageId) ?? 0) >= SOURCE_RECOVERY_SEMANTIC_THRESHOLD;
@@ -163,7 +189,7 @@ export function retrieveSourceEvidence(db: RcmDatabase, chatId: string, query: s
       const sources = new Map<string, string>([[messageId, row.canonical_content]]);
       for (const id of new Set(storedGrants.flatMap((grant) => grant.evidence.map((item) => item.messageId)))) {
         const support = db.prepare(`SELECT canonical_content FROM messages WHERE chat_id=? AND message_id=?
-          AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`).get(chatId, id) as { canonical_content: string } | undefined;
+          AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).get(chatId, id) as { canonical_content: string } | undefined;
         if (support?.canonical_content) sources.set(id, support.canonical_content);
       }
       const grants = validSourcePassageAccess({ messageId }, sources, storedGrants);

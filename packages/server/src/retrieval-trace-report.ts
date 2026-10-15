@@ -120,6 +120,7 @@ export interface TurnAnalysis {
 }
 
 export interface DiagnosticAnalysis {
+  sourceRecovery?: { jobs: number; withAdditions: number; noOp: number; failed: number; unreported: number };
   qualityReview: { status: "manual_review_required"; criteria: string[]; note: string };
   schema: "rcm.retrieval-diagnostics-report.v2";
   generatedAt: string;
@@ -405,7 +406,8 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
   };
 }
 
-export function analyzeTrace(parsed: TraceParseResult, options: { source: string; enabledChatIds?: Set<string>; latestEnabledChatId?: string; chatId?: string; allChats?: boolean; turns?: number }): DiagnosticAnalysis {
+export function analyzeTrace(parsed: TraceParseResult, options: { source: string; enabledChatIds?: Set<string>; latestEnabledChatId?: string; chatId?: string; allChats?: boolean; turns?: number;
+  sourceRecoveryJobs?: Array<{ chatId: string; metadata?: import("@rcm/shared").SourceRecoveryMetadata }> }): DiagnosticAnalysis {
   const allowedEvents = options.chatId
     ? parsed.events.filter((event) => event.chatId === options.chatId)
     : options.enabledChatIds ? parsed.events.filter((event) => options.enabledChatIds!.has(String(event.chatId))) : parsed.events;
@@ -419,6 +421,11 @@ export function analyzeTrace(parsed: TraceParseResult, options: { source: string
     ...(parsed.unsupportedLines ? [`지원하지 않는 trace ${parsed.unsupportedLines}줄을 제외했습니다.`] : []),
   ];
   const warnings = [...globalWarnings, ...turns.flatMap((turn) => turn.warnings.map((warning) => `턴 ${turn.userTurn ?? turn.turnKey}: ${warning}`))];
+  const selectedChats = [...new Set(turns.map(turn => turn.chatId))];
+  const recoveryJobs = options.sourceRecoveryJobs?.filter(job => selectedChats.includes(job.chatId));
+  const withAdditions = recoveryJobs?.filter(job => job.metadata?.result?.outcome === "added").length ?? 0;
+  const noOp = recoveryJobs?.filter(job => job.metadata?.result?.outcome === "no_excerpt").length ?? 0;
+  const failed = recoveryJobs?.filter(job => job.metadata?.result?.outcome === "failed").length ?? 0;
   return {
     qualityReview: {
       status: "manual_review_required",
@@ -427,7 +434,8 @@ export function analyzeTrace(parsed: TraceParseResult, options: { source: string
     },
     schema: "rcm.retrieval-diagnostics-report.v2", generatedAt: new Date().toISOString(), source: options.source,
     status: turns.length === 0 ? "기록 없음" : warnings.length ? "확인 필요" : "정상",
-    selectedChats: [...new Set(turns.map((turn) => turn.chatId))], invalidLines: parsed.invalidLines, unsupportedLines: parsed.unsupportedLines, warnings, turns,
+    selectedChats, invalidLines: parsed.invalidLines, unsupportedLines: parsed.unsupportedLines, warnings, turns,
+    ...(recoveryJobs ? { sourceRecovery: { jobs: recoveryJobs.length, withAdditions, noOp, failed, unreported: recoveryJobs.length - withAdditions - noOp - failed } } : {}),
   };
 }
 
@@ -534,6 +542,7 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
     `- 생성: ${analysis.generatedAt}`,
     `- 대상 채팅: ${analysis.selectedChats.length ? analysis.selectedChats.map((id) => `\`${id}\``).join(", ") : "없음"}`,
     `- 분석 범위: 최근 ${analysis.turns.length}턴`,
+    analysis.sourceRecovery ? `- 원문 발췌 보완(선택 채팅의 보존된 전체 작업): 작업 ${analysis.sourceRecovery.jobs}개 / 발췌 추가 ${analysis.sourceRecovery.withAdditions}개 / 추가 없음 ${analysis.sourceRecovery.noOp}개 / 실패 ${analysis.sourceRecovery.failed}개 / 결과 미기록 ${analysis.sourceRecovery.unreported}개` : "- 원문 발췌 보완: 작업 메타데이터 미기록",
     "- 지연 관찰: 완료된 클라이언트 요청은 5초 이내 / 5~10초 지연 관찰 / 10초 초과 경고로 구분합니다. 실패·중단은 별도이며, 개별 관측으로 p50·p95 목표 달성을 판정하지 않습니다.", "",
   ];
   if (!analysis.turns.length) return [...lines, "분석할 진단 기록이 없습니다.", ""].join("\n");
@@ -598,14 +607,17 @@ function option(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-function enabledChats(dbPath: string): { ids: Set<string>; latestChatId?: string } | undefined {
+function enabledChats(dbPath: string): { ids: Set<string>; latestChatId?: string; sourceRecoveryJobs: Array<{ chatId: string; metadata?: import("@rcm/shared").SourceRecoveryMetadata }> } | undefined {
   try {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
       const rows = db.prepare(`SELECT s.key FROM server_meta s JOIN chats c ON s.key=? || c.id
         WHERE s.key LIKE ? AND s.value='1' ORDER BY c.updated_at DESC`).all(RETRIEVAL_TRACE_CHAT_PREFIX, `${RETRIEVAL_TRACE_CHAT_PREFIX}%`) as Array<{ key: string }>;
       const chatIds = rows.map((row) => row.key.slice(RETRIEVAL_TRACE_CHAT_PREFIX.length));
-      return { ids: new Set(chatIds), latestChatId: chatIds[0] };
+      const sourceRecoveryJobs = (db.prepare(`SELECT chat_id AS chatId,json_extract(payload_json,'$.sourceRecoveryMetadata') metadata
+        FROM jobs WHERE json_extract(payload_json,'$.sourceRecovery')=1`).all() as Array<{ chatId: string; metadata: string | null }>)
+        .map(row => ({ chatId: row.chatId, metadata: row.metadata ? JSON.parse(row.metadata) : undefined }));
+      return { ids: new Set(chatIds), latestChatId: chatIds[0], sourceRecoveryJobs };
     } finally { db.close(); }
   } catch { return undefined; }
 }
@@ -630,6 +642,7 @@ export async function runReportCli(): Promise<DiagnosticAnalysis> {
   const enabled = enabledChats(dbPath);
   const analysis = analyzeTrace(parseTrace(content), {
     source: tracePath, enabledChatIds: enabled?.ids, latestEnabledChatId: enabled?.latestChatId,
+    sourceRecoveryJobs: enabled?.sourceRecoveryJobs,
     chatId: option("--chat"), allChats: process.argv.includes("--all-chats"),
     turns: Math.max(1, Math.min(200, Number(option("--turns") ?? 12) || 12)),
   });

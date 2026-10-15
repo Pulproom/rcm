@@ -1,3 +1,5 @@
+import { withAuxiliaryStoryFraming } from "@rcm/shared";
+import { isProviderAuthenticationError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES } from "@rcm/shared";
 import { StateOutcomeCapture } from "./state-outcomes.js";
 import { automaticStateCandidates, fundAutomaticState, renderAutomaticState, selectAutomaticState, sharedStateBudget } from "./automatic-state.js";
 import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText } from "@rcm/shared";
@@ -20,7 +22,7 @@ import { timeout } from "hono/timeout";
 import { MemoryReferences } from "./memory-references.js";
 import { finalizeMcpAnswer } from "./mcp-answer.js";
 import { automaticDeliveryHistory, recordAutomaticDelivery, persistAutomaticActivationObservations, deliveredActivationObservation, type AutomaticActivationObservation } from "./recall-activation.js";
-import { projectJobListPayload, stageJobModelOutput } from "./jobs.js";
+import { projectJobListPayload, stageJobModelOutput, manualRetryPayload } from "./jobs.js";
 import { inspectDraftEvidence, describeEvidenceReview } from "./evidence-review.js";
 import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "./packet-manifest.js";
 import { queueSourceRecovery, retrieveSourceEvidence, renderSourceEvidence, sourceEvidenceAtomKey } from "./source-evidence.js";
@@ -107,12 +109,14 @@ import { buildRetrievalQuerySignals } from "./retrieval-planner.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage } from "./auxiliary-page-cache.js";
 import { beginInitialCalibration, clearInitialCalibrationDraft, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
 import { previewRegeneration, applyCanonicalRegeneration, applyEpisodeRegeneration, discardRegeneration, listExtractionBatches, listRegenerations, regenerationRun, startCanonicalRegeneration, startEpisodeRegeneration } from "./regeneration.js";
-import { listSourceRanges, rangeMessages } from "./source-ranges.js";
+import { listSourceRanges, rangeMessages, setMemoryExclusion } from "./source-ranges.js";
+import { additionSources, additionMessageReason, previewMemoryAddition, startMemoryAddition, listMemoryAdditions, applyMemoryAddition, discardMemoryAddition } from './memory-addition.js';
 import { applyMemoryGroup, completeMemoryGroupJob, discardMemoryGroup, invalidateChangedMemoryGroups, listMemoryGroups, previewMemoryGroup, startMemoryGroup, ungroupMemories } from "./memory-grouping.js";
 import { RetrievalTraceWriter, type RetrievalTraceEvent } from "./retrieval-trace.js";
 import { memoryAtomKeys, memoryDetailAtomKey, memoryDialogueAtomKey, memorySummaryAtomKey, physicalOccurrenceAtomKey, relationshipLandmarkAtomKey } from "./memory-atoms.js";
 import { accessibleArchiveExists, memoryToolReadiness } from "./memory-tool-readiness.js";
 import { parseLandmarkKinds, refreshMemoryFts, RELATIONSHIP_LANDMARK_KINDS } from "./memory-search-document.js";
+import { recognitionDetailSql, recognitionOnlyMemorySql } from "./memory-group-search.js";
 import { invalidateTranslations, lookupTranslations, translationCacheStats, upsertTranslations } from "./translation-cache.js";
 import { buildLedgerConsistencyJob, completeLedgerConsistencyJob, finalizeLedgerConsistencyRun } from "./ledger-consistency.js";
 import { VoyageReranker, type EvidenceReranker, RerankerUnavailableError } from "./reranker.js";
@@ -283,6 +287,7 @@ export function createApp(dependencies: Dependencies): Hono {
       status: () => readDashboardStatus(chatId),
       initialCalibration: () => initialCalibrationLedger(db, chatId),
       storySpine: () => listStorySpine(db, chatId),
+      socialKnowledge: () => readDashboardSocialKnowledge(chatId),
     };
     // Keep partial failures isolated, just like the individual dashboard reads.
     const datasets = Object.fromEntries(Object.entries(readers).map(([key, read]) => {
@@ -816,6 +821,8 @@ export function createApp(dependencies: Dependencies): Hono {
       estimatedTokens: estimateTokens(packet),
       assembly,
       selected: selectedItems.map(publicMemoryContext),
+      stateSnapshots: selectedState.filter(row => finalManifest.stateEvidenceIds.includes(row.item.id) && packet.includes(row.line))
+        .map(row => ({ id: row.item.id, text: row.line })),
       injectionManifest: finalManifest,
       memoryToolsAvailable: memoryToolReadiness(db, parsed.chatId).available,
       memoryToolOpportunity: toolOpportunity,
@@ -849,7 +856,22 @@ export function createApp(dependencies: Dependencies): Hono {
       if (candidate.matchedPhrases.length && !missingPhrases.length) return [];
       return [{ ...candidate, matchedPhrases: missingPhrases }];
     });
-    if (queueSourceRecovery(db, parsed.chatId, recoveryCandidates, retrievalSignals.filter((signal) => signal.kind !== "scene").map((signal) => signal.text).join("\n"))) serverWorker.wake();
+    const deliveredSourceEvidence = [
+      ...selectedItems.flatMap(item => [
+        ...(finalManifest.atomKeys.includes(memorySummaryAtomKey(item) ?? "") ? item.evidence : []),
+        ...item.keyDialogues.filter(dialogue => finalManifest.atomKeys.includes(memoryDialogueAtomKey(item.id, dialogue))).flatMap(dialogue => dialogue.evidence),
+      ]),
+      ...(db.prepare(`SELECT evidence_json FROM memory_details WHERE chat_id=? AND id IN (SELECT value FROM json_each(?))`)
+        .all(parsed.chatId, JSON.stringify(finalManifest.detailIds)) as Array<{ evidence_json: string }>).flatMap(row => JSON.parse(row.evidence_json)),
+      ...selectedState.filter(row => finalManifest.stateEvidenceIds.includes(row.item.id)).flatMap(row => row.item.citations),
+      ...deliveredSources,
+      ...([['memories', 'memory:'], ['memory_details', 'detail:'], ['memory_dialogues', 'dialogue:']] as const).flatMap(([table, prefix]) => {
+        const ids = (finalStory.supportItemIds ?? []).filter(id => id.startsWith(prefix)).map(id => id.slice(prefix.length));
+        return (db.prepare(`SELECT evidence_json FROM ${table} WHERE chat_id=? AND id IN (SELECT value FROM json_each(?))`)
+          .all(parsed.chatId, JSON.stringify(ids)) as Array<{ evidence_json: string }>).flatMap(row => JSON.parse(row.evidence_json));
+      }),
+    ];
+    if (queueSourceRecovery(db, parsed.chatId, recoveryCandidates, retrievalSignals.filter((signal) => signal.kind !== "scene").map((signal) => signal.text).join("\n"), deliveredSourceEvidence)) serverWorker.wake();
     const roleTokens: Record<string, number> = {};
     for (const atom of atomPreservation) if (atom.delivered) roleTokens[atom.role] = (roleTokens[atom.role] ?? 0) + atom.tokens;
     // Recovery enqueue/worker startup is still synchronous response work.
@@ -1150,9 +1172,10 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/jobs/lease", async (context) => {
     const body = LeaseJobRequestSchema.parse(await context.req.json());
     if (llmStore.config.engine === "server") return context.json({ job: null });
-    return context.json({ job: attachAuxiliaryPlan(db, leaseJob(db, body.workerId, config.leaseSeconds), {
+    const job = attachAuxiliaryPlan(db, leaseJob(db, body.workerId, config.leaseSeconds), {
       maxInputTokens: llmStore.config.maxInputTokens, maxOutputTokens: llmStore.config.maxOutputTokens, llmTimeoutMs: llmStore.config.llmTimeoutMs,
-    }) });
+    });
+    return context.json({ job: job ? { ...job, relaxAuxiliaryCensorship: llmStore.config.relaxAuxiliaryCensorship === true } : null });
   });
   app.post("/v1/jobs/:id/draft", async (context) => {
     const body = await context.req.json() as { workerId?: string; output?: string; storyValidationReason?: string };
@@ -1169,7 +1192,7 @@ export function createApp(dependencies: Dependencies): Hono {
       : context.json({ error: "Lease not found" }, 409);
   });
   app.post("/v1/jobs/:id/progress", async (context) => {
-    const body = await context.req.json() as { workerId?: string; stage?: string; repairDelta?: number; llmCallStats?: { total?: unknown; repairs?: unknown; byPurpose?: unknown }; llmCallDiagnostic?: { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown } };
+    const body = await context.req.json() as { workerId?: string; stage?: string; repairDelta?: number; llmCallStats?: { total?: unknown; repairs?: unknown; byPurpose?: unknown }; llmCallDiagnostic?: { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; code?: unknown; httpStatus?: unknown; risuCall?: unknown } };
     const allowed = new Set<JobPipelineStage>(["queued", "first_extraction", "post_extraction_audit", "state_reconciliation", "ledger_consistency", "relationship_projection", "story_consolidation", "storing", "complete", "failed"]);
     if (!body.workerId || !allowed.has(body.stage as JobPipelineStage)) return context.json({ error: "Invalid pipeline progress" }, 400);
     const repairDelta = Math.min(1, Math.max(0, Math.trunc(Number(body.repairDelta ?? 0))));
@@ -1180,6 +1203,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const llmCallDiagnostic = rawDiagnostic && typeof rawDiagnostic.purpose === "string" && /^[a-z_]{1,80}$/.test(rawDiagnostic.purpose)
       && Number.isInteger(Number(rawDiagnostic.attempt)) && ["started", "succeeded", "failed"].includes(String(rawDiagnostic.outcome))
       ? { purpose: rawDiagnostic.purpose, attempt: Number(rawDiagnostic.attempt), outcome: String(rawDiagnostic.outcome) as "started" | "succeeded" | "failed", at: Math.max(0, Number(rawDiagnostic.at) || Date.now()),
+        risuCall: projectRisuAuxiliaryCallDiagnostic(rawDiagnostic.risuCall),
+        ...(RISU_AUXILIARY_FAILURE_CODES.includes(rawDiagnostic.code as any) ? { code: String(rawDiagnostic.code) } : {}),
+        ...(typeof rawDiagnostic.httpStatus === "number" && Number.isInteger(rawDiagnostic.httpStatus) && rawDiagnostic.httpStatus >= 100 && rawDiagnostic.httpStatus <= 599 ? { httpStatus: rawDiagnostic.httpStatus } : {}),
         ...(typeof rawDiagnostic.error === "string" ? { error: rawDiagnostic.error.slice(0, 300) } : {}) } : undefined;
     const ok = setJobPipelineStage(db, context.req.param("id"), body.stage as JobPipelineStage, body.workerId, repairDelta, llmCallStats, llmCallDiagnostic);
     return ok ? context.json({ ok: true }) : context.json({ error: "Lease not found" }, 409);
@@ -1235,7 +1261,8 @@ export function createApp(dependencies: Dependencies): Hono {
     if ((jobPayload as any).regenerationRunId) return context.json({ required: false, groundingDraft: preparedResult, evidenceIssues });
     const maxInputTokens = jobPayload.auxiliaryBudget?.maxInputTokens ?? jobPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000;
     const prepared = usesStateExtraction(job.type, jobPayload)
-      ? prepareStateExtraction(db, job.chat_id, sourceMessageIds, preparedResult, maxInputTokens)
+      ? prepareStateExtraction(db, job.chat_id, sourceMessageIds, preparedResult, maxInputTokens, job.type === 'memory_addition'
+        ? { userRequest: (jobPayload as any).userRequest, existingMemories: (jobPayload as any).existingMemories } : undefined)
       : prepareReconciliation(db, job.chat_id, preparedResult, maxInputTokens);
     (jobPayload as any).auxiliaryPromptParts = prepared.parts?.map((part) => ({ purpose: "reconciliation", systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) ?? [];
     db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND lease_owner=? AND status='leased'").run(JSON.stringify(jobPayload), Date.now(), context.req.param("id"), body.workerId);
@@ -1565,7 +1592,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const parsed = z.object({ items: z.array(z.object({ id: z.string(), text: z.string() })).max(10000), maxOutput: z.number().int().min(256).max(128000).default(8000) }).safeParse(body);
     if (!parsed.success) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation plan" }, 400);
     const batches = planTranslation(parsed.data.items, parsed.data.maxOutput);
-    return context.json({ parts: batches.map(items => ({ systemPrompt: translationSystemPrompt, userPrompt: JSON.stringify({ items }), items })) });
+    return context.json({ parts: batches.map(items => ({ systemPrompt: withAuxiliaryStoryFraming([{ role: "system", content: translationSystemPrompt }], llmStore.config.relaxAuxiliaryCensorship === true)[0]!.content, userPrompt: JSON.stringify({ items }), items })) });
   });
   app.post("/v1/translations/batch", async context => {
     const parsed = TranslationLegacySettingsSchema.extend({
@@ -1741,11 +1768,11 @@ export function createApp(dependencies: Dependencies): Hono {
     }
   });
 
-  app.get("/v1/chats/:id/social-knowledge", (context) => {
-    const chatId = context.req.param("id");
+  function readDashboardSocialKnowledge(chatId: string) {
     const jobs = db.prepare(`SELECT status,COUNT(*) count FROM jobs WHERE chat_id=? AND type='social_backfill' GROUP BY status`).all(chatId) as Array<{ status: string; count: number }>;
-    return context.json({ items: listSocialKnowledge(db, chatId), jobs: Object.fromEntries(jobs.map((row) => [row.status, row.count])) });
-  });
+    return { items: listSocialKnowledge(db, chatId), jobs: Object.fromEntries(jobs.map((row) => [row.status, row.count])) };
+  }
+  app.get("/v1/chats/:id/social-knowledge", (context) => context.json(readDashboardSocialKnowledge(context.req.param("id"))));
   app.put("/v1/chats/:id/social-knowledge", async (context) => {
     try {
       const body = await context.req.json() as { holder?: unknown; subject?: unknown; level?: unknown; knownAs?: unknown; addressTerms?: unknown; previousHolder?: unknown; previousSubject?: unknown; description?: unknown; locked?: boolean };
@@ -1808,13 +1835,68 @@ export function createApp(dependencies: Dependencies): Hono {
     const legacyHolds = db.prepare(`SELECT e.id,e.start_ordinal,e.end_ordinal FROM episodes e WHERE e.chat_id=? AND e.resolution IS NOT 'group'
       AND e.status IN ('holding','queued','processing','failed') AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.chat_id=e.chat_id AND j.type='episode'
         AND json_extract(j.payload_json,'$.episodeId')=e.id AND json_extract(j.payload_json,'$.batchId') IS NOT NULL)`).all(chatId);
-    return context.json({ ranges: listSourceRanges(db, chatId), groups: listMemoryGroups(db, chatId), regenerations: listRegenerations(db, chatId), legacyHolds });
+    return context.json({ ranges: listSourceRanges(db, chatId), groups: listMemoryGroups(db, chatId), regenerations: listRegenerations(db, chatId), additions: listMemoryAdditions(db, chatId), legacyHolds });
+  });
+  app.get('/v1/chats/:id/source-ranges/search', (context) => {
+    const chatId = context.req.param('id');
+    const query = (context.req.query('q') ?? '').trim();
+    const ordinal = context.req.query('ordinal');
+    if (query.length > 500 || ordinal !== undefined && (!/^\d+$/.test(ordinal) || Number(ordinal) < 1 || !Number.isSafeInteger(Number(ordinal)))) return context.json({ error: '검색어와 메시지 번호를 확인해 주세요' }, 400);
+    const matches = db.prepare(`SELECT message_id AS id,ordinal FROM messages WHERE chat_id=?
+      AND memory_excluded=0 AND extraction_state<>'skipped_policy'
+      AND lifecycle IN ('pending','committed','client_pruned') AND host_visibility IN ('active','all_before')
+      AND CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END IS NOT NULL
+      AND (?='' OR instr(lower(CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END),lower(?))>0)
+      AND (? IS NULL OR ordinal=?) ORDER BY ordinal LIMIT 201`).all(chatId, query, query, ordinal === undefined ? null : Number(ordinal)-1, ordinal === undefined ? null : Number(ordinal)-1) as Array<{ id: string; ordinal: number }>;
+    if (!matches.length) return context.json({ ranges: [], messageNumbers: [], truncated: false });
+    const ranges = listSourceRanges(db, chatId, matches.slice(0, 200).map(row => row.id));
+    return context.json({ ranges, messageNumbers: matches.slice(0, 200).map(row => row.ordinal+1), truncated: matches.length > 200 });
+  });
+  app.post('/v1/chats/:id/memory-additions/sources', async (context) => {
+    const body = await context.req.json() as { rangeIds?: unknown };
+    if (!Array.isArray(body.rangeIds) || !body.rangeIds.every(id => typeof id === 'string')) return context.json({ error: '원문 구간을 확인해 주세요' }, 400);
+    try { return context.json(additionSources(db, context.req.param('id'), body.rangeIds)); }
+    catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
+  });
+  for (const operation of ['preview', 'create'] as const) app.post(`/v1/chats/:id/memory-additions/${operation}`, async (context) => {
+    const body = await context.req.json() as { rangeIds?: unknown; messageIds?: unknown; request?: unknown; postExtractionReview?: unknown };
+    if (!Array.isArray(body.rangeIds) || !body.rangeIds.every(id => typeof id === 'string') || !Array.isArray(body.messageIds) || !body.messageIds.every(id => typeof id === 'string')
+      || typeof body.request !== 'string' || typeof body.postExtractionReview !== 'boolean') return context.json({ error: '메시지 선택과 요청을 확인해 주세요' }, 400);
+    try {
+      const chatId = context.req.param('id');
+      if (operation === 'preview') return context.json(previewMemoryAddition(db, chatId, body.rangeIds, body.messageIds, body.request, body.postExtractionReview));
+      const created = startMemoryAddition(db, chatId, body.rangeIds, body.messageIds, body.request, body.postExtractionReview);
+      serverWorker.wake();
+      return context.json(created, 202);
+    } catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
+  });
+  for (const operation of ['apply', 'discard', 'retry'] as const) app.post(`/v1/chats/:id/memory-additions/:runId/${operation}`, (context) => {
+    const chatId = context.req.param('id'), id = context.req.param('runId');
+    try {
+      if (operation === 'apply') { applyMemoryAddition(db, chatId, id); void embeddings.indexPending(chatId); }
+      else if (operation === 'discard') discardMemoryAddition(db, chatId, id);
+      else {
+        if (!listMemoryAdditions(db, chatId).find(row => row.id === id)?.canRetry) return context.json({ error: '다시 시도할 작업이 없어요' }, 409);
+        const job = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='memory_addition' AND status='failed'").get(id, chatId) as { payload_json: string };
+        db.prepare("UPDATE jobs SET status='queued',attempts=0,payload_json=?,last_error=NULL,updated_at=? WHERE id=? AND chat_id=? AND type='memory_addition' AND status='failed'")
+          .run(JSON.stringify(manualRetryPayload(JSON.parse(job.payload_json))), Date.now(), id, chatId);
+        serverWorker.wake();
+      }
+      return context.json({ ok: true });
+    } catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
   });
   app.get('/v1/chats/:id/source-ranges/:batchId', (context) => {
     const chatId = context.req.param('id');
     const range = listSourceRanges(db, chatId).find((row) => row.id === context.req.param('batchId'));
     if (!range) return context.json({ error: '원문 구간을 찾을 수 없어' }, 404);
-    return context.json({ ...range, messages: rangeMessages(db, chatId).filter((row) => range.sourceMessageIds.includes(row.id)) });
+    return context.json({ ...range, messages: rangeMessages(db, chatId).filter((row) => range.sourceMessageIds.includes(row.id))
+      .map(row => ({ ...row, additionReason: additionMessageReason(db, chatId, row) })) });
+  });
+  app.put('/v1/chats/:id/messages/:messageId/memory-exclusion', async (context) => {
+    const body = await context.req.json() as { excluded?: unknown };
+    if (typeof body.excluded !== 'boolean') return context.json({ error: '제외 여부를 확인해 주세요' }, 400);
+    try { return context.json(setMemoryExclusion(db,context.req.param('id'),context.req.param('messageId'),body.excluded)); }
+    catch (error: any) { return context.json({ error: error.message, reason: error.message, code: error.code }, error.code === 'MESSAGE_NOT_FOUND' ? 404 : 409); }
   });
   for (const operation of ['preview', 'create'] as const) app.post(`/v1/chats/:id/memory-groups/${operation}`, async (context) => {
     try {
@@ -1936,7 +2018,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const jobId = randomUUID();
     db.transaction(() => {
       db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'audit_retry','queued',?,0,?,?)`)
-        .run(jobId, chatId, JSON.stringify({ ...originalPayload, sourceMessageIds, sourceFingerprint: expectedFingerprint, auditDraft: retryDraft, sourceRecovery, dialogueRecovery, retryOfAuditId: audit.id, retryOfJobId: audit.job_id, llmCallStats: { total: 0, repairs: 0, byPurpose: {} }, postExtractionReview: true }), timestamp, timestamp);
+        .run(jobId, chatId, JSON.stringify({ ...originalPayload, sourceMessageIds, sourceFingerprint: expectedFingerprint, auditDraft: retryDraft, sourceRecovery, sourceRecoveryMetadata: sourceRecovery ? { targets: expectedFingerprint.map(({ messageId, ordinal }) => ({ messageId, ordinal })), matchKinds: originalPayload.sourceRecoveryMetadata?.matchKinds ?? [] } : undefined, dialogueRecovery, retryOfAuditId: audit.id, retryOfJobId: audit.job_id, llmCallStats: { total: 0, repairs: 0, byPurpose: {} }, postExtractionReview: true }), timestamp, timestamp);
     })();
     serverWorker.wake();
     return context.json({ ok: true, jobId });
@@ -1957,7 +2039,7 @@ export function createApp(dependencies: Dependencies): Hono {
   function readDashboardMemories(chatId: string) {
     const bookmarks = readMemoryBookmarks(db, chatId);
     const items = db.prepare(`
-      SELECT m.id,m.memory_key AS memoryKey,m.type,m.title,m.content,m.participants_json,m.known_by_json,m.perspective,m.story_time,m.story_time_normalized,m.locations_json,m.landmark,m.landmark_kinds_json,m.evidence_json,
+      SELECT m.id,m.memory_key AS memoryKey,${recognitionOnlyMemorySql('m')} AS recognitionOnly,m.type,m.title,m.content,m.participants_json,m.known_by_json,m.perspective,m.story_time,m.story_time_normalized,m.locations_json,m.landmark,m.landmark_kinds_json,m.evidence_json,
         m.salience,m.strength,m.recall_count,m.pinned,m.active,m.capsule_parent_id,m.source_batch_id AS sourceBatchId,m.user_managed AS userManaged,m.created_revision,m.created_at,m.updated_at,
         (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal,
         (SELECT msg.event_time FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id ORDER BY msg.ordinal LIMIT 1) AS source_event_time
@@ -1977,6 +2059,7 @@ export function createApp(dependencies: Dependencies): Hono {
       try { knownBy = JSON.parse(String(item.known_by_json ?? "[]")) as string[]; } catch { knownBy = []; }
       try { landmarkKinds = JSON.parse(String(item.landmark_kinds_json ?? "[]")) as unknown[]; } catch { landmarkKinds = []; }
       const { locations_json: _locationsJson, landmark_kinds_json: _landmarkKindsJson, ...rest } = item;
+      rest.recognitionOnly = Boolean(item.recognitionOnly);
       const episode = db.prepare("SELECT id,status,resolution,source_tokens FROM episodes WHERE memory_id=? LIMIT 1").get(item.id) as any;
       const sections = episode ? db.prepare("SELECT id,ordinal,title,summary,source_message_ids_json AS sourceMessageIds,key_dialogues_json AS keyDialogues FROM episode_sections WHERE episode_id=? ORDER BY ordinal").all(episode.id).map((section: any) => ({
         ...section,
@@ -2013,7 +2096,9 @@ export function createApp(dependencies: Dependencies): Hono {
         d.evidence_json AS evidence,d.source_start_ordinal AS sourceOrdinal,bm25(memory_detail_fts) AS rank
         FROM memory_detail_fts JOIN memory_details d ON d.id=memory_detail_fts.detail_id
         JOIN memories m ON m.id=d.memory_id AND m.active=1
-        WHERE memory_detail_fts MATCH ? AND memory_detail_fts.chat_id=? AND d.active=1 ORDER BY rank LIMIT ?`).all(match, chatId, limit) as Array<Record<string, any>>;
+        WHERE memory_detail_fts MATCH ? AND memory_detail_fts.chat_id=? AND d.active=1
+          AND NOT ${recognitionOnlyMemorySql('m')} AND NOT ${recognitionDetailSql('d')}
+        ORDER BY rank LIMIT ?`).all(match, chatId, limit) as Array<Record<string, any>>;
       return context.json({ items: rows.map((row) => {
         const access = memoryDetailAccess(db, chatId, row.id);
         return { ...row, access, participants: JSON.parse(row.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
@@ -2291,7 +2376,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
     if (!chat) return context.json({ error: "Chat not found" }, 404);
     const source = body.sourceMessageId
-      ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
+      ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
       : undefined;
     if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했습니다." }, 400);
     const ordinal = source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number | null }).ordinal;
@@ -2330,7 +2415,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (!intimacyMilestoneKeys(act).includes(current.milestone_key)) return context.json({ error: "이 실제 행위는 현재 최초 마일스톤 종류와 맞지 않습니다. 기존 행을 삭제하고 새 최초 행위로 추가하세요." }, 400);
     const sourceWasEdited = Object.hasOwn(body, "sourceMessageId");
     const source = body.sourceMessageId
-      ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
+      ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
       : undefined;
     if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했습니다." }, 400);
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
@@ -2503,8 +2588,8 @@ export function createApp(dependencies: Dependencies): Hono {
       SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) AS pending,
       SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
       FROM embedding_blocks WHERE chat_id=?`).get(chatId) as { pending: number | null; failed: number | null };
-    const sourceProgress = db.prepare(`SELECT COUNT(*) total,
-      SUM(CASE WHEN extraction_state IN ('done','encapsulated','skipped_policy') THEN 1 ELSE 0 END) processed
+    const sourceProgress = db.prepare(`SELECT SUM(CASE WHEN memory_excluded=0 THEN 1 ELSE 0 END) total,
+      SUM(CASE WHEN memory_excluded=0 AND extraction_state IN ('done','encapsulated','skipped_policy') THEN 1 ELSE 0 END) processed
       FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') AND content IS NOT NULL`).get(chatId) as { total: number; processed: number | null };
     const derivedCounts = db.prepare(`SELECT
       (SELECT COUNT(*) FROM memories WHERE chat_id=? AND active=1) memories,
@@ -2540,12 +2625,13 @@ export function createApp(dependencies: Dependencies): Hono {
       SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed
       FROM jobs WHERE chat_id=? AND type IN ('extract','episode','social_backfill','audit_retry','ledger_consistency','relationship_projection','story_consolidation')`).get(chatId) as { total: number; processed: number | null; failed: number | null };
     const activePipeline = db.prepare(`SELECT COALESCE(json_extract(payload_json,'$.pipelineStage'),json_extract(payload_json,'$.operationStage')) stage,
+      json_extract(payload_json,'$.pipelineManualRetry') manualRetry,
       json_extract(payload_json,'$.pipelineRetryAttempt') retryAttempt,
       json_extract(payload_json,'$.pipelineMaxAttempts') retryMax,
       CASE WHEN type='extract' THEN json_extract(payload_json,'$.operationStageOrdinal') END groupOrdinal,
       CASE WHEN type='extract' THEN json_extract(payload_json,'$.operationStageTotal') END groupTotal
       FROM jobs WHERE chat_id=? AND status IN ('leased','queued')${latestBackfill?.runId ? " AND json_extract(payload_json,'$.backfillRunId')=?" : ""}
-      ORDER BY status='leased' DESC,CASE WHEN json_extract(payload_json,'$.pipelineStage')='retrying' THEN 0 ELSE 1 END,created_at,rowid LIMIT 1`).get(...(latestBackfill?.runId ? [chatId, latestBackfill.runId] : [chatId])) as { stage: string | null; retryAttempt: number | null; retryMax: number | null; groupOrdinal: number | null; groupTotal: number | null } | undefined;
+      ORDER BY status='leased' DESC,CASE WHEN json_extract(payload_json,'$.pipelineStage')='retrying' THEN 0 ELSE 1 END,created_at,rowid LIMIT 1`).get(...(latestBackfill?.runId ? [chatId, latestBackfill.runId] : [chatId])) as { stage: string | null; manualRetry: number | null; retryAttempt: number | null; retryMax: number | null; groupOrdinal: number | null; groupTotal: number | null } | undefined;
     const ledgerProgress = latestBackfill?.runId
       ? db.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN status IN ('done','failed','archived') THEN 1 ELSE 0 END) processed,SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed
           FROM jobs WHERE chat_id=? AND type='ledger_consistency' AND json_extract(payload_json,'$.backfillRunId')=?`).get(chatId, latestBackfill.runId) as { total: number; processed: number | null; failed: number | null }
@@ -2559,7 +2645,9 @@ export function createApp(dependencies: Dependencies): Hono {
       FROM jobs WHERE chat_id=? AND json_extract(payload_json,'$.backfillRunId')=?`).get(chatId, latestBackfill.runId) as { total: number | null; repairs: number | null; active: number | null }
       : { total: 0, repairs: 0, active: 0 };
     const acknowledged = latestBackfill?.runId ? Boolean(db.prepare("SELECT 1 FROM server_meta WHERE key=?").get(`backfill_ack:${chatId}:${latestBackfill.runId}`)) : true;
+    const responseFailure = db.prepare("SELECT json_extract(payload_json,'$.modelResponseDiagnostic') diagnostic FROM jobs WHERE chat_id=? AND status='failed' AND json_type(payload_json,'$.modelResponseDiagnostic')='object' ORDER BY updated_at DESC LIMIT 1").get(chatId) as { diagnostic: string } | undefined;
     const calibration = initialCalibrationView(db, chatId);
+    const lastJob = db.prepare("SELECT json_extract(payload_json,'$.sourceRecoveryMetadata') metadata FROM jobs WHERE chat_id=? AND type<>'quiz' AND status IN ('done','failed') ORDER BY updated_at DESC,rowid DESC LIMIT 1").get(chatId) as { metadata: string | null } | undefined;
     const calibrationPending = ["unseeded", "awaiting_setup", "queued", "awaiting_confirmation"].includes(calibration.status);
     const chat = db.prepare("SELECT revision,memory_language FROM chats WHERE id=?").get(chatId) as { revision: number; memory_language: MemoryLanguage } | undefined;
     const memoryUpdatedAt = (db.prepare("SELECT MAX(updated_at) value FROM memories WHERE chat_id=? AND active=1").get(chatId) as { value: number | null }).value;
@@ -2570,11 +2658,13 @@ export function createApp(dependencies: Dependencies): Hono {
       pendingReconciliations,
       ...ingestion,
       pendingEmbeddings: Number(embeddingJobs.pending ?? 0), failedEmbeddings: Number(embeddingJobs.failed ?? 0),
-      progress: { processedMessages: Number(sourceProgress.processed ?? 0), totalMessages: sourceProgress.total,
+      auxiliaryAuthFailed: (db.prepare("SELECT last_error FROM jobs WHERE chat_id=? AND status='failed'").all(chatId) as Array<{ last_error: string | null }>).some(job => isProviderAuthenticationError(job.last_error)),
+      progress: { processedMessages: Number(sourceProgress.processed ?? 0), totalMessages: Number(sourceProgress.total ?? 0), excludedMessages: ingestion.excludedMessages,
         processedGroups: Number(groupProgress.processed ?? 0), totalGroups: Number(groupProgress.total ?? 0), failedGroups: Number(groupProgress.failed ?? 0),
         memories: derivedCounts.memories, details: derivedCounts.details,
         pendingRelationshipPairs: derivedCounts.projectionPairs, pendingRelationshipProjectionJobs: Number(downstreamJobs.projectionJobs ?? 0),
         processedTasks: Number(taskProgress.processed ?? 0), totalTasks: Number(taskProgress.total ?? 0), failedTasks: Number(taskProgress.failed ?? 0), activeStage: activePipeline?.stage ?? undefined,
+        manualRetry: activePipeline?.manualRetry === 1,
         retryAttempt: Number(activePipeline?.retryAttempt ?? 0) || undefined, retryMax: Number(activePipeline?.retryMax ?? 0) || undefined,
         activeGroupOrdinal: Number(activePipeline?.groupOrdinal ?? 0) || undefined, activeGroupTotal: Number(activePipeline?.groupTotal ?? 0) || undefined,
         ledgerProcessed: Number(ledgerProgress.processed ?? 0), ledgerTotal: Number(ledgerProgress.total ?? 0), ledgerFailed: Number(ledgerProgress.failed ?? 0), downstreamWaiting: ledgerBarrierActive,
@@ -2582,6 +2672,7 @@ export function createApp(dependencies: Dependencies): Hono {
         storyProcessed: Number(downstreamJobs.storyProcessed ?? 0), storyTotal: Number(downstreamJobs.storyTotal ?? 0), storyPending: Number(downstreamJobs.storyJobs ?? 0), storyFailed: Number(downstreamJobs.storyFailed ?? 0),
         llmCalls: Number(callProgress.total ?? 0), repairCalls: Number(callProgress.repairs ?? 0), runComplete: Boolean(latestBackfill?.runId && Number(callProgress.active ?? 0) === 0 && !calibrationPending), acknowledged,
         backfillRunId: latestBackfill?.runId },
+      modelResponseDiagnostic: responseFailure ? JSON.parse(responseFailure.diagnostic) : undefined,
       initialCalibration: calibration,
       worker: serverWorker.statusForChat(chatId),
       episode: (episodeOverview(db, chatId) as any).active,
@@ -2677,7 +2768,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const required = kind === "assertion" ? [body.subject, body.predicate, body.value] : kind === "belief" ? [body.holder, body.subject, body.predicate, body.value] : kind === "promise" ? [body.promisor, body.promisee, body.content] : [];
     if (!kind || required.length === 0 || required.some((value) => !value?.trim())) return context.json({ error: "필수 영문 정본 필드를 입력하세요." }, 400);
     const confidence = Math.max(0, Math.min(1, Number(body.confidence ?? (kind === "belief" ? 0.7 : 1))));
-    const source = body.sourceMessageId ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined : undefined;
+    const source = body.sourceMessageId ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined : undefined;
     if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했습니다." }, 400);
     const ordinal = source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number | null }).ordinal;
     const evidence = JSON.stringify(source ? [{ messageId: source.message_id }] : []);
@@ -2880,7 +2971,7 @@ export function createApp(dependencies: Dependencies): Hono {
         SELECT id,type,status,attempts,leased_until,last_error,payload_json,created_at,updated_at FROM jobs
         WHERE chat_id=? AND status<>'archived' ORDER BY created_at DESC,rowid DESC LIMIT 200
       `).all(chatId).map((job: any) => ({ ...job, payload_json: JSON.stringify(projectJobListPayload(JSON.parse(job.payload_json))) })),
-      cancelledMessages: (db.prepare("SELECT count(*) AS count FROM messages WHERE chat_id=? AND extraction_state='cancelled'").get(chatId) as { count: number }).count,
+      cancelledMessages: (db.prepare("SELECT count(*) AS count FROM messages WHERE chat_id=? AND memory_excluded=0 AND extraction_state='cancelled'").get(chatId) as { count: number }).count,
       ...ingestion,
     };
   }
@@ -2894,10 +2985,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const update = db.prepare(`UPDATE jobs SET status='queued',attempts=0,payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='failed'`);
       let changes = 0;
       for (const job of failed) {
-        const payload = JSON.parse(job.payload_json || "{}") as Record<string, unknown>;
-        payload.repairBudgetUsed = false;
-        payload.stateRepairBudgetUsed = false;
-        payload.pipelineRepairCount = 0;
+          const payload = manualRetryPayload(JSON.parse(job.payload_json || "{}"));
         changes += update.run(JSON.stringify(payload), Date.now(), job.id).changes;
       }
       return { changes };

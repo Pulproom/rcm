@@ -1,4 +1,4 @@
-import { isInitialCalibrationMemory } from "./memory-origin.js";
+import { isRecognitionMemory } from "./memory-origin.js";
 import { compareStoryTimes } from "./story-time.js";
 
 /**
@@ -16,9 +16,9 @@ export function compareStoryMemories(left: any, right: any): number {
     || String(left?.id ?? "").localeCompare(String(right?.id ?? ""));
 }
 
-/** A scene is an episode memory; capsule children and initial calibration are not scenes. */
+/** A scene is an episode memory; capsule children and standalone recognition are not scenes. */
 export const isScene = (memory: any): boolean =>
-  Boolean(memory) && memory.type === "episode" && !memory.capsule_parent_id && !isInitialCalibrationMemory(memory);
+  Boolean(memory) && memory.type === "episode" && !memory.capsule_parent_id && !isRecognitionMemory(memory);
 
 /** Scenes in story order. */
 export const storyScenes = (memories: any[]): any[] => memories.filter(isScene).sort(compareStoryMemories);

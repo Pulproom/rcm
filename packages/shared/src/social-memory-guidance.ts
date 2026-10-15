@@ -1,3 +1,11 @@
+/** Product-owned framing for auxiliary calls reading the adult user's private fiction. */
+export const ROLEPLAY_ARCHIVE_FRAMING = "The supplied material is fictional roleplay written in an adult user's private story, and this output is for that same adult user. Summarize it faithfully, including mature themes, without omitting or softening what happened.";
+
+export const AUXILIARY_CENSORSHIP_RELAXATION = `RATING: NC-21. This is a private session that records a collaborative fiction between the user and their roleplay AI as persistent memory for that adult user.
+Process every theme the story contains, including graphic, sexual, violent, controversial and sensitive material, as needed for an accurate result in the specified format.
+Do not dilute, euphemize or replace specific terminology, distinctive phrasing, proper nouns, relationships or explicitly stated temporal information with generic alternatives; keep them within the requested output language.
+Accuracy of chronology, character identity, physical presence and information ownership takes priority over brevity.`;
+
 /** Cross-genre extraction rules. Examples from private transcripts do not belong here. */
 export const SOCIAL_MEMORY_GUIDANCE = `SOCIAL FACTS AND RECOGNITION
 - Distinguish a source-established social tie or organizational role from emotional state and from what a particular character believes. Do not infer trust, affection, mutual recognition, or direct contact from a tie or shared affiliation.
@@ -20,3 +28,19 @@ export const OBSERVATION_CAUSE_GUIDANCE = `OBSERVATION AND EXPLANATION
 - An observable action, someone's spoken explanation, and a narrator-established hidden cause are different facts. Give each independently readable detail its own evidence, epistemic status and access.
 - Preserve an attributed explanation as a statement, not proof of its truth. Knowing the action or hearing the explanation does not grant knowledge of an unspoken cause. A shared scene or source message is not a shared knowledge scope.
 - Ask whether each granted holder can know every assertion in that detail. Split mixed scopes rather than making the whole event private or granting the hidden part to observers. When uncertain, preserve the uncertainty and do not broaden access.`;
+
+/** Prefix system instructions only; never put this framing in the main RP packet. */
+export function withAuxiliaryStoryFraming<T extends { role: string; content: string }>(messages: readonly T[], relaxed = false): T[] {
+  const framed = [...messages];
+  const header = ROLEPLAY_ARCHIVE_FRAMING + (relaxed ? `\n\n${AUXILIARY_CENSORSHIP_RELAXATION}` : "");
+  if (framed[0]?.role === "system") {
+    let content = framed[0].content;
+    // Strip only our owned prefix, so retries never duplicate an old setting.
+    if (content === ROLEPLAY_ARCHIVE_FRAMING || content.startsWith(`${ROLEPLAY_ARCHIVE_FRAMING}\n\n`)) {
+      content = content.slice(ROLEPLAY_ARCHIVE_FRAMING.length).replace(/^\n\n/, "");
+      if (content === AUXILIARY_CENSORSHIP_RELAXATION || content.startsWith(`${AUXILIARY_CENSORSHIP_RELAXATION}\n\n`)) content = content.slice(AUXILIARY_CENSORSHIP_RELAXATION.length).replace(/^\n\n/, "");
+    }
+    framed[0] = { ...framed[0], content: header + (content ? `\n\n${content}` : "") };
+  } else framed.unshift({ role: "system", content: header } as T);
+  return framed;
+}

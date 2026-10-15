@@ -1,3 +1,4 @@
+import { withAuxiliaryStoryFraming, describeModelResponse } from "@rcm/shared";
 import { sanitizeDiagnosticText } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
 import { parseReconciliationResult } from "@rcm/shared";
@@ -75,6 +76,7 @@ function extractionCheckpointKey(job: LeasedJob): string {
 
 const defaults: StoredServerLlmConfig = {
   engine: "risu",
+  relaxAuxiliaryCensorship: false,
   ...defaultAuxiliaryModelConfig,
   serviceTier: "standard",
   maxInputTokens: 80_000,
@@ -142,6 +144,10 @@ export function auxiliaryModelReady(db: RcmDatabase): boolean {
   return (store?.config ?? parseStoredConfig(db)).engine === "risu" || store?.modelReady === true;
 }
 
+export function diagnoseAuxiliaryModelResponse(db: RcmDatabase, output: string) {
+  return stores.get(db)?.responseDiagnostic(output) ?? describeModelResponse(output, [process.env.RCM_TOKEN ?? ""]);
+}
+
 export class ServerLlmStore {
   #config: StoredServerLlmConfig;
   #apiKeys: Partial<Record<ServerLlmProvider, string>>;
@@ -190,6 +196,10 @@ export class ServerLlmStore {
       this.#jobApiKeys.set(jobId, this.apiKeyFor(snapshot.provider));
     }
     return snapshot;
+  }
+  responseDiagnostic(output: string) {
+    return describeModelResponse(output, [...Object.values(this.#apiKeys), ...this.#jobApiKeys.values(),
+      this.#vertexToken?.accessToken ?? "", this.#copilotToken?.accessToken ?? "", process.env.RCM_TOKEN ?? ""]);
   }
   get apiKey(): string { return this.#apiKeys[this.#config.provider] ?? ""; }
   apiKeyFor(provider: ServerLlmProvider): string { return provider === this.config.provider ? this.apiKey : this.#apiKeys[provider] ?? ""; }
@@ -488,7 +498,7 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
   }
 }
 
-type ServerLlmPurpose = "quiz" | "memory_group" | "memory_group_repair" | "extraction" | "extraction_repair" | "initial_calibration" | "initial_calibration_repair" | "audit" | "audit_repair" | "reconciliation" | "reconciliation_repair" | "state_response_repair" | "ledger_consistency" | "ledger_consistency_repair" | "relationship_projection" | "relationship_projection_repair" | "story_consolidation" | "story_consolidation_repair" | "episode_draft" | "episode_draft_repair" | "episode_finalize" | "episode_finalize_repair";
+type ServerLlmPurpose = import("@rcm/shared").AuxiliaryPurpose;
 
 export async function groupMemoriesWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal): Promise<MemoryGroupingResult> {
   const stage = job.memoryGrouping!;
@@ -591,7 +601,7 @@ async function callProvider(
   purpose: ServerLlmPurpose,
   requestedOutputBudget?: number,
 ): Promise<string> {
-  messages = messages.map(message => ({ ...message, content: prepareAuxiliaryText(message.content) }));
+  messages = withAuxiliaryStoryFraming(messages, store.config.relaxAuxiliaryCensorship === true).map(message => ({ ...message, content: prepareAuxiliaryText(message.content) }));
   // A job snapshot remains diagnostic history. Operational recovery settings
   // are read at the start of every call so a queued retry can switch provider,
   // model, service tier, limits or timeout without rebuilding the job.
@@ -658,7 +668,7 @@ export async function testProviderConnection(
     ? 512 + (thinkingBudget(config.thinking) ?? 0) : 512;
   let result;
   try { result = await requestStructuredProvider(store, { ...config, llmTimeoutMs: Math.min(config.llmTimeoutMs, 60_000) }, apiKey,
-    [{ role: "user", content: "Connection check. Reply with OK only." }], signal, limit, undefined, "text");
+    [{ role: "user", content: "Connection check. Reply with OK only." }], signal, limit, undefined, "text", false);
   } catch (error) {
     if (error instanceof ProviderRequestError) error.providerMessage = sanitizeDiagnosticText(error.providerMessage ?? "", [apiKey]);
     throw error;
@@ -669,7 +679,7 @@ export async function testProviderConnection(
 /** Shared transport only. Selection and extraction keep independent config,
  * accounting, retry and output validation policies. */
 export async function requestStructuredProvider(
-  store: Pick<ServerLlmStore,"vertexCredential" | "copilotCredential">,
+  store: Pick<ServerLlmStore,"vertexCredential" | "copilotCredential"> & Partial<Pick<ServerLlmStore,"config">>,
   config: Pick<StoredServerLlmConfig,"provider"|"endpoint"|"model"|"temperature"|"thinking"|"serviceTier"|"llmTimeoutMs">,
   apiKey: string,
   messages: Array<{role:"system"|"user"|"assistant";content:string}>,
@@ -677,7 +687,9 @@ export async function requestStructuredProvider(
   limit: number,
   onRequest: () => void = () => {},
   outputFormat: "json" | "text" = "json",
+  storyContent = true,
 ): Promise<{content:string;finishReason?:unknown;usage?:any}> {
+    if (storyContent) messages = withAuxiliaryStoryFraming(messages, store.config?.relaxAuxiliaryCensorship === true);
     const deadline = Date.now() + config.llmTimeoutMs;
     if (config.provider === "copilot") {
       const configuredEndpoint = validateEndpoint("copilot", config.endpoint);

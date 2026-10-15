@@ -17,7 +17,7 @@ export function accessibleArchiveExists(db: RcmDatabase, chatId: string, holders
       AND ((a.item_kind='detail' AND a.item_id IN (SELECT id FROM memory_details WHERE memory_id=m.id AND active=1))
         OR (a.item_kind='dialogue' AND a.item_id IN (SELECT id FROM memory_dialogues WHERE memory_id=m.id))))) LIMIT 1`).get(chatId, names, names))
     || Boolean(db.prepare(`SELECT 1 FROM source_passages p JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash
-      WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before')
+      WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned') AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')
       AND EXISTS(SELECT 1 FROM json_each(p.access_json) a JOIN json_each(?) h ON json_extract(a.value,'$.holder')=h.value COLLATE NOCASE) LIMIT 1`).get(chatId, names))
     || Boolean(db.prepare(`SELECT 1 FROM beliefs b JOIN json_each(?) h ON b.holder=h.value COLLATE NOCASE WHERE b.chat_id=? AND b.active=1 LIMIT 1`).get(names, chatId))
     || Boolean(db.prepare(`SELECT 1 FROM item_access a JOIN json_each(?) h ON a.holder=h.value COLLATE NOCASE
@@ -32,7 +32,7 @@ export function memoryToolReadiness(db: RcmDatabase, chatId: string): MemoryTool
     + (SELECT count(*) FROM memory_dialogues dialogue JOIN memories memory ON memory.id=dialogue.memory_id
         WHERE dialogue.chat_id=? AND memory.active=1 AND ${searchableMemoryParentSql("memory")})
     + (SELECT count(*) FROM story_spine_nodes WHERE chat_id=? AND generation_id='active' AND status='active' AND hidden=0)
-    + (SELECT count(*) FROM source_passages p JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash WHERE p.chat_id=? AND p.active=1 AND json_array_length(p.access_json)>0 AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before'))
+    + (SELECT count(*) FROM source_passages p JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash WHERE p.chat_id=? AND p.active=1 AND json_array_length(p.access_json)>0 AND m.lifecycle IN ('committed','client_pruned') AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before'))
     AS count`).get(chatId, chatId, chatId, chatId, chatId) as { count: number };
   const states = db.prepare(`SELECT
       (SELECT count(*) FROM relationship_projections WHERE chat_id=? AND stale=0)

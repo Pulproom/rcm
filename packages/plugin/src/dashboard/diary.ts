@@ -6,7 +6,7 @@ import {
   type LandmarkKind,
 } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
-import { isInitialCalibrationMemory } from "@rcm/shared";
+import { isRecognitionMemory } from "@rcm/shared";
 import { MILESTONE_LABELS, type PairSummary } from "./pairs.js";
 
 export type DiaryEntry = {
@@ -110,7 +110,7 @@ const diarySort = (left: DiaryEntry, right: DiaryEntry): number => {
 };
 
 export function buildDiary(data: DashboardData, pair: PairSummary): DiaryEntry[] {
-  const memories = (data.memories ?? []).filter((memory: any) => memory?.active !== false && !isInitialCalibrationMemory(memory));
+  const memories = (data.memories ?? []).filter((memory: any) => memory?.active !== false && !isRecognitionMemory(memory));
   const byId = new Map(memories.map((memory: any) => [String(memory?.id ?? ""), memory]));
   const memoryAtOrdinal = (ordinal: number | null): any | undefined => ordinal === null
     ? undefined
@@ -245,7 +245,7 @@ export function remapHiddenAnniversariesAfterDelete(hidden: string[], memoryId: 
 export function buildAnniversaries(data: DashboardData, pair: PairSummary, hidden: string[]): Anniversary[] {
   const anniversaryKinds = new Set<string>(ANNIVERSARY_KINDS);
   const hiddenKeys = new Set(hidden);
-  const candidates = (data.memories ?? []).filter((memory: any) => memory?.active !== false && !isInitialCalibrationMemory(memory)).flatMap((memory: any, memoryIndex: number) => (memory?.landmarkKinds ?? []).flatMap((landmark: LandmarkKind, index: number) => {
+  const candidates = (data.memories ?? []).filter((memory: any) => memory?.active !== false && !isRecognitionMemory(memory)).flatMap((memory: any, memoryIndex: number) => (memory?.landmarkKinds ?? []).flatMap((landmark: LandmarkKind, index: number) => {
     const hideKey = `${String(memory?.id ?? "")}#${index}`;
     if (!anniversaryKinds.has(landmark.kind) || !arrayMatchesPair(landmark.pair, pair)) return [];
     return [{

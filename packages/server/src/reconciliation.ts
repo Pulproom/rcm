@@ -1,3 +1,4 @@
+import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { parseSocialRelation, sameSocialRelationScope } from "./social-relations.js";
 import { transitionEvidenceJson, canAutomaticallyChange, committedEditOrdinal, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -80,7 +81,9 @@ export function prepareReconciliation(db: RcmDatabase, chatId: string, draft: Ex
   const all = draft.stateObservations.map(canonicalize).map((observation) => ({ itemRef: `observation:${observation.key}`, observation, candidates: candidatesFor(db, chatId, observation, resolve) }));
   const candidates = all.filter((entry) => entry.candidates.length > 0);
   const local = all.filter((entry) => entry.candidates.length === 0).map((entry) => entry.observation);
-  const systemPrompt = `You reconcile source-grounded roleplay state observations with a bounded canonical ledger, comparing the same property even if wording changed. Return strict JSON only as {"decisions":[{"itemRef":"observation:...","action":"create|reinforce|supersede|end|coexist|dispute|ignore","targetIds":["allowed existing id"],"reason":"short reason"}]}. Return exactly one decision for every supplied itemRef. Use only supplied target IDs. Never target immutable=true. create, coexist and ignore use no target; reinforce, supersede, end and dispute require a target. Treat each observation as a candidate interpretation. Read cited evidence and preserve statements, beliefs, attempts and completed events as different things. Ignore unsupported interpretations. A passed deadline or silence never proves a world fact, belief or promise ended. Event memories are preserved separately.\n${STATE_CLASSIFICATION_GUIDANCE}\n${STORY_TIME_GUIDANCE}\n${USER_CORRECTION_GUIDANCE}`;
+  const systemPrompt = `${ROLEPLAY_ARCHIVE_FRAMING}
+
+You reconcile source-grounded roleplay state observations with a bounded canonical ledger, comparing the same property even if wording changed. Return strict JSON only as {"decisions":[{"itemRef":"observation:...","action":"create|reinforce|supersede|end|coexist|dispute|ignore","targetIds":["allowed existing id"],"reason":"short reason"}]}. Return exactly one decision for every supplied itemRef. Use only supplied target IDs. Never target immutable=true. create, coexist and ignore use no target; reinforce, supersede, end and dispute require a target. Treat each observation as a candidate interpretation. Read cited evidence and preserve statements, beliefs, attempts and completed events as different things. Ignore unsupported interpretations. A passed deadline or silence never proves a world fact, belief or promise ended. Event memories are preserved separately.\n${STATE_CLASSIFICATION_GUIDANCE}\n${STORY_TIME_GUIDANCE}\n${USER_CORRECTION_GUIDANCE}`;
   const items: CandidateEntry[] = [];
   const deferred: CandidateEntry[] = [];
   const pageEntries: CandidateEntry[][] = [];
@@ -163,6 +166,21 @@ function recordReview(db: RcmDatabase, chatId: string, jobId: string, sourceIds:
   const revision = (db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number }).revision;
   db.prepare(`INSERT INTO reconciliation_items(id,chat_id,job_id,item_ref,item_kind,incoming_json,candidates_json,model_decision_json,model_error,source_message_ids_json,status,created_revision,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)`).run(randomUUID(), chatId, jobId, entry.itemRef, entry.observation.kind, JSON.stringify({ item: entry.observation }), JSON.stringify(entry.candidates), decision ? JSON.stringify(decision) : null, error, JSON.stringify(sourceIds), revision, Date.now());
+}
+
+/** Convert new state without writing reconciliation decisions or closing rows. */
+export function additiveReconciliationResult(draft: ExtractionDraftResult, submission?: ReconciliationSubmission): ExtractionResult {
+  const result = emptyFinal(draft);
+  if (draft.seedResolutions?.length) throw new Error('Memory additions cannot resolve existing seeds');
+  const decisions = new Map((submission?.result?.decisions ?? []).map(item => [item.itemRef, item]));
+  for (const observation of draft.stateObservations) {
+    const decision = decisions.get(`observation:${observation.key}`);
+    if (decision && (!['create', 'coexist', 'ignore'].includes(decision.action) || decision.targetIds.length)) {
+      throw new Error('Memory additions cannot change existing state');
+    }
+    if (decision?.action !== 'ignore') addObservation(result, observation, decision?.action ?? 'create', [], undefined, decision?.compatibleWithIds);
+  }
+  return ExtractionResultSchema.parse(result);
 }
 
 function recordAutomatic(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], entry: CandidateEntry, decision: unknown, status: string): void {

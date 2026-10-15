@@ -1,3 +1,4 @@
+import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, LedgerConsistencyResultSchema, type LedgerConsistencyResult, type LeasedJob, type MemoryLanguage, type RpProfile } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
@@ -158,7 +159,9 @@ export function buildLedgerConsistencyJob(input: {
   id: string; chatId: string; profile: RpProfile; memoryLanguage: MemoryLanguage; attempt: number;
   payload: { backfillRunId: string; groups: LedgerGroup[]; auxiliaryBudget?: { maxInputTokens?: number } };
 }): LeasedJob {
-  const systemPrompt = `You perform a final bounded consistency check on an already extracted roleplay ledger. Return strict JSON only as {"groups":[{"itemRef":"...","closures":[{"targetId":"older id","replacementId":"newer id","reason":"short reason"}]}]}. Return every supplied itemRef exactly once. Close an older state only when a supplied later state explicitly updates or contradicts the same property. Different properties, compatible beliefs, uncertainty, aliases, and merely similar wording must remain separate. Never close immutable=true. replacementId must have direct evidenceMessageIds and be later by sourceOrdinal or createdRevision. Use only supplied IDs. Empty closures is correct when uncertain.`;
+  const systemPrompt = `${ROLEPLAY_ARCHIVE_FRAMING}
+
+You perform a final bounded consistency check on an already extracted roleplay ledger. Return strict JSON only as {"groups":[{"itemRef":"...","closures":[{"targetId":"older id","replacementId":"newer id","reason":"short reason"}]}]}. Return every supplied itemRef exactly once. Close an older state only when a supplied later state explicitly updates or contradicts the same property. Different properties, compatible beliefs, uncertainty, aliases, and merely similar wording must remain separate. Never close immutable=true. replacementId must have direct evidenceMessageIds and be later by sourceOrdinal or createdRevision. Use only supplied IDs. Empty closures is correct when uncertain.`;
   const userPrompt = JSON.stringify({ groups: input.payload.groups });
   const maxInputTokens = input.payload.auxiliaryBudget?.maxInputTokens ?? 80_000;
   const fits = (groups: LedgerGroup[]) => measureAuxiliaryPrompt([{ role: "system", content: systemPrompt }, { role: "user", content: JSON.stringify({ groups }) }], estimateTokens,

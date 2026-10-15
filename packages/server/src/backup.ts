@@ -12,7 +12,7 @@ import { migrateTranslationKeys, pruneTranslationCache, translationCacheKey } fr
 import { ledgerEditOriginsKey, readRemovedAliases, readUserDeletions, removedAliasesKey, userDeletionsKey, type Deletion, type RemovedAliases } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 
-export const BACKUP_VERSION = 32 as const;
+export const BACKUP_VERSION = 33 as const;
 
 export class BackupValidationError extends Error {
   readonly code = "BACKUP_VALIDATION_FAILED";
@@ -42,8 +42,8 @@ function insertRows(db: RcmDatabase, table: string, rows: Row[]): void {
 type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
-  version: 31 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48;
+  version: 31 | 32 | typeof BACKUP_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -152,7 +152,7 @@ function exportArchive(db: RcmDatabase, privateData: CompleteBackupPrivateData, 
   const instanceId = String((db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value?: string } | undefined)?.value ?? "");
   const chats = (db.prepare(`SELECT id,COALESCE(chat_title,'') AS title,character_id AS characterId FROM chats${chatId ? " WHERE id=?" : ""} ORDER BY updated_at DESC`).all(...(chatId ? [chatId] : [])) as CompleteManifest["chats"]);
   const manifest: CompleteManifest = {
-    format: "risu-cognitive-memory-complete", scope:chatId ? "chat" : "complete", version: BACKUP_VERSION, schemaVersion: 48, exportedAt: Date.now(), instanceId, chats,
+    format: "risu-cognitive-memory-complete", scope:chatId ? "chat" : "complete", version: BACKUP_VERSION, schemaVersion: 49, exportedAt: Date.now(), instanceId, chats,
     tables: Object.fromEntries(tables.map((table) => [table, (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)])),
     files: Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, checksum(bytes)])),
   };
@@ -165,9 +165,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && manifest.schemaVersion === 49 || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError("Unsupported backup format (accepts backup 31 / schema 46 or 47, or backup 32 / schema 48)");
+    throw new BackupValidationError("Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49)");
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -205,7 +205,8 @@ function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): voi
   if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError(`Backup database contract does not match schema ${manifest.schemaVersion}`);
   for (const table of current) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
-      .filter(column => !(manifest.schemaVersion === 46 && table === "translation_cache" && column === "model"));
+      .filter(column => !(manifest.schemaVersion === 46 && table === "translation_cache" && column === "model")
+        && !(manifest.schemaVersion < 49 && table === "messages" && column === "memory_excluded"));
     // Rows are inserted by column name. Physical column order is not a backup contract.
     const archived = manifest.tables[table];
     if (!Array.isArray(archived) || archived.length !== columns.length || new Set(archived).size !== columns.length
@@ -340,7 +341,7 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
       preserveReferenceHighWater(db, refHighWater);
       vectorsRestored = restoreVectors(db, parsed.files);
       migrateTranslationKeys(db);
-      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
+      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(49,?)").run(Date.now());
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }
@@ -385,7 +386,7 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
       if ((db.pragma("foreign_key_check") as unknown[]).length) throw new Error("Chat backup failed foreign key validation");
       vectorsRestored=restoreVectors(db,parsed.files);
       migrateTranslationKeys(db);
-      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
+      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(49,?)").run(Date.now());
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }

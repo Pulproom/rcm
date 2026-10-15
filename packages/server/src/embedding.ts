@@ -1,6 +1,6 @@
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
 import { StateSearchIndex } from "./state-search-index.js";
-import { searchableMemoryParentSql } from "./memory-group-search.js";
+import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { loadItemAccess, resolveItemAccess } from "./item-access.js";
 import { createHash } from "node:crypto";
 import { buildSourceUnits, splitAuxiliarySource, estimateTokens, queryViewAuthority, type SearchQuerySignal } from "@rcm/shared";
@@ -375,7 +375,7 @@ export class EmbeddingService {
       const messages = this.db.prepare(`
         SELECT message_id,role,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,
           CASE WHEN canonical_hash<>'' THEN canonical_hash ELSE content_hash END AS content_hash,lifecycle,host_visibility,ordinal FROM messages
-        WHERE chat_id=? AND message_id IN (${ids.map(() => "?").join(",")})
+        WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${ids.map(() => "?").join(",")})
         ORDER BY ordinal
       `).all(block.chat_id, ...ids) as MessageRow[];
       const valid = messages.length === ids.length
@@ -453,7 +453,7 @@ export class EmbeddingService {
 
   async #indexContextualDetails(chatId?: string): Promise<number> {
     const rows = this.db.prepare(`SELECT d.* FROM memory_details d JOIN memories m ON m.id=d.memory_id
-      WHERE d.active=1 AND m.active=1 AND ${searchableMemoryParentSql("m")} ${chatId ? "AND d.chat_id=?" : ""}
+      WHERE d.active=1 AND m.active=1 AND ${searchableMemoryParentSql("m")} AND NOT ${recognitionDetailSql('d')} ${chatId ? "AND d.chat_id=?" : ""}
       ORDER BY d.chat_id,d.memory_id,d.created_at,d.id`).all(...(chatId ? [chatId] : [])) as any[];
     const groups = new Map<string, any[]>();
     for (const row of rows) {
@@ -471,7 +471,7 @@ export class EmbeddingService {
       const sourceIds = [...new Set(members.flatMap((row) => (JSON.parse(row.evidence_json) as Array<{ messageId: string }>).map((item) => item.messageId)))];
       const passages = this.db.prepare(`SELECT p.quote,p.access_json,p.canonical_hash,p.start_offset,m.ordinal FROM source_passages p
         JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash
-        WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before')
+        WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned') AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')
         AND p.message_id IN (SELECT value FROM json_each(?)) ORDER BY m.ordinal,p.start_offset`)
         .all(first.chat_id, JSON.stringify(sourceIds)) as Array<{ quote: string; access_json: string; canonical_hash: string }>;
       const contexts = passages.filter((row) => JSON.stringify((JSON.parse(row.access_json) as Array<{ holder: string }>).map((grant) => grant.holder).sort()) === first.scopeKey).map((row) => row.quote);
@@ -571,7 +571,7 @@ export class EmbeddingService {
       const messages = this.db.prepare(`
         SELECT message_id,role,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,
           CASE WHEN canonical_hash<>'' THEN canonical_hash ELSE content_hash END AS content_hash,lifecycle,host_visibility,ordinal FROM messages
-        WHERE chat_id=? AND message_id IN (${ids.map(() => "?").join(",")})
+        WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${ids.map(() => "?").join(",")})
         ORDER BY ordinal
       `).all(block.chat_id, ...ids) as MessageRow[];
       if (messages.length !== ids.length || messages.some((message) => message.host_visibility !== undefined && message.host_visibility !== "active") || transcriptBlockHash(messages) !== block.content_hash) {
@@ -730,7 +730,8 @@ export class EmbeddingService {
           continue;
         }
         const { messageIds } = JSON.parse(item.source_json) as { messageIds: string[] };
-        if (messageIds.length === 0) continue;
+        if (messageIds.length === 0 || this.db.prepare(`SELECT 1 FROM messages WHERE chat_id=? AND memory_excluded=1
+          AND message_id IN (SELECT value FROM json_each(?)) LIMIT 1`).get(chatId,JSON.stringify(messageIds))) continue;
         sourceHits.push({ chunkId: item.item_id, messageIds, score });
         const evidence = this.db.prepare(`
           SELECT DISTINCT memory_id FROM evidence_spans

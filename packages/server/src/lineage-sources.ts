@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { TurnPrepareRequest } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
-import { sourceFingerprint } from './source-fingerprint.js';
+import { isOrdinalFallbackMessageId, sourceFingerprint } from './source-fingerprint.js';
 
 /** Source references only. A quote that happens to equal an ID stays a quote. */
 function remapSourceJson(text: string, ids: Map<string,string>, list = false): string {
@@ -21,13 +21,15 @@ export function remapInheritedSources(db: RcmDatabase, chatId: string, allIds: M
   if (!ids.size) return;
   if ([...ids.values()].some(id => ids.has(id))) throw new Error('LINEAGE_SOURCE_ID_COLLISION');
   const columns = (db.prepare('PRAGMA table_info(messages)').all() as Array<{name:string}>).map(row => row.name);
-  const copy = db.prepare(`INSERT INTO messages(${columns.join(',')}) SELECT ${columns.map(column => column === 'message_id' ? '?' : column).join(',')}
+  const copy = db.prepare(`INSERT INTO messages(${columns.join(',')}) SELECT ${columns.map(column => column === 'message_id' ? '?'
+    : column === 'memory_excluded' ? 'CASE WHEN ? THEN 0 ELSE memory_excluded END' : column).join(',')}
     FROM messages WHERE chat_id=? AND message_id=?`);
   const referenceTables = ['message_revisions','memory_dialogues','evidence_spans','episode_messages','source_passages'];
   for (const [oldId,newId] of ids) {
     // A choice may already have synchronized the target's raw-only shell.
     db.prepare('DELETE FROM messages WHERE chat_id=? AND message_id=?').run(chatId,newId);
-    copy.run(newId,chatId,oldId);
+    const fallback = isOrdinalFallbackMessageId(chatId,newId) || isOrdinalFallbackMessageId(chatId,oldId);
+    copy.run(...columns.flatMap<string | number>(column => column === 'message_id' ? [newId] : column === 'memory_excluded' ? [Number(fallback)] : []),chatId,oldId);
     for (const table of referenceTables) db.prepare(`UPDATE ${table} SET message_id=? WHERE chat_id=? AND message_id=?`).run(newId,chatId,oldId);
     db.prepare("UPDATE chat_lineage_items SET child_item_id=? WHERE child_chat_id=? AND item_kind='message' AND child_item_id=?").run(newId,chatId,oldId);
     db.prepare('DELETE FROM messages WHERE chat_id=? AND message_id=?').run(chatId,oldId);

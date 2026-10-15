@@ -1,3 +1,7 @@
+import { sourceRecoverySummary, operationLabel } from "@rcm/shared";
+import { AUXILIARY_CENSORSHIP_RELAXATION } from "@rcm/shared";
+import { projectRisuAuxiliaryCallDiagnostic, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
+import { isProviderAuthenticationError, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE } from "@rcm/shared";
 import { translationConnectionSettings, readTranslationConnectionSettings, updateTranslationConnectionControls } from "./translation-connection-settings.js";
 import { auxiliaryModelMissing, MODEL_SETUP_DETAIL, EMBEDDING_SETUP_DETAIL } from "./attention.js";
 import type { TranslationConnectionPublicConfig } from "@rcm/shared";
@@ -5,7 +9,7 @@ import { planTranslation, estimateTokens as estimateTranslationTokens } from "@r
 import { backgroundTranslationEnabled, callTranslationBatch, googleTranslationRecords, retranslateGoogleRecords, translationOutputBudget } from "./translation.js";
 import { sanitizeDiagnosticText } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_PROVIDER_OPTIONS } from "@rcm/shared";
-import { diagnosticReason, shareDiagnostic, supportFailure, supportJobs, supportTime } from "./support-diagnostics.js";
+import { modelResponseFailureDetail, diagnosticReason, shareDiagnostic, supportFailure, supportJobs, supportTime } from "./support-diagnostics.js";
 import { providerCapability, updateProviderFields } from "./provider-settings.js";
 import { mcpSelectorSettings, readMcpSelectorSettings, updateMcpSelectorControls } from "./mcp-selector-settings.js";
 import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
@@ -18,8 +22,8 @@ import type { ActivityProgress, DashboardSkin, InitialCalibrationActivity, Plugi
 import { drainWorker, reconcileAutomaticServerPause } from "./worker.js";
 import { readServerModelConnection, testSettingsConnection } from "./connection-tests.js";
 import { connectionCheck } from "./dashboard/film/ui.js";
-import { updateWorkerMenuButton, widgetState } from "./attention.js";
-import { createOrganizationView, memoryOrganization, toggleOrganizationRange, type OrganizationData } from './memory-organization.js';
+import { manualRetryState, updateWorkerMenuButton, widgetState } from "./attention.js";
+import { createOrganizationView, memoryOrganization, toggleOrganizationRange, organizationMemoryRanges, organizationJumpRange, type AdditionView, type OrganizationData } from './memory-organization.js';
 import { subscribeActivity } from "./activity.js";
 import { translatePacket, clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
 import { inheritLineageSettings } from "./lineage-settings.js";
@@ -33,7 +37,7 @@ import { buildPairs, entityForName, entityProminence, milestoneLabel, pairKey, P
 import { pairOpenPromises, pairSceneCount, renderRelationshipRow, renderPairDetail, type PairDiaryFilter, type PairDiarySort } from "./dashboard/pair-detail.js";
 import { buildSceneLog, storyWeekday } from "./dashboard/scene-log.js";
 import { landmarkLabel, remapHiddenAnniversariesAfterDelete } from "./dashboard/diary.js";
-import { isInitialCalibrationMemory } from "@rcm/shared";
+import { isRecognitionMemory } from "@rcm/shared";
 import { addressEditorForm, buildPersonDetail, renderPersonDetail } from "./dashboard/person.js";
 import { buildNowPage, overduePromiseEntries, renderNowPage, runPromiseStatusMutation, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
 import { POLARITY_LABELS, predicateLabel, PROMISE_STATUS_LABELS, STATE_KIND_LABELS } from "./dashboard/record-history.js";
@@ -226,7 +230,7 @@ export async function applyTranslationDisplay(
 }
 
 export function filterTimelineMemories(memories: any[], view: Pick<TimelineViewState, "landmarkOnly" | "bookmarkedOnly" | "pinnedOnly" | "includeInactive">): any[] {
-  return memories.filter((memory) => !isInitialCalibrationMemory(memory)
+  return memories.filter((memory) => !isRecognitionMemory(memory)
     && (view.includeInactive || memory.active !== false)
     && (!view.landmarkOnly || Boolean(memory.landmark))
     && (!view.bookmarkedOnly || Boolean(memory.bookmarked))
@@ -316,6 +320,7 @@ export interface DashboardData {
   cancelledMessages: number;
   waitingForAssistant: number;
   bufferedMessages: number;
+  excludedMessages?: number;
   backfillMessages: number;
   bufferedTurns: number;
   protectedTurns: number;
@@ -337,7 +342,7 @@ export interface DashboardData {
 }
 
 const emptyData = (): DashboardData => ({
-  loadedDatasets: [], failedDatasets: [], memories: [], storySpine: { overview: null, currentProgress: [], arcs: [] }, messages: [], relationships: [], relationshipEvents: [], physicalIntimacy: [], entities: [], socialKnowledge: [], socialKnowledgeJobs: {}, viewPreferences: { personaEntity: null, hiddenAnniversaries: [] }, personaEntity: null, assertions: [], beliefs: [], promises: [], endedAssertions: [], endedBeliefs: [], userDeletedBeliefs: [], promiseHistory: [], conflicts: [], reconciliationReviews: [], extractionAudits: [], jobs: [], cancelledMessages: 0, waitingForAssistant: 0, bufferedMessages: 0, backfillMessages: 0, bufferedTurns: 0, protectedTurns: 0, bufferedSourceTokens: 0, extractionGroupTurns: 6, recoverableMessages: 0, historicalBackfillMessages: 0, recallLogs: [], adminChats: [], initialCalibration: { status: "unseeded", entities: [], relationships: [], locked: false, confirmationRequired: false },
+  loadedDatasets: [], failedDatasets: [], memories: [], storySpine: { overview: null, currentProgress: [], arcs: [] }, messages: [], relationships: [], relationshipEvents: [], physicalIntimacy: [], entities: [], socialKnowledge: [], socialKnowledgeJobs: {}, viewPreferences: { personaEntity: null, hiddenAnniversaries: [] }, personaEntity: null, assertions: [], beliefs: [], promises: [], endedAssertions: [], endedBeliefs: [], userDeletedBeliefs: [], promiseHistory: [], conflicts: [], reconciliationReviews: [], extractionAudits: [], jobs: [], cancelledMessages: 0, waitingForAssistant: 0, bufferedMessages: 0, excludedMessages: 0, backfillMessages: 0, bufferedTurns: 0, protectedTurns: 0, bufferedSourceTokens: 0, extractionGroupTurns: 6, recoverableMessages: 0, historicalBackfillMessages: 0, recallLogs: [], adminChats: [], initialCalibration: { status: "unseeded", entities: [], relationships: [], locked: false, confirmationRequired: false },
 });
 
 export function availableNavigationSnapshot(snapshot: ViewSnapshot, data: DashboardData): ViewSnapshot {
@@ -365,7 +370,7 @@ export function availableNavigationSnapshot(snapshot: ViewSnapshot, data: Dashbo
       next.relationshipMobileDetail = false;
     }
   }
-  if (next.tab === "timeline" && next.selectedMemory && !data.memories.some((memory) => String(memory?.id) === next.selectedMemory && !isInitialCalibrationMemory(memory))) {
+  if (next.tab === "timeline" && next.selectedMemory && !data.memories.some((memory) => String(memory?.id) === next.selectedMemory && !isRecognitionMemory(memory))) {
     next.selectedMemory = "";
     next.timelineMobileDetail = false;
   }
@@ -384,7 +389,7 @@ const ALL_DASHBOARD_DATASETS: DashboardChatDataset[] = [
 
 export function dashboardDatasetsForTab(tab: Tab): DashboardChatDataset[] {
   const byTab: Record<Tab, DashboardChatDataset[]> = {
-    overview: ["memories", "relationships", "entities", "viewPreferences", "world", "conflicts", "jobs", "lineage", "status", "initialCalibration", "storySpine"],
+    overview: ["memories", "relationships", "entities", "viewPreferences", "world", "conflicts", "jobs", "lineage", "status", "initialCalibration", "storySpine", "socialKnowledge"],
     initial: ["memories", "relationships", "entities", "world", "socialKnowledge", "physicalIntimacy", "viewPreferences", "initialCalibration", "status"],
     story: ["memories", "storySpine", "entities", "relationships", "viewPreferences", "status"],
     timeline: ["memories", "messages", "status"],
@@ -660,6 +665,26 @@ export function dialogHtml(opts: { id: string; title: string; body: string; conf
   const confirm = `<button type="button" class="btn ${opts.danger ? "btn--danger-solid" : opts.keep ? "btn--secondary" : "btn--primary"}" value="confirm"${opts.notice ? " autofocus" : ""}>${escapeHtml(opts.confirm)}</button>`;
   const cancel = opts.notice ? "" : `<button type="button" class="btn ${opts.keep ? "btn--primary" : "btn--quiet"}" value="cancel" autofocus>${escapeHtml(opts.cancel ?? "취소")}</button>`;
   return `<h3 id="${opts.id}">${escapeHtml(opts.title)}</h3>${opts.body}<div class="dialog__actions">${cancel}${confirm}</div>`;
+}
+
+export async function chooseMemoryCreation(): Promise<'manual' | 'source' | undefined> {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'scene-sheet film create-sheet';
+  dialog.setAttribute('aria-labelledby', 'memory-create-title');
+  const option = (action: 'manual' | 'source', glyph: string, title: string, hint: string) => `<button type="button" class="create-opt" data-action="${action}"><span class="create-opt__ico">${icon(glyph)}</span><span class="create-opt__txt"><b>${title}</b><small>${hint}</small></span><span class="chev" aria-hidden="true">${icon('chevron')}</span></button>`;
+  dialog.innerHTML = `<div class="scene-sheet__body"><h2 class="scene-sheet__title" id="memory-create-title">기억 추가</h2><div class="create-sheet__list">${option('manual', 'pencil', '직접 쓰기', '내용을 직접 입력해요')}${option('source', 'search', '원문에서 만들기', '원문을 골라 빠진 기억을 찾아요')}</div><div class="create-sheet__foot">${btn('닫기', { kind: 'quiet', action: 'close' })}</div></div>`;
+  document.body.append(dialog);
+  try {
+    return await new Promise(resolve => {
+      dialog.addEventListener('click', event => {
+        const choice = (event.target as HTMLElement).closest<HTMLElement>('[data-action]')?.dataset.action;
+        if (choice) dialog.close(choice);
+        else if (event.target === dialog) dialog.close();
+      });
+      dialog.addEventListener('close', () => resolve(dialog.returnValue === 'manual' || dialog.returnValue === 'source' ? dialog.returnValue : undefined), { once: true });
+      dialog.showModal();
+    });
+  } finally { dialog.remove(); }
 }
 
 export async function confirmDashboard(message: string, notice = false, labels: { confirm?: string; cancel?: string; title?: string; danger?: boolean; keep?: boolean; bodyHtml?: string; className?: string } = {}): Promise<boolean> {
@@ -1064,6 +1089,12 @@ export async function pauseWorkerForQueueMutation(
   state.publishActivity?.();
 }
 
+export async function retryFailedJobs(state: RuntimeState, client: ServerClient, chatId: string): Promise<void> {
+  const result = await client.request<{ retried: number }>(`/v1/chats/${encodeURIComponent(chatId)}/jobs/retry-failed`, { method: "POST" });
+  addLog(state.logs, "info", `${result.retried} failed extraction job(s) returned to queued state`);
+  if (result.retried > 0) void drainWorker(state, client);
+}
+
 export async function closeDashboardContainer(
   state: RuntimeState,
   hideContainer: () => Promise<void> = () => risuai.hideContainer(),
@@ -1296,6 +1327,8 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const blockingFailed = data.jobs.filter((job) => job.status === "failed" && job.type === "extract").length;
   const advisoryFailed = data.jobs.filter((job) => job.status === "failed" && job.type !== "extract").length;
   const failed = blockingFailed + advisoryFailed;
+  const retryJobs = data.jobs.filter(job => ["queued", "leased"].includes(job.status) && parseJson<Record<string, unknown>>(job.payload_json, {}).pipelineManualRetry === true);
+  const retry = manualRetryState(state, retryJobs.length > 0, retryJobs.some(job => job.id === state.currentJob?.id || job.status === "leased" && state.serverWorker?.activeJob?.chatId === state.current?.chatId && (state.serverWorker?.activeCalls ?? 0) > 0));
   const currentChatId = state.current?.chatId ?? "";
   const currentInstanceId = data.health?.instanceId;
   const liveInjection = currentInjection(state, currentInstanceId);
@@ -1335,7 +1368,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const needsAttention = Boolean(data.connectionIssue) || !data.health?.ok || failed > 0 || validation?.status === "marker_missing" || state.settings.workerPaused || pendingConflicts > 0;
   const blockingAlert = blockingFailed > 0 && !data.connectionIssue;
   const blockingTitle = "기억 추출이 멈췄어요";
-  const blockingCopy = queued > 0 ? `실패한 작업 ${blockingFailed}건 때문에 뒤의 ${queued}건이 기다리고 있어요.` : `실패한 작업 ${blockingFailed}건을 다시 시도해 주세요.`;
+  const blockingCopy = data.jobs.some(job => job.status === "failed" && isProviderAuthenticationError(job.last_error)) ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : queued > 0 ? `실패한 작업 ${blockingFailed}건 때문에 뒤의 ${queued}건이 기다리고 있어요.` : `실패한 작업 ${blockingFailed}건을 다시 시도해 주세요.`;
   const backfillPending = shouldOfferBackfill(state, data);
   const hasDerivedData = data.memories.length + data.relationships.length + data.assertions.length + data.promises.length > 0;
   const processing = queued > 0 || state.workerBusy;
@@ -1383,6 +1416,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const notices = [
     data.connectionIssue ? notice(`${healthTitle} · ${healthDetail}`, { tone: "cut", action: btn("서버 설정 열기", { kind: "quiet", action: "tab", data: { tab: "settings", settingsSection: "server" }, hit: true }) }) : "",
     blockingAlert ? notice(`${blockingTitle} · ${blockingCopy}`, { tone: "cut", action: `<span class="notice__acts">${btn("다시 시도", { kind: "primary", action: "retry-failed" })}${btn("처리 상태", { kind: "quiet", action: "tab", data: { tab: "operations" } })}</span>` }) : "",
+    retry && !blockingAlert && !data.connectionIssue ? notice(`${retry.label} · ${retry.detail}`, { tone: "plain", action: btn("처리 상태", { kind: "quiet", action: "tab", data: { tab: "operations" } }) }) : "",
     pendingConflicts ? notice(`확인이 필요한 충돌 ${pendingConflicts}건`, { tone: "cut", action: btn("관리로", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "reviews", attentionFilter: "conflict" }, hit: true }) }) : "",
     // One thing to do, said plainly: what is waiting and how many.
     pencilTotal ? notice([pencil.overdue ? `기한 지난 약속 ${pencil.overdue}개` : "", pencil.attention ? `확인할 기록 ${pencil.attention}개` : ""].filter(Boolean).join(" · "), { tone: "cut", action: btn("확인하기", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "world" }, hit: true }) }) : "",
@@ -1404,7 +1438,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const injectedIds = new Set(manifest?.memoryIds ?? []);
   const toSentScene = (id: string): SentScene | null => {
     const memory: any = (data.memories ?? []).find((item: any) => String(item?.id) === id);
-    if (!memory) return null;
+    if (!memory || isRecognitionMemory(memory)) return null;
     const summary = injectedScenes.get(id);
     return { memoryId: id, no: numbers.get(id) ?? 0, titleHtml: sceneTitle(memory), when: sceneDate(memory.story_time ?? memory.storyTime ?? null) ?? "",
       clarity: summary?.clarity, details: summary?.details, dialogues: summary?.dialogues };
@@ -1431,7 +1465,8 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
     scenes: (manifest?.memoryIds ?? []).flatMap((id) => toSentScene(id) ?? []).sort((left, right) => right.no - left.no),
     spine: manifest?.storySpineNodeIds?.length ?? 0,
     people: sentPeople, peopleCount: sentPairs.size + intimacyCount,
-    now: manifest ? injectedStateRows(manifest, data, translations, translationDisplay) : [],
+    now: manifest ? injectedStateRows(manifest, data, translations, translationDisplay,
+      (liveInjection ? liveInjection.stateSnapshots : compatibleCache?.lastInjectionStateSnapshots)?.filter(row => packet.includes(row.text))) : [],
     searches: (state.lastTurnSearches?.chatId === currentChatId ? state.lastTurnSearches.calls : []).map((search) => ({ ...search,
       expandedMemory: search.expandedMemoryId ? toSentScene(search.expandedMemoryId) ?? undefined : undefined,
       scenes: search.memoryIds.flatMap((id) => { const scene = toSentScene(id); return scene ? [{ ...scene, already: injectedIds.has(id) || search.alreadyProvidedIds.includes(id) }] : []; }) })),
@@ -1453,7 +1488,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const protectedTurns = Math.max(0, data.protectedTurns || 0);
   const workflowTarget = bufferTarget + protectionTarget;
   const workflowTurns = Math.min(workflowTarget, readyTurns + protectedTurns);
-  const workflow = backfillPending ? "" : `<div class="meter" role="img" aria-label="다음 기억 정리 ${workflowTurns} / ${workflowTarget}턴"><span>다음 기억 정리</span><i style="--v:${Math.round(workflowTurns / workflowTarget * 100)}%"></i><span>${workflowTurns} / ${workflowTarget}턴</span></div><p class="sub">최근 ${protectionTarget}턴을 수정에 대비해 보호하고, 그 앞의 ${bufferTarget}턴이 모이면 기억으로 정리합니다.${protectedTurns ? ` 보호 중 ${protectedTurns}턴.` : ""}</p>`;
+  const workflow = backfillPending ? "" : `<div class="meter" role="img" aria-label="다음 기억 정리 ${workflowTurns} / ${workflowTarget}턴"><span>다음 기억 정리</span><i style="--v:${Math.round(workflowTurns / workflowTarget * 100)}%"></i><span>${workflowTurns} / ${workflowTarget}턴</span></div><p class="sub">최근 ${protectionTarget}턴을 수정에 대비해 보호하고, 그 앞의 ${bufferTarget}턴이 모이면 기억으로 정리합니다.${protectedTurns ? ` 보호 중 ${protectedTurns}턴.` : ""}${data.excludedMessages ? ` 기억 제외 ${data.excludedMessages}개.` : ""}</p>`;
   const homeSceneCount = storyScenes(data.memories).length;
   const counts: Array<[string, string]> = [
     ["Risu 원문", Number(state.current?.sourceMessageCount ?? 0).toLocaleString()],
@@ -1508,6 +1543,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
           { label: "다시 시도", kind: "primary" as const, action: "retry-failed" },
           { label: "처리 상태", kind: "quiet" as const, action: "tab", data: { tab: "operations" } },
         ] }] : []),
+        ...(retry && !blockingAlert && !data.connectionIssue ? [{ tone: "wait" as const, text: retry.label, body: retry.detail, action: "tab", data: { tab: "operations" } }] : []),
         ...(pendingConflicts ? [{ tone: "cut" as const, text: `확인이 필요한 충돌 ${pendingConflicts}건`, action: "tab", data: { tab: "reviews", attentionFilter: "conflict" } }] : []),
         ...(pencil.attention ? [{ tone: "wait" as const, text: `확인할 기록 ${pencil.attention}개`, action: "tab", data: { tab: "world" } }] : []),
         ...(phoneAdvisoryAlert ? [{ tone: "wait" as const, text: healthTitle, action: "tab", data: { tab: "operations" } }] : []),
@@ -2970,34 +3006,11 @@ export function operations(state: RuntimeState, data: DashboardData): string {
   const blockingFailed = data.jobs.filter((job) => job.status === "failed" && job.type === "extract").length;
   const queued = data.jobs.filter((job) => ["queued", "leased"].includes(job.status)).length;
   const removableCount = data.jobs.filter((job) => ["queued", "failed"].includes(job.status) || (job.status === "leased" && Number(job.leased_until) < Date.now())).length;
-  const jobTypeLabels: Record<string, string> = {
-    extract: "대화 기억 정리", extract_episode: "대화 기억 정리", episode: "대화 기억 정리",
-    project_relationship: "관계 상태 갱신", relationship_projection: "관계 상태 갱신",
-    story_consolidation: "줄거리 갱신", initial_calibration: "초기 인물 설정",
-    embed: "검색 색인 갱신", social_knowledge: "지인 관계 정리", social_backfill: "지인 관계 다시 찾기",
-    quiz: "퀴즈 만들기",
-    audit_retry: "추출 재검수",
-    ledger_consistency: "최종 장부 대조",
-  };
-  const jobStatusLabels: Record<string, string> = { queued: "대기 중", leased: "처리 중", failed: "실패", completed: "완료", done: "완료", cancelled: "취소됨", superseded: "교체됨" };
-  const stageLabels: Record<string, string> = { queued: "대기", retrying: "자동 재시도", initial_calibration: "초기 인물 설정", first_extraction: "1차 기억 추출", post_extraction_audit: "추출 재검수", state_reconciliation: "세계·인식·약속 대조", ledger_consistency: "최종 장부 대조", relationship_projection: "관계 상태 투영", story_consolidation: "줄거리 갱신", storing: "기억 반영", complete: "전체 단계 완료", failed: "단계 실패" };
-  const callPurposeLabels: Record<string, string> = {
-    memory_group: "대화 묶음 나누기", memory_group_repair: "묶음 응답 형식 보완",
-    extraction: "대화에서 기억 찾기", extraction_repair: "응답 형식 보완",
-    initial_calibration: "초기 인물 설정", initial_calibration_repair: "초기 설정 응답 보완",
-    audit: "추출 결과 재검수", audit_repair: "재검수 응답 보완",
-    reconciliation: "상태 추출·기존 기억과 대조", reconciliation_repair: "상태 대조·접근 근거 보완", state_response_repair: "상태 응답 형식 보완",
-    ledger_consistency: "마지막 장부 대조", ledger_consistency_repair: "장부 응답 형식 보완",
-    relationship_projection: "관계 상태 갱신", relationship_projection_repair: "관계 응답 형식 보완",
-    story_consolidation: "줄거리 갱신", story_consolidation_repair: "줄거리 응답 형식 보완",
-    episode_draft: "장면 기억 초안", episode_draft_repair: "장면 초안 응답 보완",
-    episode_finalize: "장면 기억 마무리", episode_finalize_repair: "장면 응답 형식 보완",
-  };
-  type RawCallDiagnostic = { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; usage?: unknown };
+  type RawCallDiagnostic = { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; usage?: unknown; risuCall?: unknown };
   type OperationCall = {
     purpose: string; attempt: number; startedAt?: number; endedAt?: number;
     outcome: "running" | "succeeded" | "failed" | "interrupted";
-    error?: string; usage?: Record<string, unknown>;
+    error?: string; usage?: Record<string, unknown>; risuCall?: RisuAuxiliaryCallDiagnostic;
   };
   const callDuration = (call: OperationCall): string => {
     if (!call.startedAt) return "";
@@ -3023,6 +3036,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
       call.endedAt = observedAt;
       call.outcome = diagnostic.outcome;
       if (diagnostic.error) call.error = String(diagnostic.error);
+      call.risuCall = projectRisuAuxiliaryCallDiagnostic(diagnostic.risuCall);
       if (diagnostic.usage && typeof diagnostic.usage === "object" && !Array.isArray(diagnostic.usage)) call.usage = diagnostic.usage as Record<string, unknown>;
     }
     if (status === "leased") {
@@ -3044,21 +3058,22 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     return calls.map((call) => {
       const occurrence = (seen.get(call.purpose) ?? 0) + 1;
       seen.set(call.purpose, occurrence);
-      const baseLabel = callPurposeLabels[call.purpose] ?? String(call.purpose).replaceAll("_", " ");
+      const baseLabel = operationLabel(call.purpose);
       const label = occurrence > 1 ? `${baseLabel} 재시도 ${occurrence - 1}` : baseLabel;
       const stateLabel = call.outcome === "succeeded" ? "완료" : call.outcome === "failed" ? "실패" : call.outcome === "running" ? "진행 중" : "중단됨";
       const input = Number(call.usage?.promptTokens ?? call.usage?.inputTokens), output = Number(call.usage?.completionTokens ?? call.usage?.outputTokens);
       const cached = Number(call.usage?.cachedInputTokens ?? call.usage?.cachedTokens ?? call.usage?.cacheReadInputTokens);
       const usageLine = [Number.isFinite(input) ? `입력 ${input.toLocaleString()}` : "", Number.isFinite(output) ? `출력 ${output.toLocaleString()}` : "", Number.isFinite(cached) && cached > 0 ? `캐시 ${cached.toLocaleString()}` : ""].filter(Boolean).join(" · ");
       const detail = call.error ? `<p class="step__err">${escapeHtml(call.error)}</p>` : call.outcome === "interrupted" ? '<p class="sub">완료 응답 없이 작업이 다시 시작됐습니다.</p>' : "";
-      return step(call.outcome, label, `${stateLabel}${callDuration(call) ? ` · ${callDuration(call)}` : ""}`, detail, usageLine || "토큰 사용량 미제공");
+      return step(call.outcome, label, `${stateLabel}${callDuration(call) ? ` · ${callDuration(call)}` : ""}`, detail + (call.risuCall ? `<p class="sub">${escapeHtml(JSON.stringify(call.risuCall))}</p>` : ""), usageLine || "토큰 사용량 미제공");
     }).join("");
   };
   const jobRow = (job: any) => {
     const payload = parseJson<Record<string, unknown>>(job.payload_json, {});
     const sourceRecovery = payload.sourceRecovery === true;
+    const recoverySummary = sourceRecoverySummary(payload.sourceRecoveryMetadata as import("@rcm/shared").SourceRecoveryMetadata | undefined);
     const stage = String(payload.pipelineStage ?? (job.status === "queued" ? "queued" : ""));
-    const stageLabel = sourceRecovery && stage === "post_extraction_audit" ? "원문 발췌 보완" : stageLabels[stage];
+    const stageLabel = sourceRecovery && stage === "post_extraction_audit" ? operationLabel("source_recovery") : stage ? operationLabel(stage) : undefined;
     const callStats = payload.llmCallStats as { total?: number; repairs?: number } | undefined;
     const usage = payload.llmUsage as { inputTokens?: number; outputTokens?: number; callsWithUsage?: number } | undefined;
     const calls = operationCalls(payload, job.status, Number(job.updated_at));
@@ -3068,12 +3083,16 @@ export function operations(state: RuntimeState, data: DashboardData): string {
       Number(usage?.callsWithUsage ?? 0) > 0 ? `입력 ${Number(usage!.inputTokens ?? 0).toLocaleString()} · 출력 ${Number(usage!.outputTokens ?? 0).toLocaleString()}토큰` : totalCalls ? "토큰 사용량 미제공" : "",
       !["done", "completed", "cancelled", "superseded"].includes(job.status) && stageLabel ? `현재 ${stageLabel}` : ""].filter(Boolean).join(" · ");
     const ordinal = Number(payload.operationStageOrdinal ?? 0), total = Number(payload.operationStageTotal ?? 0);
-    const title = `${sourceRecovery ? "원문 발췌 보완" : jobTypeLabels[job.type] ?? String(job.type)}${ordinal > 0 && total > 1 ? ` ${ordinal}/${total}` : ""}`;
+    const title = `${sourceRecovery ? operationLabel("source_recovery") : operationLabel(job.type)}${ordinal > 0 && total > 1 ? ` ${ordinal}/${total}` : ""}`;
     const statusKey = job.status === "leased" && stage === "retrying" ? "retrying" : job.status;
-    const statusLabel = statusKey === "retrying" ? "재시도" : jobStatusLabels[job.status] ?? job.status;
+    const statusLabel = statusKey === "retrying" ? "재시도" : operationLabel(job.status);
     const terminalState = ["cancelled", "superseded"].includes(job.status);
     const fallbackStep = (!calls.length || terminalState) ? step(job.status === "failed" ? "failed" : ["done", "completed"].includes(job.status) ? "succeeded" : "running", stageLabel ?? title, statusLabel, job.status === "failed" && job.last_error ? `<p class="step__err">${escapeHtml(job.last_error)}</p>` : "") : "";
-    const stored = ["done", "completed"].includes(job.status) && (stage === "complete" || ["extract", "extract_episode", "episode", "audit_retry"].includes(job.type))
+    const stored = job.type === 'memory_addition' ? (job.status === 'done'
+      ? payload.candidateStatus === 'applied' ? step('succeeded', '기억 저장', '추가 결과 반영 완료')
+        : payload.candidateStatus === 'stale' ? step('failed', '후보 만료', '원문과 연결된 기억을 다시 선택해 주세요')
+        : step('succeeded', '기억 후보 준비', '기억 정리에서 적용 대기') : '')
+      : ["done", "completed"].includes(job.status) && (stage === "complete" || ["extract", "extract_episode", "episode", "audit_retry"].includes(job.type))
       ? step("succeeded", "기억 저장", "정리 결과 반영 완료") : "";
     const recentNote = totalCalls > calls.length && calls.length ? `<p class="sub">전체 ${totalCalls}회 중 최근 ${calls.length}회의 세부 기록을 표시합니다.</p>` : "";
     const errorCopy = job.status === "failed" && job.last_error && calls.every((call) => call.error !== job.last_error) ? `<p class="step__err">${escapeHtml(job.last_error)}</p>` : "";
@@ -3081,7 +3100,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const jobIcon = job.status === "failed" ? "error" : job.status === "queued" ? "ring" : "clock";
     const rowDetail = job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : job.status === "leased" ? stageLabel || "기억 처리 중" : "";
     const terminalTag = terminalState ? `<span class="job__status is-${escapeHtml(statusKey)}">${escapeHtml(statusLabel)}</span>` : "";
-    return `<details class="fold job${active ? "" : " job--history"} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(title)}${terminalTag}</span>${rowDetail ? `<small>${escapeHtml(rowDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}</div></details>`;
+    return `<details class="fold job${active ? "" : " job--history"} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(title)}${terminalTag}</span>${rowDetail ? `<small>${escapeHtml(rowDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
   };
   const isUnresolvedJob = (job: any): boolean => ["queued", "leased", "failed"].includes(job.status);
   const currentRunId = data.coldStartProgress?.acknowledged ? undefined : data.coldStartProgress?.backfillRunId;
@@ -3096,7 +3115,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
   const historyJobs = data.jobs.filter((job) => !currentJobs.includes(job)).sort((left, right) => Number(right.updated_at) - Number(left.updated_at));
   const unresolvedJobs = [...currentJobs, ...historyJobs.filter(isUnresolvedJob)];
   const completedJobs = historyJobs.filter((job) => !isUnresolvedJob(job));
-  const jobKind = (job: any): string => parseJson<Record<string, unknown>>(job.payload_json, {}).sourceRecovery === true ? "원문 발췌 보완" : jobTypeLabels[job.type] ?? String(job.type);
+  const jobKind = (job: any): string => parseJson<Record<string, unknown>>(job.payload_json, {}).sourceRecovery === true ? operationLabel("source_recovery") : operationLabel(job.type);
   const byKind = (jobs: any[]): Map<string, any[]> => {
     const groups = new Map<string, any[]>();
     for (const job of jobs) {
@@ -3217,7 +3236,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
   const panelTone = terminal ? advisoryCount > 0 || (progress?.failedGroups ?? 0) > 0 ? "warn" : "done" : "run";
   const callSummary = `보조 모델 호출 총 ${progress?.llmCalls ?? 0}회${(progress?.repairCalls ?? 0) > 0 ? ` (보완 ${progress!.repairCalls}회 포함)` : ""}`;
   const progressPercent = progress && progress.totalGroups > 0 ? Math.min(100, Math.round(progress.processedGroups / progress.totalGroups * 100)) : 0;
-  const progressPanel = progressActive ? `<section class="progress is-${panelTone}"><h3 class="sec">${terminal ? `과거 대화 기억 생성 완료${advisoryCount > 0 || progress!.failedGroups > 0 ? " · 일부 정리 필요" : ""}` : "과거 대화 기억 생성"}</h3><div class="progress__card"><div class="meter" role="img" aria-label="대화 기억 정리 ${progress!.processedGroups} / ${progress!.totalGroups}"><span>대화 기억 정리</span><i style="--v:${progressPercent}%"></i><span>${progress!.processedGroups}/${progress!.totalGroups}</span></div><p class="sub">${progress!.activeStage && stageLabels[progress!.activeStage] ? `현재: ${escapeHtml(stageLabels[progress!.activeStage]!)} · ` : ""}${escapeHtml(retryStatus.replace(/^ · /, ""))}${retryStatus ? " · " : ""}${callSummary}</p><dl class="kv phases">${phaseStatus("대화 기억 정리", `${progress!.processedGroups}/${progress!.totalGroups} · ${extractionState[0]}`, extractionState[1])}${phaseStatus("마지막 장부 대조", ledgerState[0], ledgerState[1])}${phaseStatus("관계 상태", relationshipState[0], relationshipState[1])}${phaseStatus("줄거리", storyState[0], storyState[1])}<dt>기억 / 세부</dt><dd>${progress!.memories} / ${progress!.details}</dd><dt>최종 실패</dt><dd>${progress!.failedGroups + advisoryCount}</dd></dl>${terminal && !progress!.acknowledged ? `<div class="decide">${advisoryCount > 0 || progress!.failedGroups > 0 ? btn("실패 작업 다시 시도", { kind: "secondary", action: "retry-failed" }) : ""}${btn("확인", { kind: "primary", action: "acknowledge-backfill", data: { runId: String(progress!.backfillRunId) } })}</div>` : ""}</div></section>` : "";
+  const progressPanel = progressActive ? `<section class="progress is-${panelTone}"><h3 class="sec">${terminal ? `과거 대화 기억 생성 완료${advisoryCount > 0 || progress!.failedGroups > 0 ? " · 일부 정리 필요" : ""}` : "과거 대화 기억 생성"}</h3><div class="progress__card"><div class="meter" role="img" aria-label="대화 기억 정리 ${progress!.processedGroups} / ${progress!.totalGroups}"><span>대화 기억 정리</span><i style="--v:${progressPercent}%"></i><span>${progress!.processedGroups}/${progress!.totalGroups}</span></div><p class="sub">${progress!.activeStage ? `현재: ${escapeHtml(operationLabel(progress!.activeStage))} · ` : ""}${escapeHtml(retryStatus.replace(/^ · /, ""))}${retryStatus ? " · " : ""}${callSummary}</p><dl class="kv phases">${phaseStatus("대화 기억 정리", `${progress!.processedGroups}/${progress!.totalGroups} · ${extractionState[0]}`, extractionState[1])}${phaseStatus("마지막 장부 대조", ledgerState[0], ledgerState[1])}${phaseStatus("관계 상태", relationshipState[0], relationshipState[1])}${phaseStatus("줄거리", storyState[0], storyState[1])}<dt>기억 / 세부</dt><dd>${progress!.memories} / ${progress!.details}</dd><dt>최종 실패</dt><dd>${progress!.failedGroups + advisoryCount}</dd></dl>${terminal && !progress!.acknowledged ? `<div class="decide">${advisoryCount > 0 || progress!.failedGroups > 0 ? btn("실패 작업 다시 시도", { kind: "secondary", action: "retry-failed" }) : ""}${btn("확인", { kind: "primary", action: "acknowledge-backfill", data: { runId: String(progress!.backfillRunId) } })}</div>` : ""}</div></section>` : "";
   const stateTone = operationTone === "is-error" ? "bad" : operationTone === "is-idle" ? "ok" : "wait";
   return `<div class="operations" data-preserve-scroll="operations-page">${pageHeader("처리 상태", "기억 처리와 실패한 작업을 확인합니다.", pageActions)}
     ${state.episodeActivity?.status === "holding" ? homeMessage({ title: "이전 수동 보류가 남아 있습니다", bodyHtml: '<p>기억 정리에서 보류를 해제할 수 있습니다. 이미 처리된 기억은 그대로 유지됩니다.</p>', actionsHtml: btn("기억 정리 열기", { kind: "secondary", action: "organization-open" }), tone: "warning" }) : ""}
@@ -3412,7 +3431,7 @@ export async function setRetrievalDiagnostics(client: Pick<ServerClient, "reques
 const SETTINGS_SECTIONS = ["chat", "memory", "display", "model", "server"] as const;
 type SettingsSection = typeof SETTINGS_SECTIONS[number];
 
-type ComparableServerLlmConfig = Pick<ServerLlmPublicConfig, "engine" | "provider" | "endpoint" | "model" | "temperature" | "thinking" | "serviceTier"> & Partial<Pick<ServerLlmPublicConfig, "maxInputTokens" | "maxOutputTokens" | "embeddingTimeoutMs" | "rerankTimeoutMs" | "llmTimeoutMs">>;
+type ComparableServerLlmConfig = Pick<ServerLlmPublicConfig, "engine" | "provider" | "endpoint" | "model" | "temperature" | "thinking" | "serviceTier"> & Partial<Pick<ServerLlmPublicConfig, "maxInputTokens" | "maxOutputTokens" | "embeddingTimeoutMs" | "rerankTimeoutMs" | "llmTimeoutMs" | "relaxAuxiliaryCensorship">>;
 
 export function serverLlmUpdateRequired(
   current: ServerLlmPublicConfig | undefined,
@@ -3427,6 +3446,7 @@ export function serverLlmUpdateRequired(
     || endpoint(current.endpoint) !== endpoint(next.endpoint)
     || current.model.trim() !== next.model.trim()
     || Number(current.temperature) !== Number(next.temperature)
+    || (current.relaxAuxiliaryCensorship === true) !== (next.relaxAuxiliaryCensorship === true)
     || current.thinking !== next.thinking
     || (current.serviceTier ?? "standard") !== next.serviceTier
     || ["maxInputTokens", "maxOutputTokens", "embeddingTimeoutMs", "rerankTimeoutMs", "llmTimeoutMs"].some(key => {
@@ -3441,7 +3461,8 @@ export function serverLlmUpdateRequiredForSettingsSave(
   next: ComparableServerLlmConfig,
   apiKey = "",
 ): boolean {
-  if (bootstrappingServerConnection) return Boolean(apiKey.trim());
+  if (bootstrappingServerConnection) return Boolean(apiKey.trim())
+    || Boolean(current && (current.relaxAuxiliaryCensorship === true) !== (next.relaxAuxiliaryCensorship === true));
   return serverLlmUpdateRequired(current, next, apiKey);
 }
 
@@ -3594,6 +3615,8 @@ export function settingsV2(
   const capability = providerCapability(serverLlm.provider);
   const model = pane("model", "모델", `
     ${!isServerConfigured(settings) || !serverConnectionReady ? notice(SERVER_SETUP_REQUIRED, { action: btn("서버 설정으로 이동", { kind: "quiet", action: "settings-section", data: { section: "server" } }) }) : ""}
+    ${group("", `${check("relaxAuxiliaryCensorship", "추가 검열 완화 (실험적)", serverLlm.relaxAuxiliaryCensorship === true, "모델이 기억 정리를 거절할 때 켜 보세요.")}
+      <details class="settings-advanced"><summary>추가되는 문구</summary><p class="sub" style="white-space:pre-wrap;overflow-wrap:anywhere">${escapeHtml(AUXILIARY_CENSORSHIP_RELAXATION)}</p></details>`)}
     <h3 class="model-section-title">기억 추출</h3>
     ${group("", `<div class="form__row connection-card">
       <label class="field"><span>처리 위치</span><select name="extractionEngine"><option value="risu" ${settings.extractionEngine === "risu" ? "selected" : ""}>Risu 보조 모델</option><option value="server" ${settings.extractionEngine === "server" ? "selected" : ""}>RCM 서버</option></select></label>
@@ -3908,7 +3931,7 @@ export async function loadDashboardData(
     : requested.has("viewPreferences") ? null : previous.personaEntity;
   const jobsState = value("jobs", {
     items: previous.jobs, cancelledMessages: previous.cancelledMessages, waitingForAssistant: previous.waitingForAssistant,
-    bufferedMessages: previous.bufferedMessages, backfillMessages: previous.backfillMessages, bufferedTurns: previous.bufferedTurns, protectedTurns: previous.protectedTurns, bufferedSourceTokens: previous.bufferedSourceTokens,
+    bufferedMessages: previous.bufferedMessages, excludedMessages: previous.excludedMessages, backfillMessages: previous.backfillMessages, bufferedTurns: previous.bufferedTurns, protectedTurns: previous.protectedTurns, bufferedSourceTokens: previous.bufferedSourceTokens,
     extractionGroupTurns: previous.extractionGroupTurns, recoverableMessages: previous.recoverableMessages,
     historicalBackfillMessages: previous.historicalBackfillMessages, ingestionState: previous.ingestionState,
   });
@@ -3956,6 +3979,7 @@ export async function loadDashboardData(
     cancelledMessages: Number(jobsState.cancelledMessages ?? 0),
     waitingForAssistant: Number(jobsState.waitingForAssistant ?? 0),
     bufferedMessages: Number(jobsState.bufferedMessages ?? 0),
+    excludedMessages: Number(jobsState.excludedMessages ?? 0),
     backfillMessages: Number(jobsState.backfillMessages ?? 0),
     bufferedTurns: Number(jobsState.bufferedTurns ?? 0),
     protectedTurns: Number(jobsState.protectedTurns ?? 0),
@@ -4007,6 +4031,22 @@ export function scheduleDashboardRetry(
 
 async function applyDashboardTheme(preferredTheme?: RuntimeState["settings"]["dashboardTheme"]): Promise<void> {
   document.documentElement.dataset.theme = filmTheme(preferredTheme);
+}
+
+/** An explicit Enter submission may replace its result pane while its input
+ * remains focused. Passive refreshes still protect all focused editors. */
+export function renderSourceNavigationCompletion(root: HTMLElement, render: (completeSourceNavigation: boolean) => void): void {
+  const input = root.ownerDocument.activeElement as HTMLInputElement | null;
+  const form = input && root.contains(input) ? input.closest<HTMLFormElement>('#organization-search-form, #organization-jump-form') : null;
+  const saved = form && input?.matches('input') ? { formId: form.id, value: input.value,
+    start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection } : undefined;
+  render(Boolean(saved));
+  if (!saved) return;
+  const replacement = root.querySelector<HTMLInputElement>(`#${saved.formId} input`);
+  if (!replacement) return;
+  replacement.value = saved.value;
+  replacement.focus({ preventScroll: true });
+  if (saved.start !== null && saved.end !== null) replacement.setSelectionRange(saved.start, saved.end, saved.direction ?? undefined);
 }
 
 export async function openDashboard(state: RuntimeState, client: ServerClient): Promise<void> {
@@ -4376,7 +4416,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     await syncQuizSettings(state, client, quizWasEnabled);
     if (state.current) state.current = await readCurrentContext(state);
     const apiKey = String(values.serverLlmApiKey ?? "").trim();
-    const nextServerLlm = {
+    const submittedServerLlm = {
+      relaxAuxiliaryCensorship: formData.has("relaxAuxiliaryCensorship"),
       engine: extractionEngine,
       maxInputTokens: Number(values.maxInputTokens ?? verifiedHealth?.serverLlm?.maxInputTokens ?? 80000),
       maxOutputTokens: Number(values.maxOutputTokens ?? verifiedHealth?.serverLlm?.maxOutputTokens ?? 24000),
@@ -4385,6 +4426,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       llmTimeoutMs: Number(values.llmTimeoutSeconds ?? (verifiedHealth?.serverLlm?.llmTimeoutMs ?? 300000) / 1000) * 1000,
       ...readServerModelConnection(formData),
     };
+    // On first connection, preserve the server's discovered model settings while
+    // allowing this explicitly chosen prompt option to be saved immediately.
+    const nextServerLlm = bootstrappingServerConnection && !apiKey && verifiedHealth?.serverLlm
+      ? { ...verifiedHealth.serverLlm, relaxAuxiliaryCensorship: submittedServerLlm.relaxAuxiliaryCensorship }
+      : submittedServerLlm;
     if (serverConfigured && serverLlmUpdateRequiredForSettingsSave(bootstrappingServerConnection, verifiedHealth?.serverLlm, nextServerLlm, apiKey)) {
       const result = await client.request<{ worker: ServerWorkerStatus }>("/v1/admin/server-llm", {
         method: "PUT",
@@ -4782,7 +4828,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if (again && body) body.scrollTop = sheetShown.top;
     else sheetShown = { scene: sheet.dataset.scene ?? "", top: 0 };
   };
-  const render = (preservePageScroll = true) => {
+  const render = (preservePageScroll = true, completeSourceNavigation = false) => {
     const previousSidebar = root.querySelector<HTMLElement>(".nav");
     const previousRows = root.querySelector<HTMLElement>("#memory-rows");
     const timelineAnchor = (() => {
@@ -4817,7 +4863,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     setHtmlIfChanged(secondaryNav, dashboardSecondaryNavigation(activeGroup, activeTab));
     secondaryNav.hidden = activeGroup.items.length === 0;
     const activeElement = document.activeElement as HTMLElement | null;
-    const protectFocusedControl = !organizationView.open && page.dataset.tab === activeTab && Boolean(activeElement && page.contains(activeElement) && activeElement.matches("input, select, textarea"));
+    const protectFocusedControl = page.dataset.tab === activeTab && !organizationView.busy && Boolean(activeElement && page.contains(activeElement)
+      && !(completeSourceNavigation && activeElement.closest('#organization-search-form input, #organization-jump-form input'))
+      && activeElement.matches("input, select, textarea") && (!organizationView.open
+        || activeElement.closest('#organization-addition-form textarea, #organization-search-form input, #organization-jump-form input')));
     const protectDirtyForm = formDirty && EDITABLE_DASHBOARD_TABS.includes(activeTab) && page.dataset.tab === activeTab;
     const pageContent = content;
     const pageUnchanged = page.dataset.tab === activeTab && renderedPageTab === activeTab && renderedPageContent === pageContent;
@@ -5192,10 +5241,70 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     }
   }, true);
 
+  let additionEstimateEpoch = 0;
+  let additionEstimateTimer: ReturnType<typeof setTimeout> | undefined;
+  const updateAdditionEstimate = async (): Promise<void> => {
+    const addition = organizationView.addition;
+    if (!addition || !state.current) return;
+    const epoch = ++additionEstimateEpoch;
+    addition.estimate = undefined;
+    addition.estimating = Boolean(addition.selectedIds.length);
+    const paintEstimate = () => {
+      const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
+      if (line) line.textContent = addition.estimating ? '예상량을 확인하고 있어요…' : addition.estimate
+        ? `원문 약 ${addition.estimate.rawTokens.toLocaleString()}토큰 · 보조 호출 약 ${addition.estimate.initialCalls}회 · ${addition.estimate.note}` : '사용할 메시지를 선택해 주세요.';
+      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form button[type="submit"]');
+      if (button) button.disabled = Boolean(organizationView.busy || addition.estimating || !addition.estimate);
+    };
+    paintEstimate();
+    if (!addition.selectedIds.length) return;
+    const chatId = state.current.chatId;
+    try {
+      const estimate = await client.request<NonNullable<AdditionView['estimate']>>(`/v1/chats/${encodeURIComponent(chatId)}/memory-additions/preview`, {
+        method: 'POST', body: JSON.stringify({ rangeIds: addition.rangeIds, messageIds: addition.selectedIds, request: addition.request, postExtractionReview: state.settings.postExtractionReview }),
+      });
+      if (epoch !== additionEstimateEpoch || organizationView.addition !== addition || state.current?.chatId !== chatId) return;
+      addition.estimate = estimate;
+      organizationView.error = undefined;
+    } catch (error) {
+      if (epoch !== additionEstimateEpoch || organizationView.addition !== addition) return;
+      organizationView.error = error instanceof Error ? error.message : String(error);
+      const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
+      if (line) line.textContent = organizationView.error;
+    } finally {
+      if (epoch === additionEstimateEpoch && organizationView.addition === addition) {
+        addition.estimating = false;
+        paintEstimate();
+        if (!addition.estimate && organizationView.error) {
+          const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
+          if (line) line.textContent = organizationView.error;
+        }
+      }
+    }
+  };
+  const openMemoryAddition = async (rangeIds: string[]): Promise<void> => {
+    if (!state.current) return;
+    const chatId = state.current.chatId;
+    const sources = await client.request<Omit<AdditionView, 'selectedIds' | 'request'>>(`/v1/chats/${encodeURIComponent(chatId)}/memory-additions/sources`, {
+      method: 'POST', body: JSON.stringify({ rangeIds }),
+    });
+    if (state.current?.chatId !== chatId || !organizationView.open) return;
+    organizationView.addition = { ...sources, selectedIds: sources.messages.filter(message => !message.additionReason).map(message => message.id), request: '' };
+    organizationView.candidateId = '';
+    organizationView.mobileDetail = true;
+    render();
+    await updateAdditionEstimate();
+  };
+  const scrollOrganizationRange = (id: string) => {
+    const target = Array.from(root.querySelectorAll<HTMLElement>('[data-range-id]')).find(element => element.dataset.rangeId === id);
+    target?.scrollIntoView({ block: 'center' });
+  };
+
   const discardReadyOrganizationCandidate = async (): Promise<boolean> => {
     const candidateId = organizationView.candidateId;
     const item = candidateId.startsWith("group:")
       ? organizationView.data.groups.find((group) => `group:${group.id}` === candidateId)
+      : candidateId.startsWith('addition:') ? organizationView.data.additions?.find(run => `addition:${run.id}` === candidateId)
       : organizationView.data.regenerations.find((run) => `regeneration:${run.id}` === candidateId);
     if (!candidateId || item?.status !== "ready" || !state.current) return true;
     const confirmed = await confirmDashboard(
@@ -5207,6 +5316,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     try {
       const chat = encodeURIComponent(state.current.chatId);
       if (candidateId.startsWith("group:")) await client.request(`/v1/chats/${chat}/memory-groups/${encodeURIComponent(item.id)}/discard`, { method: "POST" });
+      else if (candidateId.startsWith('addition:')) await client.request(`/v1/chats/${chat}/memory-additions/${encodeURIComponent(item.id)}/discard`, { method: 'POST' });
       else await client.request(`/v1/chats/${chat}/regenerations/${encodeURIComponent(item.id)}`, { method: "DELETE" }, 120_000);
       organizationView.candidateId = "";
       organizationView.selection = [];
@@ -5885,6 +5995,26 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       return;
     }
     if (action === "new-manual-memory") {
+      const choice = await chooseMemoryCreation();
+      if (!choice) return;
+      if (choice === 'source') {
+        if (!state.current) return;
+        organizationView.open = true;
+        activeTab = 'timeline';
+        const chat = encodeURIComponent(state.current.chatId);
+        try {
+          organizationView.data = await client.request<OrganizationData>(`/v1/chats/${chat}/memory-organization`);
+          const memoryOpen = !timelineView.creating && (!window.matchMedia('(max-width: 899px)').matches || timelineView.mobileDetail);
+          const rangeIds = organizationMemoryRanges(organizationView.data.ranges, memoryOpen ? selectedMemory : '');
+          organizationView.highlightedIds = rangeIds;
+          organizationView.selection = rangeIds;
+          organizationView.focusedId = rangeIds[0] ?? '';
+          organizationView.candidateId = '';
+          if (rangeIds.length) await openMemoryAddition(rangeIds);
+          else { organizationView.mobileDetail = false; organizationView.addition = undefined; render(); }
+        } catch (error) { organizationView.error = error instanceof Error ? error.message : String(error); render(); }
+        return;
+      }
       formDirty = false;
       timelineView.editing = false;
       timelineView.creating = true;
@@ -6356,11 +6486,38 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         organizationView.error = undefined;
         try {
           const id = target.dataset.id ?? '';
-          const leavesCandidate = ['organization-close', 'organization-list', 'organization-back-detail', 'organization-detail', 'organization-select', 'organization-candidate'].includes(action ?? '');
+          const leavesCandidate = ['organization-close', 'organization-list', 'organization-back-detail', 'organization-detail', 'organization-select', 'organization-candidate', 'organization-add-memory'].includes(action ?? '');
           if (leavesCandidate && !await discardReadyOrganizationCandidate()) return;
           if (action === 'organization-close') organizationView.open = false;
-          else if (action === 'organization-list') { organizationView.mobileDetail = false; organizationView.candidateId = ''; }
-          else if (action === 'organization-back-detail') { organizationView.candidateId = ''; organizationView.mobileDetail = Boolean(organizationView.focusedId); }
+          else if (action === 'organization-list') { organizationView.mobileDetail = false; organizationView.candidateId = ''; organizationView.addition = undefined; }
+          else if (action === 'organization-back-detail') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = Boolean(organizationView.focusedId); }
+          else if (action === 'organization-add-memory') {
+            if (!id) organizationView.focusedId = '';
+            await openMemoryAddition(id ? [id] : organizationView.selection);
+            if (organizationView.addition) organizationView.addition.origin = id ? 'detail' : 'selection';
+          } else if (action === 'organization-addition-message' || action === 'organization-addition-toggle-all') {
+            const addition = organizationView.addition;
+            if (!addition || organizationView.busy) return;
+            const eligibleIds = addition.messages.filter(message => !message.additionReason).map(message => message.id);
+            if (action === 'organization-addition-toggle-all') addition.selectedIds = eligibleIds.every(id => addition.selectedIds.includes(id)) ? [] : eligibleIds;
+            else if (eligibleIds.includes(id)) addition.selectedIds = addition.selectedIds.includes(id) ? addition.selectedIds.filter(item => item !== id) : eligibleIds.filter(item => item === id || addition.selectedIds.includes(item));
+            addition.estimate = undefined;
+            render();
+            await updateAdditionEstimate();
+          } else if (action === 'organization-clear-search') {
+            organizationView.search = ''; organizationView.searchStatus = ''; organizationView.highlightedIds = [];
+          } else if (['organization-apply-addition', 'organization-discard-addition', 'organization-retry-addition'].includes(action ?? '')) {
+            if (organizationView.busy) return;
+            const operation = action!.split('-')[1];
+            organizationView.busy = true; render();
+            try {
+              await client.request(`/v1/chats/${chat}/memory-additions/${encodeURIComponent(id)}/${operation}`, { method: 'POST' });
+              if (operation !== 'retry') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = false; }
+              else void drainWorker(state, client);
+              await refresh({ forceApply: true });
+            } finally { organizationView.busy = false; render(); }
+            return;
+          }
           else if (action === 'organization-open' || action === 'related-source') {
             organizationView.open = true; activeTab = 'timeline';
             organizationView.data = await client.request<OrganizationData>(`/v1/chats/${chat}/memory-organization`);
@@ -6376,10 +6533,24 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
           } else if (action === 'organization-select') {
             organizationView.selection = toggleOrganizationRange(organizationView.data.ranges, organizationView.selection, id);
           } else if (action === 'organization-detail') {
-            organizationView.focusedId = id; organizationView.candidateId = ''; organizationView.mobileDetail = true;
+            organizationView.focusedId = id; organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = true;
             organizationView.detail = await client.request(`/v1/chats/${chat}/source-ranges/${encodeURIComponent(id)}`);
           } else if (action === 'organization-candidate') { organizationView.candidateId = id; organizationView.mobileDetail = true; }
-          else if (action === 'organization-create-group') {
+          else if (action === 'organization-memory-exclusion') {
+            const range = organizationView.data.ranges.find(row => row.id === id);
+            if (!range || range.sourceMessageIds.length !== 1 || organizationView.busy) return;
+            organizationView.busy = true; render();
+            try {
+              await client.request(`/v1/chats/${chat}/messages/${encodeURIComponent(range.sourceMessageIds[0]!)}/memory-exclusion`, {
+                method: 'PUT', body: JSON.stringify({ excluded: !range.memoryExcluded }),
+              });
+              organizationView.selection = organizationView.selection.filter(selected => selected !== id);
+            } finally {
+              organizationView.busy = false;
+              organizationView.data = await client.request(`/v1/chats/${chat}/memory-organization`);
+            }
+            await refresh({ forceApply: true }); return;
+          } else if (action === 'organization-create-group') {
             requireChatMemoryEnabled(state, state.current.chatId);
             const estimate = await client.request<any>(`/v1/chats/${chat}/memory-groups/preview`, { method: 'POST', body: JSON.stringify({ batchIds: organizationView.selection, postExtractionReview: state.settings.postExtractionReview }) });
             const review = await chooseExtractionReviewOverride('선택한 원문 구간을 묶을까요?',
@@ -6767,9 +6938,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         void drainWorker(state, client);
       } else if (action === "retry-failed") {
         requireChatMemoryEnabled(state, state.current.chatId);
-        if (!await confirmDashboard("실패한 기억 처리 작업의 시도 횟수를 초기화해 다시 대기 상태로 둘까요? 서버 worker가 실행 중이면 곧바로 다시 처리합니다.")) return;
-        const result = await client.request<{ retried: number }>(`/v1/chats/${chat}/jobs/retry-failed`, { method: "POST" });
-        addLog(state.logs, "info", `${result.retried} failed extraction job(s) returned to queued state`);
+        if (!await confirmDashboard("실패한 기억 처리 작업을 다시 시도할까요? 메인 응답 중이거나 처리가 일시정지되어 있으면 끝나거나 재개될 때까지 기다립니다.")) return;
+        await retryFailedJobs(state, client, state.current.chatId);
       } else if (action === "acknowledge-backfill") {
         const runId = target.dataset.runId ?? "";
         if (!runId) return;
@@ -6830,6 +7000,45 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     event.preventDefault();
     const form = event.target as HTMLFormElement;
     const values = Object.fromEntries(new FormData(form));
+    if (form.id === 'organization-search-form' || form.id === 'organization-jump-form' || form.id === 'organization-addition-form') {
+      if (!state.current || organizationView.busy) return;
+      const chatId = state.current.chatId, chat = encodeURIComponent(chatId);
+      organizationView.error = undefined;
+      try {
+        if (form.id === 'organization-addition-form') {
+          const addition = organizationView.addition;
+          if (!addition || addition.estimating || !addition.estimate) return;
+          requireChatMemoryEnabled(state, chatId);
+          organizationView.busy = true; render();
+          const created = await client.request<{ runId: string }>(`/v1/chats/${chat}/memory-additions/create`, {
+            method: 'POST', body: JSON.stringify({ rangeIds: addition.rangeIds, messageIds: addition.selectedIds, request: addition.request, postExtractionReview: state.settings.postExtractionReview }),
+          });
+          if (state.current?.chatId !== chatId) return;
+          organizationView.candidateId = `addition:${created.runId}`;
+          organizationView.addition = undefined;
+          void drainWorker(state, client);
+          await refresh({ forceApply: true });
+        } else {
+          const jumping = form.id === 'organization-jump-form';
+          const query = jumping ? `ordinal=${encodeURIComponent(String(values.ordinal))}` : `q=${encodeURIComponent(String(values.query))}`;
+          if (jumping) organizationView.jump = String(values.ordinal); else organizationView.search = String(values.query);
+          const found = await client.request<{ ranges: OrganizationData['ranges']; messageNumbers: number[]; truncated: boolean }>(`/v1/chats/${chat}/source-ranges/search?${query}`);
+          if (state.current?.chatId !== chatId) return;
+          organizationView.highlightedIds = found.ranges.map(range => range.id);
+          organizationView.searchStatus = found.ranges.length ? `${found.ranges.length}개 구간을 찾았어요${found.truncated ? ' · 처음 200개 메시지만 표시해요' : ''}` : '일치하는 원문 구간이 없어요.';
+          organizationView.mobileDetail = false;
+          renderSourceNavigationCompletion(root, complete => render(true, complete));
+          const id = jumping ? organizationJumpRange(found.ranges, Number(values.ordinal)) : found.ranges[0]?.id;
+          if (id) scrollOrganizationRange(id);
+        }
+      } catch (error) { organizationView.error = error instanceof Error ? error.message : String(error); }
+      finally {
+        organizationView.busy = false;
+        if (form.id === 'organization-addition-form') render();
+        else renderSourceNavigationCompletion(root, complete => render(true, complete));
+      }
+      return;
+    }
     const mutationForm = ["memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form"].includes(form.id);
     const submitButton = form.querySelector<HTMLButtonElement>('button[type="submit"], button[data-action="submit-form"]')
       ?? root.querySelector<HTMLButtonElement>(`button[data-action="submit-form"][data-form-id="${form.id}"]`);
@@ -7165,6 +7374,18 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     const relationForm = (event.target as HTMLElement).closest<HTMLFormElement>('#world-state-form[data-social="true"]');
     if (relationForm) syncRelationForm(relationForm);
     const input = event.target as HTMLInputElement;
+    if (input.closest('#organization-addition-form') && organizationView.addition) {
+      organizationView.addition.request = input.value;
+      organizationView.addition.estimate = undefined;
+      additionEstimateEpoch++;
+      if (additionEstimateTimer) clearTimeout(additionEstimateTimer);
+      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form button[type="submit"]');
+      if (button) button.disabled = true;
+      additionEstimateTimer = setTimeout(() => void updateAdditionEstimate(), 400);
+      return;
+    }
+    if (input.closest('#organization-search-form')) { organizationView.search = input.value; return; }
+    if (input.closest('#organization-jump-form')) { organizationView.jump = input.value; return; }
     if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
     if (input.dataset.action === "people-search") {
       peopleView.query = input.value;

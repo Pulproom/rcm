@@ -21,7 +21,7 @@ export function targetDetailSourceEvidence(db: RcmDatabase, chatId: string, deta
     WHERE d.chat_id=? AND d.id IN (${ids.map(() => "?").join(",")}) AND d.active=1 AND m.active=1`)
     .all(chatId, ...ids) as Array<{ id: string; memory_id: string; evidence_json: string; epistemic: string }>;
   const message = db.prepare(`SELECT ordinal,canonical_content FROM messages WHERE chat_id=? AND message_id=?
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`);
+    AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`);
   const result: SourceEvidenceItem[] = [];
   const excluded = new Set(excludedAtoms);
   const promptSources = new Set(promptSourceMessageIds);

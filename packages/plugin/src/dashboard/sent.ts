@@ -97,8 +97,8 @@ function sceneRow(scene: SentScene, extra = ""): string {
 
 function stateNavigation(row: SentState): string {
   const identity = `data-kind="${row.kind}" data-id="${escapeHtml(row.id)}"`;
-  if (row.kind === "relationship" || row.kind === "basic_relation") return `${identity} data-action="open-relationship" data-key="${escapeHtml(row.key ?? "")}"`;
-  if (row.kind === "recognition") return `${identity} data-action="open-relationship-person" data-person-name="${escapeHtml(row.key ?? "")}"`;
+  if (row.kind === "relationship" || row.kind === "basic_relation") return row.key ? `${identity} data-action="open-relationship" data-key="${escapeHtml(row.key)}"` : identity;
+  if (row.kind === "recognition") return row.key ? `${identity} data-action="open-relationship-person" data-person-name="${escapeHtml(row.key)}"` : identity;
   return `${identity} data-action="open-sent-now"`;
 }
 
@@ -136,7 +136,7 @@ export function sentPage(data: SentData, view: SentView): string {
   const peopleSection = `<h2 class="sent__h">인물 <span class="n">${data.memoryOnly ? "" : data.peopleCount}</span></h2>
     ${data.memoryOnly ? off : data.people.length ? `<ul class="sent-list">${people.map((person) => `<li><button type="button" class="sent-row"${person.key ? ` data-action="open-relationship" data-key="${escapeHtml(person.key)}"` : ' data-action="tab" data-tab="relationships"'}><span class="sent-row__k">관계</span><span class="sent-row__t"><span class="who">${person.namesHtml}</span>${person.labelHtml ? ` · ${person.labelHtml}` : ""}</span>${chevron}${person.meta ? `<span class="sent-row__m">${escapeHtml(person.meta)}</span>` : ""}</button></li>`).join("")}${moreButton(view, "people", data.people.length - people.length)}</ul>` : '<p class="sent-off">이번에는 인물 기록을 보내지 않았어요.</p>'}`;
   const nowSection = `<h2 class="sent__h">현재 <span class="n">${data.memoryOnly ? "" : data.now.length}</span></h2>
-    ${data.memoryOnly ? off : data.now.length ? `<ul class="sent-list">${now.map((row) => `<li><button type="button" class="sent-row" ${stateNavigation(row)}><span class="sent-row__k">${escapeHtml(row.tag)}</span><span class="sent-row__t is-text"><span class="who">${row.whoHtml}</span> · ${row.textHtml}</span>${chevron}</button></li>`).join("")}${moreButton(view, "now", data.now.length - now.length)}</ul>` : '<p class="sent-off">이번에는 현재 기록을 보내지 않았어요.</p>'}`;
+    ${data.memoryOnly ? off : data.now.length ? `<ul class="sent-list">${now.map((row) => `<li><button type="button" class="sent-row" ${stateNavigation(row)}><span class="sent-row__k">${escapeHtml(row.tag)}</span><span class="sent-row__t is-text">${row.whoHtml ? `<span class="who">${row.whoHtml}</span> · ` : ""}${row.textHtml}</span>${chevron}</button></li>`).join("")}${moreButton(view, "now", data.now.length - now.length)}</ul>` : '<p class="sent-off">이번에는 현재 기록을 보내지 않았어요.</p>'}`;
   const searchSection = data.searches.length ? `<h2 class="sent__h">답변 중 찾아본 기억 <span class="n">${data.searches.length}번</span></h2>
     <ul class="sent-list">${data.searches.map(callRow).join("")}</ul>` : "";
   const translation = view.packetTranslation;

@@ -78,10 +78,10 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       (SELECT count(*) FROM embedding_items e WHERE e.chat_id=c.id) AS embeddings,
       (SELECT count(*) FROM jobs j WHERE j.chat_id=c.id) AS jobs,
       (SELECT count(*) FROM server_meta s WHERE s.key='retrieval_trace_chat:' || c.id AND s.value='1') AS retrieval_diagnostics_enabled,
-      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.content IS NOT NULL AND m.extraction_state IN ('pending','cancelled')) AS reprocessable_messages,
-      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle='committed' AND m.host_visibility IN ('active','all_before') AND m.content IS NOT NULL AND m.extraction_state='pending') AS buffered_messages,
-      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.role='user' AND m.lifecycle='committed' AND m.host_visibility IN ('active','all_before') AND m.extraction_state='pending' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.chat_id=m.chat_id AND a.role='assistant' AND a.lifecycle='committed' AND a.host_visibility IN ('active','all_before') AND a.ordinal>m.ordinal)) AS waiting_for_assistant,
-      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.content IS NOT NULL AND m.extraction_state='cancelled') AS recoverable_messages,
+      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.memory_excluded=0 AND m.content IS NOT NULL AND m.extraction_state IN ('pending','cancelled')) AS reprocessable_messages,
+      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle='committed' AND m.host_visibility IN ('active','all_before') AND m.memory_excluded=0 AND m.content IS NOT NULL AND m.extraction_state='pending') AS buffered_messages,
+      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.role='user' AND m.lifecycle='committed' AND m.host_visibility IN ('active','all_before') AND m.memory_excluded=0 AND m.extraction_state='pending' AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.chat_id=m.chat_id AND a.role='assistant' AND a.lifecycle='committed' AND a.host_visibility IN ('active','all_before') AND a.ordinal>m.ordinal)) AS waiting_for_assistant,
+      (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.memory_excluded=0 AND m.content IS NOT NULL AND m.extraction_state='cancelled') AS recoverable_messages,
       COALESCE((SELECT sum(length(CAST(content AS BLOB))) FROM messages m WHERE m.chat_id=c.id),0)
         + COALESCE((SELECT sum(length(CAST(title AS BLOB))+length(CAST(content AS BLOB))) FROM memories m WHERE m.chat_id=c.id),0) AS approximate_bytes
     FROM chats c LEFT JOIN chat_lineage l ON l.child_chat_id=c.id ORDER BY c.updated_at DESC
@@ -206,8 +206,8 @@ export function listSourceLedger(db: RcmDatabase, chatId: string, offset: number
   const total = Number((db.prepare("SELECT count(*) count FROM messages WHERE chat_id=?").get(chatId) as { count: number } | undefined)?.count ?? 0);
   if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId)) throw new Error("Chat not found");
   const fields = includeContent
-    ? "message_id,role,ordinal,lifecycle,host_visibility,extraction_state,event_time,updated_at,length(CAST(content AS BLOB)) AS content_bytes,content"
-    : "message_id,role,ordinal,lifecycle,host_visibility,extraction_state,event_time,updated_at,length(CAST(content AS BLOB)) AS content_bytes,content IS NOT NULL AS has_content";
+    ? "message_id,role,ordinal,lifecycle,host_visibility,extraction_state,memory_excluded,event_time,updated_at,length(CAST(content AS BLOB)) AS content_bytes,content"
+    : "message_id,role,ordinal,lifecycle,host_visibility,extraction_state,memory_excluded,event_time,updated_at,length(CAST(content AS BLOB)) AS content_bytes,content IS NOT NULL AS has_content";
   const items = db.prepare(`SELECT ${fields} FROM messages WHERE chat_id=? ORDER BY CASE lifecycle WHEN 'client_pruned' THEN 0 ELSE 1 END,ordinal LIMIT ? OFFSET ?`)
     .all(chatId, boundedLimit, boundedOffset) as Array<Record<string, unknown>>;
   return { items, total, offset: boundedOffset, limit: boundedLimit, includesContent: includeContent };

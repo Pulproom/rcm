@@ -92,7 +92,7 @@ export class ServerExtractionWorker {
       ...(this.#lastError ? { lastError: this.#lastError } : {}),
       queuedJobs: (this.db.prepare("SELECT count(*) AS count FROM jobs WHERE status IN ('queued','leased') AND type<>'quiz'").get() as { count: number }).count,
       phase: this.#faulted ? "faulted" : this.#manualPaused ? "paused" : active?.phase ?? "idle",
-      ...(active ? { activeJob: { chatId: active.job.chatId, sourceMessageCount: active.job.sourceMessageIds.length, sourceTurnCount: active.job.sourceTurnCount, startedAt: active.startedAt, kind: active.job.kind, sourceRecovery: active.job.sourceRecovery } } : {}),
+      ...(active ? { activeJob: { chatId: active.job.chatId, sourceMessageCount: active.job.sourceMessageIds.length, sourceTurnCount: active.job.sourceTurnCount, startedAt: active.startedAt, kind: active.job.kind, sourceRecovery: active.job.sourceRecovery, sourceRecoveryMetadata: active.job.sourceRecoveryMetadata } } : {}),
       ...(chatId && this.#auxiliaryCalls.get(chatId)?.length ? { auxiliaryCalls: this.#auxiliaryCalls.get(chatId) } : {}),
       ...(this.#lastCompletedAt ? { lastCompletedAt: this.#lastCompletedAt } : {}),
     };

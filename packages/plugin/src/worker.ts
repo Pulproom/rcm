@@ -1,4 +1,7 @@
+import { operationLabel } from "@rcm/shared";
+import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { supportFailure } from "./support-diagnostics.js";
+import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { isChatMemoryEnabled } from "./settings.js";
 import { parseReconciliationResult, type SourceUnit } from "@rcm/shared";
@@ -117,9 +120,41 @@ async function readModelStream(stream: any, signal?: AbortSignal): Promise<strin
   }
 }
 
+function risuAuxiliaryError(error: unknown): Error & { code?: string; status?: number; risuCall?: RisuAuxiliaryCallDiagnostic } {
+  if (error instanceof AuxiliaryModelTimeoutError || error instanceof AuxiliaryStreamError) return error;
+  const status = (error as { status?: unknown } | null)?.status;
+  const auth = isProviderAuthenticationError(error);
+  const code = auth ? "AUXILIARY_AUTH_FAILED" : isPermanentProviderError(error) ? "AUXILIARY_PROVIDER_REJECTED" : "MODEL_CONNECTION_FAILED";
+  const message = auth ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : "Risu 보조 모델 호출에 실패했어요. 모델 설정과 입력 한도를 확인해 주세요" + (isProviderContextLimitError(error) ? " · context length exceeded" : "");
+  const httpStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+  return Object.assign(new Error(`${code}: ${message}${httpStatus ? ` · HTTP ${httpStatus}` : ""}`), {
+    code, ...(httpStatus ? { status: httpStatus } : {}),
+  });
+}
+
+async function auxiliaryCallDiagnostic(state: RuntimeState, options: Parameters<typeof risuai.runLLMModel>[0], job: RuntimeState["currentJob"], resolution: any): Promise<RisuAuxiliaryCallDiagnostic | undefined> {
+  const identity = state.hostChatIdentity;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const activeChatId = await Promise.race([
+    (async () => {
+      // Read only selection indices. Never fetch a chat, character, database or key for diagnostics.
+      const character = await risuai.getCurrentCharacterIndex();
+      const chat = await risuai.getCurrentChatIndex();
+      const confirmedCharacter = await risuai.getCurrentCharacterIndex();
+      return identity && character === confirmedCharacter && character === identity.characterIndex && chat === identity.chatIndex ? identity.chatId : undefined;
+    })().catch(() => undefined),
+    new Promise<undefined>(resolve => { timer = setTimeout(resolve, 500); }),
+  ]).finally(() => clearTimeout(timer));
+  return projectRisuAuxiliaryCallDiagnostic({ jobId: job?.id, jobChatId: job?.chatId, activeChatId, activeChatIdAvailable: Boolean(activeChatId),
+    mode: options.mode, staticModel: options.staticModel,
+    hostResolutionAvailable: true, model: resolution?.model, provider: resolution?.provider, authPresent: resolution?.authPresent });
+}
+
 export async function responseText(response: any, signal?: AbortSignal): Promise<string> {
   if (typeof response === "string") return response;
-  if (response?.type === "fail") throw new Error(`Auxiliary model failed: ${String(response.result ?? "unknown provider error")}`);
+  if (response?.type === "fail") throw risuAuxiliaryError(Object.assign(new Error(`Auxiliary model failed: ${String(response.result ?? "unknown provider error")}`), {
+    status: response.status ?? response.httpStatus, code: response.code ?? response.error?.code,
+  }));
   if (response?.type === "streaming") return readModelStream(response.result, signal);
   if (typeof response?.result === "string") return response.result;
   if (typeof response?.content === "string") return response.content;
@@ -132,7 +167,7 @@ export function parseJson(text: string): unknown {
   return parseStructuredModelJson(text).value;
 }
 
-type WorkerJsonPurpose = "memory_group" | "memory_group_repair" | "extraction" | "extraction_repair" | "initial_calibration" | "initial_calibration_repair" | "audit" | "audit_repair" | "reconciliation" | "reconciliation_repair" | "state_response_repair" | "ledger_consistency" | "ledger_consistency_repair" | "relationship_projection" | "relationship_projection_repair" | "story_consolidation" | "story_consolidation_repair" | "quiz" | "episode_draft" | "episode_draft_repair" | "episode_finalize" | "episode_finalize_repair";
+type WorkerJsonPurpose = import("@rcm/shared").AuxiliaryPurpose;
 
 async function generateQuiz(state: RuntimeState, job: LeasedJob): Promise<unknown> {
   return parseWorkerJson(state, await runModel(state, [
@@ -160,6 +195,7 @@ async function groupMemories(state: RuntimeState, job: LeasedJob): Promise<unkno
   }
 }
 const validatedPartRecorders = new WeakMap<RuntimeState, (purpose: "initial_calibration" | "ledger_consistency" | "reconciliation", part: { systemPrompt: string; userPrompt: string }, result: unknown) => Promise<unknown>>();
+const modelPromptRelaxation = new WeakMap<RuntimeState, boolean>();
 const modelJobBudgets = new WeakMap<RuntimeState, NonNullable<LeasedJob["auxiliaryBudget"]>>();
 const modelDraftRecorders = new WeakMap<RuntimeState, (output: string, storyValidationReason?: string) => Promise<unknown>>();
 const modelCallRecorders = new WeakMap<RuntimeState, (purpose: WorkerJsonPurpose, outcome: "started" | "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => Promise<void>>();
@@ -181,12 +217,13 @@ export function isInternalModelRequest(state: RuntimeState, messages: OpenAIChat
     && state.internalModelCalls?.has(attribute.slice(INTERNAL_CALL_ATTRIBUTE.length))));
 }
 
-export async function runRisuModel(state: RuntimeState, options: Parameters<typeof risuai.runLLMModel>[0]): Promise<any> {
+export async function runRisuModel(state: RuntimeState, options: Parameters<typeof risuai.runLLMModel>[0], job?: RuntimeState["currentJob"]): Promise<any> {
   if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
   const id = crypto.randomUUID();
   const calls = state.internalModelCalls ??= new Set();
   calls.add(id);
   const controller = new AbortController();
+  let resolution: unknown;
   const timeoutMs = modelJobBudgets.get(state)?.llmTimeoutMs ?? RISU_AUXILIARY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_, reject) => {
@@ -200,12 +237,19 @@ export async function runRisuModel(state: RuntimeState, options: Parameters<type
       : { ...message, attr: [...(message.attr ?? []), `${INTERNAL_CALL_ATTRIBUTE}${id}`] });
     const call = async () => {
       const response = await risuai.runLLMModel({ ...options, messages });
+      resolution = response;
       // Even a late header must have its stream cancelled, never delivered.
       if (response?.type === "streaming") return { ...response, type: "success", result: await responseText(response, controller.signal) };
       if (controller.signal.aborted) throw controller.signal.reason;
+      if (response?.type === "fail") await responseText(response);
       return response;
     };
     return await Promise.race([call(), deadline]);
+  } catch (error) {
+    const failure = risuAuxiliaryError(error);
+    failure.risuCall = await auxiliaryCallDiagnostic(state, options, job, resolution ?? error);
+    addLog(state.logs, "error", "Risu auxiliary call failed", supportFailure("auxiliary_call", failure, { target: "risu", attempt: job?.attempt }));
+    throw failure;
   } finally { clearTimeout(timer!); calls.delete(id); }
 }
 
@@ -316,21 +360,20 @@ async function waitForMainGeneration(state: RuntimeState): Promise<void> {
 
 async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose): Promise<string> {
   const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
-    if (state.currentJob?.kind === "quiz") return;
     try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
     catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`); }
   };
   const timing = state.currentJob?.kind !== "quiz" && state.currentJob
-    ? startTiming(state, { chatId: state.currentJob.chatId, kind: "auxiliary_llm", label: `보조 모델 · ${purpose}` })
+    ? startTiming(state, { chatId: state.currentJob.chatId, kind: "auxiliary_llm", label: `보조 모델 · ${operationLabel(purpose)}` })
     : undefined;
   try {
     while (mainGenerationOpen(state)) await waitForMainGeneration(state);
     if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
-    const preparedMessages = messages.map(message => ({ ...message, content: typeof message.content === "string" ? prepareAuxiliaryText(message.content) : message.content }));
+    const preparedMessages = withAuxiliaryStoryFraming(messages, modelPromptRelaxation.get(state) === true).map(message => ({ ...message, content: typeof message.content === "string" ? prepareAuxiliaryText(message.content) : message.content }));
     const budget = modelJobBudgets.get(state) ?? { maxInputTokens: 80000, maxOutputTokens: 24000, llmTimeoutMs: 300000 };
     const measurement = measureAuxiliaryPrompt(preparedMessages, estimateTokens, budget);
     if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${measurement.estimatedInputTokens}/${budget.maxInputTokens} input tokens; source retained for replanning`);
-    if (state.currentJob?.kind !== "quiz") await modelCallRecorders.get(state)?.(purpose, "started");
+    await modelCallRecorders.get(state)?.(purpose, "started");
     // Main beforeRequest may arrive during progress reporting. Check again at
     // the dispatch boundary; the main path never waits for this worker.
     while (mainGenerationOpen(state)) await waitForMainGeneration(state);
@@ -338,10 +381,9 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     const response = await runRisuModel(state, {
       messages: preparedMessages,
       ...risuModelSlot(state.settings.auxiliaryMode, state.settings.staticModel),
-    });
-    if (state.currentJob?.kind !== "quiz" && response?.type === "fail" && typeof response.result === "string") await modelDraftRecorders.get(state)?.(response.result);
+    }, state.currentJob);
     const output = await responseText(response);
-    if (state.currentJob?.kind !== "quiz") await modelDraftRecorders.get(state)?.(output);
+    await modelDraftRecorders.get(state)?.(output);
     const finishReason = response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.candidates?.[0]?.finishReason;
     if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase())) {
       throw Object.assign(new Error(`Auxiliary model output truncated (${finishReason}); raw response retained`), { code: "MODEL_OUTPUT_TRUNCATED" });
@@ -743,6 +785,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       const llmCallStats: OperationLlmCallStats = { total: job.llmCallStats?.total ?? 0, repairs: job.llmCallStats?.repairs ?? 0, byPurpose: { ...(job.llmCallStats?.byPurpose ?? {}) } };
       let repairBudgetUsed = job.repairBudgetUsed ?? (llmCallStats.repairs > (llmCallStats.byPurpose.state_response_repair ?? 0));
       let stateRepairBudgetUsed = job.stateRepairBudgetUsed ?? ((llmCallStats.byPurpose.state_response_repair ?? 0) > 0);
+      modelPromptRelaxation.set(state, job.relaxAuxiliaryCensorship === true);
       if (job.auxiliaryBudget) modelJobBudgets.set(state, job.auxiliaryBudget);
       validatedPartRecorders.set(state, async (purpose, part, result) => client.validatedAuxiliaryPart?.(job.id, state.workerId, purpose, part, result));
       modelDraftRecorders.set(state, async (output, storyValidationReason) => client.stageDraft?.(job.id, state.workerId, output, storyValidationReason));
@@ -758,10 +801,12 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         const phase = state.currentJob?.phase;
         const stage = phase === "post_extraction_audit" || phase === "state_reconciliation" || phase === "ledger_consistency"
           || phase === "relationship_projection" || phase === "story_consolidation" || phase === "storing" ? phase : firstStage;
+        const diagnostic = outcome === "failed" ? supportFailure("auxiliary_call", error) : undefined;
         await client.progress(job.id, state.workerId, stage, 0, llmCallStats, { purpose, attempt: job.attempt, outcome, at: Date.now(),
+          ...(diagnostic ? { code: diagnostic.code, httpStatus: diagnostic.httpStatus, risuCall: diagnostic.risuCall } : {}),
           ...(outcome === "failed" ? { error: String(error ?? "Model call failed") } : {}), ...(usage && Object.keys(usage).length ? { usage } : {}) });
       });
-      state.currentJob = { id: job.id, chatId: job.chatId, attempt: job.attempt, sourceMessageCount: job.sourceMessageIds.length, sourceTurnCount: job.sourceTurnCount, startedAt: Date.now(), kind: job.kind, sourceRecovery: job.sourceRecovery, phase: job.kind === "episode" ? "capsule" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "initial_calibration" ? "initial_calibration" : firstStage };
+      state.currentJob = { id: job.id, chatId: job.chatId, attempt: job.attempt, sourceMessageCount: job.sourceMessageIds.length, sourceTurnCount: job.sourceTurnCount, startedAt: Date.now(), kind: job.kind, sourceRecovery: job.sourceRecovery, sourceRecoveryMetadata: job.sourceRecoveryMetadata, phase: job.kind === "episode" ? "capsule" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "initial_calibration" ? "initial_calibration" : firstStage };
       state.publishActivity?.();
       try {
         if (job.kind !== "initial_calibration" && job.kind !== "social_backfill" && job.kind !== "episode" && job.kind !== "quiz") await client.progress(job.id, state.workerId, firstStage).catch(() => undefined);
@@ -871,6 +916,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         modelDraftRecorders.delete(state);
         validatedPartRecorders.delete(state);
         modelJobBudgets.delete(state);
+        modelPromptRelaxation.delete(state);
         modelCallRecorders.delete(state);
         state.currentJob = undefined;
         state.publishActivity?.();

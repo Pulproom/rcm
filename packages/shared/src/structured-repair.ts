@@ -1,3 +1,4 @@
+import { withAuxiliaryStoryFraming } from "./social-memory-guidance.js";
 import { ACCESS_BASIS_GUIDANCE } from "./state-classification.js";
 import {
   INITIAL_AFFECTION_LEVELS,
@@ -237,8 +238,9 @@ export function buildAuxiliaryRepairMessages(args: {
   // A parser position alone points at the end of a long object; the bracket shape shows where it went wrong.
   const shape = args.validationError instanceof SyntaxError ? structuredJsonShapeDiagnostic(args.invalidOutput) : undefined;
   const structure = shape ? `\nJSON structure of the previous response: ${shape}. Compare it with the required shape and move misplaced keys and brackets; the content itself may already be correct.` : "";
+  const original = withAuxiliaryStoryFraming(args.originalMessages.map((message) => ({ role: repairRole(message.role), content: message.content })));
   return [
-    ...args.originalMessages.map((message) => ({ role: repairRole(message.role), content: message.content })),
+    ...original,
     { role: "assistant", content: args.invalidOutput },
     { role: "user", content: `${commonInstruction}\n${taskInstruction(args.request)}\n${diagnosticLabel}: ${diagnostic}${structure}` },
   ];

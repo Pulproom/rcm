@@ -1,5 +1,5 @@
 import { risuModelSlot, runRisuModel } from "./worker.js";
-import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
+import { withAuxiliaryStoryFraming, planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
 import type { RuntimeState, TranslationDisplay, TranslationProvider } from "./types.js";
 import type { MemoryLanguage } from "@rcm/shared";
 import { ServerClient } from "./api-client.js";
@@ -160,7 +160,8 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
       if (provider === "server") return clientFor(state).request<{ items: Array<{ id: string; partIndex: number; ko: string }>; usage?: any; model: string }>("/v1/translations/batch", {
         method: "POST", body: JSON.stringify({ items, model: state.settings.translationServerModel, temperature: state.settings.translationTemperature, thinking: state.settings.translationThinking, maxOutput: state.settings.translationServerMaxOutput }),
       }, TRANSLATION_TIMEOUT_MS + 5000);
-      const response = await runRisuModel(state, { messages: [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
+      const { config } = await clientFor(state).request<{ config: { relaxAuxiliaryCensorship?: boolean } }>("/v1/admin/server-llm");
+      const response = await runRisuModel(state, { messages: withAuxiliaryStoryFraming([{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], config.relaxAuxiliaryCensorship === true), ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
       if (response?.type !== "success" || typeof response.result !== "string") throw new TranslationError("MODEL_CONNECTION_FAILED", String(response?.result || "Risu 번역 모델 호출 실패"));
       return { items: validateTranslation(response.result, items, response.finish_reason ?? response.finishReason), usage: response.usage ?? response.usageMetadata, model: state.settings.translationSlot === "static" ? state.settings.translationModel : state.settings.translationSlot };
     };

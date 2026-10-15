@@ -1,5 +1,10 @@
 import type { RcmDatabase } from "./db.js";
 
+/** Host-owned ordinal fallback syntax does not identify a persistent message. */
+export function isOrdinalFallbackMessageId(chatId: string, messageId: string): boolean {
+  return messageId.startsWith(`${chatId}:`) && /^\d+$/.test(messageId.slice(chatId.length + 1));
+}
+
 export interface SourceFingerprintItem {
   messageId: string;
   ordinal: number;
@@ -41,7 +46,7 @@ export function fingerprintMatches(db: RcmDatabase, chatId: string, expected: So
   if (!isSourceFingerprint(expected)) return false;
   if (!expected.length) return true;
   const usable = (db.prepare(`SELECT count(*) AS count FROM messages
-    WHERE chat_id=? AND message_id IN (${expected.map(() => "?").join(",")}) AND host_visibility IN ('active','all_before') AND content IS NOT NULL`)
+    WHERE chat_id=? AND message_id IN (${expected.map(() => "?").join(",")}) AND memory_excluded=0 AND host_visibility IN ('active','all_before') AND content IS NOT NULL`)
     .get(chatId, ...expected.map((item) => item.messageId)) as { count: number }).count;
   if (usable !== expected.length) return false;
   const current = sourceFingerprint(db, chatId, expected.map((item) => item.messageId));

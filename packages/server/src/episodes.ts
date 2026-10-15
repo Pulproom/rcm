@@ -11,6 +11,7 @@ interface EpisodeMessage {
   role: string;
   ordinal: number;
   content: string;
+  memory_excluded?: number;
 }
 
 export interface EpisodeTurn {
@@ -36,7 +37,7 @@ export function completedEpisodeTurns(messages: EpisodeMessage[]): EpisodeTurn[]
     groups.push(users.length ? [...users, message] : [message]);
     users = [];
   }
-  return groups.map((group, index) => ({
+  return groups.map(group => group.filter(message => !message.memory_excluded)).filter(group => group.length).map((group, index) => ({
     index,
     startMessageId: group[0]!.message_id,
     endMessageId: group.at(-1)!.message_id,
@@ -50,7 +51,7 @@ export function completedEpisodeTurns(messages: EpisodeMessage[]): EpisodeTurn[]
 
 function activeMessages(db: RcmDatabase, chatId: string): EpisodeMessage[] {
   return db.prepare(`
-    SELECT message_id,role,ordinal,content FROM messages
+    SELECT message_id,role,ordinal,CASE WHEN memory_excluded=0 THEN content ELSE '' END AS content,memory_excluded FROM messages
     WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL
     ORDER BY ordinal
   `).all(chatId) as EpisodeMessage[];
@@ -172,7 +173,7 @@ export function previewEpisodeStart(db: RcmDatabase, chatId: string, startMessag
   } else selected = [];
   const messageIds = selected.flatMap((turn) => turn.messageIds);
   const lastCompletedOrdinal = turns.at(-1)?.endOrdinal ?? -1;
-  const trailingUser = messages.find((message) => message.ordinal > lastCompletedOrdinal && message.role === "user");
+  const trailingUser = messages.find((message) => message.ordinal > lastCompletedOrdinal && message.role === "user" && !message.memory_excluded);
   return {
     startOrdinal: selected[0]?.startOrdinal ?? trailingUser?.ordinal ?? ((messages.at(-1)?.ordinal ?? -1) + 1),
     endOrdinal: selected.at(-1)?.endOrdinal,

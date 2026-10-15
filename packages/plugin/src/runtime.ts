@@ -271,10 +271,11 @@ function reuseExistingContext(state: RuntimeState, client: ServerClient, message
     guidanceInjected: injected.packet.includes("<guidance>"),
     evidenceInjected: hasMemoryEvidence(injected.packet),
     manifest: automatic?.response.injectionManifest ? { ...automatic.response.injectionManifest, source: "reused" } : emptyInjectionManifest("reused"),
+    stateSnapshots: automatic?.response.stateSnapshots ?? (previous?.packet === injected.packet ? previous.stateSnapshots : []),
     at: Date.now(),
   };
   const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
-  state.cache[chatId] = { ...(state.cache[chatId] ?? { serverInstanceId: automatic?.response.serverInstanceId ?? state.settings.serverInstances[serverUrl], stableAnchors: "", lastPacket: injected.packet, lastRevision: 0, lastPreparedAt: Date.now() }), lastPacket: injected.packet, lastInjectionManifest: state.lastInjection.manifest, lastInjectionScenes: summarizeInjectedScenes(automatic?.response.selected), lastInjectedTokens: injected.injectedTokens, lastInjectionAt: state.lastInjection.at };
+  state.cache[chatId] = { ...(state.cache[chatId] ?? { serverInstanceId: automatic?.response.serverInstanceId ?? state.settings.serverInstances[serverUrl], stableAnchors: "", lastPacket: injected.packet, lastRevision: 0, lastPreparedAt: Date.now() }), lastPacket: injected.packet, lastInjectionManifest: state.lastInjection.manifest, lastInjectionScenes: summarizeInjectedScenes(automatic?.response.selected), lastInjectionStateSnapshots: state.lastInjection.stateSnapshots, lastInjectedTokens: injected.injectedTokens, lastInjectionAt: state.lastInjection.at };
   void persistCache(state);
   traceAutomaticInjection(state, client, state.automaticTurnPacket?.latestMessageId ?? state.current?.snapshot?.at(-1)?.id);
   addLog(state.logs, "info", `Reused ~${injected.injectedTokens} memory tokens from the prepared request`);
@@ -759,6 +760,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           guidanceInjected: !blocked && injected.packet.includes("<guidance>"),
           evidenceInjected: !blocked && hasMemoryEvidence(injected.packet),
           manifest: blocked ? emptyInjectionManifest("empty") : manifest,
+          stateSnapshots: blocked || injected.omitted ? [] : response?.stateSnapshots,
           at: Date.now(),
         };
         injectionTimingOutcome = blocked ? "failed" : reused ? "reused" : "succeeded";
@@ -769,6 +771,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             lastPacket: injected.packet,
             lastInjectionManifest: manifest,
             lastInjectionScenes: summarizeInjectedScenes(response?.selected),
+            lastInjectionStateSnapshots: state.lastInjection.stateSnapshots,
             lastInjectedTokens: injected.injectedTokens,
             lastInjectionAt: state.lastInjection!.at,
           };

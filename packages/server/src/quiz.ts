@@ -1,3 +1,4 @@
+import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { acceptQuizItems, compareStoryMemories, estimateTokens, measureAuxiliaryPrompt, isScene, sceneNumbers, QUIZ_BATCH_SIZE, quizDateLabel, QUIZ_MIX, QUIZ_REFILL_BELOW,
   type QuizRegenerateResponse, type QuizStatus, type LeasedJob, type MemoryLanguage, type RpProfile, type QuizJobMeta, type QuizAnswerResponse, type QuizDraftItem, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
@@ -96,14 +97,14 @@ function sourceProgress(db: RcmDatabase, chatId: string): { cutoff: number | nul
 function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows(db, chatId)): QuizSceneRow[] {
   if (scenes.length >= QUIZ_MEMORY_ONLY_SCENES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
   const { cutoff } = sourceProgress(db, chatId);
-  const rows = db.prepare(`SELECT message_id,role,ordinal,content,updated_at FROM messages WHERE chat_id=?
+  const rows = db.prepare(`SELECT message_id,role,ordinal,content,updated_at,memory_excluded FROM messages WHERE chat_id=?
     AND ordinal>? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal`)
-    .all(chatId, quizSourceBoundary(db, chatId)) as Array<{message_id:string;role:string;ordinal:number;content:string|null;updated_at:number}>;
+    .all(chatId, quizSourceBoundary(db, chatId)) as Array<{message_id:string;role:string;ordinal:number;content:string|null;updated_at:number;memory_excluded:number}>;
   const chunks: QuizSceneRow[] = [];
   let previousExchange = "";
   for (let index = 1; index < rows.length; index++) {
     const reply = rows[index]!, user = rows[index - 1]!;
-    if (reply.role !== "assistant" || user.role !== "user" || reply.content === null || user.content === null
+    if (reply.memory_excluded || user.memory_excluded || reply.role !== "assistant" || user.role !== "user" || reply.content === null || user.content === null
       || cutoff === null || reply.ordinal > cutoff) continue;
     const nearest = scenes.filter(scene => scene.source_ordinal !== null && scene.source_ordinal <= user.ordinal)
       .sort((a,b) => b.source_ordinal! - a.source_ordinal!)[0];
@@ -471,7 +472,7 @@ export function buildQuizPrompt(material: QuizMaterial): { systemPrompt: string;
   return { systemPrompt, userPrompt: render() };
 }
 
-export const QUIZ_SYSTEM_PROMPT = `You write a light, playful trivia quiz for a reader about their own roleplay story, the way a friend who loves the same show would quiz them. Use only the supplied scenes.
+export const QUIZ_SYSTEM_PROMPT = `${ROLEPLAY_ARCHIVE_FRAMING}\n\nYou write a light, playful trivia quiz for a reader about their own roleplay story, the way a friend who loves the same show would quiz them. Use only the supplied scenes.
 Tone: casual Korean 해요체 ("~였을까요?", "~는 뭐였죠?", "기억나요?"), warm and a little cheeky. Vary how questions open; do not repeat "~은 무엇인가요?".
 Fun: about one third of the items carry a clear playful touch, and the rest stay plain. A playful touch is either one obviously absurd wrong option that fits the characters or an explanation that ends with a short witty aside about this particular scene. Use each joke idea once per batch. Humor never changes or invents story facts and never mocks the reader.
 Names: write every person, place and title exactly in the script the scenes use; never transliterate them into Hangul.

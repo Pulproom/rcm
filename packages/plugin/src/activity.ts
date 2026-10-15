@@ -10,6 +10,9 @@ import { isChatMemoryEnabled } from "./settings.js";
 import { refreshUpdateStatus } from "./updates.js";
 
 interface StatusResponse {
+  auxiliaryAuthFailed?: boolean;
+  modelResponseDiagnostic?: import("@rcm/shared").ModelResponseDiagnostic;
+    lastJobSourceRecovery?: import("@rcm/shared").SourceRecoveryMetadata;
   serverInstanceId: string;
   memoryLanguage: TranslationSource["sourceLanguage"];
   translationRevision: string;
@@ -140,8 +143,12 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           queuedJobs: Number(result.queuedJobs ?? 0), failedJobs: Number(result.failedJobs ?? 0), blockingFailedJobs: Number(result.blockingFailedJobs ?? result.failedJobs ?? 0), advisoryFailedJobs: Number(result.advisoryFailedJobs ?? 0),
           pendingReviews: Number(result.pendingReviews ?? 0), pendingReconciliations: Number(result.pendingReconciliations ?? 0), waitingForAssistant: Number(result.waitingForAssistant ?? 0), bufferedMessages: Number(result.bufferedMessages ?? 0), bufferedTurns: Number(result.bufferedTurns ?? 0), bufferedSourceTokens: Number(result.bufferedSourceTokens ?? 0), extractionGroupTurns: Number(result.extractionGroupTurns ?? 6), recoverableMessages: Number(result.recoverableMessages ?? 0), historicalBackfillMessages: Number(result.historicalBackfillMessages ?? 0), ingestionState: result.ingestionState, pendingEmbeddings: Number(result.pendingEmbeddings ?? 0),
           failedEmbeddings: Number(result.failedEmbeddings ?? 0),
+          auxiliaryAuthFailed: result.auxiliaryAuthFailed === true,
+          modelResponseDiagnostic: result.modelResponseDiagnostic,
+          lastJobSourceRecovery: result.lastJobSourceRecovery,
           progress: result.progress ? {
-            processedMessages: Number(result.progress.processedMessages ?? 0), totalMessages: Number(result.progress.totalMessages ?? 0),
+            manualRetry: result.progress.manualRetry === true,
+            excludedMessages: Number(result.progress.excludedMessages ?? 0), processedMessages: Number(result.progress.processedMessages ?? 0), totalMessages: Number(result.progress.totalMessages ?? 0),
             processedGroups: Number(result.progress.processedGroups ?? 0), totalGroups: Number(result.progress.totalGroups ?? 0),
             failedGroups: Number(result.progress.failedGroups ?? 0), memories: Number(result.progress.memories ?? 0),
             details: Number(result.progress.details ?? 0), pendingRelationshipPairs: Number(result.progress.pendingRelationshipPairs ?? 0),

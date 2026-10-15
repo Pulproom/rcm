@@ -41,9 +41,34 @@ export function replaceItemAccess(
 function evidenceOrdinal(db: RcmDatabase, chatId: string, evidence: Array<{ messageId: string }>): number | null {
   const ids = [...new Set(evidence.map((item) => item.messageId).filter(Boolean))];
   if (!ids.length) return null;
-  const row = db.prepare(`SELECT MIN(ordinal) AS ordinal FROM messages WHERE chat_id=? AND message_id IN (${ids.map(() => "?").join(",")})`)
+  const row = db.prepare(`SELECT MIN(ordinal) AS ordinal FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${ids.map(() => "?").join(",")})`)
     .get(chatId, ...ids) as { ordinal: number | null };
   return row.ordinal;
+}
+
+/** A spanning record is anchored to its earliest actual evidence batch.
+ * Evidence, rather than this single anchor, defines its full source scope. */
+function evidenceBatchId(db: RcmDatabase, chatId: string, evidence: Array<{ messageId: string }>): string | undefined {
+  return (db.prepare(`SELECT b.id FROM extraction_batches b,json_each(b.source_message_ids_json) s
+    JOIN messages m ON m.chat_id=b.chat_id AND m.message_id=s.value
+    WHERE b.chat_id=? AND b.generation_id='active' AND b.status='applied'
+      AND s.value IN (SELECT json_extract(value,'$.messageId') FROM json_each(?))
+    ORDER BY m.ordinal,b.start_ordinal,b.id LIMIT 1`).get(chatId, JSON.stringify(evidence)) as { id: string } | undefined)?.id;
+}
+
+export function hasRelationshipEvent(db: RcmDatabase, chatId: string, event: NonNullable<ExtractionResult['relationshipEvents']>[number], sourceJobId?: string): boolean {
+  // Compare typed values and evidence as sets; serialization order and parent IDs
+  // do not make the same source-backed relationship change a new event.
+  const identity = (changes: typeof event.changes, reason: string, evidence: typeof event.evidence) => JSON.stringify({
+    changes: changes.map(change => JSON.stringify([change.axis, change.effect, change.impact])).sort(),
+    reason: normalizeLedgerText(reason),
+    evidence: evidence.map(item => JSON.stringify([item.messageId, item.quote ?? null])).sort(),
+  });
+  const fingerprint = identity(event.changes, event.reason, event.evidence);
+  return (db.prepare(`SELECT changes_json,reason,evidence_json FROM relationship_events
+    WHERE chat_id=? AND from_entity=? AND to_entity=? AND active=1 ${sourceJobId === undefined ? '' : 'AND source_job_id=?'}`)
+    .all(chatId, event.from, event.to, ...(sourceJobId === undefined ? [] : [sourceJobId])) as Array<{ changes_json: string; reason: string; evidence_json: string }>)
+    .some(row => identity(JSON.parse(row.changes_json), row.reason, JSON.parse(row.evidence_json)) === fingerprint);
 }
 
 function resolvePhysicalSourceMemoryId(
@@ -88,7 +113,7 @@ export function applyMemoryRecallObservations(
     if (!holder || !candidate.accessibleTo.some((name) => name.localeCompare(holder, undefined, { sensitivity: "accent" }) === 0)) continue;
     const evidenceMessageIds = [...new Set(observation.evidenceMessageIds)].filter((id) => sourceIds.has(id));
     if (!evidenceMessageIds.length) continue;
-    const grounded = db.prepare(`SELECT COUNT(*) n FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?))
+    const grounded = db.prepare(`SELECT COUNT(*) n FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?))
       AND completed_turn_seq IS NOT NULL AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`)
       .get(chatId, JSON.stringify(evidenceMessageIds)) as {n:number};
     if (grounded.n !== evidenceMessageIds.length) continue;
@@ -108,7 +133,7 @@ export function applyMemoryRecallObservations(
       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
         randomUUID(), chatId, observation.memoryId, observation.holder, observation.action, observation.confidence,
         JSON.stringify(observation.evidenceMessageIds), sourceBatchId ?? null, revision, timestamp,
-        Number((db.prepare(`SELECT MAX(completed_turn_seq) seq FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?))`)
+        Number((db.prepare(`SELECT MAX(completed_turn_seq) seq FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?))`)
           .get(chatId, JSON.stringify(observation.evidenceMessageIds)) as { seq: number | null }).seq ?? 0),
       ).changes;
       if (!inserted) continue;
@@ -147,7 +172,7 @@ export function backfillExplicitStoryTimes(db: RcmDatabase, chatId: string, sour
   const result = structuredClone(source);
   const ids = [...new Set(result.memories.flatMap((memory) => memory.evidence.map((item) => item.messageId)))];
   if (ids.length === 0) return result;
-  const rows = db.prepare(`SELECT message_id,content FROM messages WHERE chat_id=? AND message_id IN (${ids.map(() => "?").join(",")})`)
+  const rows = db.prepare(`SELECT message_id,content FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${ids.map(() => "?").join(",")})`)
     .all(chatId, ...ids) as Array<{ message_id: string; content: string | null }>;
   const contents = new Map(rows.map((row) => [row.message_id, row.content ?? ""]));
   for (const memory of result.memories) {
@@ -186,7 +211,7 @@ export function validateDialogueEvidence(
 ): ExtractionResult {
   const result = structuredClone(source);
   const rows = sourceMessageIds.length ? db.prepare(`SELECT message_id,canonical_content,canonical_hash FROM messages
-    WHERE chat_id=? AND message_id IN (${sourceMessageIds.map(() => "?").join(",")})`).all(chatId, ...sourceMessageIds)
+    WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${sourceMessageIds.map(() => "?").join(",")})`).all(chatId, ...sourceMessageIds)
     : [];
   const messages = new Map((rows as Array<{ message_id: string; canonical_content: string | null; canonical_hash: string }>)
     .map((row) => [row.message_id, row]));
@@ -287,7 +312,7 @@ export function validateExtractionSources(
   const allowedIds = new Set(sourceMessageIds);
   const rows = sourceMessageIds.length === 0 ? [] : db.prepare(`
     SELECT message_id FROM messages
-    WHERE chat_id=? AND message_id IN (${sourceMessageIds.map(() => "?").join(",")})
+    WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${sourceMessageIds.map(() => "?").join(",")})
   `).all(chatId, ...sourceMessageIds) as Array<{ message_id: string }>;
   const existingIds = new Set(rows.map((row) => row.message_id));
   const errors: string[] = [];
@@ -347,7 +372,10 @@ export function validateExtractionSources(
   return errors;
 }
 
-export function ingestExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceJobId: string = randomUUID(), sourceBatchId?: string, relationContext?: AtomRelationContext, userInitiated = false): string[] {
+export function ingestExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceJobId: string = randomUUID(), sourceBatchId?: string, relationContext?: AtomRelationContext, userInitiated: boolean | 'additions' = false): string[] {
+  const additionsOnly = userInitiated === 'additions';
+  const batchFor = (evidence: Array<{ messageId: string }>) => additionsOnly ? evidenceBatchId(db, chatId, evidence) : sourceBatchId;
+  userInitiated = userInitiated === true;
   const relationWarnings: string[] = [];
   result = backfillExplicitStoryTimes(db, chatId, result);
   const source = db.prepare("SELECT value FROM server_meta WHERE key=?").get(userDeletionsKey(chatId))
@@ -376,7 +404,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
     if (!chat) throw new Error(`Unknown chat: ${chatId}`);
     const revision = chat.revision;
-    storeSourcePassages(db, chatId, result.sourcePassages, sourceBatchId);
+    if (!additionsOnly) storeSourcePassages(db, chatId, result.sourcePassages, sourceBatchId);
     const replaceAccess = (itemKind: string, itemId: string, grants: Array<{ holder: string; basis: string; evidence: Array<{ messageId: string; quote?: string }>; confidence: number }>): void =>
       replaceItemAccess(db, chatId, itemKind, itemId, grants, revision, timestamp);
 
@@ -397,6 +425,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         | { id: string }
         | undefined;
       const id = existing?.id ?? randomUUID();
+      if (additionsOnly && existing) { entityIds.set(entity.key, id); continue; }
       db.prepare(`
         INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,created_at) VALUES(?,?,?,?,?,?,'transcript',?)
         ON CONFLICT(chat_id,entity_key) DO UPDATE SET type=excluded.type
@@ -409,11 +438,13 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     const memoryByKey = new Map<string, string>();
     const detailByKey = new Map<string, string>();
     for (const memory of result.memories) {
+      const sourceBatchId = batchFor([...memory.evidence, ...(memory.details ?? []).flatMap(detail => detail.evidence), ...(memory.keyDialogues ?? []).flatMap(dialogue => dialogue.evidence)]);
       const keyDialogues = memory.keyDialogues ?? [];
       const existing = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=?").get(chatId, memory.key) as
         | { id: string }
         | undefined;
       const id = existing?.id ?? randomUUID();
+      if (additionsOnly && existing) throw new Error('Additive memory identity already exists');
       const strength = normalizeUnitScore(Math.max(0.15, 0.35 + memory.salience * 0.55));
       db.prepare(`
         INSERT INTO memories(
@@ -535,7 +566,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
     }
 
-    relationWarnings.push(...storeAtomRelations(db, chatId, result, memoryByKey, relationContext, sourceBatchId, replaceAccess));
+    relationWarnings.push(...storeAtomRelations(db, chatId, result, memoryByKey, relationContext, additionsOnly ? batchFor : sourceBatchId, replaceAccess));
     for (const memory of result.memories) {
       const sourceId = memoryByKey.get(memory.key);
       if (!sourceId) continue;
@@ -552,6 +583,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const assertion of result.assertions) {
+      const sourceBatchId = batchFor(assertion.evidence);
       const activeRelations = assertion.socialRelation ? activeSocialRelations(db, chatId) : [];
       const manualScope = assertion.socialRelation
         ? activeRelations.filter(row => socialRelationCovers(row, assertion.subject, assertion.socialRelation!) && !userInitiated
@@ -585,6 +617,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       const matchingCurrent = activeAssertions.filter((row) => normalizeLedgerPredicate(row.predicate) === assertion.predicate && sameSocialRelationScope(row.social_relation_json, assertion.socialRelation));
       const current = matchingCurrent.find((row) => row.state_kind === stateKind && normalizeLedgerText(row.value) === normalizeLedgerText(assertion.value))
         ?? matchingCurrent[0];
+      if (additionsOnly && (current || assertion.changeType !== 'initial' || assertion.targetAssertionIds?.length)) continue;
       const requestedTargets = [...new Set(assertion.targetAssertionIds ?? [])]
         .map((id) => activeAssertions.find((row) => row.id === id && sameSocialRelationScope(row.social_relation_json, assertion.socialRelation)))
         .filter((row): row is typeof activeAssertions[number] => Boolean(row));
@@ -640,6 +673,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const belief of result.beliefs) {
+      const sourceBatchId = batchFor(belief.evidence);
       const userDeleted = (db.prepare(`SELECT predicate,value,polarity FROM beliefs
         WHERE chat_id=? AND holder=? COLLATE NOCASE AND subject=? COLLATE NOCASE
           AND active=0 AND source LIKE 'user_deleted:%'`).all(chatId, belief.holder, belief.subject) as Array<{ predicate: string; value: string; polarity: string }>).some((row) =>
@@ -650,6 +684,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       const candidates = db.prepare("SELECT * FROM beliefs WHERE chat_id=? AND holder=? COLLATE NOCASE AND subject=? COLLATE NOCASE AND active=1 AND status='active' ORDER BY created_at DESC")
         .all(chatId, belief.holder, belief.subject) as Array<Record<string, any>>;
       const existing = candidates.find((row) => normalizeLedgerPredicate(row.predicate) === belief.predicate);
+      if (additionsOnly && (existing || !['new', 'coexist'].includes(belief.action ?? 'new') || belief.targetBeliefId || belief.targetBeliefIds?.length)) continue;
       const requestedIds = [...new Set([...(belief.targetBeliefIds ?? []), ...(belief.targetBeliefId ? [belief.targetBeliefId] : [])])];
       const requestedTargets = requestedIds.map((id) => candidates.find((row) => row.id === id)).filter((row): row is typeof candidates[number] => Boolean(row));
       const requestedTarget = requestedTargets[0];
@@ -704,6 +739,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     const setupFingerprint = (db.prepare("SELECT relationship_setup_fingerprint FROM chats WHERE id=?").get(chatId) as { relationship_setup_fingerprint: string | null } | undefined)?.relationship_setup_fingerprint ?? null;
     for (const baseline of result.relationshipBaselines ?? []) {
       const existingBaseline = db.prepare("SELECT id,source,active FROM relationship_baselines WHERE chat_id=? AND from_entity=? AND to_entity=?").get(chatId, baseline.from, baseline.to) as { id: string; source: string; active: number } | undefined;
+      if (additionsOnly && existingBaseline) continue;
       if (existingBaseline?.active === 1 && existingBaseline.source !== "transcript_unknown") continue;
       const knownAxes = RELATIONSHIP_AXES.filter((axis) => baseline[axis] !== "unknown");
       if (knownAxes.length === 0) continue;
@@ -722,26 +758,27 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
     for (const pair of affectedRelationshipPairs) queueRelationshipProjection(db, chatId, pair.from, pair.to);
 
-    const jobOrdinals = sourceJobId ? db.prepare(`SELECT MIN(m.ordinal) AS start_ordinal,MAX(m.ordinal) AS end_ordinal
+    const jobOrdinals = sourceJobId && !additionsOnly ? db.prepare(`SELECT MIN(m.ordinal) AS start_ordinal,MAX(m.ordinal) AS end_ordinal
       FROM jobs j JOIN json_each(j.payload_json,'$.sourceMessageIds') ids JOIN messages m ON m.chat_id=j.chat_id AND m.message_id=ids.value WHERE j.id=?`)
       .get(sourceJobId) as { start_ordinal: number | null; end_ordinal: number | null } : undefined;
     for (const event of result.relationshipEvents ?? []) {
+      const sourceBatchId = batchFor(event.evidence);
+      const eventOrdinals = db.prepare(`SELECT MIN(ordinal) start_ordinal,MAX(ordinal) end_ordinal FROM messages
+        WHERE chat_id=? AND message_id IN (SELECT json_extract(value,'$.messageId') FROM json_each(?))`)
+        .get(chatId, JSON.stringify(event.evidence)) as { start_ordinal: number | null; end_ordinal: number | null };
       const sourceMemoryId = event.memoryKey ? memoryByKey.get(event.memoryKey) ?? null : null;
       const detailOwner = event.detailKey ? relationshipDetailOwner(result, event) : undefined;
       const sourceDetailId = detailOwner !== undefined ? detailByKey.get(JSON.stringify([detailOwner, event.detailKey])) ?? null : null;
-      const fingerprint = JSON.stringify({ from: event.from, to: event.to, changes: event.changes, reason: normalizeLedgerText(event.reason), evidence: event.evidence });
-      const duplicate = (db.prepare("SELECT id,changes_json,reason,evidence_json FROM relationship_events WHERE chat_id=? AND from_entity=? AND to_entity=? AND active=1 AND source_job_id=?")
-        .all(chatId, event.from, event.to, sourceJobId) as Array<{ id: string; changes_json: string; reason: string; evidence_json: string }>).some((row) =>
-          JSON.stringify({ from: event.from, to: event.to, changes: JSON.parse(row.changes_json), reason: normalizeLedgerText(row.reason), evidence: JSON.parse(row.evidence_json) }) === fingerprint);
-      if (duplicate) continue;
+      if (hasRelationshipEvent(db, chatId, event, additionsOnly ? undefined : sourceJobId)) continue;
       db.prepare(`INSERT INTO relationship_events(id,chat_id,from_entity,to_entity,changes_json,reason,evidence_json,source_memory_id,source_detail_id,source_job_id,source_batch_id,source_start_ordinal,source_end_ordinal,active,created_revision,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`).run(randomUUID(), chatId, event.from, event.to, JSON.stringify(event.changes), event.reason,
-        JSON.stringify(event.evidence), sourceMemoryId, sourceDetailId, sourceJobId, sourceBatchId ?? null, jobOrdinals?.start_ordinal ?? evidenceOrdinal(db, chatId, event.evidence),
-        jobOrdinals?.end_ordinal ?? evidenceOrdinal(db, chatId, event.evidence), revision, timestamp);
+        JSON.stringify(event.evidence), sourceMemoryId, sourceDetailId, sourceJobId, sourceBatchId ?? null, jobOrdinals?.start_ordinal ?? eventOrdinals.start_ordinal,
+        jobOrdinals?.end_ordinal ?? eventOrdinals.end_ordinal, revision, timestamp);
       queueRelationshipProjection(db, chatId, event.from, event.to);
     }
 
     for (const event of result.physicalIntimacy ?? []) {
+      const sourceBatchId = batchFor(event.evidence);
       const [participantA, participantB] = [...event.participants].sort((left, right) => left.localeCompare(right));
       const startOrdinal = evidenceOrdinal(db, chatId, event.evidence);
       const sourceMemoryId = resolvePhysicalSourceMemoryId(db, chatId, memoryByKey, event.memoryKey, event.evidence);
@@ -752,6 +789,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
             id: string; source_memory_id: string | null; source_start_ordinal: number | null; active: number; manual_override: number; deleted_by_user: number;
           } | undefined;
         if (existing?.manual_override === 1 || existing?.deleted_by_user === 1) continue;
+        if (additionsOnly && existing) continue;
         const replaceExisting = Boolean(existing) && (existing!.active === 0
           || startOrdinal !== null && (existing!.source_start_ordinal === null || startOrdinal < existing!.source_start_ordinal)
           || startOrdinal === existing!.source_start_ordinal && !existing!.source_memory_id && Boolean(sourceMemoryId));
@@ -774,7 +812,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         replaceAccess("physical_milestone", storedMilestone,
           event.access !== undefined ? event.access : event.participants.map((holder) => ({ holder, basis: "experienced", evidence: event.evidence, confidence: 1 })));
       }
-      if (insertedMilestone && sourceMemoryId) {
+      if (insertedMilestone && sourceMemoryId && (!additionsOnly || [...memoryByKey.values()].includes(sourceMemoryId))) {
         const row = db.prepare("SELECT landmark_kinds_json FROM memories WHERE id=?").get(sourceMemoryId) as { landmark_kinds_json: string } | undefined;
         const kinds = row ? JSON.parse(row.landmark_kinds_json || "[]") as Array<{ kind: string; label?: string }> : [];
         if (!kinds.some((kind) => kind.kind === "intimacy_milestone")) kinds.push({ kind: "intimacy_milestone" });
@@ -783,7 +821,9 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const promise of result.promises) {
+      const sourceBatchId = batchFor(promise.evidence ?? []);
       const existingPromise = db.prepare("SELECT * FROM promises WHERE chat_id=? AND promise_key=?").get(chatId, promise.key) as Record<string,any> | undefined;
+      if (additionsOnly && existingPromise) continue;
       const protectedPromises = (existingPromise ? [existingPromise] : db.prepare("SELECT * FROM promises WHERE chat_id=? AND promisor=? COLLATE NOCASE AND promisee=? COLLATE NOCASE").all(chatId,promise.promisor,promise.promisee) as Array<Record<string,any>>).filter(row=>!canAutomaticallyChange(db,chatId,row,promise.evidence ?? []));
       const compatible = !existingPromise && protectedPromises.every(row=>promise.compatibleWithIds?.includes(row.id));
       if (!userInitiated && protectedPromises.length && !compatible) {
@@ -816,7 +856,10 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       );
     }
 
-    ingestSocialKnowledge(db, chatId, result.socialKnowledge ?? [], memoryByKey, sourceBatchId);
+    if (additionsOnly) for (const item of result.socialKnowledge ?? []) {
+      ingestSocialKnowledge(db, chatId, [item], memoryByKey, batchFor(item.evidence), true);
+    }
+    else ingestSocialKnowledge(db, chatId, result.socialKnowledge ?? [], memoryByKey, sourceBatchId);
 
     const sceneNames = new Set([
       ...result.entities.map((entity) => entity.name),
@@ -845,7 +888,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const memoryId of new Set(memoryByKey.values())) refreshMemoryFts(db, memoryId);
-    applySeedResolutions(db, chatId, result.seedResolutions);
+    if (!additionsOnly) applySeedResolutions(db, chatId, result.seedResolutions);
     writeDialogueAccessIdentities(db, chatId, dialogueIdentities);
     pruneDetailAccessEdits(db, chatId);
     invalidateStorySupports(db,chatId,revokedStorySupports);

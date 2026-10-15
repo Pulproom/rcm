@@ -57,7 +57,7 @@ export function resolveAssertionHolders(db: RcmDatabase, chatId: string, row: an
 export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcomeCapture, perspective = ""): StateEvidence[] {
   const result: StateEvidence[] = [];
   const rejected = (kind: string, id: string, reason: string): void => trace?.record(perspective, { id: `${kind}:${id}`, kind }, "not_collected", { reason });
-  const sources = new Map((db.prepare("SELECT message_id,canonical_hash,content_hash,canonical_content,ordinal,lifecycle,host_visibility FROM messages WHERE chat_id=?").all(chatId) as any[]).map(row => [row.message_id, row]));
+  const sources = new Map((db.prepare("SELECT message_id,canonical_hash,content_hash,canonical_content,ordinal,lifecycle,host_visibility FROM messages WHERE chat_id=? AND memory_excluded=0").all(chatId) as any[]).map(row => [row.message_id, row]));
   const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
   const add = (kind: string, row: any, text: string, holders: string[], subjects: string[], current: boolean, evidence = parse(row.evidence_json), stateKind?: StateKind, automatic?: StateEvidence["automatic"]) => {
     const corrected=row.user_edit_ordinal != null || row.userEdited===true;

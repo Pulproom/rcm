@@ -116,7 +116,12 @@ export async function readHostSourceLedgers(onlyChatIds?: ReadonlySet<string>): 
 }
 
 async function resolveMessageSource(chat: any, message: any): Promise<ResolvedMessageSource> {
-  const markerId = typeof message?.__yumi_tr === "string" ? message.__yumi_tr : "";
+  const display = String(message?.data ?? message?.content ?? "");
+  // Yumi's transport marker can precede its message metadata (including after
+  // a tail replacement). The displayed record ID owns this representation;
+  // never use a stale metadata ID to resolve a different response's original.
+  const markerId = display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->/)?.[1]
+    ?? (typeof message?.__yumi_tr === "string" ? message.__yumi_tr : "");
   if (markerId) {
     const record = await decodeYumiRecord(chat?.scriptstate?.[`$__yumi_tr.${markerId}`]);
     const model = typeof record?.model === "string" ? record.model : "";
@@ -125,7 +130,7 @@ async function resolveMessageSource(chat: any, message: any): Promise<ResolvedMe
     if (segmented.trim()) return { content: segmented, sourceKind: "yumi_model", sourceRecordId: markerId };
   }
   return {
-    content: String(message?.data ?? message?.content ?? ""),
+    content: display,
     sourceKind: "risu_display",
     ...(markerId ? { sourceRecordId: markerId } : {}),
   };
@@ -359,6 +364,7 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
 export async function readDashboardContext(state: RuntimeState): Promise<DashboardContext> {
   const generation = state.mainGeneration;
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   generation?.observe(chatId, chat);
   const database = await risuai.getDatabase(["personas", "selectedPersona"]);
   const identity = chatIdentityFields(characterIndex, character, chatIndex, chat);
@@ -464,6 +470,7 @@ export async function readCurrentContext(
   // state does not masquerade as a server failure in callers such as Dashboard.
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
   generation?.observe(chatId, chat);
+  state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   const [lore, database] = await Promise.all([
     risuai.getCurrentLorebookEntries(),
     risuai.getDatabase(["personas", "selectedPersona", "characters"]),

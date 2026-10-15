@@ -127,7 +127,7 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
   semantic:SemanticSearchResult[],tokenBudget:number,query:string,promptSourceMessageIds:string[]=[],bounded=false,providedSourceMessageIds:string[]=[],selectorCoverage=false,sourceMemoryIds:string[]=[],stateEvidence?:StateEvidence[]):{anchors:number;unmapped:number;windows:number;sourceCandidates:number;coherenceRemoved:number} {
   const promptSources=new Set(promptSourceMessageIds);
   const read=db.prepare(`SELECT message_id,canonical_content,canonical_hash,ordinal,role FROM messages WHERE chat_id=? AND message_id=?
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`);
+    AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`);
   const cache=new Map<string,Source|undefined>();
   const windowSources=new Map<string,Source>();
   const contextWindows=new ContextWindows(windowSources);
@@ -343,7 +343,7 @@ export function appendMcpProvidedSourceContext(db:RcmDatabase,chatId:string,answ
   promptSourceMessageIds:string[],tokenBudget:number,query:string,currentMessageId?:string):McpProvidedSourceDiagnostic {
   if(!answers.length||!promptSourceMessageIds.length)return {sources:0,windows:0,candidates:0};
   const read=db.prepare(`SELECT message_id,canonical_content,canonical_hash,ordinal,role FROM messages WHERE chat_id=? AND message_id=?
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`);
+    AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`);
   const promptSources=[...new Set(promptSourceMessageIds)].filter(id=>id!==currentMessageId).flatMap(id=>{
     const row=read.get(chatId,id) as Source|undefined;
     return typeof row?.canonical_content==="string"&&row.canonical_content.trim()?[row]:[];

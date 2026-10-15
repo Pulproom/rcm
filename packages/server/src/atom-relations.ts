@@ -39,7 +39,7 @@ const overlaps = (a: Span[], b: Span[]): boolean => a.some(left => b.some(right 
  */
 export function storeAtomRelations(
   db: RcmDatabase, chatId: string, result: ExtractionResult, memoryByKey: Map<string, string>,
-  context: AtomRelationContext | undefined, sourceBatchId: string | undefined,
+  context: AtomRelationContext | undefined, sourceBatchId: string | undefined | ((evidence: Array<{messageId:string}>) => string | undefined),
   replaceAccess: (kind: string, id: string, grants: ItemAccessGrant[]) => void,
 ): string[] {
   const relations = result.atomRelations ?? [];
@@ -114,7 +114,7 @@ export function storeAtomRelations(
     db.prepare(`INSERT INTO atom_relations(id,chat_id,source_detail_id,target_detail_id,kind,confidence,evidence_json,
       source_batch_id,source_start_ordinal,source_end_ordinal,created_revision,active,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?)`).run(id, chatId, source.id, target.id, relation.kind, relation.confidence,
-        JSON.stringify(relation.evidence), sourceBatchId ?? null, Math.min(...evidence.map(span => span.ordinal)),
+        JSON.stringify(relation.evidence), (typeof sourceBatchId === 'function' ? sourceBatchId(relation.evidence) : sourceBatchId) ?? null, Math.min(...evidence.map(span => span.ordinal)),
         Math.max(...evidence.map(span => span.ordinal)), revision, Date.now());
     replaceAccess("atom_relation", id, grants);
     seen.add(pair);

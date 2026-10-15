@@ -33,7 +33,7 @@ function recentLanguageFractions(db: RcmDatabase, chatId: string, language: Memo
   const cached = cache.get(chatId);
   if (cached?.revision === revision && cached.language === language) return cached.fractions;
   const messages = db.prepare(`SELECT content FROM messages
-    WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before')
+    WHERE chat_id=? AND lifecycle='committed' AND memory_excluded=0 AND host_visibility IN ('active','all_before')
     ORDER BY ordinal DESC, message_id DESC LIMIT ?`).all(chatId, RECENT_LANGUAGE_MESSAGE_LIMIT) as Array<{ content: string | null }>;
   const fractions = new Map<string, number>();
   for (const message of messages) {

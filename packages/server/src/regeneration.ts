@@ -113,7 +113,7 @@ function evidenceMessagesExist(db: RcmDatabase, chatId: string, evidenceJson: st
   if (!Array.isArray(evidence) || !evidence.length || evidence.some((item) => typeof item.messageId !== "string")) return false;
   const ids = [...new Set(evidence.map((item) => item.messageId as string))];
   const count = (db.prepare(`SELECT count(*) count FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?))
-    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') AND canonical_content IS NOT NULL`)
+    AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before') AND canonical_content IS NOT NULL`)
     .get(chatId, JSON.stringify(ids)) as { count: number }).count;
   return count === ids.length;
 }
@@ -560,7 +560,7 @@ export function applyEpisodeRegeneration(db: RcmDatabase, chatId: string, runId:
 }
 
 function canonicalRegenerationRanges(db: RcmDatabase, chatId: string, batchId: string) {
-  const ranges = listSourceRanges(db, chatId);
+  const ranges = listSourceRanges(db, chatId).filter(row => !row.memoryExcluded);
   const startIndex = ranges.findIndex((row) => row.id === batchId);
   const lastEligibleIndex = ranges.reduce((last, row, index) => row.eligible ? index : last, -1);
   const selectedIds = ranges.slice(startIndex, Math.max(startIndex + 1, lastEligibleIndex + 1)).map((row) => row.id);

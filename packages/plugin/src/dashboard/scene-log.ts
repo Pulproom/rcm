@@ -1,7 +1,7 @@
 import { formatStoryTime, compareParsedStoryTimes, parseStoryTime } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { buildAnniversaries, landmarkLabel } from "./diary.js";
-import { isInitialCalibrationMemory } from "@rcm/shared";
+import { isRecognitionMemory } from "@rcm/shared";
 import { MILESTONE_LABELS, type PairSummary } from "./pairs.js";
 
 export type SceneChip = { kind: "landmark" | "love" | "up" | "down" | "promise_made" | "promise_kept" | "promise_broken" | "bookmark" | "secret_ended" | "minor"; label: string; trend?: "up" | "down" };
@@ -124,7 +124,7 @@ const intimacyLabel = (item: any): string => {
 };
 export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "all" | "key" | "intimacy" | "heart" | "promise" | "bookmark", sort: "newest" | "oldest" = "newest"): SceneDay[] {
   const direction = sort === "oldest" ? 1 : -1;
-  const allMemories = (data.memories ?? []).filter((memory: any) => !isInitialCalibrationMemory(memory));
+  const allMemories = (data.memories ?? []).filter((memory: any) => !isRecognitionMemory(memory));
   const allMemoryById = new Map(allMemories.map((memory: any) => [String(memory?.id ?? ""), memory]));
   const activeScenes = allMemories
     .map((memory: any, index: number) => ({ memory, index }))

@@ -43,7 +43,7 @@ function candidateLedger(db: RcmDatabase, chatId: string): Map<string, Candidate
   for (const row of db.prepare(`SELECT DISTINCT json_extract(a.value,'$.holder') holder FROM source_passages p
     JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash,
     json_each(p.access_json) a WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned')
-    AND m.host_visibility IN ('active','all_before')`).all(chatId) as Array<{holder:string}>) add(row.holder, 1);
+    AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')`).all(chatId) as Array<{holder:string}>) add(row.holder, 1);
   const memories = db.prepare("SELECT participants_json,known_by_json,perspective FROM memories WHERE chat_id=? AND active=1").all(chatId) as Array<{ participants_json: string; known_by_json: string; perspective: string | null }>;
   for (const memory of memories) {
     for (const name of parseNames(memory.known_by_json)) add(name, 4);

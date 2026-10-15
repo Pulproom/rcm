@@ -17,7 +17,7 @@ import { materializeInitialRelationshipProjections } from "./initial-calibration
 import { rebuildCharacterRecallTraces } from "./ingest.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { EVERYONE_HOLDER, readDetailAccessEdits, writeDetailAccessEdits, syncDetailKnownBy, memoryDetailAccess } from "./item-access.js";
-import { sourceFingerprint } from './source-fingerprint.js';
+import { isOrdinalFallbackMessageId, sourceFingerprint } from './source-fingerprint.js';
 import { lineageSources, matchLineageSources } from './lineage-matching.js';
 import { remapInheritedSources } from './lineage-sources.js';
 import { pruneTranslationCache, translationCacheKey } from './translation-cache.js';
@@ -307,21 +307,23 @@ function cloneLineage(
 
     const childProjection = new Map(sourcePairs.map(pair => [pair.parent.message_id, pair.child]));
     const parentMessages = db.prepare("SELECT * FROM messages WHERE chat_id=? AND ordinal<=? AND lifecycle IN ('committed','client_pruned','pending') ORDER BY ordinal").all(parent, fork) as any[];
-    const addMessage = db.prepare(`INSERT OR IGNORE INTO messages(chat_id,message_id,role,ordinal,content,content_hash,canonical_content,canonical_hash,lifecycle,visible,event_time,generation_id,source_kind,source_record_id,display_content_hash,display_comparison_hash,host_visibility,extraction_state,completed_turn_seq,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const addMessage = db.prepare(`INSERT OR IGNORE INTO messages(chat_id,message_id,role,ordinal,content,content_hash,canonical_content,canonical_hash,lifecycle,visible,event_time,generation_id,source_kind,source_record_id,display_content_hash,display_comparison_hash,host_visibility,extraction_state,completed_turn_seq,memory_excluded,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const row of parentMessages) {
       const visible = childProjection.get(row.message_id);
       if (!visible && row.lifecycle === "pending") continue;
       const lifecycle = visible ? row.lifecycle : "client_pruned";
       const hostVisibility = visible?.visibility ?? "active";
       const archiveEligible = hostVisibility === "active" || hostVisibility === "all_before";
+      const memoryExcluded = isOrdinalFallbackMessageId(parent,row.message_id)
+        || isOrdinalFallbackMessageId(child,visible?.id ?? row.message_id) ? 0 : row.memory_excluded;
       const extractionState = !archiveEligible
         ? "blocked"
         : ["done", "encapsulated", "skipped_policy", "excluded_episode", "cancelled"].includes(row.extraction_state)
           ? row.extraction_state
           : "pending";
-      addMessage.run(child, row.message_id, row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, now);
-      db.prepare("UPDATE messages SET role=?,ordinal=?,content=?,content_hash=?,canonical_content=?,canonical_hash=?,lifecycle=?,visible=?,event_time=?,generation_id=?,source_kind=?,source_record_id=?,display_content_hash=?,display_comparison_hash=?,host_visibility=?,extraction_state=?,completed_turn_seq=?,updated_at=? WHERE chat_id=? AND message_id=?").run(
-        row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, now, child, row.message_id,
+      addMessage.run(child, row.message_id, row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, memoryExcluded, now);
+      db.prepare("UPDATE messages SET role=?,ordinal=?,content=?,content_hash=?,canonical_content=?,canonical_hash=?,lifecycle=?,visible=?,event_time=?,generation_id=?,source_kind=?,source_record_id=?,display_content_hash=?,display_comparison_hash=?,host_visibility=?,extraction_state=?,completed_turn_seq=?,memory_excluded=?,updated_at=? WHERE chat_id=? AND message_id=?").run(
+        row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, memoryExcluded, now, child, row.message_id,
       );
       if (extractionState === "pending") pendingReextractionIds.add(row.message_id);
       db.prepare("INSERT INTO message_revisions(id,chat_id,message_id,content,content_hash,canonical_content,canonical_hash,lifecycle,created_at,purge_after) VALUES(?,?,?,?,?,?,?,?,?,NULL)").run(randomUUID(), child, row.message_id, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, now);
@@ -1261,10 +1263,10 @@ export function createRegenerationShadow(db: RcmDatabase, sourceChatId: string, 
     sharedMessages: prefix?.length ?? 0,
   }, "branch", "user", {preserveUserCorrections:true});
   const suffix = db.prepare("SELECT * FROM messages WHERE chat_id=? AND ordinal>=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal").all(sourceChatId, cutOrdinal) as any[];
-  const insert = db.prepare(`INSERT INTO messages(chat_id,message_id,role,ordinal,content,content_hash,canonical_content,canonical_hash,lifecycle,visible,event_time,generation_id,source_kind,source_record_id,display_content_hash,display_comparison_hash,host_visibility,extraction_state,completed_turn_seq,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const insert = db.prepare(`INSERT INTO messages(chat_id,message_id,role,ordinal,content,content_hash,canonical_content,canonical_hash,lifecycle,visible,event_time,generation_id,source_kind,source_record_id,display_content_hash,display_comparison_hash,host_visibility,extraction_state,completed_turn_seq,memory_excluded,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   const timestamp = Date.now();
-  for (const row of suffix) insert.run(shadowChatId, row.message_id, row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, row.lifecycle, row.visible, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, row.host_visibility, "pending", row.completed_turn_seq, timestamp);
+  for (const row of suffix) insert.run(shadowChatId, row.message_id, row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, row.lifecycle, row.visible, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, row.host_visibility, "pending", row.completed_turn_seq, isOrdinalFallbackMessageId(sourceChatId,row.message_id) || isOrdinalFallbackMessageId(shadowChatId,row.message_id) ? 0 : row.memory_excluded, timestamp);
   db.prepare("UPDATE chats SET is_internal=1,post_extraction_review=?,updated_at=? WHERE id=?").run(source.post_extraction_review, timestamp, shadowChatId);
 }
 

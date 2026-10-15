@@ -1,3 +1,4 @@
+import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { estimateTokens } from "./index.js";
 import { splitAuxiliarySource } from "./auxiliary-budget.js";
 export const TRANSLATION_TIMEOUT_MS = 120_000;
@@ -28,7 +29,7 @@ export function planTranslation(items: Array<{ id: string; text: string }>, maxO
   if (batch.length) batches.push(batch);
   return batches;
 }
-export const translationSystemPrompt = 'Translate each text to natural Korean. Preserve proper names, numbers, directions, quotations, and meaning. Return strict JSON only as {"items":[{"id":string,"partIndex":number,"ko":string}]}. Return every supplied part separately with its exact id and partIndex.';
+export const translationSystemPrompt = `${ROLEPLAY_ARCHIVE_FRAMING}\n\nTranslate each text to natural Korean. Preserve proper names, numbers, directions, quotations, and meaning. Return strict JSON only as {"items":[{"id":string,"partIndex":number,"ko":string}]}. Return every supplied part separately with its exact id and partIndex.`;
 export function validateTranslation(content: string, expected: TranslationPart[], finishReason?: unknown): Array<{ id: string; partIndex: number; ko: string }> {
   if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase())) throw new TranslationError("MODEL_OUTPUT_TRUNCATED", "번역 응답이 잘려 저장하지 않았습니다.");
   let parsed: any;

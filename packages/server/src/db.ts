@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS messages (
   source_kind TEXT NOT NULL DEFAULT 'host',
   host_visibility TEXT NOT NULL DEFAULT 'active',
   extraction_state TEXT NOT NULL DEFAULT 'pending',
+  memory_excluded INTEGER NOT NULL DEFAULT 0 CHECK(memory_excluded IN (0,1)),
   updated_at INTEGER NOT NULL,
   source_record_id TEXT,
   display_content_hash TEXT,
@@ -875,12 +876,12 @@ CREATE TABLE IF NOT EXISTS source_passages (
 );
 CREATE INDEX IF NOT EXISTS idx_source_passages_message ON source_passages(chat_id,message_id,active);
 CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(chat_id UNINDEXED,message_id UNINDEXED,body);
-CREATE TRIGGER IF NOT EXISTS source_fts_insert AFTER INSERT ON messages BEGIN
+CREATE TRIGGER IF NOT EXISTS source_fts_insert AFTER INSERT ON messages WHEN new.memory_excluded=0 BEGIN
   INSERT INTO source_fts(chat_id,message_id,body) VALUES(new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,''));
 END;
-CREATE TRIGGER IF NOT EXISTS source_fts_update AFTER UPDATE OF canonical_content,content ON messages BEGIN
+CREATE TRIGGER IF NOT EXISTS source_fts_update AFTER UPDATE OF canonical_content,content,memory_excluded ON messages BEGIN
   DELETE FROM source_fts WHERE chat_id=old.chat_id AND message_id=old.message_id;
-  INSERT INTO source_fts(chat_id,message_id,body) VALUES(new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,''));
+  INSERT INTO source_fts(chat_id,message_id,body) SELECT new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,'') WHERE new.memory_excluded=0;
 END;
 CREATE TRIGGER IF NOT EXISTS source_fts_delete AFTER DELETE ON messages BEGIN
   DELETE FROM source_fts WHERE chat_id=old.chat_id AND message_id=old.message_id;
@@ -959,8 +960,9 @@ export function openDatabase(path: string): DatabaseHandle {
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
   const hasSchemaLedger = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get());
+  let version = 0;
   if (hasSchemaLedger) {
-    const version = Number((db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number | null }).version ?? 0);
+    version = Number((db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number | null }).version ?? 0);
     if (version === 46) {
       db.transaction(() => {
         db.exec("ALTER TABLE translation_cache ADD COLUMN model TEXT NOT NULL DEFAULT ''");
@@ -968,14 +970,19 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (version !== 46 && version !== 47 && version !== 48) {
+    if (![46, 47, 48, 49].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
   }
   db.transaction(() => {
+    if (hasSchemaLedger && !(db.pragma("table_info(messages)") as Array<{ name: string }>).some(column => column.name === "memory_excluded")) {
+      db.exec("ALTER TABLE messages ADD COLUMN memory_excluded INTEGER NOT NULL DEFAULT 0 CHECK(memory_excluded IN (0,1))");
+      db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update");
+    }
     db.exec(schema);
-    db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
+    if (hasSchemaLedger && version < 48) db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
+    db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(49,?)").run(Date.now());
   })();
   if (!hasSchemaLedger) {
     db.prepare("INSERT OR IGNORE INTO server_meta(key,value) VALUES('instance_id',?)").run(randomUUID());

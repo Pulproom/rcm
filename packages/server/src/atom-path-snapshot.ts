@@ -1,6 +1,6 @@
 import type { RcmDatabase } from "./db.js";
 import { NARRATOR_ARCHIVE_HOLDER, readItemAccessBatches, resolveItemAccess, visibleTo, type ItemAccessRow } from "./item-access.js";
-import { searchableMemoryParentSql } from "./memory-group-search.js";
+import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { memoryAtomKey } from "./memory-atoms.js";
 import { memoryContextSignature } from "./memory-search-document.js";
 import {
@@ -178,7 +178,7 @@ export function searchStoredAtomPaths(db: RcmDatabase, options: StoredAtomPathSe
         m.evidence_json AS memory_evidence_json,m.story_time FROM json_each(?) requested
         CROSS JOIN memory_details d ON d.id=requested.value
         JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
-        WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND ${searchableMemoryParentSql("m")}`);
+        WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND ${searchableMemoryParentSql("m")} AND NOT ${recognitionDetailSql('d')}`);
       const rows = detailQuery.all([JSON.stringify(batch), options.chatId]) as DetailSnapshotRow[];
       stats.sqlQueries += 1;
       for (const id of batch) detailsRead.add(id);

@@ -197,6 +197,7 @@ export function ingestSocialKnowledge(
   items: IngestedSocialKnowledge[],
   memoryByKey: Map<string, string> = new Map(),
   sourceBatchId?: string,
+  additionsOnly = false,
 ): number {
   const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
   if (!chat) return 0;
@@ -233,7 +234,7 @@ export function ingestSocialKnowledge(
     );
     inserted += 1;
   }
-  syncManualCognition(db,chatId);
+  if (!additionsOnly) syncManualCognition(db,chatId);
   return inserted;
 }
 

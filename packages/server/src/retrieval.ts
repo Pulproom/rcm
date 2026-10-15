@@ -13,7 +13,7 @@ import { compareAtomPaths, type AtomPath } from "./atom-path-search.js";
 import { searchStoredAtomPaths, type StoredAtomPathSearchStats } from "./atom-path-snapshot.js";
 import { AUTOMATIC_ROLE_SHARES, ASSOCIATION_RELATIVE_THRESHOLD, ASSOCIATION_SEMANTIC_MAX, type AutomaticAtomPriority, type AutomaticPortfolioCandidate, type AutomaticRoleReason } from "./automatic-packet.js";
 import { extendRecallPath, startRecallPath, observeRootEvidence, type RecallPath, type RecallPathCapture, type RecallPathObservation } from "./recall-path.js";
-import { searchableMemoryParentSql } from "./memory-group-search.js";
+import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { invalidateChangedMemoryGroups } from "./memory-grouping.js";
 import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "./packet-manifest.js";
 import { randomUUID } from "node:crypto";
@@ -990,7 +990,9 @@ function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuery
         matches.set(row.memory_id, { memory: matched, detail: [] });
       });
       const details = db.prepare(`SELECT detail_id AS id,memory_id,text,participants,locations,bm25(memory_detail_fts) AS rank FROM memory_detail_fts
-        WHERE memory_detail_fts MATCH ? AND chat_id=? ORDER BY rank LIMIT 120`).all(ftsQuery, chatId) as Array<{ id: string; memory_id: string; text: string; participants: string; locations: string }>;
+        WHERE memory_detail_fts MATCH ? AND chat_id=?
+          AND detail_id IN (SELECT d.id FROM memory_details d WHERE NOT ${recognitionDetailSql('d')})
+        ORDER BY rank LIMIT 120`).all(ftsQuery, chatId) as Array<{ id: string; memory_id: string; text: string; participants: string; locations: string }>;
       details.forEach((row) => {
         const { score, matched } = coverage(`${row.text} ${row.participants} ${row.locations}`);
         record(row.memory_id, score, "memory_detail", row.id);
@@ -1260,7 +1262,7 @@ function hoistSharedOpenCommitments(combinedPerspectives: Map<string, string>, a
 
 /** Processing positions are diagnostics, not story dates or character knowledge. */
 export function processedHistoryCoverage(db: RcmDatabase, chatId: string): { processedThrough: number | null; latestProcessed: number | null } {
-  const processing = db.prepare("SELECT ordinal,extraction_state FROM messages WHERE chat_id=? AND lifecycle='committed' ORDER BY ordinal").all(chatId) as Array<{ ordinal: number; extraction_state: string }>;
+  const processing = db.prepare("SELECT ordinal,extraction_state FROM messages WHERE chat_id=? AND lifecycle='committed' AND memory_excluded=0 ORDER BY ordinal").all(chatId) as Array<{ ordinal: number; extraction_state: string }>;
   const complete = new Set(["done", "encapsulated", "skipped_policy"]);
   let processedThrough: number | null = null;
   for (const row of processing) { if (!complete.has(row.extraction_state)) break; processedThrough = row.ordinal; }
@@ -1569,7 +1571,8 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     WHERE chat_id=? AND memory_id IN (${placeholders}) ORDER BY memory_id,ordinal
   `).all(options.chatId, ...candidates) as Array<{ id: string; memory_id: string; speaker: string; text: string; message_id: string; evidence_json: string; kind: KeyDialogue["kind"]; ordinal: number }> : [];
   const detailRows = candidates.length > 0 ? db.prepare(`SELECT id,memory_id,detail_key,kind,role,seed_json,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal
-    FROM memory_details WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`).all(options.chatId, ...candidates) as Array<Record<string, any>> : [];
+    FROM memory_details d WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) AND NOT ${recognitionDetailSql('d')}
+    ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`).all(options.chatId, ...candidates) as Array<Record<string, any>> : [];
   const accessByItem = loadItemAccess(db, options.chatId, [
     ...dialogueRows.map((row) => ({ kind: "dialogue" as const, id: row.id })),
     ...detailRows.map((row) => ({ kind: "detail" as const, id: String(row.id) })),
@@ -1596,7 +1599,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     if (options.mcpCandidatesOnly) {
       const valid = dialogueEvidence.length > 0 && dialogueEvidence.every((evidence) => {
         const source = db.prepare(`SELECT canonical_content,canonical_hash FROM messages WHERE chat_id=? AND message_id=?
-          AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`).get(options.chatId,evidence.messageId) as {canonical_content:string;canonical_hash:string}|undefined;
+          AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).get(options.chatId,evidence.messageId) as {canonical_content:string;canonical_hash:string}|undefined;
         return typeof source?.canonical_content === "string" && source.canonical_hash === evidence.canonicalHash && source.canonical_content.slice(evidence.startOffset,evidence.endOffset) === evidence.quote;
       });
       if (!valid) continue;
