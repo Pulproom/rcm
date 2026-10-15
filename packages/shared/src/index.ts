@@ -21,6 +21,7 @@ import {
 } from "./structured-contract-values.js";
 export { describeModelResponse, type ModelResponseDiagnostic, sanitizeDiagnosticText, CONNECTION_FAILURE_LABELS, connectionFailureReason, isProviderAuthenticationError, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type ConnectionFailureCode } from "./support-diagnostics.js";
 export { isPermanentProviderError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES, type RisuAuxiliaryCallDiagnostic } from "./support-diagnostics.js";
+export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFailureMetadata } from './support-diagnostics.js';
 export const RCM_API_REVISION = 90;
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const UserCorrectionViewSchema = z.object({ userEdited: z.boolean(), userEditOrdinal: z.number().int().nullable(), locked: z.boolean() });
@@ -1111,7 +1112,13 @@ const extractionStructureRefinement = (result: { memories: Array<{ retention?: s
     if (memory.retention === "scene" && memory.type !== "episode") context.addIssue({ code: "custom", path: ["memories", index, "retention"], message: "Scene-retention memories must use type episode." });
   });
 };
+export const MemoryAdditionRequestOutcomeSchema = z.object({
+  status: z.enum(["not_in_source", "already_recorded"]),
+  reason: z.string().trim().min(1),
+  relatedMemoryIds: z.array(z.string().trim().min(1)).optional(),
+}).strict();
 export const ExtractionDraftResultSchema = z.object({
+  requestOutcome: MemoryAdditionRequestOutcomeSchema.optional(),
   seedResolutions: z.array(SeedResolutionSchema).optional(),
   atomRelations: z.array(ExtractedAtomRelationSchema).optional(),
   // Processing-generated review candidates, never knowledge grants or facts.
@@ -1162,6 +1169,9 @@ export function mergeExtractionPages(previous: ExtractionDraftResult | undefined
     (result as any)[field] = unique([...(result[field] ?? []), ...(page[field] ?? [])]);
   }
   result.unfinishedSource = page.unfinishedSource ?? [];
+  // An outcome describes a completed empty request, never a later empty page
+  // that follows already extracted evidence-backed memories.
+  result.requestOutcome = result.memories.length ? undefined : page.requestOutcome;
   return ExtractionAggregateSchema.parse(result);
 }
 
@@ -1461,6 +1471,7 @@ function requireCoreDetail(memory: z.infer<typeof ExtractedMemorySchema>, contex
 /** Current first-pass extraction contract. It deliberately omits canonical
  * assertion, belief, and promise lifecycle decisions. */
 export const Api38ExtractionDraftResultSchema = ExtractionDraftResultSchema.superRefine((result, context) => {
+  if (result.requestOutcome && (result.memories.length || result.unfinishedSource?.length)) context.addIssue({code:"custom",path:["requestOutcome"],message:"requestOutcome is only for a completed request with no new memories."});
   if (result.seedResolutions?.length) context.addIssue({code:"custom",path:["seedResolutions"],message:"Seed resolution patches belong to the second state pass."});
   for (const field of ["sourcePassages", "unfinishedSource"] as const) if (!Array.isArray(result[field])) context.addIssue({ code: "custom", path: [field], message: `Current extraction must explicitly return ${field}, using [] when empty.` });
   result.memories.forEach((memory, index) => {
@@ -1488,7 +1499,10 @@ const StateDetailSchema = ExtractedMemoryDetailSchema.safeExtend({
 });
 export const StateExtractionSchema = z.object({
   entities: z.array(EntitySchema).default([]),
-  memories: z.array(ExtractedMemorySchema.safeExtend({details:z.array(StateDetailSchema).min(1),retention:z.enum(["scene","arc","durable"])}).superRefine(requireCoreDetail)).default([]),
+  // Dialogue belongs to the event archivist, including sourceRef resolution. Stray state dialogue is
+  // dropped rather than rejected so it never costs a format repair.
+  memories: z.array(z.preprocess(value => value && typeof value === "object" && !Array.isArray(value) ? (({ keyDialogues: _dropped, ...rest }: Record<string, unknown>) => rest)(value as Record<string, unknown>) : value,
+    ExtractedMemorySchema.safeExtend({details:z.array(StateDetailSchema).min(1),retention:z.enum(["scene","arc","durable"])}).superRefine(requireCoreDetail))).default([]),
   detailAdditions: z.array(z.object({ memoryKey: z.string().min(1), detail: StateDetailSchema })).default([]),
   stateObservations: z.array(StateObservationSchema).default([]),
   relationshipEvents: z.array(RelationshipEventSchema).default([]),
@@ -1535,7 +1549,7 @@ export const ReconciliationReviewResolutionSchema = z.object({
   editedItem: z.unknown().optional(),
 });
 
-export const LeaseJobRequestSchema = z.object({ workerId: z.string().min(1) });
+export const LeaseJobRequestSchema = z.object({ workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional() });
 export const CompleteJobRequestSchema = z.object({
   workerId: z.string().min(1),
   // The stored job kind selects the result schema at the completion boundary.
@@ -1546,6 +1560,7 @@ export const CompleteJobRequestSchema = z.object({
 export const FailJobRequestSchema = z.object({
   workerId: z.string().min(1),
   error: z.string().max(4000),
+  providerFailure: z.object({ status:z.number().int().min(100).max(599).optional(),code:z.string().max(80).optional(),finishReason:z.string().max(80).optional(),refusal:z.boolean().optional(),retryAfterMs:z.number().finite().min(0).optional() }).optional(),
 });
 
 export const ExtractionEngineSchema = z.enum(["risu", "server"]);
@@ -1724,6 +1739,7 @@ export interface LeasedJob {
   operationStageTotal?: number;
   postExtractionReview?: boolean;
   auditDraft?: ExtractionDraftResult;
+  risuStageCheckpoints?: Partial<Record<"extraction"|"audit",{inputHash:string;result:unknown}>>;
   continuationDraft?: ExtractionDraftResult;
   sourceRecovery?: boolean;
   sourceRecoveryMetadata?: import("./source-recovery.js").SourceRecoveryMetadata;
@@ -1938,10 +1954,11 @@ export { renderMcpAnswer, type McpEvidence, type McpQuestionAnswer, type McpSour
 export { projectMemoryScene, renderMemoryScene, type MemoryScene } from "./memory-scene.js";
 
 export { AUXILIARY_CENSORSHIP_RELAXATION, withAuxiliaryStoryFraming, ROLEPLAY_ARCHIVE_FRAMING, SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
+export { MEMORY_ADDITION_GUIDANCE, memoryAdditionRequestGuidance, validateMemoryAdditionRequestOutcome, memoryAdditionUserNote, memoryAdditionStopsAfterEvents } from "./memory-addition-guidance.js";
 
 export { ANNIVERSARY_KINDS, DEFAULT_ALWAYS_INJECT_KINDS, landmarkAlwaysInjected } from "./landmark-injection.js";
 
 export * from "./reference-translation.js";
 export { sourceRecoverySummary, type SourceRecoveryMetadata } from "./source-recovery.js";
 
-export { JOB_KIND_VALUES, JOB_PIPELINE_STAGE_VALUES, WORKER_PHASE_VALUES, AUXILIARY_PURPOSE_VALUES, OPERATION_LABELS, operationLabel, type JobKind, type JobPipelineStage, type WorkerPhase, type AuxiliaryPurpose } from "./operation-labels.js";
+export { JOB_KIND_VALUES, JOB_PIPELINE_STAGE_VALUES, WORKER_PHASE_VALUES, AUXILIARY_PURPOSE_VALUES, JOB_TRIGGER_VALUES, JOB_TRIGGER_LABELS, OPERATION_LABELS, operationLabel, type JobKind, type JobPipelineStage, type WorkerPhase, type AuxiliaryPurpose, type JobTrigger } from "./operation-labels.js";

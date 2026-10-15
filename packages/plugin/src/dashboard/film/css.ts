@@ -1016,6 +1016,11 @@ dialog.dialog--notes[open] { display: flex; flex-direction: column; max-height: 
 .job__time { font-size: var(--t-meta, var(--t-small)); color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .job-group + .job-group { margin-top: 0; }
 .job + .job, .jobs > .fold { margin-top: 0; }
+/* same-kind burst: children read as sub-items under one guide line */
+.fold.job-group.job-burst > .fold__body { padding: 0 16px 10px 34px; background: linear-gradient(var(--sep), var(--sep)) 22px 0 / 1px calc(100% - 14px) no-repeat, var(--screen); }
+.fold.job-group.job-burst > .fold__body > .job--child > summary { min-height: 40px; padding-block: 8px; }
+.job--child .job__name { font-size: var(--t-meta); font-weight: 400; color: var(--ink-2); }
+.job--child .job__time { font-size: var(--t-micro); }
 .step { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 8px 0; font-size: var(--t-ui); }
 .step + .step { border-top: 1px solid var(--rule); }
 .step > .i { width: 14px; height: 14px; margin-top: 3px; color: var(--ink-3); }

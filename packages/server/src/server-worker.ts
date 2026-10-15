@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { ExtractionDraftResultSchema, ReconciliationResultSchema, extractionAuditDraftForJob, type LeasedJob, type ReconciliationSubmission, type ServerAuxiliaryCallTiming, type ServerWorkerStatus } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import type { EmbeddingService } from "./embedding.js";
-import { attachAuxiliaryPlan, failJob, leaseJob, releaseJob, setJobPipelineStage } from "./jobs.js";
+import { attachAuxiliaryPlan, failJob, leaseJob, releaseJob, renewJobLease, setJobPipelineStage } from "./jobs.js";
 import { completeExtractionJob } from "./extraction-completion.js";
 import { finalizeExtractPage } from "./extraction-pipeline.js";
 import { completeEpisodeJob } from "./episode-completion.js";
@@ -27,6 +27,7 @@ const MANUAL_PAUSE_KEY = "server_worker_manual_pause";
 const MAX_ACTIVE_CALLS = 2;
 
 interface ActiveJob {
+  owner: string;
   job: LeasedJob;
   controller: AbortController;
   startedAt: number;
@@ -59,7 +60,11 @@ export class ServerExtractionWorker {
       this.#lastError = persistedPause.value || "Paused by user";
     }
     this.store.setTimingObserver((event) => this.#recordAuxiliaryTiming(event));
-    this.#timer = setInterval(() => this.#checkControlLease(), 2_000);
+    this.#timer = setInterval(() => {
+      this.#checkControlLease();
+      for(const active of this.#active.values()) if(!renewJobLease(this.db,active.job.id,active.owner,this.leaseSeconds)) active.controller.abort(new Error('Lease generation changed'));
+      this.wake(); // Resume due backoff within the existing control lease.
+    }, Math.max(10,Math.min(2_000,this.leaseSeconds*1_000/3)));
     this.#timer.unref?.();
   }
 
@@ -179,7 +184,7 @@ export class ServerExtractionWorker {
 
   #stopActive(reason: string): void {
     for (const active of this.#active.values()) {
-      releaseJob(this.db, active.job.id, this.workerId);
+      releaseJob(this.db, active.job.id, active.owner);
       active.controller.abort(new Error(reason));
     }
   }
@@ -191,12 +196,13 @@ export class ServerExtractionWorker {
         // Cumulative extraction/reconciliation for one chat remains serial.
         // The only overlap admitted beside it is a fingerprint-guarded story job.
         const hasNonStory = [...this.#active.values()].some((item) => item.job.kind !== "story_consolidation");
-        const job = attachAuxiliaryPlan(this.db, leaseJob(this.db, this.workerId, this.leaseSeconds, { storyOnly: hasNonStory }), {
+        const owner = `${this.workerId}:${randomUUID()}`;
+        const job = attachAuxiliaryPlan(this.db, leaseJob(this.db, owner, this.leaseSeconds, { storyOnly: hasNonStory, excludeJobIds:[...this.#active.keys()] }), {
           maxInputTokens: this.store.config.maxInputTokens, maxOutputTokens: this.store.config.maxOutputTokens, llmTimeoutMs: this.store.config.llmTimeoutMs,
         });
         if (!job) break;
         this.store.snapshotJob(job.id);
-        const active: ActiveJob = { job, controller: new AbortController(), startedAt: Date.now(), phase: job.kind === "quiz" ? "storing" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction" };
+        const active: ActiveJob = { owner, job, controller: new AbortController(), startedAt: Date.now(), phase: job.kind === "quiz" ? "storing" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction" };
         this.#active.set(job.id, active);
         void this.#process(active);
       }
@@ -208,7 +214,7 @@ export class ServerExtractionWorker {
   async #process(active: ActiveJob): Promise<void> {
     const { job, controller } = active;
     try {
-      setJobPipelineStage(this.db, job.id, active.phase === "storing" ? "storing" : active.phase === "relationship_projection" ? "relationship_projection" : active.phase === "story_consolidation" ? "story_consolidation" : active.phase === "ledger_consistency" ? "ledger_consistency" : "first_extraction", this.workerId);
+      setJobPipelineStage(this.db, job.id, active.phase === "storing" ? "storing" : active.phase === "relationship_projection" ? "relationship_projection" : active.phase === "story_consolidation" ? "story_consolidation" : active.phase === "ledger_consistency" ? "ledger_consistency" : "first_extraction", active.owner);
       let result = job.kind === 'memory_group' ? await groupMemoriesWithServerLlm(this.store, job, controller.signal) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode"
         ? await episodeWithServerLlm(this.store, job, controller.signal)
         : job.kind === "initial_calibration"
@@ -223,13 +229,13 @@ export class ServerExtractionWorker {
           ? await checkLedgerConsistencyWithServerLlm(this.store, job, controller.signal)
           : await extractWithServerLlm(this.store, job, controller.signal);
       if (controller.signal.aborted || !this.#canFinishActive()) {
-        releaseJob(this.db, job.id, this.workerId);
+        releaseJob(this.db, job.id, active.owner);
         return;
       }
       if (job.kind === "extract") {
-        await finalizeExtractPage({ db: this.db, store: this.store, job, workerId: this.workerId,
+        await finalizeExtractPage({ db: this.db, store: this.store, job, workerId: active.owner,
           pageDraft: result as any, signal: controller.signal,
-          onStage: stage => { active.phase = stage; setJobPipelineStage(this.db, job.id, stage, this.workerId); } });
+          onStage: stage => { active.phase = stage; setJobPipelineStage(this.db, job.id, stage, active.owner); } });
         this.#lastCompletedAt = Date.now();
         void this.embeddings.indexPending(job.chatId);
         return;
@@ -250,7 +256,7 @@ export class ServerExtractionWorker {
       let audit;
       if (!incomplete && job.postExtractionReview && reviewable) {
         active.phase = "post_extraction_audit";
-        setJobPipelineStage(this.db, job.id, "post_extraction_audit", this.workerId);
+        setJobPipelineStage(this.db, job.id, "post_extraction_audit", active.owner);
         audit = await auditExtractionWithServerLlm(this.store, job, result, controller.signal);
       }
       let reconciliation: ReconciliationSubmission | undefined;
@@ -277,7 +283,7 @@ export class ServerExtractionWorker {
           : prepareReconciliation(this.db, job.chatId, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000)) : { required: false, candidateSetHash: "", systemPrompt: "", userPrompt: "", parts: [] };
         if (prepared.required) {
           active.phase = "state_reconciliation";
-          setJobPipelineStage(this.db, job.id, "state_reconciliation", this.workerId);
+          setJobPipelineStage(this.db, job.id, "state_reconciliation", active.owner);
           const decisions = [];
           const seedResolutions = [];
           let stateResult;
@@ -299,19 +305,20 @@ export class ServerExtractionWorker {
       }
       controller.signal.throwIfAborted();
       active.phase = "storing";
-      setJobPipelineStage(this.db, job.id, "storing", this.workerId);
-      if (job.kind === 'memory_group') completeMemoryGroupJob(this.db, job.id, this.workerId, result);
-      else if (job.kind === "episode") completeEpisodeJob(this.db, job.id, this.workerId, result as any, reconciliation, audit);
-      else if (job.kind === "initial_calibration") completeInitialCalibrationJob(this.db, job.id, this.workerId, result as any);
-      else if (job.kind === "relationship_projection") completeRelationshipProjectionJob(this.db, job.id, this.workerId, result as any);
-      else if (job.kind === "quiz") completeQuizJob(this.db, job.id, this.workerId, result);
-      else if (job.kind === "story_consolidation") completeStoryConsolidationJob(this.db, job, this.workerId, result as any);
+      if(controller.signal.aborted || !this.db.prepare("SELECT 1 FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(job.id,active.owner)) return;
+      setJobPipelineStage(this.db, job.id, "storing", active.owner);
+      if (job.kind === 'memory_group') completeMemoryGroupJob(this.db, job.id, active.owner, result);
+      else if (job.kind === "episode") completeEpisodeJob(this.db, job.id, active.owner, result as any, reconciliation, audit);
+      else if (job.kind === "initial_calibration") completeInitialCalibrationJob(this.db, job.id, active.owner, result as any);
+      else if (job.kind === "relationship_projection") completeRelationshipProjectionJob(this.db, job.id, active.owner, result as any);
+      else if (job.kind === "quiz") completeQuizJob(this.db, job.id, active.owner, result);
+      else if (job.kind === "story_consolidation") completeStoryConsolidationJob(this.db, job, active.owner, result as any);
       else if (job.kind === "ledger_consistency") {
-        completeLedgerConsistencyJob(this.db, job, this.workerId, result);
+        completeLedgerConsistencyJob(this.db, job, active.owner, result);
         finalizeLedgerConsistencyRun(this.db, job.chatId, job.ledgerConsistency!.runId);
       }
       else {
-        const completed = completeExtractionJob(this.db, job.id, this.workerId, result as any, reconciliation, audit);
+        const completed = completeExtractionJob(this.db, job.id, active.owner, result as any, reconciliation, audit);
         if (completed.warnings.length) console.warn(`[RCM] Extraction ${job.id}: ${completed.warnings.join("; ")}`);
       }
       if (job.kind !== "quiz") {
@@ -320,10 +327,10 @@ export class ServerExtractionWorker {
       }
     } catch (error) {
       if (controller.signal.aborted) {
-        releaseJob(this.db, job.id, this.workerId);
+        releaseJob(this.db, job.id, active.owner);
       } else {
         const message = error instanceof Error ? error.message : String(error);
-        const failure = failJob(this.db, job.id, this.workerId, message);
+        const failure = failJob(this.db, job.id, active.owner, error);
         if (job.kind === "ledger_consistency" && failure?.status === "failed") {
           finalizeLedgerConsistencyRun(this.db, job.chatId, job.ledgerConsistency!.runId);
         }
@@ -331,7 +338,7 @@ export class ServerExtractionWorker {
         // leaseJob isolates failed cumulative work to its chat; other chats keep running.
       }
     } finally {
-      this.#active.delete(job.id);
+      if(this.#active.get(job.id)===active) this.#active.delete(job.id);
       if (this.#canRun()) this.wake();
     }
   }

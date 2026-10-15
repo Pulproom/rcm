@@ -1,5 +1,5 @@
-import { withAuxiliaryStoryFraming, describeModelResponse } from "@rcm/shared";
-import { sanitizeDiagnosticText } from "@rcm/shared";
+import { withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
+import { sanitizeDiagnosticText, assertProviderOutputAllowed } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
 import { parseReconciliationResult } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
@@ -232,7 +232,8 @@ export class ServerLlmStore {
     if (!checkpoint || checkpoint.inputHash !== extractionCheckpointKey(job)) return undefined;
     const parsed = Api38ExtractionDraftResultSchema.safeParse(checkpoint.result);
     if (!parsed.success || parsed.data.language !== job.memoryLanguage) return undefined;
-    return parsed.data;
+    try { return validateMemoryAdditionRequestOutcome(parsed.data, job.memoryAddition?.userRequest); }
+    catch { return undefined; }
   }
   cacheExtraction(job: LeasedJob, result: ExtractionDraftResult): ExtractionDraftResult {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=? AND status='leased' AND lease_owner IS NOT NULL").get(job.id) as { payload_json: string } | undefined;
@@ -442,6 +443,7 @@ function geminiApiUrl(endpoint: string, model: string): string {
 
 export class ProviderRequestError extends Error {
   providerMessage?: string;
+  retryAfterMs?:number;
   constructor(public readonly kind:"timeout"|"transport"|"http"|"json", public readonly status?:number, message?:string) { super(message ?? (kind === "http" ? `Provider HTTP ${status}` : `Provider ${kind} failure`)); }
 }
 
@@ -459,6 +461,7 @@ async function copilotFetchJson(url: string, init: RequestInit, signal: AbortSig
       const failure = new ProviderRequestError(error.kind, error.status,
         error.kind === "http" ? `Copilot HTTP ${error.status} · ${detail || "토큰 권한, 구독 및 모델 사용 가능 여부를 확인해 주세요."}` : `Copilot ${error.kind} failure`);
       if (detail) failure.providerMessage = detail;
+      failure.retryAfterMs = error.retryAfterMs;
       throw failure;
     }
     throw error;
@@ -487,6 +490,11 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
     }
     if (!response.ok) {
       const error = new ProviderRequestError("http", response.status, providerHttpFailureMessage(response, body));
+      const retryAfter=response.headers.get('Retry-After');
+      if(retryAfter) {
+        const delay=/^\d+(?:\.\d+)?$/.test(retryAfter.trim()) ? Number(retryAfter)*1000 : Date.parse(retryAfter)-Date.now();
+        if(Number.isFinite(delay)) error.retryAfterMs=Math.max(0,delay);
+      }
       try { const parsed = JSON.parse(body); error.providerMessage = typeof parsed?.error?.message === "string" ? parsed.error.message : typeof parsed?.message === "string" ? parsed.message : undefined; } catch { /* Unstructured response bodies are not diagnostic messages. */ }
       throw error;
     }
@@ -564,7 +572,7 @@ function parseServerJson(text: string, purpose: ServerLlmPurpose): unknown {
 
 export class ServerLlmOutputError extends Error {
   readonly retryable = true;
-  constructor(readonly reason: "empty_output" | "max_tokens", message: string) {
+  constructor(readonly reason: "empty_output" | "max_tokens", message: string, readonly finishReason?:string) {
     super(message);
     this.name = "ServerLlmOutputError";
   }
@@ -580,11 +588,12 @@ async function callRepairProvider(call: () => Promise<string>): Promise<string> 
 }
 
 function ensureCompleteOutput(content: string, finishReason: unknown): string {
+  assertProviderOutputAllowed(finishReason, false);
   const normalized = String(finishReason ?? "").trim().toUpperCase();
   if (["MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH"].includes(normalized)) {
-    throw new ServerLlmOutputError("max_tokens", `Server LLM output was truncated (${normalized})`);
+    throw new ServerLlmOutputError("max_tokens", `Server LLM output was truncated (${normalized})`,normalized);
   }
-  if (!content.trim()) throw new ServerLlmOutputError("empty_output", "Server LLM returned an empty response");
+  if (!content.trim()) throw new ServerLlmOutputError("empty_output", "Server LLM returned an empty response",normalized || undefined);
   return content;
 }
 
@@ -617,7 +626,7 @@ async function callProvider(
   const jsonBudget = Math.min(config.maxOutputTokens, requestedOutputBudget ?? config.maxOutputTokens);
   const limit = jsonBudget;
   console.log(`[RCM] Server LLM request start provider=${config.provider} model=${config.model} purpose=${purpose} promptChars=${promptChars} jsonBudget=${jsonBudget} maxTokens=${limit}`);
-  const finish = (content: string, metadata: { finishReason?: unknown; usage?: any } = {}): string => {
+  const finish = (content: string, metadata: { finishReason?: unknown; refusal?:boolean; usage?: any } = {}): string => {
     const promptTokens = finiteTokenCount(metadata.usage?.prompt_tokens ?? metadata.usage?.promptTokenCount);
     const completionTokens = finiteTokenCount(metadata.usage?.completion_tokens ?? metadata.usage?.candidatesTokenCount);
     const reasoningTokens = finiteTokenCount(metadata.usage?.reasoning_tokens ?? metadata.usage?.completion_tokens_details?.reasoning_tokens ?? metadata.usage?.thoughtsTokenCount);
@@ -633,7 +642,7 @@ async function callProvider(
     ].filter(Boolean).join(" "));
     store.stageOutput(jobId, content);
     let completed: string;
-    try { completed = ensureCompleteOutput(content, metadata.finishReason); }
+    try { assertProviderOutputAllowed(metadata.finishReason,metadata.refusal); completed = ensureCompleteOutput(content, metadata.finishReason); }
     catch (error) {
       store.settleCall(jobId, purpose, "failed", { error, usage: { promptTokens, completionTokens, reasoningTokens, cachedInputTokens } });
       throw error;
@@ -647,7 +656,7 @@ async function callProvider(
     return finish(result.content, result);
   } catch (error) {
     const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 300);
-    store.settleCall(jobId, purpose, "failed", { error: message });
+    store.settleCall(jobId, purpose, "failed", { error });
     store.recordTiming({ id: timingId, jobId, purpose, startedAt, elapsedMs: Date.now() - startedAt, outcome: "failed" });
     console.warn(`[RCM] Server LLM request failed provider=${config.provider} model=${config.model} purpose=${purpose} elapsedMs=${Date.now() - startedAt} error=${message}`);
     throw error;
@@ -688,7 +697,7 @@ export async function requestStructuredProvider(
   onRequest: () => void = () => {},
   outputFormat: "json" | "text" = "json",
   storyContent = true,
-): Promise<{content:string;finishReason?:unknown;usage?:any}> {
+): Promise<{content:string;finishReason?:unknown;refusal?:boolean;usage?:any}> {
     if (storyContent) messages = withAuxiliaryStoryFraming(messages, store.config?.relaxAuxiliaryCensorship === true);
     const deadline = Date.now() + config.llmTimeoutMs;
     if (config.provider === "copilot") {
@@ -701,7 +710,7 @@ export async function requestStructuredProvider(
         // JSON uses the prompt; unsupported tuning fails without a parameter fallback.
         body: JSON.stringify({ model: config.model, messages, ...openAiGenerationTuning(config.thinking, config.temperature), max_tokens: limit, stream: false }),
       }, signal, Math.max(1, deadline - Date.now()), [apiKey, credential.accessToken]);
-      return { content: String(result.choices?.[0]?.message?.content ?? ""), finishReason: result.choices?.[0]?.finish_reason, usage: result.usage };
+      return { content: String(result.choices?.[0]?.message?.content ?? ""), finishReason: result.choices?.[0]?.finish_reason, refusal:Boolean(result.choices?.[0]?.message?.refusal), usage: result.usage };
     }
     if (config.provider === "gemini_api" || config.provider === "vertex") {
       const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
@@ -736,7 +745,7 @@ export async function requestStructuredProvider(
       onRequest();
       const result = await fetchJson(url, request, signal, timeoutMs);
       const content = (result.candidates?.[0]?.content?.parts ?? []).map((part: any) => typeof part?.text === "string" ? part.text : "").join("");
-      return { content, finishReason: result.candidates?.[0]?.finishReason, usage: result.usageMetadata };
+      return { content, finishReason: result.promptFeedback?.blockReason ?? result.candidates?.[0]?.finishReason, usage: result.usageMetadata };
     }
 
     if (config.provider === "ollama_cloud") {
@@ -773,7 +782,7 @@ export async function requestStructuredProvider(
     } satisfies RequestInit;
     onRequest();
     const result = await fetchJson(config.endpoint, request, signal, config.llmTimeoutMs);
-    return { content:String(result.choices?.[0]?.message?.content ?? ""), finishReason:result.choices?.[0]?.finish_reason, usage:result.usage };
+    return { content:String(result.choices?.[0]?.message?.content ?? ""), finishReason:result.choices?.[0]?.finish_reason, refusal:Boolean(result.choices?.[0]?.message?.refusal), usage:result.usage };
 }
 
 export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal, onRepair?: () => void): Promise<ExtractionDraftResult> {
@@ -789,7 +798,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
       ? resolveModelSourceReferences(parseServerJson(output, purpose), job.sourceUnits)
       : parseServerJson(output, purpose)), { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
-    return parsed;
+    return validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest);
   };
   const validateRepair = async (repaired: string): Promise<ExtractionDraftResult> => validateStructuredRepairOrRegenerate({
     original: first,
@@ -809,7 +818,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     resolved = normalizeExtractionDraftInput(job.sourceUnits ? resolveModelSourceReferences(raw, job.sourceUnits) : raw);
     const parsed = Api38ExtractionDraftResultSchema.parse(resolved, { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
-    return store.cacheExtraction(job, parsed);
+    return store.cacheExtraction(job, validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest));
   } catch (firstError) {
     onRepair?.();
     const rawWindow = structuredJsonErrorWindow(first, firstError);

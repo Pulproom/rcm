@@ -2,7 +2,7 @@ import { applySeedResolutions } from "./story-seeds.js";
 import { activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope } from "./social-relations.js";
 import { storeSourcePassages } from "./source-evidence.js";
 import { randomUUID } from "node:crypto";
-import { invalidateStorySupports } from "./story-spine.js";
+import { invalidateStorySupports, markStorySupportsInvalid } from "./story-spine.js";
 import { augmentSearchText, modelImageRanges, normalizeStoryTime, type ExtractionResult } from "@rcm/shared";
 import { canonicalizeExtraction, normalizeEntityName } from "./entities.js";
 import type { RcmDatabase } from "./db.js";
@@ -372,8 +372,11 @@ export function validateExtractionSources(
   return errors;
 }
 
-export function ingestExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceJobId: string = randomUUID(), sourceBatchId?: string, relationContext?: AtomRelationContext, userInitiated: boolean | 'additions' = false): string[] {
+export function ingestExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceJobId: string = randomUUID(), sourceBatchId?: string, relationContext?: AtomRelationContext, userInitiated: boolean | 'additions' | 'regeneration' = false): string[] {
   const additionsOnly = userInitiated === 'additions';
+  // Episode regeneration schedules after its batch final_json is replaced;
+  // registering here would freeze an obsolete batch fingerprint and trigger.
+  const invalidateStory = userInitiated === 'regeneration' ? markStorySupportsInvalid : invalidateStorySupports;
   const batchFor = (evidence: Array<{ messageId: string }>) => additionsOnly ? evidenceBatchId(db, chatId, evidence) : sourceBatchId;
   userInitiated = userInitiated === true;
   const relationWarnings: string[] = [];
@@ -891,7 +894,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     if (!additionsOnly) applySeedResolutions(db, chatId, result.seedResolutions);
     writeDialogueAccessIdentities(db, chatId, dialogueIdentities);
     pruneDetailAccessEdits(db, chatId);
-    invalidateStorySupports(db,chatId,revokedStorySupports);
+    invalidateStory(db,chatId,revokedStorySupports);
   })();
   return relationWarnings;
 }

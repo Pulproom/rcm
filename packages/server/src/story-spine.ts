@@ -10,6 +10,7 @@ import {
   type MemoryLanguage,
   type RpProfile,
   type StorySpineConsolidationResult,
+  type JobTrigger,
 } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { hasActiveBackfillBarrier } from "./backfill-barrier.js";
@@ -20,6 +21,22 @@ import { UNCORRECTED_SQL } from "./user-corrections.js";
 const SEGMENT_BATCH_TARGET = 4;
 const SEGMENT_TOKEN_TARGET = 40_000;
 const ARC_SEGMENT_TARGET = 4;
+
+/** Baseline scheduling estimate; model output paging and repairs are additional. */
+export function estimateStoryRebuild(db:RcmDatabase,chatId:string) {
+  const batches=db.prepare("SELECT start_ordinal,end_ordinal FROM extraction_batches WHERE chat_id=? AND generation_id='active' AND status='applied' ORDER BY start_ordinal,id").all(chatId) as Array<{start_ordinal:number;end_ordinal:number}>;
+  let segment=0,count=0,tokens=0,end=-1;
+  for(const batch of batches) {
+    if(batch.start_ordinal>end+1) { count=0;tokens=0; }
+    const rows=db.prepare('SELECT content FROM messages WHERE chat_id=? AND memory_excluded=0 AND ordinal BETWEEN ? AND ?').all(chatId,Math.max(end+1,batch.start_ordinal),batch.end_ordinal) as Array<{content:string}>;
+    tokens+=rows.reduce((sum,row)=>sum+estimateTokens(row.content ?? ''),0); count++;end=batch.end_ordinal;
+    if(count>=SEGMENT_BATCH_TARGET || tokens>=SEGMENT_TOKEN_TARGET) {segment++;count=0;tokens=0;}
+  }
+  const arc=Math.floor(segment/ARC_SEGMENT_TARGET);
+  // Overview can be extended after each completed arc while the hierarchy grows.
+  const overview=arc;
+  return {segment,arc,overview,total:segment+arc+overview};
+}
 
 interface StoryAtom {
   id: string;
@@ -45,6 +62,8 @@ interface SpinePayload {
   outputScopes?: Array<{ scope: string; holder: string | null }>;
   inputGuardFingerprint?: string;
   backfillRunId?: string;
+  trigger?: JobTrigger;
+  targetGroupId?: string;
   operationStage?: string;
   operationStageOrdinal?: number;
   operationStageTotal?: number;
@@ -465,6 +484,9 @@ function enqueue(db: RcmDatabase, chatId: string, payload: SpinePayload): boolea
   }
   const guarded = refreshStoryInputGuard(db, chatId, payload);
   if (!guarded) return false;
+  const previous = payload.replaceNodeIds?.length ? db.prepare("SELECT * FROM story_spine_nodes WHERE id=?").get(payload.replaceNodeIds[0]) as StoryRow | undefined : undefined;
+  guarded.targetGroupId = previous ? storyGroupId(storyGroupKey(previous))
+    : storyGroupId(`${payload.level}:${payload.startOrdinal}:${payload.endOrdinal}:${payload.sourceFingerprint}`);
   // A terminal failure owns this exact target and input until the input changes
   // or the existing explicit retry path moves that job back to queued.
   const target=(value: SpinePayload) => fingerprint([value.level,value.generationId,value.startOrdinal,value.endOrdinal,
@@ -487,7 +509,7 @@ function enqueue(db: RcmDatabase, chatId: string, payload: SpinePayload): boolea
   return true;
 }
 
-function maybeEnqueueSegment(db: RcmDatabase, chatId: string, backfillRunId?: string, flushTail = false): boolean {
+function maybeEnqueueSegment(db: RcmDatabase, chatId: string, backfillRunId?: string, flushTail = false, trigger?: JobTrigger): boolean {
   const batches = db.prepare(`SELECT b.id,b.start_ordinal,b.end_ordinal,b.source_message_ids_json,b.final_json,b.updated_at FROM extraction_batches b
     WHERE b.chat_id=? AND b.generation_id='active' AND b.status='applied' ORDER BY b.start_ordinal,b.id`)
     .all(chatId) as Array<Record<string, any>>;
@@ -549,14 +571,14 @@ function maybeEnqueueSegment(db: RcmDatabase, chatId: string, backfillRunId?: st
     }
     if (!selected.length || (!flushTail && selected.length < SEGMENT_BATCH_TARGET && tokens < SEGMENT_TOKEN_TARGET)) continue;
     const payload: SpinePayload={level:'segment',generationId:'active',startOrdinal,endOrdinal,outputScopes:first.outputScopes,
-      sourceBatchIds:selected.map(row=>String(row.id)),sourceTokens:tokens,sourceFingerprint:'',backfillRunId};
+      sourceBatchIds:selected.map(row=>String(row.id)),sourceTokens:tokens,sourceFingerprint:'',backfillRunId,trigger};
     payload.sourceFingerprint=fingerprint(rewriteSources(db,chatId,payload));
     if (enqueue(db,chatId,payload)) return true;
   }
   return false;
 }
 
-function maybeEnqueueArc(db: RcmDatabase, chatId: string, backfillRunId?: string, flushTail = false): boolean {
+function maybeEnqueueArc(db: RcmDatabase, chatId: string, backfillRunId?: string, flushTail = false, trigger?: JobTrigger): boolean {
   const segments = db.prepare(`SELECT n.id,n.start_ordinal,n.end_ordinal,n.source_fingerprint,n.source_token_count
     FROM story_spine_nodes n
     WHERE n.chat_id=? AND n.generation_id='active' AND n.level='segment' AND n.status='active'
@@ -579,11 +601,11 @@ function maybeEnqueueArc(db: RcmDatabase, chatId: string, backfillRunId?: string
     level: "arc", generationId: "active", startOrdinal: Number(selectedGroups[0]![0]!.start_ordinal), endOrdinal: Number(selectedGroups.at(-1)![0]!.end_ordinal),
     sourceNodeIds: selected.map((row) => String(row.id)),
     sourceTokens: selectedGroups.reduce((sum, group) => sum + Number(group[0]?.source_token_count || 0), 0),
-    sourceFingerprint: fingerprint(selectedGroups.map((group) => [group[0]?.start_ordinal, group[0]?.end_ordinal, group[0]?.source_fingerprint])), backfillRunId,
+    sourceFingerprint: fingerprint(selectedGroups.map((group) => [group[0]?.start_ordinal, group[0]?.end_ordinal, group[0]?.source_fingerprint])), backfillRunId, trigger,
   });
 }
 
-function maybeEnqueueOverview(db: RcmDatabase, chatId: string, backfillRunId?: string): boolean {
+function maybeEnqueueOverview(db: RcmDatabase, chatId: string, backfillRunId?: string, trigger?: JobTrigger): boolean {
   const current = db.prepare("SELECT id,start_ordinal,end_ordinal,source_fingerprint,source_token_count FROM story_spine_nodes WHERE chat_id=? AND generation_id='active' AND level='overview' AND status='active' ORDER BY updated_at DESC LIMIT 1")
     .get(chatId) as Record<string, any> | undefined;
   const arcs = db.prepare("SELECT id,start_ordinal,end_ordinal,source_fingerprint,source_token_count FROM story_spine_nodes WHERE chat_id=? AND generation_id='active' AND level='arc' AND status='active' AND (? IS NULL OR end_ordinal>?) ORDER BY start_ordinal,end_ordinal,created_at")
@@ -604,11 +626,11 @@ function maybeEnqueueOverview(db: RcmDatabase, chatId: string, backfillRunId?: s
     level: "overview", generationId: "active", startOrdinal: Number(current?.start_ordinal ?? arcGroups[0]![0]!.start_ordinal), endOrdinal: Number(arcGroups.at(-1)![0]!.end_ordinal),
     sourceNodeIds: sources.map((row) => String(row.id)),
     sourceTokens: Number(current?.source_token_count ?? 0) + arcGroups.reduce((sum, group) => sum + Number(group[0]?.source_token_count || 0), 0),
-    sourceFingerprint: desired, backfillRunId,
+    sourceFingerprint: desired, backfillRunId, trigger,
   });
 }
 
-export function maybeEnqueueStorySpine(db: RcmDatabase, chatId: string, backfillRunId?: string): number {
+export function maybeEnqueueStorySpine(db: RcmDatabase, chatId: string, backfillRunId?: string, trigger?: JobTrigger): number {
   // A regeneration shadow is a candidate, not the active hierarchy. Build its
   // derived navigation only after the canonical replacement is approved.
   if (db.prepare("SELECT 1 FROM regeneration_runs WHERE shadow_chat_id=? AND status IN ('queued','processing','ready') LIMIT 1").get(chatId)) return 0;
@@ -622,7 +644,7 @@ export function maybeEnqueueStorySpine(db: RcmDatabase, chatId: string, backfill
       && row.end_ordinal===first.end_ordinal && row.source_fingerprint===first.source_fingerprint);
     targets.forEach(row=>visited.add(row.id));
     const payload: SpinePayload={level:first.level,generationId:'active',startOrdinal:first.start_ordinal,endOrdinal:first.end_ordinal,
-      replaceNodeIds:targets.map(row=>row.id),sourceTokens:first.source_token_count,sourceFingerprint:'',backfillRunId};
+      replaceNodeIds:targets.map(row=>row.id),sourceTokens:first.source_token_count,sourceFingerprint:'',backfillRunId,trigger};
     if (rewriteBlocked(db,chatId,payload)) continue;
     const sources=rewriteSources(db,chatId,payload);
     if (payload.level==='segment') payload.sourceBatchIds=sources.map(row=>row.id);
@@ -641,15 +663,15 @@ export function maybeEnqueueStorySpine(db: RcmDatabase, chatId: string, backfill
   // barrier to avoid repeatedly paying to summarize a hierarchy still growing.
   if (hasActiveBackfillBarrier(db, chatId)) {
     let count = 0;
-    if (maybeEnqueueArc(db, chatId, backfillRunId)) count += 1;
-    if (maybeEnqueueSegment(db, chatId, backfillRunId)) count += 1;
+    if (maybeEnqueueArc(db, chatId, backfillRunId, false, trigger)) count += 1;
+    if (maybeEnqueueSegment(db, chatId, backfillRunId, false, trigger)) count += 1;
     return count;
   }
   const flushTail = Boolean(backfillRunId);
   let count = 0;
-  if (maybeEnqueueOverview(db, chatId, backfillRunId)) count += 1;
-  if (maybeEnqueueArc(db, chatId, backfillRunId, flushTail)) count += 1;
-  if (maybeEnqueueSegment(db, chatId, backfillRunId, flushTail)) count += 1;
+  if (maybeEnqueueOverview(db, chatId, backfillRunId, trigger)) count += 1;
+  if (maybeEnqueueArc(db, chatId, backfillRunId, flushTail, trigger)) count += 1;
+  if (maybeEnqueueSegment(db, chatId, backfillRunId, flushTail, trigger)) count += 1;
   return count;
 }
 
@@ -706,6 +728,33 @@ export function storyMemorySupportIds(db: RcmDatabase, chatId: string, memoryIds
   return ids;
 }
 
+function storyParents(db: RcmDatabase, chatId: string, id: string): Array<{id:string;scope:string;holder:string|null}> {
+  return db.prepare(`SELECT n.id,n.scope,n.holder FROM story_spine_sources s JOIN story_spine_nodes n ON n.id=s.node_id
+    WHERE s.source_node_id=? AND n.chat_id=? AND n.generation_id='active'`).all(id,chatId) as Array<{id:string;scope:string;holder:string|null}>;
+}
+
+function storyAncestors(db: RcmDatabase, chatId: string, seeds: Iterable<string>): Set<string> {
+  const affected = new Set(seeds);
+  for (const id of affected) storyParents(db,chatId,id).forEach(row => affected.add(row.id));
+  return affected;
+}
+
+/** Added atoms and replaced batches cannot rely on old support links. Seed
+ * segments by actual applied-batch membership and preserve their boundaries. */
+export function markStoryRangesInvalid(db: RcmDatabase, chatId: string, messageIds: readonly string[]): void {
+  if (!messageIds.length) return;
+  const segments = db.prepare(`SELECT DISTINCT n.id FROM story_spine_nodes n JOIN messages m
+    ON m.chat_id=n.chat_id AND m.ordinal BETWEEN n.start_ordinal AND n.end_ordinal
+    WHERE n.chat_id=? AND n.generation_id='active' AND n.level='segment' AND n.status IN ('active','pending')
+      AND m.message_id IN (SELECT value FROM json_each(?))
+      AND EXISTS(SELECT 1 FROM extraction_batches b,json_each(b.source_message_ids_json) s
+        WHERE b.chat_id=m.chat_id AND b.generation_id='active' AND b.status='applied' AND s.value=m.message_id)`)
+    .all(chatId,JSON.stringify(messageIds)) as Array<{id:string}>;
+  const affected = storyAncestors(db,chatId,segments.map(row => row.id));
+  db.prepare(`UPDATE story_spine_nodes SET status='pending',updated_at=?
+    WHERE id IN (SELECT value FROM json_each(?)) AND status IN ('active','pending')`).run(now(),JSON.stringify([...affected]));
+}
+
 /** Every mutation supplies only the typed atoms it actually revoked. Ancestor
  * traversal includes retired cumulative overviews to reach their active heirs. */
 export function markStorySupportsInvalid(db: RcmDatabase, chatId: string, invalidated: ReadonlySet<string>, accessChanges: ReadonlyMap<string, {holders:readonly string[];shared:boolean}> = new Map()): void {
@@ -713,12 +762,7 @@ export function markStorySupportsInvalid(db: RcmDatabase, chatId: string, invali
   const seeds=db.prepare(`SELECT DISTINCT n.id FROM story_spine_nodes n JOIN story_spine_support s ON s.node_id=n.id
     WHERE n.chat_id=? AND n.generation_id='active' AND n.status IN ('active','pending')
       AND s.item_id IN (SELECT value FROM json_each(?))`).all(chatId,JSON.stringify([...invalidated])) as Array<{id:string}>;
-  const affected=new Set(seeds.map(row=>row.id));
-  const parents=db.prepare(`SELECT n.id,n.scope,n.holder FROM story_spine_sources s JOIN story_spine_nodes n ON n.id=s.node_id
-    WHERE s.source_node_id=? AND n.chat_id=? AND n.generation_id='active'`);
-  for(const id of affected) {
-    (parents.all(id,chatId) as Array<{id:string}>).forEach(row=>affected.add(row.id));
-  }
+  const affected=storyAncestors(db,chatId,seeds.map(row=>row.id));
   const accessAffected=new Set<string>();
   const losesAccess=(node:{scope:string;holder:string|null},itemId:string):boolean=>{
     const change=accessChanges.get(itemId);
@@ -731,7 +775,7 @@ export function markStorySupportsInvalid(db: RcmDatabase, chatId: string, invali
     if (losesAccess(node,node.item_id)) accessAffected.add(node.id);
   }
   for(const id of accessAffected) {
-    for(const parent of parents.all(id,chatId) as Array<{id:string;scope:string;holder:string|null}>) {
+    for(const parent of storyParents(db,chatId,id)) {
       if(recursiveLeafSupports(db,[parent.id]).some(itemId=>losesAccess(parent,itemId))) accessAffected.add(parent.id);
     }
   }
@@ -762,7 +806,7 @@ export function invalidateStorySupports(db: RcmDatabase, chatId: string, invalid
   markStorySupportsInvalid(db,chatId,invalidated,accessChanges);
   // Source-only sync uses the marking step alone. Ordinary mutations also
   // schedule repairs, guarded again after any replacement extraction.
-  maybeEnqueueStorySpine(db,chatId);
+  maybeEnqueueStorySpine(db,chatId,undefined,'support_change');
 }
 
 export function completeStoryConsolidationJob(
@@ -807,7 +851,7 @@ export function completeStoryConsolidationJob(
     || storyInputGuard(db, job.chatId, payload) !== payload.inputGuardFingerprint) {
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error='Story source changed before completion',updated_at=? WHERE id=? AND lease_owner=?")
       .run(timestamp, job.id, workerId);
-    maybeEnqueueStorySpine(db, job.chatId, payload.backfillRunId);
+    maybeEnqueueStorySpine(db, job.chatId, payload.backfillRunId, payload.trigger);
     return { chatId: job.chatId, warnings: ["줄거리 입력이 바뀌어 오래된 생성 결과를 저장하지 않았습니다."], pendingReconciliations: 0 };
   }
   const sourceAtoms = storyInputAtoms(db,job.chatId,payload);
@@ -876,7 +920,7 @@ export function completeStoryConsolidationJob(
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND lease_owner=?")
       .run(timestamp, job.id, workerId);
   })();
-  maybeEnqueueStorySpine(db, job.chatId, payload.backfillRunId);
+  maybeEnqueueStorySpine(db, job.chatId, payload.backfillRunId, payload.trigger);
   return { chatId: job.chatId, warnings: [], pendingReconciliations: 0 };
 }
 

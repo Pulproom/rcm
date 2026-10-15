@@ -1,3 +1,4 @@
+import type { JobTrigger } from "@rcm/shared";
 import { maybeEnqueueQuiz } from "./quiz.js";
 import { completeMemoryAddition } from './memory-addition.js';
 import { ExtractionAggregateSchema, validSourcePassageAccess, validateSourceRecoveryPatch } from "@rcm/shared";
@@ -10,7 +11,7 @@ import { markJobComplete, recordSourceRecoveryOutcome } from "./jobs.js";
 import { applyExtractionAuditPatch, recordExtractionAudit } from "./extraction-audit.js";
 import { socialOnlyResult } from "./social-knowledge.js";
 import { flushRelationshipProjectionQueue, queueLaggingRelationshipProjections } from "./relationship-projections.js";
-import { fingerprintMatches, type SourceFingerprintItem } from "./source-fingerprint.js";
+import { fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from "./source-fingerprint.js";
 import { lockInitialCalibration } from "./initial-calibration.js";
 import { maybeEnqueueStorySpine } from "./story-spine.js";
 import { applyReconciliation, prepareReconciliation } from "./reconciliation.js";
@@ -53,7 +54,7 @@ export function completeExtractionJob(
     | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
   if (job.type === 'memory_addition') return completeMemoryAddition(db, jobId, workerId, result, reconciliation, audit);
-  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; resolvedSetup?: { messages?: Array<{ content: string }> }; postExtractionReview?: boolean; sourceRecovery?: boolean; dialogueRecovery?: DialogueRecoveryCandidate[]; retryOfAuditId?: string; retryOfJobId?: string; continuationDraft?: ExtractionDraftResult; continuationHistory?: string[]; batchId?: string; regenerationRunId?: string; backfillRunId?: string; recallCandidates?: Array<{ memoryId: string; accessibleTo: string[] }>; recallAtomRefs?: RecallAtomReference[] };
+  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; resolvedSetup?: { messages?: Array<{ content: string }> }; postExtractionReview?: boolean; sourceRecovery?: boolean; dialogueRecovery?: DialogueRecoveryCandidate[]; retryOfAuditId?: string; retryOfJobId?: string; continuationDraft?: ExtractionDraftResult; continuationHistory?: string[]; batchId?: string; regenerationRunId?: string; backfillRunId?: string; trigger?: JobTrigger; recallCandidates?: Array<{ memoryId: string; accessibleTo: string[] }>; recallAtomRefs?: RecallAtomReference[] };
   if (payload.regenerationRunId) {
     const run = db.prepare("SELECT status FROM regeneration_runs WHERE id=? AND chat_id=?").get(payload.regenerationRunId, job.chat_id) as { status: string } | undefined;
     if (!run || !['queued', 'processing'].includes(run.status)) throw new Error("Regeneration candidate is no longer accepting results");
@@ -160,15 +161,13 @@ export function completeExtractionJob(
   const validationErrors = [...rangeErrors, ...validateExtractionSources(db, job.chat_id, sourceMessageIds, normalizedEpisodic.result), ...observationEvidenceErrors];
   if (validationErrors.length) throw new ExtractionValidationError(validationErrors);
   if (input.unfinishedSource?.length) {
-    const signature = JSON.stringify([...input.unfinishedSource].sort((a, b) => a.messageId.localeCompare(b.messageId) || a.quote.localeCompare(b.quote)));
+    const {signature,progress} = extractionContinuationProgress(db,job.chat_id,sourceMessageIds,payload.continuationDraft?.unfinishedSource,input.unfinishedSource);
     const history = payload.continuationHistory ?? [];
-    const previousSize = (payload.continuationDraft?.unfinishedSource ?? []).reduce((sum, range) => sum + range.quote.length, 0);
-    const remainingSize = input.unfinishedSource.reduce((sum, range) => sum + range.quote.length, 0);
-    const stalled = history.includes(signature) || (previousSize > 0 && remainingSize >= previousSize);
+    const stalled = !progress;
     const next = { ...payload, continuationDraft: submitted, continuationHistory: [...history, signature] };
     db.transaction(() => {
-      db.prepare("UPDATE jobs SET payload_json=?,status=?,attempts=0,lease_owner=NULL,leased_until=NULL,last_error=?,updated_at=? WHERE id=?")
-        .run(JSON.stringify(next), stalled ? "failed" : "queued", stalled ? "Extraction continuation made no progress; review required" : null, Date.now(), jobId);
+      db.prepare("UPDATE jobs SET payload_json=?,status=?,attempts=CASE WHEN ? THEN attempts ELSE 0 END,lease_owner=NULL,leased_until=NULL,last_error=?,updated_at=? WHERE id=?")
+        .run(JSON.stringify(next), stalled ? "failed" : "queued", Number(stalled), stalled ? "Extraction continuation made no progress; review required" : null, Date.now(), jobId);
       if (payload.regenerationRunId && stalled) db.prepare("UPDATE regeneration_runs SET status='failed',error='Continuation made no progress',updated_at=? WHERE id=?").run(Date.now(), payload.regenerationRunId);
       if (payload.batchId && !payload.regenerationRunId) db.prepare("UPDATE extraction_batches SET draft_json=?,status=?,updated_at=? WHERE id=?")
         .run(JSON.stringify(submitted), stalled ? "pending_review" : "processing", Date.now(), payload.batchId);
@@ -296,12 +295,14 @@ export function completeExtractionJob(
     db.prepare("UPDATE extraction_audits SET status='applied',error=NULL,updated_at=? WHERE id=? AND chat_id=?").run(Date.now(), payload.retryOfAuditId, job.chat_id);
     if (payload.retryOfJobId) db.prepare("UPDATE jobs SET status='done',last_error=NULL,updated_at=? WHERE id=? AND chat_id=? AND status='failed'").run(Date.now(), payload.retryOfJobId, job.chat_id);
   }
+  // Source recovery only restores evidence; it does not change canonical state.
+  if (payload.sourceRecovery) return { chatId: job.chat_id, warnings: [], pendingReconciliations };
   const finalLedger = payload.backfillRunId ? enqueueFinalLedgerConsistency(db, job.chat_id, payload.backfillRunId) : undefined;
   if (!finalLedger || finalLedger.state === "not_needed") {
     queueLaggingRelationshipProjections(db, job.chat_id);
     flushRelationshipProjectionQueue(db, job.chat_id, payload.backfillRunId);
   }
-  maybeEnqueueStorySpine(db, job.chat_id, payload.backfillRunId);
+  maybeEnqueueStorySpine(db, job.chat_id, payload.backfillRunId, payload.trigger ?? 'extraction');
   maybeEnqueueQuiz(db, job.chat_id);
   return { chatId: job.chat_id, warnings: [...normalizedEpisodic.warnings, ...(rejectedExcerpts ? ["일부 원문 발췌 또는 접근 근거를 검토 상태로 보존하고 검증된 기억만 저장했습니다."] : [])], pendingReconciliations };
 }

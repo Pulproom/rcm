@@ -52,3 +52,29 @@ export function fingerprintMatches(db: RcmDatabase, chatId: string, expected: So
   const current = sourceFingerprint(db, chatId, expected.map((item) => item.messageId));
   return JSON.stringify(current) === JSON.stringify(expected);
 }
+
+/** Exact UTF-16 source coverage, independent of range order, overlap or partition. */
+export function extractionContinuationProgress(db: RcmDatabase, chatId: string, sourceIds: string[], previous: Array<{messageId:string;quote:string;startOffset?:number}> | undefined, next: Array<{messageId:string;quote:string;startOffset?:number}>): {signature:string;progress:boolean} {
+  const texts = new Map((db.prepare(`SELECT message_id,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END content FROM messages
+    WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?))`).all(chatId,JSON.stringify(sourceIds)) as Array<{message_id:string;content:string}>).map(row=>[row.message_id,row.content]));
+  type Span={id:string;start:number;end:number};
+  const merge=(ranges:Span[]):Span[]=>{
+    const result:Span[]=[];
+    for(const span of ranges.sort((a,b)=>a.id.localeCompare(b.id)||a.start-b.start||a.end-b.end)) {
+      const last=result.at(-1);
+      if(last && last.id===span.id && span.start<=last.end) last.end=Math.max(last.end,span.end);
+      else result.push({...span});
+    }
+    return result;
+  };
+  const spans=(ranges:NonNullable<typeof previous>):Span[]=>merge(ranges.map(range=>{
+    const text=texts.get(range.messageId);
+    const start=range.startOffset ?? text?.indexOf(range.quote) ?? -1;
+    if(text==null || !range.quote || start<0 || text.slice(start,start+range.quote.length)!==range.quote
+      || range.startOffset==null && text.indexOf(range.quote,start+1)>=0) throw new Error('Invalid exact continuation source range');
+    return {id:range.messageId,start,end:start+range.quote.length};
+  }));
+  const before=previous?.length ? spans(previous) : merge([...texts].map(([id,text])=>({id,start:0,end:text.length})));
+  const after=spans(next), size=(items:Span[])=>items.reduce((sum,item)=>sum+item.end-item.start,0);
+  return {signature:JSON.stringify(after),progress:size(after)<size(before) && after.every(span=>before.some(old=>old.id===span.id && old.start<=span.start && old.end>=span.end))};
+}

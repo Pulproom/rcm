@@ -14,6 +14,7 @@ export interface OrganizationRange {
 export interface OrganizationData { ranges: OrganizationRange[]; groups: any[]; regenerations: any[]; additions?: any[]; legacyHolds?: Array<{ id: string }> }
 export interface AdditionSource { id: string; role: string; content: string | null; ordinal: number; additionReason?: string | null; translatedContent?: string }
 export interface AdditionView { rangeIds: string[]; startOrdinal: number; endOrdinal: number; messages: AdditionSource[]; selectedIds: string[]; request: string;
+  submission?: {key:string;body:string};
   estimate?: { rawTokens: number; initialCalls: number; note: string }; estimating?: boolean; origin?: 'detail' | 'selection' }
 export interface OrganizationView {
   open: boolean; selection: string[]; focusedId: string; highlightedIds: string[]; mobileDetail: boolean;
@@ -94,9 +95,11 @@ function candidateDetail(view: OrganizationView, memories: any[], translations: 
     const sourceNumbers = new Map<string, number>(addition.sourceFingerprint.map((item: any) => [item.messageId, item.ordinal + 1]));
     const withNumbers = (items: any[]) => items.map(item => ({ ...item, sourceNumbers: [...new Set((item.evidence ?? []).map((e: any) => sourceNumbers.get(e.messageId)).filter(Boolean))],
       details: item.details?.map((detail: any) => ({ ...detail, sourceNumbers: [...new Set((detail.evidence ?? []).map((e: any) => sourceNumbers.get(e.messageId)).filter(Boolean))] })) }));
-    const ready = addition.status === 'ready';
+    const noMemories = addition.status === 'empty' || (addition.status === 'ready' && !candidate?.memories?.length);
+    const ready = addition.status === 'ready' && !noMemories;
     return `<article class="reader"><div class="reader__bar">${back('organization-back-detail', '구간 상세')}</div><h2 class="reader__title">기억 추가 결과</h2><p class="sub">기존 기억은 바뀌지 않아요</p>${addition.request ? `<p class="add__req"><b>요청</b>${html(addition.request)}</p>` : ''}${addition.error ? cutNotice(addition.error) : ''}${ready
       ? `${memoryList(withNumbers(candidate.memories), translations, display)}${canonicalStates([candidate], sourceNumbers, true)}`
+      : noMemories ? `<h3 class="org-h">새 기억을 찾지 못했어요</h3><p class="sub">${html(addition.requestOutcome?.reason ?? '선택한 원문에서 추가할 기억이 반환되지 않았어요.')}</p>`
       : `<p class="sub">${addition.status === 'stale' ? '원문이나 연결된 기억이 바뀌어 사용할 수 없는 후보예요.' : addition.status === 'failed' ? '작업을 끝내지 못했어요. 처리 상태에서 호출 상세도 확인할 수 있어요.' : '선택한 원문에서 기억을 찾고 있어요. 화면을 닫아도 작업은 유지돼요.'}</p>`}<div class="form__bar">${action('organization-discard-addition', '후보 버리기', addition.id)}${addition.canRetry ? action('organization-retry-addition', '실패 단계 다시 시도', addition.id) : ''}${ready ? action('organization-apply-addition', '적용', addition.id, Boolean(view.busy), true) : ''}</div></article>`;
   }
   const group = view.data.groups.find((row) => `group:${row.id}` === view.candidateId);
@@ -127,7 +130,7 @@ export function memoryOrganization(view: OrganizationView, memories: any[], tran
     ...view.data.regenerations.map((row) => ({ ...row, key: `regeneration:${row.id}`, label: row.mode === 'episode' ? '구간 재생성' : '이후 기억 재생성' })),
     ...(view.data.additions ?? []).map(row => ({ ...row, key: `addition:${row.id}`, label: '기억 추가' }))];
   const activeGroups = view.data.groups.filter((row) => row.status === 'capsuled');
-  const candidateState = (status: string) => status === 'ready' ? '결과 확인' : status === 'failed' ? '확인 필요' : status === 'stale' ? '원문 변경됨' : '생성 중';
+  const candidateState = (status: string) => status === 'ready' || status === 'empty' ? '결과 확인' : status === 'failed' ? '확인 필요' : status === 'stale' ? '원문 변경됨' : '생성 중';
   const canToggleExclusion = (range: OrganizationRange) => Boolean(range.canExclude || range.memoryExcluded) && range.sourceMessageIds.length === 1;
   const exclusionLabel = (range: OrganizationRange) => range.memoryExcluded ? '제외 해제' : '기억에서 제외';
   const exclusionAction = (range: OrganizationRange) => canToggleExclusion(range) ? action('organization-memory-exclusion', exclusionLabel(range), range.id, Boolean(view.busy)) : '';
@@ -168,5 +171,5 @@ function additionForm(view: OrganizationView, display: TranslationDisplay): stri
   }).join('');
   const estimate = addition.estimating ? '예상량을 확인하고 있어요…'
     : addition.estimate ? `원문 약 ${number(addition.estimate.rawTokens)}토큰 · 보조 모델 약 ${addition.estimate.initialCalls}회${addition.estimate.note ? `<br>${html(addition.estimate.note)}` : ''}` : '사용할 메시지를 선택해 주세요.';
-  return `<article class="reader add"><div class="reader__bar">${addition.origin === 'detail' ? back('organization-back-detail', '구간 상세') : back('organization-list', '구간 목록')}</div><h2 class="reader__title">메시지 ${addition.startOrdinal+1}–${addition.endOrdinal+1}에서 기억 추가</h2><p class="sub">지금 기억은 그대로 두고, 고른 원문에서 빠진 내용만 찾아요.</p><div class="add__head"><h3 class="org-h">원문 · ${addition.messages.length}개 중 ${chosen}개 선택</h3>${selectable.length ? btn(allSelected ? '전체 선택 해제' : '전체 선택', { kind: 'quiet', action: 'organization-addition-toggle-all', data: { id: '' }, disabled: Boolean(view.busy) }) : ''}</div><div class="add__msgs">${messages}</div><form id="organization-addition-form" class="add__form"><label class="add__field"><span class="org-h">모델에게 요청 <small>(선택)</small></span><textarea name="request" rows="3" ${view.busy ? 'disabled' : ''} placeholder="예: 이 장면에서 건넨 물건과 그 의미를 꼭 넣어 줘">${html(addition.request)}</textarea></label><p class="add__note">원문에 근거가 있는 것만 기억이 돼요. 모델에게는 원문이 전달돼요.</p><div class="add__foot"><p class="add__est" role="status" data-addition-estimate>${estimate}</p>${btn('기억 찾기', { kind: 'primary', type: 'submit', disabled: Boolean(view.busy || addition.estimating || !addition.estimate || !addition.selectedIds.length) })}</div></form></article>`;
+  return `<article class="reader add"><div class="reader__bar">${addition.origin === 'detail' ? back('organization-back-detail', '구간 상세') : back('organization-list', '구간 목록')}</div><h2 class="reader__title">메시지 ${addition.startOrdinal+1}–${addition.endOrdinal+1}에서 기억 추가</h2><p class="sub">지금 기억은 그대로 두고, 고른 원문에서 빠진 내용만 찾아요.</p><div class="add__head"><h3 class="org-h">원문 · ${addition.messages.length}개 중 ${chosen}개 선택</h3>${selectable.length ? btn(allSelected ? '전체 선택 해제' : '전체 선택', { kind: 'quiet', action: 'organization-addition-toggle-all', data: { id: '' }, disabled: Boolean(view.busy) }) : ''}</div><div class="add__msgs">${messages}</div><form id="organization-addition-form" class="add__form"><label class="add__field"><span class="org-h">모델에게 요청 <small>(선택)</small></span><textarea name="request" rows="3" ${view.busy ? 'disabled' : ''} placeholder="예: 이 장면에서 건넨 물건과 그 의미를 꼭 넣어 줘">${html(addition.request)}</textarea></label><p class="add__note">원문에 근거가 있는 것만 기억이 돼요. 모델에게는 원문이 전달돼요.</p><div class="add__foot"><p class="add__est" role="status" data-addition-estimate>${estimate}</p>${btn('기억 찾기', { kind: 'primary', action: 'submit-form', data: { formId: 'organization-addition-form' }, disabled: Boolean(view.busy || addition.estimating || !addition.estimate || !addition.selectedIds.length) })}</div></form></article>`;
 }

@@ -75,11 +75,33 @@ export function isProviderContextLimitError(error: unknown): boolean {
 }
 
 export function isPermanentProviderError(error: unknown): boolean {
-  const value = error as { status?: unknown; message?: unknown; code?: unknown } | null;
+  const value = error as { status?: unknown; message?: unknown; code?: unknown; finishReason?:unknown; refusal?:unknown } | null;
   const message = typeof error === "string" ? error : typeof value?.message === "string" ? value.message : "";
   // Provider/protocol markers, never natural-language story inference.
-  return isProviderAuthenticationError(error) || isProviderContextLimitError(error) || [400, 403, 413].includes(Number(value?.status)) || value?.code === "AUXILIARY_PROVIDER_REJECTED"
-    || /AUXILIARY_PROVIDER_REJECTED|returned\s+(?:400|401|403|413)\b|HTTP\s+(?:400|401|403|413)\b|context (?:length|window)|context_length_exceeded|(?:maximum|max|exceed(?:s|ed)?).{0,24}context|too many (?:input )?tokens|input.{0,20}too (?:large|long)|payload too large/i.test(message);
+  return isProviderAuthenticationError(error) || isProviderContextLimitError(error) || [400, 403, 404, 413, 422].includes(Number(value?.status)) || value?.code === "AUXILIARY_PROVIDER_REJECTED"
+    || value?.refusal === true || providerBlockedFinishReason(value?.finishReason)
+    || /AUXILIARY_PROVIDER_REJECTED|returned\s+(?:400|401|403|404|413|422)\b|HTTP\s+(?:400|401|403|404|413|422)\b|context (?:length|window)|context_length_exceeded|(?:maximum|max|exceed(?:s|ed)?).{0,24}context|too many (?:input )?tokens|input.{0,20}too (?:large|long)|payload too large/i.test(message);
+}
+
+export interface ProviderFailureMetadata { status?: number; code?: string; finishReason?: string; refusal?: boolean; retryAfterMs?: number }
+export function providerFailureMetadata(error: unknown): ProviderFailureMetadata {
+  const value = error as ProviderFailureMetadata | null;
+  return {
+    ...(Number.isInteger(value?.status) && Number(value?.status)>=100 && Number(value?.status)<=599 ? {status:value!.status} : {}),
+    ...(typeof value?.code==='string' ? {code:value.code.slice(0,80)} : {}),
+    ...(typeof value?.finishReason==='string' ? {finishReason:value.finishReason.slice(0,80)} : {}),
+    ...(value?.refusal===true ? {refusal:true} : {}),
+    ...(typeof value?.retryAfterMs==='number' && Number.isFinite(value.retryAfterMs) && value.retryAfterMs>=0 ? {retryAfterMs:value.retryAfterMs} : {}),
+  };
+}
+function providerBlockedFinishReason(reason:unknown):boolean {
+  return ['SAFETY','CONTENT_FILTER','REFUSAL','BLOCKLIST','PROHIBITED_CONTENT','RECITATION','SPII','IMAGE_SAFETY'].includes(String(reason ?? '').toUpperCase());
+}
+/** Read only provider-owned protocol fields, never infer refusal from prose. */
+export function assertProviderOutputAllowed(finishReason:unknown, refusal:unknown):void {
+  if(!providerBlockedFinishReason(finishReason) && !refusal) return;
+  throw Object.assign(new Error(`AUXILIARY_PROVIDER_REJECTED: ${refusal ? 'structured refusal' : String(finishReason)}; change the model or settings before retrying`),
+    {code:'AUXILIARY_PROVIDER_REJECTED',finishReason: typeof finishReason==='string' ? finishReason : undefined,refusal:Boolean(refusal)});
 }
 
 export interface RisuAuxiliaryCallDiagnostic {

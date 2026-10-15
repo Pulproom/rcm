@@ -280,11 +280,15 @@ export class ServerClient {
     return this.request("/v1/diagnostics/retrieval-events", { method: "POST", body: JSON.stringify(event) }, 2_000);
   }
 
-  async lease(workerId: string): Promise<LeasedJob | null> {
+  async lease(workerId: string, modelSettingsFingerprint?:string): Promise<LeasedJob | null> {
     const result = await this.request<{ job: LeasedJob | null }>("/v1/jobs/lease", {
-      method: "POST", body: JSON.stringify({ workerId }),
+      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint }),
     });
     return result.job;
+  }
+
+  validatedStage(jobId:string,workerId:string,stage:'extraction'|'audit',inputHash:string,result:unknown):Promise<{ok:boolean}> {
+    return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/validated-stage`,{method:'POST',body:JSON.stringify({workerId,stage,inputHash,result})});
   }
 
   validatedAuxiliaryPart(jobId: string, workerId: string, purpose: "initial_calibration" | "ledger_consistency" | "reconciliation", part: { systemPrompt: string; userPrompt: string }, result: unknown): Promise<{ ok: boolean }> {
@@ -317,9 +321,9 @@ export class ServerClient {
     });
   }
 
-  fail(jobId: string, workerId: string, error: string): Promise<{ ok: boolean; status: "queued" | "failed"; attempt: number; maxAttempts: number; retryable: boolean }> {
+  fail(jobId: string, workerId: string, error: string, providerFailure?: import('@rcm/shared').ProviderFailureMetadata): Promise<{ ok: boolean; status: "queued" | "failed"; attempt: number; maxAttempts: number; retryable: boolean }> {
     return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/fail`, {
-      method: "POST", body: JSON.stringify({ workerId, error }),
+      method: "POST", body: JSON.stringify({ workerId, error, providerFailure }),
     });
   }
 

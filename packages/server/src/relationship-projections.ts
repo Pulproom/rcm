@@ -1,3 +1,4 @@
+import { auxiliaryInputFingerprint, auxiliaryInputOutcome, recordAuxiliaryInput } from './auxiliary-input-cache.js';
 import { randomUUID } from "node:crypto";
 import {
   estimateTokens,
@@ -57,6 +58,22 @@ const parseList = (value: string | null | undefined): string[] => {
   catch { return []; }
 };
 
+/** Hash source/reference state, excluding the generated projection and its cursor. */
+export function relationshipInputFingerprint(db:RcmDatabase,chatId:string,from:string,to:string):string {
+  const events=db.prepare('SELECT * FROM relationship_events WHERE chat_id=? AND from_entity=? AND to_entity=? AND active=1 ORDER BY id').all(chatId,from,to);
+  const baseline=db.prepare('SELECT * FROM relationship_baselines WHERE chat_id=? AND from_entity=? AND to_entity=? ORDER BY id').all(chatId,from,to);
+  const milestones=db.prepare('SELECT * FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND ((participant_a=? AND participant_b=?) OR (participant_a=? AND participant_b=?)) ORDER BY id').all(chatId,from,to,to,from);
+  const promises=db.prepare('SELECT * FROM promises WHERE chat_id=? AND ((promisor=? AND promisee=?) OR (promisor=? AND promisee=?)) ORDER BY id').all(chatId,from,to,to,from);
+  const overrides=db.prepare('SELECT overrides_json,user_edit_ordinal,auto_locked FROM relationship_projections WHERE chat_id=? AND from_entity=? AND to_entity=?').get(chatId,from,to);
+  return auxiliaryInputFingerprint(db,[from,to,events,baseline,milestones,promises,overrides ?? {overrides_json:"{}",user_edit_ordinal:null,auto_locked:0}]);
+}
+export function recordRelationshipInputs(db:RcmDatabase,chatId:string,payload:Record<string,any>,outcome:'succeeded'|'failed'):void {
+  for(const [pair,key] of Object.entries(payload.projectionInputFingerprints ?? {})) {
+    if(outcome==='succeeded' && (payload.projectionRemainingPairs ?? []).some((item:any)=>`${item.from}\0${item.to}`===pair)) continue;
+    recordAuxiliaryInput(db,chatId,'relationship',String(key),outcome);
+  }
+}
+
 export function queueRelationshipProjection(db: RcmDatabase, chatId: string, from: string, to: string, mode: RelationshipProjectionMode = "incremental"): void {
   const current=db.prepare("SELECT * FROM relationship_projections WHERE chat_id=? AND from_entity=? AND to_entity=?").get(chatId,from,to) as Record<string,any>|undefined;
   if(current && isAutoLocked(current)) return;
@@ -87,8 +104,8 @@ export function queueLaggingRelationshipProjections(db: RcmDatabase, chatId: str
     WHERE chat_id=? AND type='relationship_projection' AND status IN ('queued','leased')`).all(chatId) as Array<{ payload_json: string }>;
   for (const job of activeJobs) {
     const payload = parseObject(job.payload_json);
-    if (!Array.isArray(payload.pairs)) continue;
-    for (const pair of payload.pairs) {
+    for (const pair of [...(Array.isArray(payload.pairs) ? payload.pairs : []),
+      ...(Array.isArray(payload.projectionRemainingPairs) ? payload.projectionRemainingPairs : [])]) {
       if (pair && typeof pair.from === "string" && typeof pair.to === "string") activePairKeys.add(`${pair.from}\0${pair.to}`);
     }
   }
@@ -103,6 +120,7 @@ export function queueLaggingRelationshipProjections(db: RcmDatabase, chatId: str
     const pending = (db.prepare(`SELECT id,created_revision FROM relationship_events
       WHERE chat_id=? AND from_entity=? AND to_entity=? AND active=1 AND source_job_id LIKE 'lineage:%'`).all(chatId, pair.from, pair.to) as Array<{ id: string; created_revision: number }>)
       .some((event) => event.created_revision > cursor.revision || (event.created_revision === cursor.revision && !cursorIds.has(event.id)));
+    if (auxiliaryInputOutcome(db,chatId,'relationship',relationshipInputFingerprint(db,chatId,pair.from,pair.to))==='failed') continue;
     if (!pending || activePairKeys.has(`${pair.from}\0${pair.to}`)) continue;
     queueRelationshipProjection(db, chatId, pair.from, pair.to, "replay");
     queued += 1;
@@ -112,8 +130,14 @@ export function queueLaggingRelationshipProjections(db: RcmDatabase, chatId: str
 
 export function flushRelationshipProjectionQueue(db: RcmDatabase, chatId: string, backfillRunId?: string): number {
   if (hasActiveBackfillBarrier(db, chatId)) return 0;
-  const extractionBusy = db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND type IN ('extract','episode','social_backfill','audit_retry','initial_calibration') AND status IN ('queued','leased') LIMIT 1`).get(chatId);
-  if (extractionBusy) return 0;
+  // Keep new changes coalesced in the pair queue while the previous wave (and
+  // any continuation pages) runs, rather than enqueuing duplicate pair jobs.
+  const busy = db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND type IN ('extract','episode','social_backfill','audit_retry','initial_calibration','relationship_projection') AND status IN ('queued','leased') LIMIT 1`).get(chatId);
+  if (busy) return 0;
+  // A manual lock may have superseded a dirty request while its old job ran.
+  db.prepare(`DELETE FROM relationship_projection_queue WHERE chat_id=? AND EXISTS(
+    SELECT 1 FROM relationship_projections p WHERE p.chat_id=relationship_projection_queue.chat_id
+      AND p.from_entity=relationship_projection_queue.from_entity AND p.to_entity=relationship_projection_queue.to_entity AND p.auto_locked=1)`).run(chatId);
   const pairs = db.prepare(`SELECT from_entity AS "from",to_entity AS "to",mode FROM relationship_projection_queue WHERE chat_id=? ORDER BY queued_at`).all(chatId) as Array<{ from: string; to: string; mode: RelationshipProjectionMode }>;
   if (!pairs.length) return 0;
   const insert = db.prepare("INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'relationship_projection','queued',?,0,?,?)");
@@ -271,13 +295,22 @@ export function completeRelationshipProjectionJob(db: RcmDatabase, jobId: string
       const evidence=validBasis.flatMap(id => JSON.parse((db.prepare("SELECT evidence_json FROM relationship_events WHERE id=? AND chat_id=?").get(id,job.chat_id) as {evidence_json:string}).evidence_json));
       if(current && !canAutomaticallyChange(db,job.chat_id,current,evidence)) continue;
       const cursor = payload.projectionCursors?.[pairKey] ?? { revision: -1, eventIds: [] };
+      const dirty = db.prepare('SELECT 1 FROM relationship_projection_queue WHERE chat_id=? AND from_entity=? AND to_entity=?').get(job.chat_id,item.from,item.to);
       db.prepare(`INSERT INTO relationship_projections(chat_id,from_entity,to_entity,axes_json,summary,active_tensions_json,basis_event_ids_json,
         overrides_json,event_cursor_json,projection_origin,stale,updated_revision,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,'llm',0,?,?) ON CONFLICT(chat_id,from_entity,to_entity) DO UPDATE SET
+        VALUES(?,?,?,?,?,?,?,?,?,'llm',?,?,?) ON CONFLICT(chat_id,from_entity,to_entity) DO UPDATE SET
           axes_json=excluded.axes_json,summary=excluded.summary,active_tensions_json=excluded.active_tensions_json,
           basis_event_ids_json=excluded.basis_event_ids_json,event_cursor_json=excluded.event_cursor_json,projection_origin='llm',
-          stale=0,updated_revision=excluded.updated_revision,updated_at=excluded.updated_at`)
-        .run(job.chat_id, item.from, item.to, JSON.stringify(axes), summary, JSON.stringify(tensions), JSON.stringify(validBasis), JSON.stringify(overrides), JSON.stringify(cursor), revision, timestamp);
+          stale=excluded.stale,updated_revision=excluded.updated_revision,updated_at=excluded.updated_at`)
+        .run(job.chat_id, item.from, item.to, JSON.stringify(axes), summary, JSON.stringify(tensions), JSON.stringify(validBasis), JSON.stringify(overrides), JSON.stringify(cursor), Number(Boolean(dirty)), revision, timestamp);
+    }
+    recordRelationshipInputs(db,job.chat_id,payload,'succeeded');
+    for(const pair of payload.pairs ?? []) {
+      const key=payload.projectionInputFingerprints?.[`${pair.from}\0${pair.to}`];
+      if(key && key===relationshipInputFingerprint(db,job.chat_id,pair.from,pair.to)) {
+        db.prepare('DELETE FROM relationship_projection_queue WHERE chat_id=? AND from_entity=? AND to_entity=?').run(job.chat_id,pair.from,pair.to);
+        db.prepare('UPDATE relationship_projections SET stale=0 WHERE chat_id=? AND from_entity=? AND to_entity=?').run(job.chat_id,pair.from,pair.to);
+      }
     }
     if (payload.projectionRemainingPairs?.length) {
       const next: Record<string, any> = { ...payload, pairs: payload.projectionRemainingPairs, projectionRemainingPairs: [], projectionCursors: {}, allowedBasisIds: {}, projectionCompletedParts: Number(payload.projectionCompletedParts ?? 0) + 1, pipelineStage: "queued" };
@@ -285,6 +318,7 @@ export function completeRelationshipProjectionJob(db: RcmDatabase, jobId: string
       db.prepare("UPDATE jobs SET status='queued',payload_json=?,attempts=0,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(JSON.stringify(next), timestamp, jobId);
     } else db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(timestamp, jobId);
   })();
+  flushRelationshipProjectionQueue(db,job.chat_id,payload.backfillRunId);
   return { chatId: job.chat_id, warnings: [], pendingReconciliations: 0 };
 }
 

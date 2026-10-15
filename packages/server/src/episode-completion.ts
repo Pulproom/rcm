@@ -1,3 +1,4 @@
+import type { JobTrigger } from "@rcm/shared";
 import { maybeEnqueueQuiz } from "./quiz.js";
 import { randomUUID } from "node:crypto";
 import { extractionAuditDraftForJob, KeyDialogueSchema, type EpisodeCapsuleResult, type ExtractionAuditSubmission, type ExtractionDraftResult, type ExtractionResult, type ReconciliationSubmission } from "@rcm/shared";
@@ -62,7 +63,7 @@ export function completeEpisodeJob(
     | { chat_id: string; payload_json: string }
     | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
-  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; episodeId?: string; postExtractionReview?: boolean; batchId?: string; backfillRunId?: string };
+  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; episodeId?: string; postExtractionReview?: boolean; batchId?: string; backfillRunId?: string; trigger?: JobTrigger };
   const sourceMessageIds = payload.sourceMessageIds ?? [];
   const episodeId = payload.episodeId ?? "";
   const sourceSet = new Set(sourceMessageIds);
@@ -188,7 +189,7 @@ export function completeEpisodeJob(
     queueLaggingRelationshipProjections(db, job.chat_id);
     flushRelationshipProjectionQueue(db, job.chat_id, payload.backfillRunId);
   }
-  maybeEnqueueStorySpine(db, job.chat_id, payload.backfillRunId);
+  maybeEnqueueStorySpine(db, job.chat_id, payload.backfillRunId, payload.trigger ?? 'extraction');
   maybeEnqueueQuiz(db, job.chat_id);
   return { chatId: job.chat_id, warnings: [], pendingReconciliations };
 }

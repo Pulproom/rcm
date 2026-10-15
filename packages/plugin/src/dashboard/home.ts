@@ -59,13 +59,17 @@ export function injectedStateRows(
   for (const id of manifest.promiseIds) append("promise", id);
   for (const row of typed) if (["world_fact", "basic_relation", "belief", "promise", "relationship", "recognition"].includes(row.kind)) append(row.kind as InjectedStateRow["kind"], row.id);
   // These are product-owned XML-escaped renderer lines, not arbitrary HTML.
-  // The receipt takes precedence even if the current row still has the same ID.
+  // The receipt is only a fallback for records that can no longer be resolved; live rows keep their
+  // structured, translatable display instead of the raw packet line.
   return rows.map(row => {
+    if (row.textHtml !== unavailableDelivery) return row;
     const snapshot = snapshots.find(item => item.id === `${row.kind}:${row.id}`);
     if (!snapshot) return row;
     const line = snapshot.text.replace(/^- /, '').replace(/&(amp|lt|gt);/g,
       (_, entity: string) => ({ amp: '&', lt: '<', gt: '>' })[entity]!);
-    return { ...row, whoHtml: '', textHtml: safeText(line) };
+    // Product-owned packet line: "Who [scope]: text". Show it in the same who · text shape as live rows.
+    const parsed = /^(.+?) \[[^\]]*\]: ([\s\S]+)$/.exec(line);
+    return { ...row, whoHtml: parsed ? safeText(parsed[1]!) : '', textHtml: safeText(parsed ? parsed[2]! : line) };
   });
 }
 

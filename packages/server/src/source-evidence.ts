@@ -137,7 +137,7 @@ export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates:
     };
     const payload = { sourceMessageIds: [messageId], sourceFingerprint: sourceFingerprint(db, chatId, [messageId]), sourceRecoveryContext,
       sourceRecoveryMetadata: { targets: [{ messageId, ordinal: row.ordinal }], matchKinds: typeof candidate === "string" ? [] : candidate.matchKinds },
-      sourceRecovery: true, postExtractionReview: true, auditDraft: { language: row.memory_language, entities: [], memories: [], stateObservations: [] } };
+      sourceRecovery: true, trigger: 'source_recovery', postExtractionReview: true, auditDraft: { language: row.memory_language, entities: [], memories: [], stateObservations: [] } };
     const added = db.prepare(`INSERT OR IGNORE INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
       VALUES(?,?,'audit_retry','queued',?,0,?,?)`).run(id, chatId, JSON.stringify(payload), Date.now(), Date.now()).changes;
     if (added) return 1;

@@ -1,6 +1,6 @@
 import {
   applySourceAccessRepair, ExtractionAggregateSchema, ExtractionAuditPatchSchema, ExtractionAuditSubmissionSchema,
-  mergeExtractionPages, planSourceAccessRepair,
+  mergeExtractionPages, planSourceAccessRepair, memoryAdditionStopsAfterEvents,
   type ExtractionAuditSubmission, type ExtractionDraftResult, type LeasedJob, type ReconciliationSubmission,
 } from "@rcm/shared";
 import { createHash } from "node:crypto";
@@ -48,6 +48,12 @@ export async function finalizeExtractPage(options: FinalizeExtractPageOptions) {
   if (job.kind !== "extract") throw new Error("Extraction pipeline requires an extract job");
   const warn = options.onWarning ?? ((message: string) => console.warn(message));
   let result = job.continuationDraft ? mergeExtractionPages(job.continuationDraft, pageDraft) : pageDraft;
+  if (job.memoryAddition && memoryAdditionStopsAfterEvents(result)) {
+    signal.throwIfAborted();
+    options.onStage?.("storing");
+    const completion = completeExtractionJob(db, job.id, workerId, result);
+    return { draft: result, audit: undefined, reconciliation: undefined, completion };
+  }
   const incomplete = Boolean(result.unfinishedSource?.length);
   let audit: ExtractionAuditSubmission | undefined;
   const checkpointKey = preReconciliationCheckpointKey(job, result);

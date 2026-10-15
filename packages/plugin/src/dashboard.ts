@@ -1,4 +1,4 @@
-import { sourceRecoverySummary, operationLabel } from "@rcm/shared";
+import { sourceRecoverySummary, operationLabel, JOB_TRIGGER_LABELS, type JobTrigger } from "@rcm/shared";
 import { AUXILIARY_CENSORSHIP_RELAXATION } from "@rcm/shared";
 import { projectRisuAuxiliaryCallDiagnostic, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { isProviderAuthenticationError, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE } from "@rcm/shared";
@@ -2403,7 +2403,7 @@ export function storySpinePage(
   const storyLimit = Number(spine?.storyLimitTokens) || 0;
   const draftCount = storyOverviewCount(view.overviewDraft ?? String(overview?.summary ?? ""), storyLimit);
   const overviewCount = `<p class="hint story__count${draftCount.over ? " is-over" : ""}" data-story-overview-count data-limit="${storyLimit}" aria-live="polite">${escapeHtml(draftCount.text)}</p>`;
-  const overviewEditor = overview ? `<form id="story-overview-form" class="form story__edit" data-group-id="${escapeHtml(overview.groupId ?? "")}">${field({ id: "story-overview-summary", label: "지금까지의 이야기", control: `<textarea id="story-overview-summary" class="textarea" name="summary" rows="12" maxlength="120000" required>${escapeHtml(view.overviewDraft ?? String(overview.summary ?? ""))}</textarea>${overviewCount}`, hint: `대화 ${Number(overview.startOrdinal ?? 0) + 1}–${Number(overview.endOrdinal ?? 0) + 1} 범위는 그대로 유지됩니다.` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-story-overview" })}${btn("저장", { kind: "primary", icon: "save", type: "submit" })}</div></form>` : "";
+  const overviewEditor = overview ? `<form id="story-overview-form" class="form story__edit" data-group-id="${escapeHtml(overview.groupId ?? "")}">${field({ id: "story-overview-summary", label: "지금까지의 이야기", control: `<textarea id="story-overview-summary" class="textarea" name="summary" rows="12" maxlength="120000" required>${escapeHtml(view.overviewDraft ?? String(overview.summary ?? ""))}</textarea>${overviewCount}`, hint: `대화 ${Number(overview.startOrdinal ?? 0) + 1}–${Number(overview.endOrdinal ?? 0) + 1} 범위는 그대로 유지됩니다.` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-story-overview" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>` : "";
   const loglineText = overview ? copy(overviewKey, "summary", String(overview.summary ?? "")) : "전체 요약을 준비하고 있습니다.";
   const loglineContent = overview
     ? lex().skin === "phone" ? `<p>${loglineText}</p>` : expandableLongContent("전체 요약", `<p>${loglineText}</p>`, String(overview.summary ?? "").length, true)
@@ -3061,7 +3061,8 @@ export function operations(state: RuntimeState, data: DashboardData): string {
       return step(call.outcome, label, `${stateLabel}${callDuration(call) ? ` · ${callDuration(call)}` : ""}`, detail + (call.risuCall ? `<p class="sub">${escapeHtml(JSON.stringify(call.risuCall))}</p>` : ""), usageLine || "토큰 사용량 미제공");
     }).join("");
   };
-  const jobRow = (job: any) => {
+  const clockTime = (at: number): string => Number.isFinite(at) && at > 0 ? new Date(at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false }) : "시간 없음";
+  const jobRow = (job: any, clock = false, child = false) => {
     const payload = parseJson<Record<string, unknown>>(job.payload_json, {});
     const sourceRecovery = payload.sourceRecovery === true;
     const recoverySummary = sourceRecoverySummary(payload.sourceRecoveryMetadata as import("@rcm/shared").SourceRecoveryMetadata | undefined);
@@ -3091,9 +3092,19 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const errorCopy = job.status === "failed" && job.last_error && calls.every((call) => call.error !== job.last_error) ? `<p class="step__err">${escapeHtml(job.last_error)}</p>` : "";
     const active = ["queued", "leased", "failed"].includes(job.status);
     const jobIcon = job.status === "failed" ? "error" : job.status === "queued" ? "ring" : "clock";
-    const rowDetail = job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : job.status === "leased" ? stageLabel || "기억 처리 중" : "";
+    const triggerLabel = typeof payload.trigger === 'string' && Object.hasOwn(JOB_TRIGGER_LABELS,payload.trigger) ? JOB_TRIGGER_LABELS[payload.trigger as JobTrigger] : undefined;
+    const storyLevel = job.type === 'story_consolidation' ? ({segment:'구간',arc:'줄거리 묶음',overview:'전체 개요'} as Record<string,string>)[String(payload.level)] : undefined;
+    const target = storyLevel && Number.isSafeInteger(payload.startOrdinal) && Number.isSafeInteger(payload.endOrdinal)
+      ? `${storyLevel} · 메시지 ${Number(payload.startOrdinal)+1}–${Number(payload.endOrdinal)+1}` : storyLevel;
+    const metadata = [triggerLabel, target].filter(Boolean).join(' · ');
+    const groupDetail = (metadata ? `<p class="sub">${escapeHtml(metadata)}</p>` : '')
+      + (storyLevel && typeof payload.targetGroupId === 'string' ? `<p class="sub">대상 그룹 · ${escapeHtml(payload.targetGroupId)}</p>` : '');
+    const rowDetail = [job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : job.status === "leased" ? stageLabel || "기억 처리 중" : "", metadata].filter(Boolean).join(' · ');
     const terminalTag = terminalState ? `<span class="job__status is-${escapeHtml(statusKey)}">${escapeHtml(statusLabel)}</span>` : "";
-    return `<details class="fold job${active ? "" : " job--history"} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(title)}${terminalTag}</span>${rowDetail ? `<small>${escapeHtml(rowDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
+    // Inside a same-kind burst the kind is already the parent's title; a child names only what differs.
+    const childName = child ? target || triggerLabel || title : title;
+    const childDetail = child ? (job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : "") : rowDetail;
+    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
   };
   const isUnresolvedJob = (job: any): boolean => ["queued", "leased", "failed"].includes(job.status);
   const currentRunId = data.coldStartProgress?.acknowledged ? undefined : data.coldStartProgress?.backfillRunId;
@@ -3125,7 +3136,6 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const first = Math.min(...ordinals), last = Math.max(...ordinals);
     return `${kind} ${first === last ? first : `${first}–${last}`}`;
   };
-  const clockTime = (at: number): string => Number.isFinite(at) && at > 0 ? new Date(at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false }) : "시간 없음";
   const clockRange = (startAt: number, endAt: number): string => {
     const dated = startAt > 0 && endAt > 0 && new Date(startAt).toDateString() !== new Date(endAt).toDateString();
     const label = (at: number): string => {
@@ -3138,46 +3148,69 @@ export function operations(state: RuntimeState, data: DashboardData): string {
   const jobGroup = (title: string, meta: string, time: string, body: string, key: string, queued = false): string =>
     `<details class="fold job-group${queued ? " is-queued" : ""}" data-preserve-open="${escapeHtml(key)}"><summary>${queued ? `<span class="job__state" role="img" aria-label="대기 중">${icon("ring")}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(title)}</span>${meta ? `<small>${escapeHtml(meta)}</small>` : ""}</span>${time ? `<span class="job__time">${escapeHtml(time)}</span>` : ""}<span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${body}</div></details>`;
   const queuedJobs = unresolvedJobs.filter((job) => job.status === "queued");
-  const queue = queuedJobs.length ? jobGroup(`대기 ${queuedJobs.length}건`, [...byKind(queuedJobs)].map(([kind, jobs]) => kindTitle(kind, jobs)).join(" · "), "", queuedJobs.map(jobRow).join(""), "operation-queue", true) : "";
-  const visibleCurrent = `${unresolvedJobs.filter((job) => job.status === "leased").map(jobRow).join("")}${unresolvedJobs.filter((job) => job.status === "failed").map(jobRow).join("")}${queue}`;
+  const queue = queuedJobs.length ? jobGroup(`대기 ${queuedJobs.length}건`, [...byKind(queuedJobs)].map(([kind, jobs]) => kindTitle(kind, jobs)).join(" · "), "", queuedJobs.map((job) => jobRow(job)).join(""), "operation-queue", true) : "";
+  const visibleCurrent = `${unresolvedJobs.filter((job) => job.status === "leased").map((job) => jobRow(job)).join("")}${unresolvedJobs.filter((job) => job.status === "failed").map((job) => jobRow(job)).join("")}${queue}`;
   const phone = lex().skin === "phone";
   const monthDay = (at: number): string => { const date = new Date(at); return `${date.getMonth() + 1}월 ${date.getDate()}일`; };
   // A run's label carries its date unless it finished today.
-  const runWhen = (at: number): string => new Date(at).toDateString() === new Date().toDateString() ? clockTime(at) : `${monthDay(at)} ${clockTime(at)}`;
-  const runs = new Map<string, { title: string; jobs: any[] }>();
+  // Completed work reads newest first under day headings; only a cold-start run stays one item.
+  const dayLabel = (at: number): string => {
+    const day = new Date(at), today = new Date(), yesterday = new Date(today.getTime() - 86_400_000);
+    return day.toDateString() === today.toDateString() ? "오늘" : day.toDateString() === yesterday.toDateString() ? "어제" : monthDay(at);
+  };
+  const runs = new Map<string, any[]>();
+  const entries: Array<{ at: number; html: () => string; job?: any }> = [];
   for (const job of completedJobs) {
     const runId = parseJson<Record<string, unknown>>(job.payload_json, {}).backfillRunId;
-    const date = new Date(Number(job.updated_at)).toLocaleDateString("ko-KR");
-    const key = runId ? `run:${runId}` : `day:${date}`;
-    const group = runs.get(key) ?? { title: runId ? "과거 대화 기억 생성" : phone ? "기억 처리" : `기억 처리 · ${monthDay(Number(job.updated_at))}`, jobs: [] };
-    group.jobs.push(job);
-    runs.set(key, group);
+    if (!runId) { entries.push({ at: Number(job.updated_at), html: () => jobRow(job, true), job }); continue; }
+    const group = runs.get(String(runId)) ?? [];
+    if (!group.length) runs.set(String(runId), group);
+    group.push(job);
   }
   const countLabels: Record<string, string> = { "대화 기억 정리": "기억 정리", "줄거리 갱신": "줄거리", "관계 상태 갱신": "관계", "최종 장부 대조": "장부 대조", "퀴즈 만들기": "퀴즈" };
-  const older = [...runs].map(([key, group]) => {
-    const kinds = [...byKind(group.jobs)];
-    const runTime = clockTime(Math.max(...group.jobs.map((job) => Number(job.updated_at))));
-    if (phone) {
-      // The run is the section label; a kind with one job opens straight to its steps.
-      const rows = kinds.map(([kind, jobs]) => {
+  for (const [runId, group] of runs) {
+    const endAt = Math.max(...group.map((job) => Number(job.updated_at)));
+    entries.push({ at: endAt, html: () => {
+      const kinds = [...byKind(group)];
+      const meta = kinds.map(([kind, jobs]) => `${countLabels[kind] ?? kind} ${jobs.length}`).join(" · ");
+      const body = kinds.map(([kind, jobs]) => {
         jobs.sort((left, right) => Number(parseJson<Record<string, unknown>>(left.payload_json, {}).operationStageOrdinal ?? 0) - Number(parseJson<Record<string, unknown>>(right.payload_json, {}).operationStageOrdinal ?? 0) || Number(left.updated_at) - Number(right.updated_at));
-        if (jobs.length === 1) return jobRow(jobs[0]);
         const startAt = Math.min(...jobs.map((job) => Number(job.created_at ?? job.updated_at)));
-        const endAt = Math.max(...jobs.map((job) => Number(job.updated_at)));
-        return jobGroup(kind, `${jobs.length}건 · ${clockRange(startAt, endAt)}`, "", jobs.map(jobRow).join(""), `operation-kind:${key}:${kind}`);
+        return jobGroup(kindTitle(kind, jobs), "", clockRange(startAt, Math.max(...jobs.map((job) => Number(job.updated_at)))), jobs.map((job) => jobRow(job, true)).join(""), `operation-kind:run:${runId}:${kind}`);
       }).join("");
-      return `<section class="oprun"><h2 class="sec">${escapeHtml(group.title)} <span class="n">${escapeHtml(runWhen(Math.max(...group.jobs.map((job) => Number(job.updated_at)))))}</span></h2><div class="jobs jobs--grouped">${rows}</div></section>`;
+      return jobGroup("과거 대화 기억 생성", meta, clockTime(endAt), body, `operation-run:run:${runId}`);
+    } });
+  }
+  entries.sort((left, right) => right.at - left.at);
+  const days = new Map<string, typeof entries>();
+  for (const entry of entries) {
+    const label = dayLabel(entry.at);
+    days.set(label, [...(days.get(label) ?? []), entry]);
+  }
+  // Back-to-back jobs of the same kind (e.g. a Story rebuild burst) fold into one row; any other job breaks the run.
+  const foldRuns = (items: typeof entries): string => {
+    const out: string[] = [];
+    for (let index = 0; index < items.length;) {
+      const first = items[index]!;
+      const kind = first.job ? jobKind(first.job) : "";
+      let end = index + 1;
+      while (kind && end < items.length && items[end]!.job && jobKind(items[end]!.job) === kind) end++;
+      const run = items.slice(index, end);
+      if (run.length < 2) out.push(first.html());
+      else {
+        const startAt = Math.min(...run.map((item) => Number(item.job.created_at ?? item.job.updated_at)));
+        // A burst shares its cause; name it once on the parent instead of on every child.
+        const triggers = new Set(run.map((item) => parseJson<Record<string, unknown>>(item.job.payload_json, {}).trigger).filter((value) => typeof value === "string" && Object.hasOwn(JOB_TRIGGER_LABELS, value)));
+        const cause = triggers.size === 1 ? JOB_TRIGGER_LABELS[[...triggers][0] as JobTrigger] : "";
+        out.push(jobGroup(`${kind} · ${run.length}건`, [cause, clockRange(startAt, first.at)].filter(Boolean).join(" · "), clockTime(first.at), run.map((item) => jobRow(item.job, true, true)).join(""), `operation-burst:${first.job.id}`)
+          .replace('class="fold job-group', 'class="fold job-group job-burst'));
+      }
+      index = end;
     }
-    const meta = kinds.map(([kind, jobs]) => `${countLabels[kind] ?? kind} ${jobs.length}`).join(" · ");
-    const body = kinds.map(([kind, jobs]) => {
-      jobs.sort((left, right) => Number(parseJson<Record<string, unknown>>(left.payload_json, {}).operationStageOrdinal ?? 0) - Number(parseJson<Record<string, unknown>>(right.payload_json, {}).operationStageOrdinal ?? 0) || Number(left.updated_at) - Number(right.updated_at));
-      const startAt = Math.min(...jobs.map((job) => Number(job.created_at ?? job.updated_at)));
-      const endAt = Math.max(...jobs.map((job) => Number(job.updated_at)));
-      return jobGroup(kindTitle(kind, jobs), "", clockRange(startAt, endAt), jobs.map(jobRow).join(""), `operation-kind:${key}:${kind}`);
-    }).join("");
-    return jobGroup(group.title, meta, runTime, body, `operation-run:${key}`);
-  }).join("");
-  const jobs = `${visibleCurrent ? `<section><h2 class="sec">작업</h2><div class="jobs">${visibleCurrent}</div></section>` : ""}${older ? phone ? `<div data-preserve-scroll="operation-history">${older}</div>` : `<section data-preserve-scroll="operation-history"><h2 class="sec">완료</h2><div class="jobs">${older}</div></section>` : ""}`;
+    return out.join("");
+  };
+  const older = [...days].map(([label, items]) => `<section class="oprun"><h2 class="sec">${escapeHtml(label)}</h2><div class="jobs jobs--grouped">${foldRuns(items)}</div></section>`).join("");
+  const jobs = `${visibleCurrent ? `<section><h2 class="sec">작업</h2><div class="jobs">${visibleCurrent}</div></section>` : ""}${older ? `<div data-preserve-scroll="operation-history">${older}</div>` : ""}`;
   const logs = state.logs.map((log) => `<li class="entry"><span class="entry__k">${escapeHtml(log.level)}</span><div class="entry__v">${escapeHtml(log.message)}${log.level !== "info" && (log.diagnostic || log.detail) ? `<small class="diagnostic-reason">${escapeHtml([diagnosticReason(log.diagnostic), log.detail].filter(Boolean).join(" · "))}</small>` : ""}<small>${escapeHtml(formatTime(log.at))}</small></div></li>`).join("");
   const workerAction = state.settings.workerPaused
     ? btn("처리 재개", { kind: "primary", action: "resume-worker" })
@@ -5246,7 +5279,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
       if (line) line.textContent = addition.estimating ? '예상량을 확인하고 있어요…' : addition.estimate
         ? `원문 약 ${addition.estimate.rawTokens.toLocaleString()}토큰 · 보조 호출 약 ${addition.estimate.initialCalls}회 · ${addition.estimate.note}` : '사용할 메시지를 선택해 주세요.';
-      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form button[type="submit"]');
+      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form [data-action="submit-form"]');
       if (button) button.disabled = Boolean(organizationView.busy || addition.estimating || !addition.estimate);
     };
     paintEstimate();
@@ -5697,7 +5730,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if ((action === "toggle-story-pin" || action === "toggle-story-hidden" || action === "rebuild-story-spine") && state.current) {
       const chat = encodeURIComponent(state.current.chatId);
       if (action === "rebuild-story-spine") {
-        if (!await confirmDashboard("현재 파생 스토리 지도만 다시 만들까요? 정본 기억과 원문은 변경되지 않습니다.")) return;
+        const estimate=await client.request<{segment:number;arc:number;overview:number;total:number}>(`/v1/chats/${chat}/story-spine/rebuild/estimate`);
+        if (!await confirmDashboard(`줄거리를 처음부터 다시 만들까요? 기억과 원문은 바뀌지 않습니다.\n보조 모델 약 ${estimate.total}회 (구간 ${estimate.segment} · 줄거리 묶음 ${estimate.arc} · 전체 개요 ${estimate.overview}). 긴 구간은 나뉘어 조금 더 늘 수 있습니다.`)) return;
         await client.request(`/v1/chats/${chat}/story-spine/rebuild`, { method: "POST" });
         void drainWorker(state, client);
       } else {
@@ -6781,7 +6815,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
           render();
           const review = await chooseExtractionReviewOverride(
             canonical ? "여기부터 기억 후보를 다시 만들까요?" : "이 구간의 기억 후보를 다시 만들까요?",
-            `${canonical ? "선택 지점부터 최신 적격 원문까지 기억과 상태를 다시 계산합니다." : "선택한 원문 묶음의 기억·세부·대사만 다시 만들고 상태 장부는 유지합니다."} 결과는 자동으로 적용되지 않습니다.\n묶음 ${estimate.batchCount}개 · 메시지 ${estimate.messageCount}개 · 원문 약 ${estimate.rawTokens.toLocaleString()}토큰\n전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰, 기본 추출 약 ${estimate.estimatedExtractionCalls}회입니다. 재검수·상태 대조·긴 입력 분할에 따라 호출이 추가될 수 있으며 실제 청구량과 다릅니다.`,
+            `${canonical ? "선택한 지점부터 최신 원문까지 기억과 상태를 다시 계산합니다." : "선택한 원문 묶음의 기억·세부·대사만 다시 만들고 상태 장부는 유지합니다."} 결과는 자동으로 적용되지 않습니다.\n묶음 ${estimate.batchCount}개 · 메시지 ${estimate.messageCount}개 · 원문 약 ${estimate.rawTokens.toLocaleString()}토큰\n전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰, 기본 추출 약 ${estimate.estimatedExtractionCalls}회입니다.${canonical && estimate.estimatedStoryCalls ? `\n적용하면 줄거리 약 ${estimate.estimatedStoryCalls.total}회(구간 ${estimate.estimatedStoryCalls.segment} · 줄거리 묶음 ${estimate.estimatedStoryCalls.arc} · 전체 개요 ${estimate.estimatedStoryCalls.overview})와 관계 약 ${estimate.estimatedRelationshipCalls}회가 이어집니다.` : ''} 재검수·보정에 따라 호출이 늘 수 있고, 실제 청구량과는 다릅니다.`,
             state.settings.postExtractionReview,
           );
           if (review === undefined) return;
@@ -6936,7 +6970,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         void drainWorker(state, client);
       } else if (action === "retry-failed") {
         requireChatMemoryEnabled(state, state.current.chatId);
-        if (!await confirmDashboard("실패한 기억 처리 작업을 다시 시도할까요? 메인 응답 중이거나 처리가 일시정지되어 있으면 끝나거나 재개될 때까지 기다립니다.")) return;
+        const estimate=await client.request<{jobs:number;total:number}>(`/v1/chats/${chat}/jobs/retry-failed/estimate`);
+        if (!await confirmDashboard(`실패한 작업 ${estimate.jobs}건을 다시 시도할까요? 보조 모델 약 ${estimate.total}회가 예상됩니다. 이미 성공한 단계는 다시 쓰지만, 원문이나 설정이 바뀌었으면 처음부터 다시 호출합니다. 메인 응답 중이거나 일시정지 상태면 그 뒤에 시작합니다.`)) return;
         await retryFailedJobs(state, client, state.current.chatId);
       } else if (action === "acknowledge-backfill") {
         const runId = target.dataset.runId ?? "";
@@ -6982,6 +7017,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   });
 
   root.addEventListener("keydown", async (event) => {
+    // The host blocks native form submission, so Enter in the source finders dispatches it.
+    const finder = event.key === "Enter" && !event.isComposing ? (event.target as HTMLElement).closest<HTMLFormElement>("#organization-search-form, #organization-jump-form") : null;
+    if (finder) {
+      event.preventDefault();
+      finder.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      return;
+    }
     if (event.key !== "Escape") return;
     if (organizationView.open && organizationView.candidateId) {
       event.preventDefault();
@@ -7005,11 +7047,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       try {
         if (form.id === 'organization-addition-form') {
           const addition = organizationView.addition;
-          if (!addition || addition.estimating || !addition.estimate) return;
+          if (!addition || organizationView.busy || addition.estimating || !addition.estimate) return;
           requireChatMemoryEnabled(state, chatId);
+          const body={rangeIds:addition.rangeIds,messageIds:addition.selectedIds,request:addition.request,postExtractionReview:state.settings.postExtractionReview};
+          const serialized=JSON.stringify(body);
+          if(addition.submission?.body!==serialized) addition.submission={key:crypto.randomUUID(),body:serialized};
           organizationView.busy = true; render();
           const created = await client.request<{ runId: string }>(`/v1/chats/${chat}/memory-additions/create`, {
-            method: 'POST', body: JSON.stringify({ rangeIds: addition.rangeIds, messageIds: addition.selectedIds, request: addition.request, postExtractionReview: state.settings.postExtractionReview }),
+            method: 'POST', body: JSON.stringify({...body,idempotencyKey:addition.submission!.key}),
           });
           if (state.current?.chatId !== chatId) return;
           organizationView.candidateId = `addition:${created.runId}`;
@@ -7377,7 +7422,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       organizationView.addition.estimate = undefined;
       additionEstimateEpoch++;
       if (additionEstimateTimer) clearTimeout(additionEstimateTimer);
-      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form button[type="submit"]');
+      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form [data-action="submit-form"]');
       if (button) button.disabled = true;
       additionEstimateTimer = setTimeout(() => void updateAdditionEstimate(), 400);
       return;

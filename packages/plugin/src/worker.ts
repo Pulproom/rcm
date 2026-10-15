@@ -1,4 +1,5 @@
-import { operationLabel } from "@rcm/shared";
+import { sha256 } from './context.js';
+import { operationLabel, providerFailureMetadata, assertProviderOutputAllowed } from "@rcm/shared";
 import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
@@ -6,7 +7,7 @@ import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { isChatMemoryEnabled } from "./settings.js";
 import { parseReconciliationResult, type SourceUnit } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
-import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages } from "@rcm/shared";
+import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch } from "@rcm/shared";
 import { Api38ExtractionDraftResultSchema, EpisodeCapsuleResultSchema, EpisodeDraftResultSchema, buildAuxiliaryRepairMessages, buildExtractionAuditMessages, extractionAuditDraftForJob, ExtractionAuditPatchSchema, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, RelationshipProjectionResultSchema, StorySpineConsolidationResultSchema, StructuredJsonSyntaxError, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, estimateTokens, groupEpisodeDrafts, normalizeEpisodeCapsuleInput, normalizeEpisodeDraftInput, normalizeExtractionDraftInput, normalizeStructuredModelOptionals, parseStructuredModelJson, structuredValidationDiagnostic, validateStorySpineConsolidation, type EpisodeDraftResult, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type ReconciliationSubmission } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
@@ -128,7 +129,7 @@ function risuAuxiliaryError(error: unknown): Error & { code?: string; status?: n
   const message = auth ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : "Risu 보조 모델 호출에 실패했어요. 모델 설정과 입력 한도를 확인해 주세요" + (isProviderContextLimitError(error) ? " · context length exceeded" : "");
   const httpStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
   return Object.assign(new Error(`${code}: ${message}${httpStatus ? ` · HTTP ${httpStatus}` : ""}`), {
-    code, ...(httpStatus ? { status: httpStatus } : {}),
+    ...providerFailureMetadata(error),code, ...(httpStatus ? { status: httpStatus } : {}),
   });
 }
 
@@ -153,7 +154,7 @@ async function auxiliaryCallDiagnostic(state: RuntimeState, options: Parameters<
 export async function responseText(response: any, signal?: AbortSignal): Promise<string> {
   if (typeof response === "string") return response;
   if (response?.type === "fail") throw risuAuxiliaryError(Object.assign(new Error(`Auxiliary model failed: ${String(response.result ?? "unknown provider error")}`), {
-    status: response.status ?? response.httpStatus, code: response.code ?? response.error?.code,
+    ...providerFailureMetadata(response), status: response.status ?? response.httpStatus, code: response.code ?? response.error?.code,
   }));
   if (response?.type === "streaming") return readModelStream(response.result, signal);
   if (typeof response?.result === "string") return response.result;
@@ -238,6 +239,8 @@ export async function runRisuModel(state: RuntimeState, options: Parameters<type
     const call = async () => {
       const response = await risuai.runLLMModel({ ...options, messages });
       resolution = response;
+      assertProviderOutputAllowed(response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.promptFeedback?.blockReason ?? response?.candidates?.[0]?.finishReason,
+        response?.refusal ?? response?.choices?.[0]?.message?.refusal);
       // Even a late header must have its stream cancelled, never delivered.
       if (response?.type === "streaming") return { ...response, type: "success", result: await responseText(response, controller.signal) };
       if (controller.signal.aborted) throw controller.signal.reason;
@@ -386,7 +389,7 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     await modelDraftRecorders.get(state)?.(output);
     const finishReason = response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.candidates?.[0]?.finishReason;
     if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase())) {
-      throw Object.assign(new Error(`Auxiliary model output truncated (${finishReason}); raw response retained`), { code: "MODEL_OUTPUT_TRUNCATED" });
+      throw Object.assign(new Error(`Auxiliary model output truncated (${finishReason}); raw response retained`), { code: "MODEL_OUTPUT_TRUNCATED",finishReason:String(finishReason) });
     }
     const rawUsage = response?.usage ?? response?.usageMetadata;
     const inputTokens = rawUsage?.prompt_tokens ?? rawUsage?.input_tokens ?? rawUsage?.promptTokenCount;
@@ -413,7 +416,7 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
       ? resolveModelSourceReferences(parseWorkerJson(state, output, purpose), job.sourceUnits)
       : parseWorkerJson(state, output, purpose)), { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
-    return parsed;
+    return validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest);
   };
   const validateRepair = (repaired: string): Promise<ExtractionDraftResult> => validateStructuredRepairOrRegenerate({
     original: first,
@@ -429,7 +432,7 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
     resolved = normalizeExtractionDraftInput(job.sourceUnits ? resolveModelSourceReferences(raw, job.sourceUnits) : raw);
     const parsed = Api38ExtractionDraftResultSchema.parse(resolved, { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
-    return parsed;
+    return validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest);
   } catch (firstError) {
     onRepair?.();
     const fieldRepair = job.sourceUnits ? planExtractionFieldRepair(raw, resolved, firstError, job.sourceUnits) : undefined;
@@ -768,7 +771,8 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
   try {
     for (;;) {
       if (state.unloaded || state.settings.workerPaused || mainGenerationOpen(state)) break;
-      const job = await client.lease(state.workerId);
+      const modelSettingsFingerprint=JSON.stringify([state.settings.auxiliaryMode,state.settings.staticModel]);
+      const job = await client.lease(state.workerId,modelSettingsFingerprint);
       if (state.unloaded) break;
       state.serverConnectionIssue = undefined;
       state.activityStatusError = undefined;
@@ -810,7 +814,11 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       state.publishActivity?.();
       try {
         if (job.kind !== "initial_calibration" && job.kind !== "social_backfill" && job.kind !== "episode" && job.kind !== "quiz") await client.progress(job.id, state.workerId, firstStage).catch(() => undefined);
-        let result = job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : await extract(state, job);
+        const checkpointInput=JSON.stringify([modelSettingsFingerprint,job.profile,job.memoryLanguage,job.prompt,job.systemPrompt,job.userPrompt,job.sourceUnits,job.sourceMessageIds,job.memoryAddition,job.postExtractionReview,job.relaxAuxiliaryCensorship,job.sourceRecovery,job.sourceRecoveryContext]);
+        const extractionHash=await sha256(checkpointInput);
+        const cachedExtraction=job.risuStageCheckpoints?.extraction;
+        let result = job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : cachedExtraction?.inputHash===extractionHash ? Api38ExtractionDraftResultSchema.parse(cachedExtraction.result) : await extract(state, job);
+        if(job.kind==='extract' && cachedExtraction?.inputHash!==extractionHash) await client.validatedStage?.(job.id,state.workerId,'extraction',extractionHash,result);
         if (job.kind === "extract" && job.continuationDraft) result = mergeExtractionPages(job.continuationDraft, result as any);
         const recoveringDialogues = job.kind === "audit_retry" && job.sourceRecovery
           && Boolean(job.auditDraft?.memories.some(memory => memory.keyDialogues?.length));
@@ -826,15 +834,19 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           }
         }
         const incomplete = Boolean((result as any)?.unfinishedSource?.length);
-        const reviewable = job.kind === "extract" || job.kind === "audit_retry" || job.kind === "episode" || job.kind === "social_backfill";
+        const emptyAddition = job.memoryAddition && memoryAdditionStopsAfterEvents(result as ExtractionDraftResult);
+        const reviewable = !emptyAddition && (job.kind === "extract" || job.kind === "audit_retry" || job.kind === "episode" || job.kind === "social_backfill");
         if (!incomplete && job.postExtractionReview && reviewable && state.currentJob) {
           state.currentJob.phase = "post_extraction_audit";
           state.publishActivity?.();
           await client.progress(job.id, state.workerId, "post_extraction_audit").catch(() => undefined);
         }
-        let audit = !incomplete && job.postExtractionReview && reviewable ? await auditExtraction(state, job, result) : undefined;
+        const auditHash=await sha256(JSON.stringify([checkpointInput,result,job.auditSourceMessages,job.auditExistingOpenPromises,job.recallCandidates]));
+        const cachedAudit=job.risuStageCheckpoints?.audit;
+        let audit = !incomplete && job.postExtractionReview && reviewable ? cachedAudit?.inputHash===auditHash ? cachedAudit.result as ExtractionAuditSubmission : await auditExtraction(state, job, result) : undefined;
+        if(audit?.patch && cachedAudit?.inputHash!==auditHash) await client.validatedStage?.(job.id,state.workerId,'audit',auditHash,audit);
         let reconciliation: ReconciliationSubmission | undefined;
-        if (!incomplete && !recoveringDialogues && job.kind !== 'memory_group' && job.kind !== "initial_calibration" && job.kind !== "relationship_projection" && job.kind !== "story_consolidation" && job.kind !== "ledger_consistency" && job.kind !== "quiz") {
+        if (!incomplete && !emptyAddition && !recoveringDialogues && job.kind !== 'memory_group' && job.kind !== "initial_calibration" && job.kind !== "relationship_projection" && job.kind !== "story_consolidation" && job.kind !== "ledger_consistency" && job.kind !== "quiz") {
           const reconciliationDraft = job.kind === "episode" ? extractionAuditDraftForJob(job, result) : result;
           let prepared = await client.prepareReconciliation(job.id, state.workerId, reconciliationDraft, audit);
           const repairIssues = prepared.evidenceIssues?.filter((issue) => issue.reason !== "access_unverified") ?? [];
@@ -883,7 +895,9 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         addLog(state.logs, "info", `${job.kind === "quiz" ? "Quiz batch" : job.kind === "episode" ? "Episode capsule" : job.kind === "story_consolidation" ? "Story spine consolidation" : "Memory extraction"} completed (${job.sourceMessageIds.length} messages)`);
       } catch (error) {
         addLog(state.logs, "error", "Auxiliary job failed", supportFailure("worker_job", error, { kind: job.kind, attempt: job.attempt }));
-        const failure = await client.fail(job.id, state.workerId, String(error));
+        const metadata=providerFailureMetadata(error);
+        const typedFailure=metadata.status!==undefined || metadata.finishReason!==undefined || metadata.refusal!==undefined || metadata.retryAfterMs!==undefined;
+        const failure = typedFailure ? await client.fail(job.id,state.workerId,String(error),metadata) : await client.fail(job.id, state.workerId, String(error));
         if (failure.status === "queued") {
           addLog(state.logs, "warn", `기억 묶음 재시도 ${failure.attempt + 1}/${failure.maxAttempts}: [오류 원문 제외]`);
           continue;

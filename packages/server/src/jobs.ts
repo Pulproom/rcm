@@ -1,4 +1,8 @@
-import { ROLEPLAY_ARCHIVE_FRAMING, type SourceRecoveryMetadata } from "@rcm/shared";
+import { auxiliaryInputOutcome } from './auxiliary-input-cache.js';
+import { relationshipInputFingerprint, recordRelationshipInputs } from './relationship-projections.js';
+import { recordLedgerInputs } from './ledger-consistency.js';
+import { providerFailureMetadata } from '@rcm/shared';
+import { ROLEPLAY_ARCHIVE_FRAMING, JOB_TRIGGER_VALUES, type JobTrigger, type SourceRecoveryMetadata } from "@rcm/shared";
 import { isPermanentProviderError, isProviderContextLimitError, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { buildQuizJob } from "./quiz.js";
@@ -750,7 +754,7 @@ export function enqueueExtractionJobs(
         for (const message of group) insertEpisodeMessage.run(episodeId, chatId, message.message_id, message.ordinal);
       }
       insert.run(id, chatId, oversizedSingleTurn ? "episode" : "extract", JSON.stringify({
-        sourceMessageIds: messageIds, sourceFingerprint: fingerprint, includeUserMessages,
+        sourceMessageIds: messageIds, sourceFingerprint: fingerprint, includeUserMessages, trigger: 'extraction',
         extractionGroupTurns: targetTurns, turnCount: extractionUnits(group, includeUserMessages).length, sourceTokens, episodeId, memoryLanguage, postExtractionReview: review,
         batchId, ...(backfillRunId ? { backfillRunId, operationStage: "extraction", operationStageOrdinal: groupIndex + 1, operationStageTotal: groups.length } : {}),
       }), now(), now());
@@ -791,7 +795,17 @@ export function enqueueSocialKnowledgeBackfill(db: RcmDatabase, chatId: string, 
   })();
 }
 
-export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number, options: { storyOnly?: boolean } = {}): LeasedJob | null {
+function recordAuxiliaryFailure(db:RcmDatabase,row:{type:string;chat_id:string;payload_json:string}):void {
+  const payload=JSON.parse(row.payload_json);
+  if(row.type==='relationship_projection') {
+    payload.projectionInputFingerprints ??= Object.fromEntries((payload.pairs ?? []).map((pair:any)=>[
+      `${pair.from}\0${pair.to}`,relationshipInputFingerprint(db,row.chat_id,pair.from,pair.to)]));
+    recordRelationshipInputs(db,row.chat_id,payload,'failed');
+  }
+  if(row.type==='ledger_consistency') recordLedgerInputs(db,row.chat_id,payload,'failed');
+}
+
+export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number, options: { storyOnly?: boolean; excludeJobIds?: string[] } = {}): LeasedJob | null {
   let planningJobId: string | undefined;
   try { return db.transaction(() => {
     const timestamp = now();
@@ -802,18 +816,24 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
         db.prepare("UPDATE extraction_audits SET status='stale',updated_at=? WHERE job_id=?").run(timestamp, blocked.id);
       }
     }
+    const expired=db.prepare(`SELECT type,chat_id,payload_json FROM jobs WHERE status='leased' AND leased_until < ? AND attempts>=3
+      AND id NOT IN (SELECT value FROM json_each(?))`).all(timestamp,JSON.stringify(options.excludeJobIds ?? [])) as Array<{type:string;chat_id:string;payload_json:string}>;
+    for(const job of expired) recordAuxiliaryFailure(db,job);
     db.prepare(`
       UPDATE jobs
       SET status='failed',lease_owner=NULL,leased_until=NULL,
           last_error=COALESCE(last_error,'Lease expired after maximum attempts'),updated_at=?
       WHERE status='leased' AND leased_until < ? AND attempts >= 3
-    `).run(timestamp, timestamp);
+        AND id NOT IN (SELECT value FROM json_each(?))
+    `).run(timestamp, timestamp,JSON.stringify(options.excludeJobIds ?? []));
     const row = db.prepare(`
       SELECT j.id,j.chat_id,j.type,j.payload_json,j.attempts,c.profile,c.memory_language
       FROM jobs j JOIN chats c ON c.id=j.chat_id
       WHERE (j.status='queued' OR (j.status='leased' AND j.leased_until < ?))
         AND j.attempts < 3
+        AND COALESCE(json_extract(j.payload_json,'$.nextAttemptAt'),0) <= ?
         AND (?=0 OR j.type='story_consolidation')
+        AND j.id NOT IN (SELECT value FROM json_each(?))
         AND (j.type='audit_retry' OR NOT EXISTS (
           SELECT 1 FROM jobs blocked WHERE blocked.chat_id=j.chat_id AND blocked.status='failed'
             AND blocked.type IN ('extract','episode','social_backfill','initial_calibration')
@@ -829,7 +849,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
             AND json_extract(barrier.payload_json,'$.backfillRunId') IS NOT NULL
         ))
       ORDER BY CASE WHEN j.type='quiz' THEN 1 ELSE 0 END, j.created_at, j.rowid LIMIT 1
-    `).get(timestamp, options.storyOnly ? 1 : 0) as { id: string; chat_id: string; type: string; payload_json: string; attempts: number; profile: RpProfile; memory_language: MemoryLanguage } | undefined;
+    `).get(timestamp,timestamp, options.storyOnly ? 1 : 0,JSON.stringify(options.excludeJobIds ?? [])) as { id: string; chat_id: string; type: string; payload_json: string; attempts: number; profile: RpProfile; memory_language: MemoryLanguage } | undefined;
     if (!row) return null;
     planningJobId = row.id;
     const payload = JSON.parse(row.payload_json) as Partial<RecallCandidateSnapshot> & { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[] | string; includeUserMessages?: boolean; episodeId?: string; resolvedSetup?: ResolvedSetupProjection; identityHints?: Record<string, unknown>; pairs?: Array<{ from: string; to: string; mode?: "incremental" | "replay" }>; memoryLanguage?: MemoryLanguage; postExtractionReview?: boolean; auditDraft?: ExtractionDraftResult; continuationDraft?: ExtractionDraftResult; sourceRecovery?: boolean; sourceRecoveryMetadata?: SourceRecoveryMetadata; sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] }; batchId?: string; regenerationRunId?: string; backfillRunId?: string; groups?: any[]; level?: "segment" | "arc" | "overview"; generationId?: string; startOrdinal?: number; endOrdinal?: number; sourceNodeIds?: string[]; sourceBatchIds?: string[]; sourceTokens?: number; llmCallStats?: OperationLlmCallStats; repairBudgetUsed?: boolean; stateRepairBudgetUsed?: boolean; operationStage?: string; operationStageOrdinal?: number; operationStageTotal?: number };
@@ -839,8 +859,8 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     if (row.type === 'memory_addition') {
       if (!validatePendingAddition(db, row.chat_id, row.id, payload as any)) return null;
       const addition = buildAdditionJob(db, row.id, row.chat_id, row.profile, row.attempts + 1, payload as any);
-      db.prepare("UPDATE jobs SET status='leased',lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?")
-        .run(workerId, timestamp + leaseSeconds * 8_000, timestamp, row.id);
+      db.prepare("UPDATE jobs SET status='leased',lease_owner=?,leased_until=?,attempts=attempts+1,payload_json=?,updated_at=? WHERE id=?")
+        .run(workerId, timestamp + leaseSeconds * 8_000, JSON.stringify({ ...payload, recallCandidates: addition.recallCandidates, recallAtomRefs: addition.recallAtomRefs }), timestamp, row.id);
       return { ...addition, ...operationMeta };
     }
     if (row.type === 'memory_group') {
@@ -865,7 +885,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       const guardedPayload = refreshStoryInputGuard(db, row.chat_id, payload as any);
       if (!guardedPayload) {
         db.prepare("UPDATE jobs SET status='superseded',last_error='Story source unavailable before lease',updated_at=? WHERE id=?").run(timestamp, row.id);
-        maybeEnqueueStorySpine(db, row.chat_id, payload.backfillRunId);
+        maybeEnqueueStorySpine(db, row.chat_id, payload.backfillRunId, (payload as {trigger?:JobTrigger}).trigger);
         return null;
       }
       db.prepare(`UPDATE jobs SET status='leased',payload_json=?,lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?`)
@@ -880,13 +900,19 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       }), operationMeta);
     }
     if (row.type === "relationship_projection") {
-      const pairs = payload.pairs ?? [];
+      const pairs = (payload.pairs ?? []).filter(pair => {
+        const reused=auxiliaryInputOutcome(db,row.chat_id,'relationship',relationshipInputFingerprint(db,row.chat_id,pair.from,pair.to));
+        if(!reused || (payload as any).trigger==='retry') return true;
+        db.prepare('DELETE FROM relationship_projection_queue WHERE chat_id=? AND from_entity=? AND to_entity=?').run(row.chat_id,pair.from,pair.to);
+        return false;
+      });
       if (!pairs.length) {
-        db.prepare("UPDATE jobs SET status='failed',last_error='Relationship pairs unavailable',updated_at=? WHERE id=?").run(timestamp, row.id);
+        db.prepare("UPDATE jobs SET status='done',last_error=NULL,updated_at=? WHERE id=?").run(timestamp, row.id);
         return null;
       }
       const systemPrompt = relationshipProjectionSystem(memoryLanguage);
       const prepared = planProjectionInput(db, row.chat_id, pairs, systemPrompt, configuredAuxiliaryInputBudget(db));
+      const projectionInputFingerprints=Object.fromEntries(prepared.pairs.map(pair=>[`${pair.from}\0${pair.to}`,relationshipInputFingerprint(db,row.chat_id,pair.from,pair.to)]));
       const projectionCursors: Record<string, unknown> = {};
       const allowedBasisIds: Record<string, string[]> = {};
       const modelPairs = prepared.pairs.map((pair) => {
@@ -898,7 +924,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       });
       const selectedPairs = prepared.pairs.map((pair) => ({ from: String(pair.from), to: String(pair.to), mode: pair.mode }));
       db.prepare(`UPDATE jobs SET status='leased',payload_json=?,lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?`)
-        .run(JSON.stringify({ ...payload, pairs: selectedPairs, projectionRemainingPairs: prepared.remainingPairs,
+        .run(JSON.stringify({ ...payload, projectionInputFingerprints, pairs: selectedPairs, projectionRemainingPairs: prepared.remainingPairs,
           omittedReferenceItems: Number((payload as any).omittedReferenceItems ?? 0) + prepared.omittedReferenceItems, projectionCursors, allowedBasisIds }), workerId, timestamp + leaseSeconds * 1000, timestamp, row.id);
       const userPrompt = JSON.stringify({ pairs: modelPairs });
       return {
@@ -1030,11 +1056,12 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
   })(); } catch (error) {
     if (!planningJobId) throw error;
     const message = `Auxiliary input planning failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4_000);
-    const payloadRow = db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(planningJobId) as { payload_json: string } | undefined;
+    const payloadRow = db.prepare("SELECT type,chat_id,payload_json FROM jobs WHERE id=?").get(planningJobId) as {type:string;chat_id:string;payload_json:string} | undefined;
     const payload = JSON.parse(payloadRow?.payload_json ?? "{}");
     payload.pipelineStage = "failed";
     payload.pipelineStageUpdatedAt = now();
     payload.planningFailure = message;
+    if(payloadRow) recordAuxiliaryFailure(db,payloadRow);
     db.prepare("UPDATE jobs SET status='failed',payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=?,updated_at=? WHERE id=?")
       .run(JSON.stringify(payload), message, now(), planningJobId);
     return null;
@@ -1158,8 +1185,8 @@ export interface JobFailureResult {
 /** Explicit manual retry preserves cumulative cost and validated checkpoints. */
 export function manualRetryPayload(payload: Record<string, unknown>): Record<string, unknown> {
   const next = { ...payload, repairBudgetUsed: false, stateRepairBudgetUsed: false, pipelineRepairCount: 0,
-    pipelineManualRetry: true, pipelineStage: 'queued', pipelineStageUpdatedAt: now() };
-  for (const key of ['pipelineRetryAttempt', 'pipelineMaxAttempts', 'pipelineRetryFrom']) delete (next as Record<string, unknown>)[key];
+    trigger: 'retry', pipelineManualRetry: true, pipelineStage: 'queued', pipelineStageUpdatedAt: now() };
+  for (const key of ['pipelineRetryAttempt', 'pipelineMaxAttempts', 'pipelineRetryFrom','nextAttemptAt','providerFailure']) delete (next as Record<string, unknown>)[key];
   if (payload.sourceRecoveryMetadata) {
     const { result: _previousResult, ...metadata } = payload.sourceRecoveryMetadata as SourceRecoveryMetadata;
     (next as Record<string, unknown>).sourceRecoveryMetadata = metadata;
@@ -1173,7 +1200,9 @@ export function recordSourceRecoveryOutcome(db: RcmDatabase, jobId: string, resu
     .run(JSON.stringify(result), jobId);
 }
 
-export function failJob(db: RcmDatabase, jobId: string, workerId: string, error: string): JobFailureResult | undefined {
+export function failJob(db: RcmDatabase, jobId: string, workerId: string, failure: unknown): JobFailureResult | undefined {
+  const error = failure instanceof Error ? failure.message : typeof failure==='string' ? failure : String((failure as any)?.message ?? 'Auxiliary call failed');
+  const providerFailure=providerFailureMetadata(failure);
   const row = db.prepare("SELECT attempts,type,payload_json,chat_id FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(jobId, workerId) as
     | { attempts: number; type: string; payload_json: string; chat_id: string }
     | undefined;
@@ -1182,17 +1211,21 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, error:
   if (row.type === 'memory_group' && isProviderContextLimitError(error)
     && resplitMemoryGroupInput(db, jobId, JSON.parse(row.payload_json))) return { accepted: true, status: 'queued', attempt: row.attempts, maxAttempts: 3, retryable: true };
   const maxAttempts = 3;
-  const nonRetryable = isPermanentProviderError(error);
+  const nonRetryable = isPermanentProviderError(failure);
   const originalPayload = JSON.parse(row.payload_json || "{}") as Record<string, unknown>;
   const status = nonRetryable || repairBudgetSpent(originalPayload) || stateRepairBudgetSpent(originalPayload) || row.attempts >= maxAttempts ? "failed" : "queued";
   const failedPayload = {
     ...originalPayload,
+    providerFailure,
+    nextAttemptAt: status==='queued' && (providerFailure.status===429 || Number(providerFailure.status)>=500)
+      ? now()+Math.max(providerFailure.retryAfterMs ?? 0, Math.min(300_000,1_000*2**Math.max(0,row.attempts-1))) : undefined,
     // A failed transport may leave an older successful output staged. Only expose
     // the response of a completed model call, never that stale output.
     modelResponseDiagnostic: typeof originalPayload.stagedModelOutput === "string"
       && (originalPayload.llmCallDiagnostics as LlmCallDiagnostic[] | undefined)?.at(-1)?.outcome === "succeeded"
       ? diagnoseAuxiliaryModelResponse(db, originalPayload.stagedModelOutput) : undefined,
     pipelineStage: status === "queued" ? "retrying" : "failed",
+    trigger: status === "queued" ? 'retry' : originalPayload.trigger,
     pipelineRetryFrom: originalPayload.pipelineStage ?? "queued",
     pipelineRetryAttempt: row.attempts + (status === "queued" ? 1 : 0),
     pipelineMaxAttempts: maxAttempts,
@@ -1205,6 +1238,7 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, error:
     now(),
     jobId,
   );
+  if(status==='failed') recordAuxiliaryFailure(db,row);
   if (status === "failed") recordSourceRecoveryOutcome(db, jobId, { outcome: "failed",
     failureCode: (originalPayload.llmCallDiagnostics as LlmCallDiagnostic[] | undefined)?.at(-1)?.code ?? "SOURCE_RECOVERY_CALL_FAILED" });
   const payload = JSON.parse(row.payload_json) as { batchId?: string; regenerationRunId?: string; sourceRecovery?: boolean };
@@ -1293,9 +1327,19 @@ export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string
 }
 
 /** List consumers need progress, never extraction prompts, sources or staged output. */
-export function projectJobListPayload(payload: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries([
+export function projectJobListPayload(payload: Record<string, unknown>, kind?: string): Record<string, unknown> {
+  const projected = Object.fromEntries([
     "sourceRecovery", "sourceRecoveryMetadata", "pipelineStage", "pipelineManualRetry", "pipelineRetryAttempt", "llmCallStats", "llmUsage", "llmCallDiagnostics",
     "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus",
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+  if (JOB_TRIGGER_VALUES.includes(payload.trigger as JobTrigger)) projected.trigger = payload.trigger;
+  if (kind === 'story_consolidation' && ['segment','arc','overview'].includes(payload.level as string)
+    && Number.isSafeInteger(payload.startOrdinal) && Number.isSafeInteger(payload.endOrdinal)
+    && Number(payload.endOrdinal) >= Number(payload.startOrdinal)) {
+    projected.level = payload.level;
+    projected.startOrdinal = payload.startOrdinal;
+    projected.endOrdinal = payload.endOrdinal;
+    if (typeof payload.targetGroupId === 'string' && /^sg_[a-f0-9]{20}$/.test(payload.targetGroupId)) projected.targetGroupId = payload.targetGroupId;
+  }
+  return projected;
 }

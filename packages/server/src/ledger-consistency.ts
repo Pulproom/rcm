@@ -2,6 +2,7 @@ import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, LedgerConsistencyResultSchema, type LedgerConsistencyResult, type LeasedJob, type MemoryLanguage, type RpProfile } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
+import { auxiliaryInputFingerprint, auxiliaryInputOutcome, recordAuxiliaryInput } from "./auxiliary-input-cache.js";
 import { buildEntityIdentityResolver } from "./entities.js";
 import { flushRelationshipProjectionQueue } from "./relationship-projections.js";
 import { maybeEnqueueStorySpine } from "./story-spine.js";
@@ -105,7 +106,11 @@ export function enqueueFinalLedgerConsistency(db: RcmDatabase, chatId: string, r
   const existing = db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND type='ledger_consistency'
     AND status IN ('queued','leased') AND json_extract(payload_json,'$.backfillRunId')=? LIMIT 1`).get(chatId, runId);
   if (existing) return { state: "queued", count: 0 };
-  const groups = candidateGroups(db, chatId);
+  const activeInputs = new Set((db.prepare("SELECT payload_json FROM jobs WHERE chat_id=? AND type='ledger_consistency' AND status IN ('queued','leased')").all(chatId) as Array<{payload_json:string}>)
+    .flatMap(row => Object.values(JSON.parse(row.payload_json).groupInputFingerprints ?? {})));
+  const fingerprints = new Map(candidateGroups(db, chatId).map(group => [group, auxiliaryInputFingerprint(db, group)]));
+  const groups = [...fingerprints.keys()].filter(group => !activeInputs.has(fingerprints.get(group)!)
+    && !auxiliaryInputOutcome(db, chatId, 'ledger', fingerprints.get(group)!));
   if (!groups.length) return { state: "not_needed", count: 0 };
   const insert = db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
     VALUES(?,?,'ledger_consistency','queued',?,0,?,?)`);
@@ -115,7 +120,8 @@ export function enqueueFinalLedgerConsistency(db: RcmDatabase, chatId: string, r
   const enqueue = (): void => {
     if (!batch.length) return;
     const timestamp = Date.now();
-    insert.run(randomUUID(), chatId, JSON.stringify({ sourceMessageIds: [], backfillRunId: runId, groups: batch }), timestamp, timestamp);
+    insert.run(randomUUID(), chatId, JSON.stringify({ sourceMessageIds: [], backfillRunId: runId, groups: batch,
+      groupInputFingerprints: Object.fromEntries(batch.map(group => [group.itemRef, fingerprints.get(group)])) }), timestamp, timestamp);
     count += 1;
     batch = [];
   };
@@ -140,6 +146,12 @@ export function finalLedgerConsistencyRunReady(db: RcmDatabase, chatId: string, 
   const active = db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND type IN ('extract','episode','ledger_consistency')
     AND status IN ('queued','leased') AND json_extract(payload_json,'$.backfillRunId')=? LIMIT 1`).get(chatId, runId);
   return !active;
+}
+
+export function recordLedgerInputs(db: RcmDatabase, chatId: string, payload: Record<string, any>, outcome: 'succeeded'|'failed'): void {
+  for (const fingerprint of Object.values(payload.groupInputFingerprints ?? {})) {
+    if (typeof fingerprint === 'string') recordAuxiliaryInput(db, chatId, 'ledger', fingerprint, outcome);
+  }
 }
 
 /**
@@ -241,6 +253,7 @@ export function completeLedgerConsistencyJob(db: RcmDatabase, job: LeasedJob, wo
     const row = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(job.id, workerId) as { payload_json: string } | undefined;
     if (!row) throw new Error("Lease not found while completing final ledger check");
     const payload = JSON.parse(row.payload_json || "{}");
+    recordLedgerInputs(db, job.chatId, payload, 'succeeded');
     payload.pipelineStage = "complete";
     payload.pipelineStageUpdatedAt = Date.now();
     db.prepare("UPDATE jobs SET status='done',payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?")

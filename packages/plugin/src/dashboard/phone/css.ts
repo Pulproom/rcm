@@ -182,6 +182,11 @@ export const PHONE_SKIN_CSS = `
 .job-group > .fold__body > :is(.job, .job-group) { margin-top: 0; }
 .job-group > .fold__body > :is(.job, .job-group) > summary { padding-inline: 0; border-radius: 0; background-image: linear-gradient(var(--sep), var(--sep)); background-size: 100% .5px; background-position: center top; background-repeat: no-repeat; }
 .job-group .job__time { white-space: normal; text-align: right; }
+/* same-kind burst: children read as sub-items under one guide line */
+.fold.job-group.job-burst > .fold__body { padding: 0 16px 10px 34px; background: linear-gradient(var(--sep), var(--sep)) 22px 0 / 1px calc(100% - 14px) no-repeat, var(--screen); }
+.fold.job-group.job-burst > .fold__body > .job--child > summary { min-height: 40px; padding-block: 8px; }
+.job--child .job__name { font-size: var(--t-meta); font-weight: 400; color: var(--ink-2); }
+.job--child .job__time { font-size: var(--t-micro); }
 /* a summary of bare text: the chevron is its only span and keeps to its icon size at the right */
 .fold > summary > .chev:first-child { flex: none; margin-left: auto; }
 .fold[open] > summary { border-radius: 12px 12px 0 0; }

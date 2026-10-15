@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { MEMORY_ADDITION_GUIDANCE, memoryAdditionRequestGuidance, validateMemoryAdditionRequestOutcome, memoryAdditionUserNote, memoryAdditionStopsAfterEvents } from '@rcm/shared';
+import type { RecallCandidateSnapshot } from './recall-candidates.js';
 import { contiguousSourceRangeSelection, estimateTokens, ExtractionAggregateSchema, ExtractionResultSchema, Api38ExtractionDraftResultSchema, measureAuxiliaryPrompt, withAuxiliaryStoryFraming,
   type ExtractionDraftResult, type ExtractionAuditSubmission, type ReconciliationSubmission, type RpProfile, type MemoryLanguage, type LeasedJob } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
 import { buildPrompt, editProtectedMessageIds } from './jobs.js';
 import { rangeMessages, listSourceRanges, memoryTargetFingerprint, sourceAccessFingerprint, type RangeMessage } from './source-ranges.js';
-import { sourceFingerprint, fingerprintMatches, type SourceFingerprintItem } from './source-fingerprint.js';
+import { sourceFingerprint, fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from './source-fingerprint.js';
 import { inspectDraftEvidence } from './evidence-review.js';
 import { applyExtractionAuditPatch } from './extraction-audit.js';
 import { finishStateExtraction } from './state-extraction.js';
@@ -12,20 +14,20 @@ import { additiveReconciliationResult } from './reconciliation.js';
 import { scopeExtractionMemoryKeys } from './extraction-memory-keys.js';
 import { ingestExtraction, hasRelationshipEvent, validateDialogueEvidence, validateExtractionSources } from './ingest.js';
 import { sameSocialRelationScope } from './social-relations.js';
-import { invalidateStorySpine, maybeEnqueueStorySpine } from './story-spine.js';
+import { markStoryRangesInvalid, maybeEnqueueStorySpine } from './story-spine.js';
 import { flushRelationshipProjectionQueue } from './relationship-projections.js';
 import { normalizeLedgerPredicate, normalizeLedgerText } from './normalization.js';
 import { stripThoughtBlocks } from './source-text.js';
 import { canonicalizeExtraction } from './entities.js';
 import { intimacyMilestoneKeys } from './intimacy-milestones.js';
 
-export const MEMORY_ADDITION_GUIDANCE = `ADDITIVE EXTRACTION ONLY. Find source-supported omissions, not replacements. Existing memories, details and state are duplicate-checking context, never evidence. Return only missing material with fresh local keys. Do not copy existing scenes merely to add a detail: a new memory may contain only the omitted claim and its own core detail. Never change, reinforce, close, supersede or resolve an existing record or seed. State decisions may only create/coexist/ignore with no targets. Keep seedResolutions empty. The delimited userNote is a user belief about a possible omission: prioritise finding it IF the selected source supports it. Never invent from that note, cite it, or store the request as memory. Gaps in the selected messages contain no evidence; never fill them in.`;
 const fail = (message: string, code = 'MEMORY_ADDITION_INVALID') => Object.assign(new Error(message), { code });
-interface AdditionPayload {
+interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
   sourceMessageIds: string[]; sourceFingerprint: SourceFingerprintItem[]; rangeIds: string[];
   userRequest: string; existingMemories: any[]; memoryIds: string[]; targetFingerprint: string; accessFingerprint: string;
   memoryLanguage: MemoryLanguage; postExtractionReview: boolean; candidateStatus?: string; candidate?: any; ledgerFingerprint: string;
   continuationDraft?: ExtractionDraftResult; auxiliaryBudget?: { maxInputTokens: number };
+  requestOutcome?: ExtractionDraftResult['requestOutcome'];
 }
 
 function additionLedgerFingerprint(db: RcmDatabase, chatId: string): string {
@@ -85,21 +87,21 @@ function prepareAddition(db: RcmDatabase, chatId: string, rangeIds: string[], me
     accessFingerprint: sourceAccessFingerprint(db, chatId, rows.map(row => row.id)), ledgerFingerprint: additionLedgerFingerprint(db, chatId), memoryLanguage: chat.memory_language, postExtractionReview: review };
 }
 
-export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, profile: RpProfile, attempt: number, payload: AdditionPayload): LeasedJob {
+export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, profile: RpProfile, attempt: number, payload: AdditionPayload): LeasedJob & RecallCandidateSnapshot {
   const allRows = rangeMessages(db, chatId);
   const rows = allRows.filter(row => payload.sourceMessageIds.includes(row.id));
   const built = buildPrompt(db, chatId, profile, payload.memoryLanguage, rows.map(row => ({ message_id: row.id, role: row.role,
     content: row.content!, content_hash: row.canonicalHash, ordinal: row.ordinal })), payload.continuationDraft?.unfinishedSource,
-    { recallCandidates: [], recallAtomRefs: [] });
+    payload.recallCandidates && payload.recallAtomRefs ? { recallCandidates: payload.recallCandidates, recallAtomRefs: payload.recallAtomRefs } : undefined);
   const gaps = rows.slice(1).flatMap((row, index) => allRows.some(between => !between.memoryExcluded
     && ['pending','committed','client_pruned'].includes(between.lifecycle) && ['active','all_before'].includes(between.visibility)
     && between.ordinal > rows[index]!.ordinal && between.ordinal < row.ordinal)
     ? [{ afterMessage: rows[index]!.ordinal + 1, beforeMessage: row.ordinal + 1, omitted: true }] : []);
   const memoryAddition = { userRequest: payload.userRequest, existingMemories: payload.existingMemories };
-  const systemPrompt = `${built.systemPrompt}\n\n${MEMORY_ADDITION_GUIDANCE}`;
+  const systemPrompt = `${built.systemPrompt}\n\n${MEMORY_ADDITION_GUIDANCE}\n${memoryAdditionRequestGuidance(payload.userRequest)}`;
   const userPrompt = `${built.userPrompt}\nADDITIVE_CONTEXT_JSON\n${JSON.stringify({ existingMemories: payload.existingMemories,
     selectedMessageNumbers: rows.map(row => ({ id: row.id, number: row.ordinal + 1 })), gaps,
-    userNote: { purpose: 'Possible omission, not story evidence', request: payload.userRequest } })}\nEND_ADDITIVE_CONTEXT_JSON`;
+    userNote: memoryAdditionUserNote(payload.userRequest) })}\nEND_ADDITIVE_CONTEXT_JSON`;
   return { ...built, id, chatId, profile, kind: 'extract', memoryAddition, attempt, systemPrompt, userPrompt, prompt: `${systemPrompt}\n\n${userPrompt}`,
     memoryLanguage: payload.memoryLanguage, sourceMessageIds: payload.sourceMessageIds, postExtractionReview: payload.postExtractionReview,
     continuationDraft: payload.continuationDraft, auditSourceMessages: rows.map(row => ({ id: row.id, role: row.role, content: row.content!, canonicalHash: row.canonicalHash })) };
@@ -118,12 +120,19 @@ export function previewMemoryAddition(db: RcmDatabase, chatId: string, rangeIds:
     note: '사건·상태 추출 기준이며, 보완·재시도·후속 투영 호출은 추가될 수 있어요.' };
 }
 
-export function startMemoryAddition(db: RcmDatabase, chatId: string, rangeIds: string[], messageIds: string[], request: string, review: boolean) {
+export function startMemoryAddition(db: RcmDatabase, chatId: string, rangeIds: string[], messageIds: string[], request: string, review: boolean, idempotencyKey?:string) {
+  const id=idempotencyKey ? `addition_${createHash('sha256').update(JSON.stringify([chatId,idempotencyKey])).digest('hex')}` : randomUUID();
+  const creationRequestFingerprint=createHash('sha256').update(JSON.stringify([[...rangeIds].sort(),[...messageIds].sort(),request.trim(),review])).digest('hex');
+  const existing=db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='memory_addition'").get(id,chatId) as {payload_json:string}|undefined;
+  if(existing) {
+    if(JSON.parse(existing.payload_json).creationRequestFingerprint!==creationRequestFingerprint) throw fail('같은 요청 키에 다른 입력이 전달됐어요. 새로 제출해 주세요','IDEMPOTENCY_CONFLICT');
+    return {runId:id,jobId:id};
+  }
   previewMemoryAddition(db, chatId, rangeIds, messageIds, request, review);
   const payload = prepareAddition(db, chatId, rangeIds, messageIds, request, review);
-  const id = randomUUID(), timestamp = Date.now();
+  const timestamp = Date.now();
   db.prepare("INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'memory_addition','queued',?,0,?,?)")
-    .run(id, chatId, JSON.stringify(payload), timestamp, timestamp);
+    .run(id, chatId, JSON.stringify({ ...payload, creationRequestFingerprint, trigger: 'memory_addition' }), timestamp, timestamp);
   return { runId: id, jobId: id };
 }
 
@@ -147,13 +156,25 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   if (!job) throw fail('Lease not found', 'LEASE_NOT_FOUND');
   const payload: AdditionPayload = JSON.parse(job.payload_json);
   if (!validatePendingAddition(db, job.chat_id, jobId, payload)) return { chatId: job.chat_id, warnings: ['원문 변경으로 후보를 중단했어요'], pendingReconciliations: 0 };
-  let draft = ExtractionAggregateSchema.parse(value);
-  Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: draft.memories, sourcePassages: draft.sourcePassages, unfinishedSource: draft.unfinishedSource });
+  let draft = validateMemoryAdditionRequestOutcome(ExtractionAggregateSchema.parse(value), payload.userRequest);
+  Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: draft.memories, sourcePassages: draft.sourcePassages, unfinishedSource: draft.unfinishedSource, requestOutcome: draft.requestOutcome });
   if (draft.unfinishedSource?.length) {
-    if (JSON.stringify(payload.continuationDraft?.unfinishedSource) === JSON.stringify(draft.unfinishedSource)) throw fail('남은 원문 처리가 진행되지 않았어요. 선택을 줄여 다시 시도해 주세요');
-    db.prepare("UPDATE jobs SET status='queued',attempts=0,lease_owner=NULL,leased_until=NULL,payload_json=?,updated_at=? WHERE id=?")
-      .run(JSON.stringify({ ...payload, continuationDraft: draft }), Date.now(), jobId);
-    return { chatId: job.chat_id, warnings: ['같은 작업에서 남은 원문을 이어서 읽어요'], pendingReconciliations: 0 };
+    const {progress} = extractionContinuationProgress(db,job.chat_id,payload.sourceMessageIds,payload.continuationDraft?.unfinishedSource,draft.unfinishedSource);
+    const reason = progress ? null : 'CONTINUATION_NO_PROGRESS: 남은 원문 범위가 줄지 않아 중단했어요. 선택을 줄여 다시 요청해 주세요';
+    db.prepare("UPDATE jobs SET status=?,attempts=CASE WHEN ? THEN 0 ELSE attempts END,lease_owner=NULL,leased_until=NULL,last_error=?,payload_json=?,updated_at=? WHERE id=?")
+      .run(progress ? 'queued' : 'failed',Number(progress),reason,JSON.stringify({ ...payload, continuationDraft: draft,
+        pipelineStage:progress?'queued':'failed',validatedExtractionCheckpoint:undefined,validatedPreReconciliationCheckpoint:undefined }),Date.now(),jobId);
+    return { chatId: job.chat_id, warnings: [reason ?? '같은 작업에서 남은 원문을 이어서 읽어요'], pendingReconciliations: 0 };
+  }
+  if (memoryAdditionStopsAfterEvents(draft)) {
+    if (draft.requestOutcome?.relatedMemoryIds?.some(id => !payload.memoryIds.includes(id))) throw fail('요청 결과가 제공되지 않은 기억을 가리켜요');
+    const refused = Boolean(payload.userRequest && !draft.requestOutcome);
+    const error = refused ? '모델이 요청을 처리하지 않았어요. 추가 검열 완화 (실험적)를 켜고 새로 요청해 보세요.' : null;
+    db.prepare("UPDATE jobs SET status=?,lease_owner=NULL,leased_until=NULL,last_error=?,payload_json=?,updated_at=? WHERE id=?")
+      .run(refused ? 'failed' : 'done', error, JSON.stringify({ ...payload, candidate: undefined, continuationDraft: undefined,
+        validatedExtractionCheckpoint: undefined, validatedPreReconciliationCheckpoint: undefined,
+        candidateStatus: refused ? undefined : 'empty', requestOutcome: draft.requestOutcome, pipelineStage: refused ? 'failed' : 'complete' }), Date.now(), jobId);
+    return { chatId: job.chat_id, warnings: error ? [error] : [], pendingReconciliations: 0 };
   }
   if (payload.postExtractionReview && (!audit?.patch || audit.error)) throw fail('요청한 추출 검수를 끝내지 못했어요');
   if (audit?.patch) {
@@ -184,7 +205,7 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   const memoryKeys = new Set(final.memories.map(memory => memory.key));
   const checkNewParent = (item: { memoryKey?: string }) => { if (item.memoryKey && !memoryKeys.has(item.memoryKey)) throw fail('추가 후보는 기존 기억을 수정 대상으로 지정할 수 없어요'); };
   [...final.promises, ...(final.socialKnowledge ?? []), ...(final.relationshipEvents ?? []), ...(final.physicalIntimacy ?? [])].forEach(checkNewParent);
-  for (const memory of final.memories) {
+  for (const memory of payload.userRequest ? [] : final.memories) {
     const duplicate = payload.existingMemories.some(existing => normalizeLedgerText(existing.content) === normalizeLedgerText(memory.content)
       && (memory.details ?? []).every(detail => existing.details.some((old: any) => normalizeLedgerText(old.text) === normalizeLedgerText(detail.text)))
       && (memory.keyDialogues ?? []).every(dialogue => existing.keyDialogues.some((old: any) => old.text === dialogue.text && old.speaker === dialogue.speaker)));
@@ -206,7 +227,7 @@ export function listMemoryAdditions(db: RcmDatabase, chatId: string) {
     if (!payload.candidateStatus && !validatePendingAddition(db, chatId, row.id, payload)) payload.candidateStatus = 'stale';
     if (payload.candidateStatus === 'ready' && !validatePendingAddition(db, chatId, row.id, payload)) payload.candidateStatus = 'stale';
     return [{ id: row.id, jobId: row.id, status: payload.candidateStatus ?? (row.status === 'failed' ? 'failed' : 'processing'),
-      error: row.last_error, request: payload.userRequest, candidate: payload.candidate, sourceFingerprint: payload.sourceFingerprint,
+      error: row.last_error, request: payload.userRequest, requestOutcome: payload.requestOutcome, candidate: payload.candidate, sourceFingerprint: payload.sourceFingerprint,
       canRetry: row.status === 'failed' && payload.candidateStatus !== 'stale' }];
   });
 }
@@ -220,12 +241,19 @@ export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string)
   if (!validatePendingAddition(db, chatId, id, payload)) throw fail('원문이나 연결된 기억이 바뀌어 후보를 적용할 수 없어요', 'SOURCE_CHANGED');
   db.transaction(() => {
     const candidate = ExtractionResultSchema.parse(payload.candidate);
-    ingestExtraction(db, chatId, candidate, id, undefined, { sourceMessageIds: payload.sourceMessageIds, atomRefs: [] }, 'additions');
+    // Only persisted new Story atoms count; selected context and skipped ledger
+    // candidates must not invalidate unrelated segments.
+    const tables = ['memories','memory_details','memory_dialogues','assertions','beliefs','promise_events','relationship_events'] as const;
+    const before = tables.map(table => (db.prepare(`SELECT COALESCE(MAX(rowid),0) last FROM ${table}`).get() as {last:number}).last);
+    ingestExtraction(db, chatId, candidate, id, undefined, { sourceMessageIds: payload.sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] }, 'additions');
+    const evidenceIds = tables.flatMap((table,index) => (db.prepare(`SELECT evidence_json FROM ${table} WHERE chat_id=? AND rowid>?`)
+      .all(chatId,before[index]) as Array<{evidence_json:string}>).flatMap(row =>
+        (JSON.parse(row.evidence_json) as Array<{messageId:string}>).map(item => item.messageId)));
     db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.candidateStatus','applied'),updated_at=? WHERE id=?").run(Date.now(), id);
-    invalidateStorySpine(db, chatId);
+    markStoryRangesInvalid(db, chatId, [...new Set(evidenceIds)]);
   })();
   flushRelationshipProjectionQueue(db, chatId);
-  maybeEnqueueStorySpine(db, chatId);
+  maybeEnqueueStorySpine(db, chatId, undefined, 'memory_addition');
 }
 
 export function discardMemoryAddition(db: RcmDatabase, chatId: string, id: string) {

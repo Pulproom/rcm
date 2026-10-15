@@ -2,6 +2,8 @@ import { syncManualCognition } from "./social-knowledge.js";
 import { preserveRegenerationQuizzes, snapshotRegenerationQuizzes } from "./quiz.js";
 import { createHash, randomUUID } from "node:crypto";
 import { estimateTokens, ExtractionResultSchema, type ExtractionResult } from "@rcm/shared";
+import { estimateStoryRebuild } from './story-spine.js';
+import { estimateRelationshipCalls } from './cost-estimates.js';
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
 import { rewindAutomaticSuccessorsToCorrections } from "./user-corrections.js";
@@ -10,7 +12,7 @@ import { fingerprintMatches, parseSourceFingerprintJson, sourceFingerprint } fro
 import { buildPrompt, enqueueExtractionJobs } from "./jobs.js";
 import { createRegenerationShadow } from "./lineage.js";
 import { flushRelationshipProjectionQueue } from "./relationship-projections.js";
-import { chatPacketBudgetKey, invalidateStorySpine, maybeEnqueueStorySpine } from "./story-spine.js";
+import { chatPacketBudgetKey, invalidateStorySpine, markStoryRangesInvalid, maybeEnqueueStorySpine } from "./story-spine.js";
 import { currentMemoryPreview, rangeMessages, listSourceRanges, rangeTargetFingerprint, selectSourceRanges } from "./source-ranges.js";
 import { atomFingerprint, type AtomRelationContext, type RecallAtomReference } from "./atom-relations.js";
 import { loadItemAccess, NARRATOR_ARCHIVE_HOLDER, resolveItemAccess, visibleTo, pruneDetailAccessEdits } from "./item-access.js";
@@ -244,7 +246,7 @@ export function startEpisodeRegeneration(db: RcmDatabase, chatId: string, batchI
         memoryLanguage: chat.memory_language,
         postExtractionReview: review,
         batchId,
-        regenerationRunId: runId,
+        regenerationRunId: runId, trigger: 'regeneration',
       }), timestamp, timestamp);
     db.prepare(`INSERT INTO regeneration_runs(id,chat_id,mode,batch_id,job_id,source_fingerprint_json,post_extraction_review,status,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(runId, chatId, "episode", batchId, jobId, source.source_fingerprint_json, review ? 1 : 0, timestamp, timestamp);
@@ -310,7 +312,7 @@ export function startCanonicalRegeneration(db: RcmDatabase, chatId: string, batc
   const queued = db.prepare("SELECT id,payload_json FROM jobs WHERE chat_id=? AND status='queued'").all(shadowChatId) as Array<{ id: string; payload_json: string }>;
   for (const job of queued) {
     const payload = JSON.parse(job.payload_json);
-    db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...payload, canonicalRegenerationRunId: runId }), job.id);
+    db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...payload, canonicalRegenerationRunId: runId, trigger: 'regeneration' }), job.id);
   }
   db.prepare("UPDATE extraction_batches SET generation_id=? WHERE chat_id=? AND generation_id='active' AND start_ordinal>=?").run(runId, shadowChatId, source.start_ordinal);
   if (!queuedJobs) {
@@ -417,6 +419,8 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
   const replayBatchMap = new Map(prefix.map((row) => [row.id, row.id]));
   const relationWarnings: string[] = [];
   db.transaction(() => {
+    // Canonical replay below also deletes and re-ingests prefix atoms. Every
+    // old Story support identity can change, so this path needs a full rebuild.
     invalidateStorySpine(db, chatId);
     db.prepare("UPDATE source_passages SET active=0 WHERE chat_id=?").run(chatId);
     db.prepare("DELETE FROM memory_recall_events WHERE chat_id=?").run(chatId);
@@ -476,7 +480,7 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
       .run(appendRelationWarnings(run.preview_json, relationWarnings), now(), runId);
   })();
   flushRelationshipProjectionQueue(db, chatId);
-  maybeEnqueueStorySpine(db, chatId);
+  maybeEnqueueStorySpine(db, chatId, undefined, 'regeneration');
   db.prepare("DELETE FROM server_meta WHERE key=? AND EXISTS (SELECT 1 FROM chats WHERE id=? AND is_internal=1)").run(chatPacketBudgetKey(run.shadow_chat_id), run.shadow_chat_id);
   db.prepare("DELETE FROM chats WHERE id=? AND is_internal=1").run(run.shadow_chat_id);
   return { batches: targetSuffixBatches.length, relationWarnings };
@@ -536,14 +540,13 @@ export function applyEpisodeRegeneration(db: RcmDatabase, chatId: string, runId:
   const quizzes = snapshotRegenerationQuizzes(db, chatId, old.map(item => item.id));
   const relationWarnings: string[] = [];
   db.transaction(() => {
-    invalidateStorySpine(db, chatId);
     db.prepare("UPDATE source_passages SET active=0 WHERE chat_id=? AND source_batch_id=?").run(chatId, run.batch_id);
     for (const item of old.slice(mappedMemories.length)) {
       db.prepare("UPDATE memories SET active=0,updated_at=? WHERE id=?").run(now(), item.id);
       db.prepare("DELETE FROM memory_fts WHERE memory_id=?").run(item.id);
       db.prepare("DELETE FROM embedding_items WHERE kind='memory' AND source_id=?").run(item.id);
     }
-    relationWarnings.push(...ingestExtraction(db, chatId, applied, run.job_id, run.batch_id, resolveRelationContext(db, chatId, relationContext)));
+    relationWarnings.push(...ingestExtraction(db, chatId, applied, run.job_id, run.batch_id, resolveRelationContext(db, chatId, relationContext), 'regeneration'));
     preserveRegenerationQuizzes(db, chatId, quizzes);
     db.prepare("DELETE FROM entity_scene_presence WHERE chat_id=? AND scene_key=?").run(chatId, run.job_id);
     db.prepare("DELETE FROM entity_prominence WHERE chat_id=?").run(chatId);
@@ -553,10 +556,11 @@ export function applyEpisodeRegeneration(db: RcmDatabase, chatId: string, runId:
     const full = original ? ExtractionResultSchema.parse(JSON.parse(original)) : applied;
     db.prepare("UPDATE extraction_batches SET final_json=?,status='applied',updated_at=? WHERE id=?")
       .run(JSON.stringify({ ...full, memories: applied.memories, atomRelations: applied.atomRelations }), now(), run.batch_id);
+    markStoryRangesInvalid(db, chatId, sourceMessageIds);
     db.prepare("UPDATE regeneration_runs SET status='applied',preview_json=?,updated_at=? WHERE id=?")
       .run(appendRelationWarnings(run.preview_json, relationWarnings), now(), runId);
   })();
-  maybeEnqueueStorySpine(db, chatId);
+  maybeEnqueueStorySpine(db, chatId, undefined, 'regeneration');
   return { memories: applied.memories.length, relationWarnings };
 }
 
@@ -587,7 +591,8 @@ export function previewRegeneration(db: RcmDatabase, chatId: string, batchId: st
     return estimateTokens(prompts.systemPrompt) + estimateTokens(prompts.userPrompt);
   });
   return { batchCount: ranges.length, messageCount: ranges.reduce((n, row) => n + row.sourceMessageIds.length, 0),
-    rawTokens: ranges.reduce((n, row) => n + row.rawTokens, 0), estimatedInputTokens: stages.reduce((a,b) => a+b,0), estimatedExtractionCalls: stages.length };
+    rawTokens: ranges.reduce((n, row) => n + row.rawTokens, 0), estimatedInputTokens: stages.reduce((a,b) => a+b,0), estimatedExtractionCalls: stages.length,
+    ...(canonical ? {estimatedStoryCalls:estimateStoryRebuild(db,chatId),estimatedRelationshipCalls:estimateRelationshipCalls(db,chatId)} : {}) };
 }
 
 function currentStatePreview(db: RcmDatabase, chatId: string) {

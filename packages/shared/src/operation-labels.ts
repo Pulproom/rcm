@@ -6,6 +6,13 @@ export const WORKER_PHASE_VALUES = ["idle", "first_extraction", "initial_calibra
 export type WorkerPhase = typeof WORKER_PHASE_VALUES[number];
 export const AUXILIARY_PURPOSE_VALUES = ["quiz", "memory_group", "memory_group_repair", "extraction", "extraction_repair", "initial_calibration", "initial_calibration_repair", "audit", "audit_repair", "reconciliation", "reconciliation_repair", "state_response_repair", "ledger_consistency", "ledger_consistency_repair", "relationship_projection", "relationship_projection_repair", "story_consolidation", "story_consolidation_repair", "episode_draft", "episode_draft_repair", "episode_finalize", "episode_finalize_repair"] as const;
 export type AuxiliaryPurpose = typeof AUXILIARY_PURPOSE_VALUES[number];
+export const JOB_TRIGGER_VALUES = ["memory_addition", "extraction", "regeneration", "source_recovery", "rebuild", "retry", "source_change", "support_change"] as const;
+export type JobTrigger = typeof JOB_TRIGGER_VALUES[number];
+export const JOB_TRIGGER_LABELS: Record<JobTrigger,string> = {
+  memory_addition: "기억 추가 적용", extraction: "대화 기억 반영", regeneration: "기억 다시 만들기",
+  source_recovery: "원문 발췌 보완", rebuild: "전체 줄거리 다시 만들기", retry: "작업 재시도",
+  source_change: "원문 변경", support_change: "기억 근거 변경",
+};
 
 /** One vocabulary for job, phase and call surfaces; identifiers stay in diagnostics. */
 export const OPERATION_LABELS = {

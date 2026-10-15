@@ -606,7 +606,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
     markStorySupportsInvalid(db,request.chatId,invalidatedSupports);
     // Ordinary sync also resumes repairs left pending by an earlier source-only
     // sync, even when there are no new invalidations or extraction candidates.
-    if (!request.deferExtraction) maybeEnqueueStorySpine(db,request.chatId);
+    if (!request.deferExtraction) maybeEnqueueStorySpine(db,request.chatId,undefined,'source_change');
     return { inserted, revised, pruned, deleted, truncated, committedMessageIds, revision: nextRevision };
   })();
 }
