@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { estimateTokens, ExtractionAggregateSchema, ExtractionResultSchema, Api38ExtractionDraftResultSchema, measureAuxiliaryPrompt, withAuxiliaryStoryFraming,
+import { contiguousSourceRangeSelection, estimateTokens, ExtractionAggregateSchema, ExtractionResultSchema, Api38ExtractionDraftResultSchema, measureAuxiliaryPrompt, withAuxiliaryStoryFraming,
   type ExtractionDraftResult, type ExtractionAuditSubmission, type ReconciliationSubmission, type RpProfile, type MemoryLanguage, type LeasedJob } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
 import { buildPrompt, editProtectedMessageIds } from './jobs.js';
@@ -51,9 +51,7 @@ export function additionSources(db: RcmDatabase, chatId: string, rangeIds: strin
   const all = listSourceRanges(db, chatId);
   const selected = all.filter(row => rangeIds.includes(row.id));
   if (selected.length !== rangeIds.length) throw fail('선택한 원문 구간이 바뀌었어요', 'SOURCE_CHANGED');
-  const selectable = all.filter(row => !row.memoryExcluded);
-  const positions = selected.filter(row => !row.memoryExcluded).map(row => selectable.indexOf(row));
-  if (positions.length && positions.at(-1)! - positions[0]! + 1 !== positions.length) throw fail('연속된 원문 구간을 선택해 주세요');
+  if (!contiguousSourceRangeSelection(all, rangeIds)) throw fail('연속된 원문 구간을 선택해 주세요');
   const ids = new Set(selected.flatMap(row => row.sourceMessageIds));
   const messages = rangeMessages(db, chatId).filter(row => ids.has(row.id) && row.content !== null
     && ['pending','committed','client_pruned'].includes(row.lifecycle) && ['active','all_before'].includes(row.visibility))
@@ -88,11 +86,14 @@ function prepareAddition(db: RcmDatabase, chatId: string, rangeIds: string[], me
 }
 
 export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, profile: RpProfile, attempt: number, payload: AdditionPayload): LeasedJob {
-  const rows = rangeMessages(db, chatId).filter(row => payload.sourceMessageIds.includes(row.id));
+  const allRows = rangeMessages(db, chatId);
+  const rows = allRows.filter(row => payload.sourceMessageIds.includes(row.id));
   const built = buildPrompt(db, chatId, profile, payload.memoryLanguage, rows.map(row => ({ message_id: row.id, role: row.role,
     content: row.content!, content_hash: row.canonicalHash, ordinal: row.ordinal })), payload.continuationDraft?.unfinishedSource,
     { recallCandidates: [], recallAtomRefs: [] });
-  const gaps = rows.slice(1).flatMap((row, index) => row.ordinal > rows[index]!.ordinal + 1
+  const gaps = rows.slice(1).flatMap((row, index) => allRows.some(between => !between.memoryExcluded
+    && ['pending','committed','client_pruned'].includes(between.lifecycle) && ['active','all_before'].includes(between.visibility)
+    && between.ordinal > rows[index]!.ordinal && between.ordinal < row.ordinal)
     ? [{ afterMessage: rows[index]!.ordinal + 1, beforeMessage: row.ordinal + 1, omitted: true }] : []);
   const memoryAddition = { userRequest: payload.userRequest, existingMemories: payload.existingMemories };
   const systemPrompt = `${built.systemPrompt}\n\n${MEMORY_ADDITION_GUIDANCE}`;

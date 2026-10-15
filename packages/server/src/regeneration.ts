@@ -286,10 +286,11 @@ function canonicalStateFingerprint(db: RcmDatabase, chatId: string): string {
 }
 
 export function startCanonicalRegeneration(db: RcmDatabase, chatId: string, batchId: string, review: boolean): { runId: string; shadowChatId: string; queuedJobs: number } {
-  const source = batch(db, chatId, batchId);
   const selected = canonicalRegenerationRanges(db, chatId, batchId);
+  const source = batch(db, chatId, selected[0]!.id);
   const selectedIds = selected.map((row) => row.id);
-  const ids = selected.flatMap((row) => row.sourceMessageIds);
+  const selectedMessages = new Set(selected.flatMap(row => row.sourceMessageIds));
+  const ids = rangeMessages(db, chatId).filter(row => selectedMessages.has(row.id)).map(row => row.id);
   if (!ids.length) throw Object.assign(new Error("No active source messages remain from this batch"), { code: "SOURCE_CHANGED" });
   const fingerprint = sourceFingerprint(db, chatId, ids);
   const runId = randomUUID();
@@ -298,7 +299,7 @@ export function startCanonicalRegeneration(db: RcmDatabase, chatId: string, batc
   db.transaction(() => {
     createRegenerationShadow(db, chatId, shadowChatId, source.start_ordinal);
     db.prepare(`INSERT INTO regeneration_runs(id,chat_id,mode,batch_id,shadow_chat_id,source_fingerprint_json,post_extraction_review,status,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'processing',?,?)`).run(runId, chatId, "canonical_suffix", batchId, shadowChatId, JSON.stringify(fingerprint), review ? 1 : 0, timestamp, timestamp);
+      VALUES(?,?,?,?,?,?,?,'processing',?,?)`).run(runId, chatId, "canonical_suffix", source.id, shadowChatId, JSON.stringify(fingerprint), review ? 1 : 0, timestamp, timestamp);
     db.prepare("UPDATE regeneration_runs SET preview_json=? WHERE id=?").run(JSON.stringify({
       beforeCurrentMemories: currentMemoryPreview(db, chatId, selectedIds), beforeStates: currentStatePreview(db, chatId), targetBatchIds: selectedIds, targetFingerprint: rangeTargetFingerprint(db, chatId, selectedIds),
       canonicalStateFingerprint: canonicalStateFingerprint(db, chatId),
@@ -560,12 +561,17 @@ export function applyEpisodeRegeneration(db: RcmDatabase, chatId: string, runId:
 }
 
 function canonicalRegenerationRanges(db: RcmDatabase, chatId: string, batchId: string) {
-  const ranges = listSourceRanges(db, chatId).filter(row => !row.memoryExcluded);
-  const startIndex = ranges.findIndex((row) => row.id === batchId);
+  const ranges = listSourceRanges(db, chatId).filter(row => !row.memoryExcluded && !row.id.startsWith('unprocessed:'));
+  let startIndex = ranges.findIndex(row => row.id === batchId);
+  if (startIndex < 0) return selectSourceRanges(db, chatId, [batchId]);
+  // A later insertion can interleave an older batch's members. Widen the
+  // canonical cut to that batch's first member, never replay half a batch.
+  for (let index = startIndex - 1; index >= 0; index--) {
+    if (ranges[index]!.endOrdinal >= ranges[startIndex]!.startOrdinal) startIndex = index;
+  }
   const lastEligibleIndex = ranges.reduce((last, row, index) => row.eligible ? index : last, -1);
-  const selectedIds = ranges.slice(startIndex, Math.max(startIndex + 1, lastEligibleIndex + 1)).map((row) => row.id);
-  const selected = selectSourceRanges(db, chatId, selectedIds);
-  if (ranges.slice(lastEligibleIndex + 1).some((row) => row.status === 'applied')) {
+  const selected = selectSourceRanges(db, chatId, ranges.slice(startIndex, Math.max(startIndex + 1, lastEligibleIndex + 1)).map(row => row.id));
+  if (ranges.slice(lastEligibleIndex + 1).some(row => row.status === 'applied')) {
     throw Object.assign(new Error("이후 기억에 수정 보호 또는 확인이 필요한 구간이 있어. 해당 구간을 확인한 뒤 다시 시도해 줘"), { code: "RANGE_NOT_ELIGIBLE" });
   }
   return selected;

@@ -7,6 +7,7 @@ import { buildSourceUnits, splitAuxiliarySource, estimateTokens, queryViewAuthor
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
 import { memoryEmbeddingDocument } from "./memory-search-document.js";
+import { querySourceRows } from './retrieval-planner.js';
 
 const DIMENSION = 1024;
 const QUERY_TIMEOUT_MS = 10_000;
@@ -750,6 +751,12 @@ export class EmbeddingService {
 
   async searchManyDetailed(signals: SearchQuerySignal[], chatId: string, limit = 80): Promise<SemanticSearchResult> {
     if (!this.ready || signals.length === 0) return { scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() };
+    const sourceIds = [...new Set(signals.flatMap(signal => signal.sourceMessageIds ?? []))];
+    const allowed = new Set(querySourceRows(this.db, chatId, sourceIds).map(row => row.id));
+    // Recheck provenance at the provider boundary. Keep view indexes stable,
+    // but never embed a combined view whose sources have become unavailable.
+    signals = signals.map(signal => signal.sourceMessageIds?.some(id => !allowed.has(id))
+      ? {...signal,text:'continue',weight:0,sourceMessageIds:[]} : signal);
     this.#discardStaleBlocks(chatId);
     const total = (this.db.prepare("SELECT count(*) AS count FROM embedding_items WHERE chat_id=?").get(chatId) as { count: number }).count;
     const searchable = signals.map((signal, index) => ({ signal, index }))

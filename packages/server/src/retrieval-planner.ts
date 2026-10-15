@@ -1,5 +1,25 @@
-import { normalizeSearchTokens, stripYumiTransportComments, type MemoryLanguage, type SearchQuerySignal } from "@rcm/shared";
+import { composeQuerySignals, normalizeSearchTokens, stripYumiTransportComments, type MemoryLanguage, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
+
+export function querySourceRows(db: RcmDatabase, chatId: string, ids: string[]) {
+  return db.prepare(`SELECT message_id id,role,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END content
+    FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) AND memory_excluded=0
+      AND lifecycle IN ('pending','committed','client_pruned') AND NOT (lifecycle='pending' AND role='assistant')
+      AND host_visibility IN ('active','all_before') AND CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END IS NOT NULL
+    ORDER BY ordinal,message_id`).all(chatId, JSON.stringify(ids)) as Array<{id:string;role:'user'|'assistant'|'system';content:string}>;
+}
+
+/** Automatic query text is composed only after the server exclusion check. */
+export function sourceQuerySignals(db: RcmDatabase, request: TurnPrepareRequest, input: SearchQuerySignal[]): SearchQuerySignal[] {
+  const hasProvenance = input.some(signal => signal.sourceMessageIds !== undefined);
+  // Old clients do not supply provenance. Once this chat has exclusions, rebuild
+  // their automatic query from the submitted source IDs instead of trusting text.
+  if (!hasProvenance && !db.prepare('SELECT 1 FROM messages WHERE chat_id=? AND memory_excluded=1 LIMIT 1').get(request.chatId)) return input;
+  const ids = hasProvenance ? input.flatMap(signal => signal.sourceMessageIds ?? [])
+    : request.messages.filter(message => !message.disabled).map(message => message.id);
+  const rows = querySourceRows(db, request.chatId, [...new Set(ids)]);
+  return rows.length ? composeQuerySignals(rows) : [{kind:'continuation',text:'continue',weight:0,sourceMessageIds:[]}];
+}
 
 interface RankedToken {
   token: string;
@@ -248,6 +268,7 @@ export function buildRetrievalQuerySignals(
       kind: "cue" as const,
       text: item.text,
       weight: cueShare * cueFactors[index]! / totalCueFactor,
+      ...(focus.sourceMessageIds === undefined ? {} : {sourceMessageIds: focus.sourceMessageIds}),
     })),
   ];
 }

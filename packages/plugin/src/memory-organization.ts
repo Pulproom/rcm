@@ -1,4 +1,4 @@
-import type { MemoryGroupingResult } from '@rcm/shared';
+import { contiguousSourceRangeSelection, type MemoryGroupingResult } from '@rcm/shared';
 import { displayText } from './translation.js';
 import type { TranslationDisplay } from './types.js';
 import { btn, empty, escapeHtml, fold, icon, notice, row } from './dashboard/film/ui.js';
@@ -6,12 +6,13 @@ import { lex } from './dashboard/lexicon.js';
 
 export interface OrganizationRange {
   id: string; startOrdinal: number; endOrdinal: number; sourceMessageIds: string[]; eligible: boolean;
+  sourceOrdinals?: number[];
   reason: string | null; excerpt: string; rawTokens: number; memoryIds: string[]; groupIds: string[];
   memoryExcluded?: boolean; canExclude?: boolean; exclusionReason?: string | null;
   selectable?: boolean;
 }
 export interface OrganizationData { ranges: OrganizationRange[]; groups: any[]; regenerations: any[]; additions?: any[]; legacyHolds?: Array<{ id: string }> }
-export interface AdditionSource { id: string; role: string; content: string | null; ordinal: number; additionReason?: string | null }
+export interface AdditionSource { id: string; role: string; content: string | null; ordinal: number; additionReason?: string | null; translatedContent?: string }
 export interface AdditionView { rangeIds: string[]; startOrdinal: number; endOrdinal: number; messages: AdditionSource[]; selectedIds: string[]; request: string;
   estimate?: { rawTokens: number; initialCalls: number; note: string }; estimating?: boolean; origin?: 'detail' | 'selection' }
 export interface OrganizationView {
@@ -32,8 +33,7 @@ export function toggleOrganizationRange(ranges: OrganizationRange[], selected: s
   const range = ranges.find((row) => row.id === id);
   if (!range || !(range.selectable ?? range.eligible)) throw new Error(range?.reason ?? '선택할 수 없는 구간입니다.');
   const next = selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
-  const positions = ranges.filter(row => !row.memoryExcluded).flatMap((row, index) => next.includes(row.id) ? [index] : []);
-  if (positions.length && positions.at(-1)! - positions[0]! + 1 !== positions.length) throw new Error('연속된 구간을 선택해 주세요. 중간 구간은 건너뛸 수 없습니다.');
+  if (!contiguousSourceRangeSelection(ranges, next)) throw new Error('연속된 구간을 선택해 주세요. 중간 구간은 건너뛸 수 없습니다.');
   return ranges.filter((row) => next.includes(row.id)).map((row) => row.id);
 }
 
@@ -150,10 +150,10 @@ export function memoryOrganization(view: OrganizationView, memories: any[], tran
   const search = `<div class="org-find"><form id="organization-search-form" class="org-find__q"><label class="org-find__field">${icon('search')}<input name="query" type="search" enterkeyhint="search" value="${html(view.search ?? '')}" placeholder="원문 검색" maxlength="500" aria-label="원문 검색"></label>${view.search ? btn('지우기', { kind: 'quiet', action: 'organization-clear-search', data: { id: '' } }) : ''}</form><form id="organization-jump-form" class="org-find__n"><label class="org-find__field"><span aria-hidden="true">#</span><input name="ordinal" type="number" inputmode="numeric" enterkeyhint="go" min="1" step="1" value="${html(view.jump ?? '')}" placeholder="메시지" aria-label="메시지 번호로 이동"></label></form></div>${view.searchStatus ? `<p class="sub org-find__status" role="status">${html(view.searchStatus)}</p>` : ''}`;
   const list = `<div class="listcol">${search}${holds}${pending}${applied}<div class="list tl-rows" data-preserve-scroll="organization-list">${rows || empty('아직 원문 구간이 없습니다', '원문이 동기화되면 여기에 구간이 나타납니다.')}</div>${selection}</div>`;
   const busy = view.busy ? `<div class="notice" role="status">${icon('clock')}<span>처리 예상량을 확인하고 있습니다…</span></div>` : '';
-  return `<div class="organization${view.mobileDetail ? ' is-detail' : ''}">${lex().skin === 'phone' ? `<div class="intro org-intro">${back('organization-close', '타임라인')}<h1 class="pagetitle">기억 정리</h1><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p></div>` : `<div class="intro"><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p><div class="intro__acts">${btn('타임라인으로', { kind: 'quiet', icon: 'back', action: 'organization-close' })}</div></div>`}${busy}${view.error ? cutNotice(view.error) : ''}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:organization:${escapeHtml(view.candidateId)}">${view.candidateId ? candidateDetail(view, memories, translations, display) : view.addition ? additionForm(view) : details}</div></div></div>`;
+  return `<div class="organization${view.mobileDetail ? ' is-detail' : ''}">${lex().skin === 'phone' ? `<div class="intro org-intro">${back('organization-close', '타임라인')}<h1 class="pagetitle">기억 정리</h1><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p></div>` : `<div class="intro"><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p><div class="intro__acts">${btn('타임라인으로', { kind: 'quiet', icon: 'back', action: 'organization-close' })}</div></div>`}${busy}${view.error ? cutNotice(view.error) : ''}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:organization:${escapeHtml(view.candidateId)}">${view.candidateId ? candidateDetail(view, memories, translations, display) : view.addition ? additionForm(view, display) : details}</div></div></div>`;
 }
 
-function additionForm(view: OrganizationView): string {
+function additionForm(view: OrganizationView, display: TranslationDisplay): string {
   const addition = view.addition!;
   const selectable = addition.messages.filter(message => !message.additionReason);
   const chosen = selectable.filter(message => addition.selectedIds.includes(message.id)).length;
@@ -162,9 +162,11 @@ function additionForm(view: OrganizationView): string {
   const firstLine = (value: string | null) => (value ?? '').split('\n').map(line => line.trim()).find(Boolean) ?? '원문을 사용할 수 없어요';
   const messages = addition.messages.map(message => {
     const on = addition.selectedIds.includes(message.id) && !message.additionReason;
-    return `<div class="add-msg${on ? '' : ' is-off'}"><label class="add-msg__ck"><input type="checkbox" data-action="organization-addition-message" data-id="${html(message.id)}" ${on ? 'checked' : ''} ${message.additionReason || view.busy ? 'disabled' : ''} aria-label="메시지 ${message.ordinal+1} 사용"></label><details class="add-msg__body" data-preserve-open="organization-source:addition:${html(message.id)}"><summary><span class="add-msg__who">메시지 ${message.ordinal+1} · ${roleLabel(message.role)}${message.additionReason ? ` · ${html(message.additionReason)}` : ''}</span><span class="add-msg__pv">${html(firstLine(message.content))}</span><span class="chev" aria-hidden="true">${icon('chevron')}</span></summary><p class="rec">${html(message.content ?? '원문을 사용할 수 없어요')}</p></details></div>`;
+    const content = display === 'ko' ? message.translatedContent || message.content : message.content;
+    const missing = display === 'ko' && !message.translatedContent && message.content !== null;
+    return `<div class="add-msg${on ? '' : ' is-off'}"><label class="add-msg__ck"><input type="checkbox" data-action="organization-addition-message" data-id="${html(message.id)}" ${on ? 'checked' : ''} ${message.additionReason || view.busy ? 'disabled' : ''} aria-label="메시지 ${message.ordinal+1} 사용"></label><details class="add-msg__body" data-preserve-open="organization-source:addition:${html(message.id)}"><summary><span class="add-msg__who">메시지 ${message.ordinal+1} · ${roleLabel(message.role)}${message.additionReason ? ` · ${html(message.additionReason)}` : ''}${missing ? ' · <small class="sub">번역 없음</small>' : ''}</span><span class="add-msg__pv">${html(firstLine(content))}</span><span class="chev" aria-hidden="true">${icon('chevron')}</span></summary><p class="rec">${html(content ?? '원문을 사용할 수 없어요')}</p></details></div>`;
   }).join('');
   const estimate = addition.estimating ? '예상량을 확인하고 있어요…'
     : addition.estimate ? `원문 약 ${number(addition.estimate.rawTokens)}토큰 · 보조 모델 약 ${addition.estimate.initialCalls}회${addition.estimate.note ? `<br>${html(addition.estimate.note)}` : ''}` : '사용할 메시지를 선택해 주세요.';
-  return `<article class="reader add"><div class="reader__bar">${addition.origin === 'detail' ? back('organization-back-detail', '구간 상세') : back('organization-list', '구간 목록')}</div><h2 class="reader__title">메시지 ${addition.startOrdinal+1}–${addition.endOrdinal+1}에서 기억 추가</h2><p class="sub">지금 기억은 그대로 두고, 고른 원문에서 빠진 내용만 찾아요.</p><div class="add__head"><h3 class="org-h">원문 · ${addition.messages.length}개 중 ${chosen}개 선택</h3>${selectable.length ? btn(allSelected ? '전체 선택 해제' : '전체 선택', { kind: 'quiet', action: 'organization-addition-toggle-all', data: { id: '' }, disabled: Boolean(view.busy) }) : ''}</div><div class="add__msgs">${messages}</div><form id="organization-addition-form" class="add__form"><label class="add__field"><span class="org-h">모델에게 요청 <small>(선택)</small></span><textarea name="request" rows="3" ${view.busy ? 'disabled' : ''} placeholder="예: 이 장면에서 건넨 물건과 그 의미를 꼭 넣어 줘">${html(addition.request)}</textarea></label><p class="add__note">원문에 근거가 있는 것만 기억이 돼요.</p><div class="add__foot"><p class="add__est" role="status" data-addition-estimate>${estimate}</p>${btn('기억 찾기', { kind: 'primary', type: 'submit', disabled: Boolean(view.busy || addition.estimating || !addition.estimate || !addition.selectedIds.length) })}</div></form></article>`;
+  return `<article class="reader add"><div class="reader__bar">${addition.origin === 'detail' ? back('organization-back-detail', '구간 상세') : back('organization-list', '구간 목록')}</div><h2 class="reader__title">메시지 ${addition.startOrdinal+1}–${addition.endOrdinal+1}에서 기억 추가</h2><p class="sub">지금 기억은 그대로 두고, 고른 원문에서 빠진 내용만 찾아요.</p><div class="add__head"><h3 class="org-h">원문 · ${addition.messages.length}개 중 ${chosen}개 선택</h3>${selectable.length ? btn(allSelected ? '전체 선택 해제' : '전체 선택', { kind: 'quiet', action: 'organization-addition-toggle-all', data: { id: '' }, disabled: Boolean(view.busy) }) : ''}</div><div class="add__msgs">${messages}</div><form id="organization-addition-form" class="add__form"><label class="add__field"><span class="org-h">모델에게 요청 <small>(선택)</small></span><textarea name="request" rows="3" ${view.busy ? 'disabled' : ''} placeholder="예: 이 장면에서 건넨 물건과 그 의미를 꼭 넣어 줘">${html(addition.request)}</textarea></label><p class="add__note">원문에 근거가 있는 것만 기억이 돼요. 모델에게는 원문이 전달돼요.</p><div class="add__foot"><p class="add__est" role="status" data-addition-estimate>${estimate}</p>${btn('기억 찾기', { kind: 'primary', type: 'submit', disabled: Boolean(view.busy || addition.estimating || !addition.estimate || !addition.selectedIds.length) })}</div></form></article>`;
 }

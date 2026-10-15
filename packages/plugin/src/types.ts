@@ -115,6 +115,7 @@ export interface CurrentContext {
   lineageHint?: ChatLineageHint;
   staticProjection: { hash: string; characterName: string; description: string; lore: Array<{ title: string; content: string }> };
   query: string;
+  querySourceHash?: string;
   querySignals: SearchQuerySignal[];
   serverInstanceId?: string;
   backfillApproved: boolean;

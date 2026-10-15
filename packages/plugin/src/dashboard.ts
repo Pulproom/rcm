@@ -16,7 +16,7 @@ import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
 declare const __RCM_DISTRIBUTION__: boolean;
 import { LANDMARK_KIND_VALUES, LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, compareStoryTimes, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type ManualLineagePreview, type ManualLineagePreviewRequest, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
 import { SERVER_STATUS_TIMEOUT_MS, type ChatViewPreferences, type MemoryDetailAccessPatch, type MemoryDetailAccessResponse, type ServerClient } from "./api-client.js";
-import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest } from "./context.js";
+import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest, readHostSourceTranslations } from "./context.js";
 import { addLog, rememberDiagnosticSecrets, defaults, isChatMemoryEnabled, normalizeMemoryOnlyInjection, supportedSettingsRevision, saveSettings, serverScopeKey, CACHE_KEY, loadStoredJson, saveStoredJson } from "./settings.js";
 import type { ActivityProgress, DashboardSkin, InitialCalibrationActivity, PluginSettings, RuntimeState, TranslationDisplay } from "./types.js";
 import { drainWorker, reconcileAutomaticServerPause } from "./worker.js";
@@ -906,12 +906,6 @@ function homeMessage(options: {
   return `<section class="msg msg--${tone}${className}" role="${options.role ?? (tone === "danger" ? "alert" : "status")}">${content}${options.actionsHtml ? `<div class="msg__acts">${options.actionsHtml}</div>` : ""}</section>`;
 }
 
-function pluginUpdateAction(state: RuntimeState): string {
-  const url = state.updateStatus?.pluginUrl;
-  if (url?.startsWith("https://")) return `<a class="btn btn--primary" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">플러그인 받기</a>`;
-  return btn("업데이트 방법 보기", { kind: "primary", action: "tab", data: { tab: "settings", settingsSection: "server" } });
-}
-
 export function updateNotice(state: RuntimeState): string {
   if (state.updateApplying) return homeMessage({
     title: state.updateApplying.error ? "서버 업데이트를 확인해 주세요" : `RCM ${state.updateApplying.targetVersion} 업데이트 중`,
@@ -937,7 +931,6 @@ export function updateNotice(state: RuntimeState): string {
   });
   if (pluginUpdate) return homeMessage({
     title: `RCM ${update.latestPluginVersion} 플러그인 업데이트 필요`,
-    actionsHtml: pluginUpdateAction(state),
     bodyHtml: "<p>Risu 플러그인 메뉴의 + 버튼으로 새 플러그인을 설치해 주세요.</p>",
     tone: "warning",
   });
@@ -1289,7 +1282,7 @@ function sceneSubtitle(memory: any, translations: Map<string, string>, display: 
 
 function incompatibleHome(state: RuntimeState, data: DashboardData): string {
   const issue = data.connectionIssue!;
-  const action = issue.requiredUpdate === "plugin" ? pluginUpdateAction(state)
+  const action = issue.requiredUpdate === "plugin" ? undefined
     : btn("서버 업데이트 보기", { action: "tab", kind: "primary", data: { tab: "settings", settingsSection: "server" } });
   return `<div class="home"><h1 class="sr-only">홈</h1>${homeMessage({ title: issue.title, bodyHtml: `<p>${escapeHtml(issue.detail)}</p>`, actionsHtml: action, tone: "neutral" })}</div>`;
 }
@@ -3659,7 +3652,7 @@ export function settingsV2(
       <label class="field"><span>서버 주소</span><input name="serverUrl" value="${escapeHtml(settings.serverUrl)}"></label>
       <label class="field"><span>서버 토큰</span>${secretInput("serverToken", "서버 토큰", { value: settings.serverToken })}</label>
     </div>`)}
-    ${installedVersions}${data.connectionIssue?.kind === "incompatible" ? `<p class="sub">${escapeHtml(data.connectionIssue.detail)}</p>${data.connectionIssue.requiredUpdate === "plugin" ? pluginUpdateAction(state) : ""}` : ""}${manualServerUpdate}${update}`);
+    ${installedVersions}${data.connectionIssue?.kind === "incompatible" ? `<p class="sub">${escapeHtml(data.connectionIssue.detail)}</p>` : ""}${manualServerUpdate}${update}`);
   const voyage = `<div class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">검색 임베딩</h3><form id="voyage-form" class="connection-card"><label class="field"><span>Voyage API 키</span>${secretInput("voyageApiKey", "Voyage API 키", { placeholder: embedding?.configured ? "저장된 키 유지" : "키 입력", disabled: voyageBusy })}</label>${connectionCheck("voyage", embedding?.configured ? '<span class="settings-action__end"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></span>' : "")}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}</div></div>` : ""}</form></div>`;
   const translation = `<section class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">참고 번역</h3><div class="form__row connection-card" data-translation-card>
     <label class="field"><span>번역 방식</span><select form="settings-form" name="translationProvider">${[["google", "Google 번역 (무료)"], ["risu", "Risu 보조 모델"], ["server", "RCM 서버 모델"]].map(([v, label]) => `<option value="${v}" ${settings.translationProvider === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
@@ -4593,7 +4586,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     : activeTab === "overview" ? overview(state, data, translations, datasetsLoaded("overview"), sentView)
     : activeTab === "initial" ? initialCalibrationPage(data, peopleView, translations, activeDisplay(), entityMergePreview, socialEditor, entityDeletePreview)
     : activeTab === "story" ? storySpinePage(data, translations, storyView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.current ? state.settings.storyOverviewBackups[state.current.chatId] : undefined, datasetsLoaded("story"))
-    : activeTab === "timeline" ? organizationView.open ? memoryOrganization(organizationView, data.memories, translations, activeDisplay()) : timeline(data, selectedMemory, translations, timelineView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.translationActivity?.error)
+    : activeTab === "timeline" ? organizationView.open ? memoryOrganization(organizationView, data.memories, translations, organizationView.addition ? state.settings.translationDisplay : activeDisplay()) : timeline(data, selectedMemory, translations, timelineView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.translationActivity?.error)
       : activeTab === "relationships" ? relationshipsV2(state, data, selectedRelationship, translations, activeDisplay(), entityMergePreview, intimacyEditor, relationshipSection, relationshipEditing, relationshipTier, relationshipMobileDetail, relationshipQuery, socialEditor, worldEditor, relationshipEditingDirection, pairDiaryFilter, pairDiarySort, anniversaryEditorEntryId)
         : activeTab === "world" ? worldEditor && worldEditorOnNow ? `<div class="now-edit">${worldEditorPanel(data, worldEditor, "현재")}</div>`
             : renderNowPage(data, data.personaEntity, nowFilter, nowSort, promiseStatusInFlight, translations, activeDisplay(), nowView)
@@ -5289,11 +5282,16 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       method: 'POST', body: JSON.stringify({ rangeIds }),
     });
     if (state.current?.chatId !== chatId || !organizationView.open) return;
-    organizationView.addition = { ...sources, selectedIds: sources.messages.filter(message => !message.additionReason).map(message => message.id), request: '' };
+    const addition: AdditionView = { ...sources, selectedIds: sources.messages.filter(message => !message.additionReason).map(message => message.id), request: '' };
+    organizationView.addition = addition;
     organizationView.candidateId = '';
     organizationView.mobileDetail = true;
     render();
-    await updateAdditionEstimate();
+    await Promise.all([updateAdditionEstimate(), readHostSourceTranslations(chatId, addition.messages, state.settings.canonicalizationPolicy).then(found => {
+      if (state.current?.chatId !== chatId || organizationView.addition !== addition) return;
+      for (const message of addition.messages) message.translatedContent = found.get(message.id);
+      render();
+    })]);
   };
   const scrollOrganizationRange = (id: string) => {
     const target = Array.from(root.querySelectorAll<HTMLElement>('[data-range-id]')).find(element => element.dataset.rangeId === id);

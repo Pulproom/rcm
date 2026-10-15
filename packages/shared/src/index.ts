@@ -3,7 +3,9 @@ import { SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GU
 import { STORY_TIME_GUIDANCE } from "./story-time.js";
 import { z } from "zod";
 import { resolveModelSourceReferences } from "./source-references.js";
+export { composeQuerySignals, RISU_CONTINUATION_MARKER } from "./query-signals.js";
 export { modelImageRanges } from "./model-text.js";
+export { contiguousSourceRangeSelection } from "./source-range-selection.js";
 import {
   INITIAL_AFFECTION_LEVELS,
   INITIAL_INTENSITY_LEVELS,
@@ -368,6 +370,7 @@ export function mergeInitialCalibrationResults(results: InitialCalibrationResult
 
 export const SearchQuerySignalSchema = z.object({
   kind: z.enum(["focus", "scene", "cue", "continuation"]),
+  sourceMessageIds: z.array(z.string().min(1)).max(512).optional(),
   text: z.string().min(1).max(8_000),
   weight: z.number().min(0).max(1),
 });

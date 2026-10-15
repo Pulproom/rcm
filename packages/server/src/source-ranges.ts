@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { publicKnowledgeScope } from "./item-access.js";
-import { estimateTokens } from "@rcm/shared";
+import { contiguousSourceRangeSelection, estimateTokens } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { editProtectedMessageIds } from "./jobs.js";
 import { fingerprintMatches, isOrdinalFallbackMessageId, parseSourceFingerprintJson } from "./source-fingerprint.js";
@@ -17,6 +17,7 @@ export interface RangeMessage {
 }
 export interface SourceRange {
   id: string; startOrdinal: number; endOrdinal: number; sourceMessageIds: string[];
+  sourceOrdinals?: number[];
   status: string; eligible: boolean; reason: string | null; excerpt: string;
   rawTokens: number; memoryIds: string[]; groupIds: string[];
   memoryExcluded: boolean; canExclude: boolean; exclusionReason: string | null;
@@ -86,6 +87,11 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
     ORDER BY start_ordinal,end_ordinal,id`).all(chatId) as Batch[];
   const matching = matchingMessageIds === undefined ? undefined : new Set(matchingMessageIds);
   const batches = matching ? allBatches.filter(batch => (JSON.parse(batch.source_message_ids_json) as string[]).some(id => matching.has(id))) : allBatches;
+  const claimedMembers = new Set<string>(), overlappingMembers = new Set<string>();
+  for (const batch of allBatches) for (const id of new Set(JSON.parse(batch.source_message_ids_json) as string[])) {
+    if (claimedMembers.has(id)) overlappingMembers.add(id);
+    claimedMembers.add(id);
+  }
   const sourceIds = matching ? [...new Set([...matching, ...batches.flatMap(batch => JSON.parse(batch.source_message_ids_json) as string[])])] : undefined;
   const messages = new Map(rangeMessages(db, chatId, sourceIds).map((row) => [row.id, row]));
   // Label the user inputs with their pending tail response, using the original
@@ -133,9 +139,10 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
     else if (row.status !== "applied") reason = row.status === "pending_review" ? "필수 검수가 끝나지 않았어요" : "기억 처리가 끝나지 않았어요";
     else if (!fingerprint || !fingerprintMatches(db, chatId, fingerprint)) reason = "원문이 바뀌어 다시 확인해야 해요";
     else if (source.some((item) => !['done', 'encapsulated', 'skipped_policy'].includes(item!.extractionState))) reason = "원문 처리가 끝나지 않았어요";
-    else if (allBatches.some((other) => other.id !== row.id && other.start_ordinal <= row.end_ordinal && other.end_ordinal >= row.start_ordinal)) reason = "겹치는 처리 구간을 먼저 확인해야 해요";
+    else if (ids.some(id => overlappingMembers.has(id))) reason = "겹치는 처리 구간을 먼저 확인해야 해요";
     else if (groupIds.length) reason = "이미 묶인 구간이에요. 먼저 묶기를 해제해 주세요";
-    return { id: row.id, startOrdinal: row.start_ordinal, endOrdinal: row.end_ordinal,
+    const sourceOrdinals = source.flatMap(item => item ? [item.ordinal] : []).sort((a,b) => a-b);
+    return { id: row.id, startOrdinal: sourceOrdinals[0] ?? row.start_ordinal, endOrdinal: sourceOrdinals.at(-1) ?? row.end_ordinal, sourceOrdinals,
       sourceMessageIds: ids, status: row.status, eligible: !reason, reason,
       memoryExcluded: false, canExclude: false, exclusionReason: '이미 기억 처리가 시작된 메시지예요',
       excerpt: source.filter(item => item && !item.memoryExcluded && isCurrentRangeMessage(item) && item.content !== null)
@@ -149,6 +156,7 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
     const exclusionReason = memoryExclusionReason(db,chatId,message);
     ranges.push({ id: `unprocessed:${message.id}`, startOrdinal: message.ordinal, endOrdinal: message.ordinal,
       sourceMessageIds: [message.id], status: message.extractionState, eligible: false,
+      sourceOrdinals: [message.ordinal],
       memoryExcluded: Boolean(message.memoryExcluded), canExclude: !exclusionReason,
       exclusionReason,
       reason: message.memoryExcluded ? '기억 제외됨' : message.lifecycle === 'pending' || unconfirmedTurnIds.has(message.id) ? '새 응답이 아직 확정되지 않았어요'
@@ -164,19 +172,11 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
 
 export function selectSourceRanges(db: RcmDatabase, chatId: string, batchIds: string[], minimum = 1): SourceRange[] {
   if (batchIds.length < minimum || new Set(batchIds).size !== batchIds.length) throw failure("서로 다른 원문 묶음을 선택해 주세요", "INVALID_RANGE_SELECTION");
-  const all = listSourceRanges(db, chatId).filter(row => !row.memoryExcluded);
+  const all = listSourceRanges(db, chatId);
   const selected = all.filter((row) => batchIds.includes(row.id));
   if (selected.length !== batchIds.length) throw failure("선택한 원문 묶음이 바뀌었어요", "SOURCE_CHANGED");
   for (const row of selected) if (!row.eligible) throw failure(row.reason!);
-  const first = all.indexOf(selected[0]!);
-  if (all.indexOf(selected.at(-1)!) - first + 1 !== selected.length) throw failure("중간을 건너뛰지 않고 연속된 묶음을 선택해 주세요", "NONCONTIGUOUS_SELECTION");
-  const ids = new Set(selected.flatMap((row) => row.sourceMessageIds));
-  // A missing/unprocessed message between batches is not an implicit selection.
-  const start = selected[0]!.startOrdinal, end = selected.at(-1)!.endOrdinal;
-  if (rangeMessages(db, chatId).some((row) => row.ordinal >= start && row.ordinal <= end && !ids.has(row.id)
-    && !row.memoryExcluded && isCurrentRangeMessage(row))) {
-    throw failure("선택 사이에 처리되지 않은 원문이 있어요", "NONCONTIGUOUS_SELECTION");
-  }
+  if (!contiguousSourceRangeSelection(all, batchIds)) throw failure("중간을 건너뛰지 않고 연속된 묶음을 선택해 주세요", "NONCONTIGUOUS_SELECTION");
   return selected;
 }
 

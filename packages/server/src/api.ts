@@ -105,7 +105,7 @@ import { fingerprintMatches, parseSourceFingerprintJson } from "./source-fingerp
 import { completeRelationshipProjectionJob, flushRelationshipProjectionQueue, listRelationshipProjections, setRelationshipProjectionOverride } from "./relationship-projections.js";
 import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
 import { replaceItemAccess } from "./ingest.js";
-import { buildRetrievalQuerySignals } from "./retrieval-planner.js";
+import { buildRetrievalQuerySignals, sourceQuerySignals } from "./retrieval-planner.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage } from "./auxiliary-page-cache.js";
 import { beginInitialCalibration, clearInitialCalibrationDraft, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
 import { previewRegeneration, applyCanonicalRegeneration, applyEpisodeRegeneration, discardRegeneration, listExtractionBatches, listRegenerations, regenerationRun, startCanonicalRegeneration, startEpisodeRegeneration } from "./regeneration.js";
@@ -422,9 +422,12 @@ export function createApp(dependencies: Dependencies): Hono {
       });
     }
     const syncFinishedAt = performance.now();
-    const querySignals = parsed.querySignals?.length
+    const requestSignals = parsed.querySignals?.length
       ? parsed.querySignals
       : [{ kind: "focus" as const, text: parsed.query, weight: 1 }];
+    const querySignals = sourceQuerySignals(db, parsed, requestSignals);
+    if (querySignals !== requestSignals) parsed.query = querySignals.find(signal => signal.kind === 'focus')?.text
+      ?? querySignals.find(signal => signal.kind === 'scene')?.text ?? 'continue';
     const retrievalSignals = buildRetrievalQuerySignals(db, parsed.chatId, querySignals, languageState.memory_language);
     const semantic = await embeddings.searchManyDetailed(retrievalSignals, parsed.chatId);
     const embeddingFinishedAt = performance.now();
@@ -434,7 +437,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const trustedPromptSourceMessageIds = requestedPromptIds.length === 0 ? [] : (db.prepare(`
       SELECT message_id FROM messages
       WHERE chat_id=? AND message_id IN (${requestedPromptIds.map(() => "?").join(",")})
-        AND lifecycle='committed' AND host_visibility='active' AND content IS NOT NULL
+        AND lifecycle='committed' AND memory_excluded=0 AND host_visibility='active' AND content IS NOT NULL
       ORDER BY ordinal
     `).all(parsed.chatId, ...requestedPromptIds) as Array<{ message_id: string }>).map((row) => row.message_id);
     const activeMemoryCount = (db.prepare("SELECT count(*) AS count FROM memories WHERE chat_id=? AND active=1").get(parsed.chatId) as { count: number }).count;
@@ -444,7 +447,7 @@ export function createApp(dependencies: Dependencies): Hono {
     // silently overflow the actual injection budget.
     const activeTurnPerspectives = perspectiveResolution.perspectives.filter((name) => name !== "__shared__");
     const namesPresent = [...activeTurnPerspectives, ...(parsed.identityHints?.recentSpeakerNames ?? []), parsed.identityHints?.userPersonaName ?? ""];
-    const namesPrompt = (db.prepare("SELECT content FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal")
+    const namesPrompt = (db.prepare("SELECT CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END content FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal")
       .all(parsed.chatId, JSON.stringify(trustedPromptSourceMessageIds)) as Array<{ content: string }>).map(row => row.content).join("\n");
     const sceneNames = renderSceneNames(db, parsed.chatId, namesPresent, namesPresent,
       mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n")), Math.min(200, Math.floor(parsed.tokenBudget * .1)));

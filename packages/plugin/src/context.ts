@@ -1,11 +1,11 @@
-import { withMemoryGuidance, canonicalizeSourceText, sourceComparisonText, estimateTokens, normalizeSearchTokens, selectTailStart, type LineageProbeRequest, type MessageHostVisibility, type ResolvedSetupProjection, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
+import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPolicy, sourceComparisonText, estimateTokens, selectTailStart, type CanonicalizationPolicy, type LineageProbeRequest, type MessageHostVisibility, type ResolvedSetupProjection, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
 import type { CurrentContext, DashboardContext, RuntimeState } from "./types.js";
 import { serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
 
 const encoder = new TextEncoder();
 export const MEMORY_MARKER = "[[RCM]]";
-export const RISU_CONTINUATION_MARKER = "*says nothing*";
+export { composeQuerySignals, RISU_CONTINUATION_MARKER } from "@rcm/shared";
 
 export async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
@@ -140,6 +140,58 @@ export async function resolveMessageContent(chat: any, message: any): Promise<st
   return (await resolveMessageSource(chat, message)).content;
 }
 
+/** Read-only display translations. Never call a translator or mutate source text. */
+export async function readHostSourceTranslations(chatId: string, sources: Array<{id:string;content:string|null}>, policy: CanonicalizationPolicy = defaultCanonicalizationPolicy()): Promise<Map<string,string>> {
+  const translated = new Map<string,string>();
+  if (!sources.length) return translated;
+  try {
+    const identity = await readCurrentChatIdentity();
+    if (identity.chatId !== chatId) return translated;
+    const messages: any[] = Array.isArray(identity.chat.message) ? identity.chat.message : [];
+    const byId = new Map(messages.map((message, ordinal) => [String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`), message]));
+    for (const source of sources) {
+      if (source.content === null || !source.content.trim()) continue;
+      const message = byId.get(source.id);
+      if (!message) continue;
+      const resolved = await resolveMessageSource(identity.chat, message);
+      // An old server revision must never acquire a newer reply's translation.
+      if (canonicalizeSourceText(resolved.content, policy) !== source.content) continue;
+      const display = String(message.data ?? message.content ?? '');
+      if (resolved.sourceKind === 'yumi_model') {
+        const id = resolved.sourceRecordId!;
+        // Parse Yumi's owned envelope, not arbitrary comments or prose.
+        const marked = display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->([\s\S]*?)<!--\s*yumi-tr:v1:\1:end\s*-->/);
+        const text = marked?.[1] === id ? marked[2] : !display.includes('<!--') && message.__yumi_tr === id ? display : undefined;
+        if (text?.trim()) { translated.set(source.id, text); continue; }
+      }
+      // GigaTrans stores the source inside its complete owned blocks and the
+      // already translated display outside them (the inverse of source selection).
+      const withoutGigaSource = display.replace(/<GigaTrans\b[^>]*>[\s\S]*?<\/GigaTrans\s*>/gi, '');
+      const gigaDisplay = withoutGigaSource.replace(/<GT-(?:CTRL\b[^>]*|SEP)\s*\/>/gi, '').trim();
+      if (withoutGigaSource !== display && gigaDisplay && !/<\/?GigaTrans\b/i.test(gigaDisplay)) {
+        translated.set(source.id, gigaDisplay); continue;
+      }
+      const keys = [...new Set([display, resolved.content, source.content].filter(Boolean))];
+      try {
+        for (const key of keys) {
+          const cached = await risuai.getTranslationCache?.(key);
+          if (cached?.trim()) { translated.set(source.id, cached); break; }
+        }
+        // PocketRisu's cache may use formatted HTML as its key. Only accept a
+        // unique full-body match; substring matches alone cannot identify a reply.
+        if (!translated.has(source.id) && risuai.searchTranslationCache && typeof DOMParser !== 'undefined') {
+          const plain = (value: string) => new DOMParser().parseFromString(value.replace(/<br\s*\/?\s*>|<\/(?:p|div|li|h[1-6])>/gi, '\n'), 'text/html').body.textContent?.replace(/\s+/g,' ').trim();
+          const expected = source.content.replace(/\s+/g,' ').trim();
+          const matches = (await risuai.searchTranslationCache(source.content))
+            .filter(entry => entry.value?.trim() && plain(entry.key) === expected);
+          if (matches.length === 1) translated.set(source.id, matches[0]!.value);
+        }
+      } catch { /* Missing/denied host cache leaves the original available. */ }
+    }
+  } catch { /* A closed/switched host chat has no matching display translations. */ }
+  return translated;
+}
+
 export function hostVisibility(messages: any[], ordinal: number, allBefore: number): MessageHostVisibility {
   const message = messages[ordinal];
   if (message?.isComment === true) return "comment";
@@ -174,117 +226,6 @@ const LARGE_CHAT_MESSAGE_LIMIT = 256;
 const LARGE_CHAT_TOKEN_LIMIT = 120_000;
 const TAIL_MESSAGE_LIMIT = 64;
 const TAIL_TOKEN_LIMIT = 32_000;
-const FOCUS_QUERY_TOKEN_LIMIT = 1_200;
-const SCENE_QUERY_TOKEN_LIMIT = 1_200;
-const SCENE_MESSAGE_LIMIT = 4;
-
-const QUERY_OMISSION = "\n[…]\n";
-
-function splitOversizedQueryUnit(value: string, tokenLimit: number): string[] {
-  const text = value.trim();
-  if (!text || estimateTokens(text) <= tokenLimit) return text ? [text] : [];
-  const words = text.split(/\s+/u).filter(Boolean);
-  if (words.length <= 1) {
-    const characters = [...text];
-    const chunks: string[] = [];
-    let current = "";
-    for (const character of characters) {
-      const candidate = `${current}${character}`;
-      if (current && estimateTokens(candidate) > tokenLimit) {
-        chunks.push(current);
-        current = character;
-      } else current = candidate;
-    }
-    if (current) chunks.push(current);
-    return chunks;
-  }
-  const chunks: string[] = [];
-  let current = "";
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (current && estimateTokens(candidate) > tokenLimit) {
-      chunks.push(current);
-      current = word;
-    } else current = candidate;
-  }
-  if (current) chunks.push(current);
-  return chunks.flatMap((chunk) => estimateTokens(chunk) > tokenLimit
-    ? splitOversizedQueryUnit(chunk, tokenLimit)
-    : [chunk]);
-}
-
-function queryUnits(value: string, tokenLimit: number): string[] {
-  const paragraphs = value.split(/\n\s*\n+/u).map((item) => item.trim()).filter(Boolean);
-  const source = paragraphs.length > 0 ? paragraphs : [value.trim()];
-  const maximumUnitTokens = Math.max(48, Math.floor(tokenLimit / 5));
-  return source.flatMap((paragraph) => {
-    const sentences = paragraph.split(/(?<=[.!?。！？])\s+/u).map((item) => item.trim()).filter(Boolean);
-    return (sentences.length > 0 ? sentences : [paragraph])
-      .flatMap((sentence) => splitOversizedQueryUnit(sentence, maximumUnitTokens));
-  });
-}
-
-function boundedQueryText(value: string, tokenLimit: number): string {
-  const text = value.trim();
-  if (estimateTokens(text) <= tokenLimit) return text;
-  const units = queryUnits(text, tokenLimit);
-  if (units.length === 0) return "";
-  const selected = new Set<number>([units.length - 1]);
-  const assembled = (indexes: Set<number>): string => [...indexes]
-    .sort((left, right) => left - right)
-    .map((index) => units[index]!)
-    .join(QUERY_OMISSION);
-  while (selected.size < units.length) {
-    const candidates = units.map((_, index) => index).filter((index) => !selected.has(index));
-    candidates.sort((left, right) => {
-      const normalized = (index: number): number => units.length <= 1 ? 1 : index / (units.length - 1);
-      const distance = (index: number): number => Math.min(...[...selected].map((picked) => Math.abs(normalized(index) - normalized(picked))));
-      return (distance(right) + normalized(right) * 0.02) - (distance(left) + normalized(left) * 0.02);
-    });
-    const next = candidates.find((index) => estimateTokens(assembled(new Set([...selected, index]))) <= tokenLimit);
-    if (next === undefined) break;
-    selected.add(next);
-  }
-  const result = assembled(selected);
-  if (estimateTokens(result) <= tokenLimit) return result;
-  return splitOversizedQueryUnit(units.at(-1)!, tokenLimit)[0] ?? "";
-}
-
-function focusInformation(value: string): number {
-  const tokens = new Set(normalizeSearchTokens(value));
-  const tokenSignal = Math.min(1, tokens.size / 8);
-  const lengthSignal = Math.min(1, value.trim().length / 80);
-  return tokenSignal * 0.7 + lengthSignal * 0.3;
-}
-
-export function composeQuerySignals(
-  messages: Array<{ role: "user" | "assistant" | "system"; content: string; disabled?: boolean }>,
-): SearchQuerySignal[] {
-  const active = messages.filter((message) => !message.disabled && message.role !== "system" && message.content.trim());
-  const focusIndex = active.findLastIndex((message) => message.role === "user");
-  const rawFocus = focusIndex >= 0 ? active[focusIndex]!.content : active.at(-1)?.content ?? "continue";
-  // PocketRisu owns this exact empty-input marker. It remains in the source
-  // ledger and extraction input, but it is not natural-language recall intent.
-  const continuation = rawFocus.trim() === RISU_CONTINUATION_MARKER;
-  const focus = continuation ? "" : boundedQueryText(rawFocus, FOCUS_QUERY_TOKEN_LIMIT);
-  const sceneSource = (focusIndex >= 0 ? active.slice(0, focusIndex) : active.slice(0, -1))
-    .filter((message) => !(message.role === "user" && message.content.trim() === RISU_CONTINUATION_MARKER))
-    .slice(-SCENE_MESSAGE_LIMIT);
-  const scene = boundedQueryText(sceneSource.map((message) => `${message.role.toUpperCase()}: ${message.content}`).join("\n\n"), SCENE_QUERY_TOKEN_LIMIT);
-  if (continuation) return scene
-    ? [
-      { kind: "continuation", text: RISU_CONTINUATION_MARKER, weight: 0 },
-      { kind: "scene", text: scene, weight: 1 },
-    ]
-    : [{ kind: "continuation", text: RISU_CONTINUATION_MARKER, weight: 0 }];
-  if (!scene) return [{ kind: "focus", text: focus || "continue", weight: 1 }];
-  const focusWeight = 0.2 + focusInformation(focus) * 0.4;
-  return [
-    { kind: "focus", text: focus || "continue", weight: Number(focusWeight.toFixed(3)) },
-    { kind: "scene", text: scene, weight: Number((1 - focusWeight).toFixed(3)) },
-  ];
-}
-
 export class NoActiveChatError extends Error {
   constructor() {
     super("No active Risu chat");
@@ -544,10 +485,12 @@ export async function readCurrentContext(
     ...message,
     content: canonicalizeSourceText(message.content, state.settings.canonicalizationPolicy),
   }));
-  const querySignals = composeQuerySignals(canonicalSnapshot);
-  const query = querySignals.find((signal) => signal.kind === "focus")?.text
-    ?? querySignals.find((signal) => signal.kind === "scene")?.text
-    ?? "continue";
+  // Exclusion belongs to the server. Send IDs, never a precombined source query
+  // that the server could no longer separate into allowed/excluded messages.
+  const querySources = canonicalSnapshot.filter(message => !message.disabled && message.role !== "system").slice(-512);
+  const querySignals: SearchQuerySignal[] = [{ kind: "focus", text: "continue", weight: 1, sourceMessageIds: querySources.map(message => message.id) }];
+  const query = "continue";
+  const querySourceHash = await sha256(JSON.stringify(querySources.map(message => [message.id, message.role, message.content])));
   const context: CurrentContext = {
     chatId,
     chatTitle,
@@ -575,6 +518,7 @@ export async function readCurrentContext(
     lineageHint,
     staticProjection,
     query,
+    querySourceHash,
     querySignals,
     serverInstanceId: state.settings.serverInstances[state.settings.serverUrl.replace(/\/$/, "")],
     backfillApproved: scopeKey ? state.settings.backfillApproved[scopeKey] === true : false,

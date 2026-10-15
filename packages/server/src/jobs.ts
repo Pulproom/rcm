@@ -683,13 +683,20 @@ export function enqueueExtractionJobs(
   }
   if (pending.length === 0) return 0;
 
-  const units = extractionUnits(pending, includeUserMessages);
+  const appliedEnd = !force && !sourceMessageIds ? (db.prepare(`SELECT MAX(m.ordinal) ordinal FROM extraction_batches b,
+    json_each(b.source_message_ids_json) s JOIN messages m ON m.chat_id=b.chat_id AND m.message_id=s.value
+    WHERE b.chat_id=? AND b.generation_id='active' AND b.status='applied'`).get(chatId) as {ordinal:number|null}).ordinal ?? -1 : -1;
+  // Late un-exclusions inside processed history are complete work in their own
+  // right. Flush that small batch without mixing it into the accumulating tail.
+  const historicalUnits = extractionUnits(pending.filter(message => message.ordinal <= appliedEnd), includeUserMessages);
+  const units = extractionUnits(pending.filter(message => message.ordinal > appliedEnd), includeUserMessages);
   const targetTurns = Math.min(50, Math.max(1, Math.round(extractionGroupTurns)));
   const completeUnitCount = force ? units.length : Math.floor(units.length / targetTurns) * targetTurns;
   // Reserve room for instructions, JSON wrapping and selected references. The
   // provider-ready prompt receives a second exact full-envelope guard.
   const maxSourceTokens = Math.max(512, Math.floor(configuredAuxiliaryInputBudget(db) * .7));
-  let groups = adaptiveExtractionGroups(units.slice(0, completeUnitCount), targetTurns, maxSourceTokens);
+  let groups = [...adaptiveExtractionGroups(historicalUnits, targetTurns, maxSourceTokens),
+    ...adaptiveExtractionGroups(units.slice(0, completeUnitCount), targetTurns, maxSourceTokens)];
   const inputBudget = configuredAuxiliaryInputBudget(db);
   const refined: PendingMessage[][] = [];
   const pendingGroups = [...groups];

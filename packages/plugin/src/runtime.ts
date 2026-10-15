@@ -458,7 +458,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         }
         const selectedMemoryBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
         const totalMemoryBudget = selectedMemoryBudget;
-        const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}`);
+        const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}`);
         const referenceTurnKey = crypto.randomUUID();
         state.memoryReferenceSnapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
         const referenceTurnChanged = state.mcpTurnKey !== referenceTurnKey;

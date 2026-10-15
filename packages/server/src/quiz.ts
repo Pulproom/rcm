@@ -10,12 +10,13 @@ export interface QuizSceneRow {
   story_time: string | null; locations_json: string; participants_json: string;
   landmark: number; capsule_parent_id: string | null; created_revision: number; source_ordinal: number | null;
   sourceOnly?: boolean;
+  sourceMessageIds?: string[];
   context?: string;
   sourceText?: string;
   created_at?: number;
 }
 export interface QuizMaterial {
-  scenes: Array<{ ref: string; memoryId: string; rich: boolean; text: string; excerpt: string; questions: string[]; limit?: number }>;
+  scenes: Array<{ ref: string; memoryId: string; rich: boolean; text: string; excerpt: string; questions: string[]; limit?: number; sourceMessageIds?: string[] }>;
   sceneCount: number;
   targetCount?: number;
 }
@@ -102,6 +103,7 @@ function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows
     .all(chatId, quizSourceBoundary(db, chatId)) as Array<{message_id:string;role:string;ordinal:number;content:string|null;updated_at:number;memory_excluded:number}>;
   const chunks: QuizSceneRow[] = [];
   let previousExchange = "";
+  let previousExchangeIds: string[] = [];
   for (let index = 1; index < rows.length; index++) {
     const reply = rows[index]!, user = rows[index - 1]!;
     if (reply.memory_excluded || user.memory_excluded || reply.role !== "assistant" || user.role !== "user" || reply.content === null || user.content === null
@@ -113,8 +115,10 @@ function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows
     chunks.push({ id: SOURCE_REF + reply.message_id, memory_key: SOURCE_REF + reply.message_id, type: "source",
       title: "Earlier exchange", content: "User:\n" + user.content + "\nAssistant:\n" + reply.content,
       context, sourceText: "User:\n" + takeCharacters(user.content, 3000) + "\nAssistant:\n" + takeCharacters(reply.content, 3000), sourceOnly: true, story_time: null, locations_json: "[]", participants_json: "[]", landmark: 0,
+      sourceMessageIds: [...previousExchangeIds, user.message_id, reply.message_id],
       capsule_parent_id: null, created_revision: 0, created_at: reply.updated_at, source_ordinal: reply.ordinal });
     previousExchange = "Preceding exchange — User:\n" + takeCharacters(user.content, 600) + "\nAssistant:\n" + takeCharacters(reply.content, 600);
+    previousExchangeIds = [user.message_id, reply.message_id];
   }
   // Keep complete source units available for validation after switching to memories.
   return [...scenes, ...chunks];
@@ -391,7 +395,7 @@ export function selectQuizMaterial(db: RcmDatabase, chatId: string, random: () =
     const row = unit.row, ref = `s${index + 1}`;
     const questions = (db.prepare(`SELECT question FROM quiz_items WHERE chat_id=? AND memory_id=? AND (retired_at IS NULL OR answered_at IS NOT NULL)
       ORDER BY created_at DESC,rowid DESC LIMIT 20`).all(chatId, row.id) as Array<{question:string}>).map(item => item.question);
-    if (row.sourceOnly) return { ref, memoryId: row.id, rich: true, limit, questions,
+    if (row.sourceOnly) return { ref, memoryId: row.id, rich: true, limit, questions, sourceMessageIds: row.sourceMessageIds,
       text: `[${ref}] Earlier exchange (reader sees no scene label; quiz subject: Source excerpt only; maximum ${limit} questions)
 Context only, not a quiz subject:
 ${takeCharacters(row.context ?? "No preceding exchange available.", 1600)}
@@ -401,7 +405,7 @@ Quiz subject: the following user input and assistant reply only.`,
     const header = takeCharacters(`[${ref}] ${row.title} (reader sees: ${label || "no date label"}; maximum ${limit} questions) — Place: ${(JSON.parse(row.locations_json) as string[]).join(", ")} · Participants: ${(JSON.parse(row.participants_json) as string[]).join(", ")}`, 360);
     const plain = takeCharacters(header + "\n" + row.content, PLAIN_CAP);
     const rich = index < QUIZ_MIX.hard;
-    return { ref, memoryId: row.id, rich, limit, questions, text: rich ? richText(db, chatId, row.id, plain) : plain,
+    return { ref, memoryId: row.id, rich, limit, questions, sourceMessageIds: quizMemorySourceIds(db, chatId, row.id), text: rich ? richText(db, chatId, row.id, plain) : plain,
       excerpt: sourceExcerpt(db, chatId, row.id, random) };
   });
   return { scenes, sceneCount: rows.length, targetCount: slots };
@@ -411,11 +415,20 @@ function takeCharacters(text: string, length: number): string {
   return Array.from(text).slice(0, length).join("");
 }
 
+function quizMemorySourceIds(db: RcmDatabase, chatId: string, memoryId: string): string[] {
+  return (db.prepare(`SELECT message_id id FROM evidence_spans WHERE chat_id=? AND memory_id=?
+    UNION SELECT json_extract(e.value,'$.messageId') FROM memories m,json_each(m.evidence_json) e WHERE m.chat_id=? AND m.id=?
+    UNION SELECT json_extract(e.value,'$.messageId') FROM memory_details d,json_each(d.evidence_json) e WHERE d.chat_id=? AND d.memory_id=? AND d.active=1
+    UNION SELECT message_id FROM memory_dialogues WHERE chat_id=? AND memory_id=?
+    UNION SELECT json_extract(e.value,'$.messageId') FROM memory_dialogues d,json_each(d.evidence_json) e WHERE d.chat_id=? AND d.memory_id=?`)
+    .all(...Array.from({length:5},()=>[chatId,memoryId]).flat()) as Array<{id:string|null}>).flatMap(row=>row.id?[row.id]:[]);
+}
+
 function sourceExcerpt(db: RcmDatabase, chatId: string, memoryId: string, random: () => number, cap = EXCERPT_CAP): string {
   const messages = db.prepare(`SELECT DISTINCT msg.message_id,msg.ordinal,msg.content FROM evidence_spans e
     JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id
     WHERE e.chat_id=? AND e.memory_id=? AND msg.content IS NOT NULL
-      AND msg.lifecycle IN ('committed','client_pruned') AND msg.host_visibility IN ('active','all_before')
+      AND msg.memory_excluded=0 AND msg.lifecycle IN ('committed','client_pruned') AND msg.host_visibility IN ('active','all_before')
     ORDER BY msg.ordinal`).all(chatId, memoryId) as Array<{ content: string }>;
   const source = Array.from(messages.map(row => row.content).join("\n\n"));
   if (source.length <= cap) return source.join("");
@@ -501,11 +514,12 @@ export function buildQuizJob(db: RcmDatabase, row: { id: string; chatId: string;
     limits: Object.fromEntries(material.scenes.map(scene => [scene.ref, scene.limit ?? 2])),
     targetCount: material.targetCount, fingerprints: Object.fromEntries(material.scenes.map(scene => [scene.ref, sceneFingerprint(current.get(scene.memoryId)!)])) };
   const stored = db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(row.id) as { payload_json: string };
-  db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(stored.payload_json), ...quiz, sourceTurns: sourceProgress(db, row.chatId).turns }), row.id);
+  const sourceMessageIds = [...new Set(material.scenes.flatMap(scene => scene.sourceMessageIds ?? []))];
+  db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({ ...JSON.parse(stored.payload_json), ...quiz, sourceMessageIds, sourceTurns: sourceProgress(db, row.chatId).turns }), row.id);
   const prompts = buildQuizPrompt(material);
   return { id: row.id, chatId: row.chatId, profile: row.profile, memoryLanguage: row.memoryLanguage,
     attempt: row.attempt, kind: "quiz", ...prompts, prompt: prompts.systemPrompt + "\n\n" + prompts.userPrompt,
-    sourceMessageIds: [], sourceTurnCount: 0, quiz };
+    sourceMessageIds, sourceTurnCount: 0, quiz };
 }
 
 export function completeQuizJob(db: RcmDatabase, jobId: string, workerId: string, result: unknown, random: () => number = Math.random): { chatId: string; accepted: number; warnings: string[] } {
