@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
 
 export type RcmDatabase = Database.Database;
+export const DATABASE_SCHEMA_VERSION = 50 as const;
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -876,15 +877,19 @@ CREATE TABLE IF NOT EXISTS source_passages (
 );
 CREATE INDEX IF NOT EXISTS idx_source_passages_message ON source_passages(chat_id,message_id,active);
 CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(chat_id UNINDEXED,message_id UNINDEXED,body);
+-- The source index shares the owning message rowid; edits/deletes never scan FTS metadata.
 CREATE TRIGGER IF NOT EXISTS source_fts_insert AFTER INSERT ON messages WHEN new.memory_excluded=0 BEGIN
-  INSERT INTO source_fts(chat_id,message_id,body) VALUES(new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,''));
+  INSERT INTO source_fts(rowid,chat_id,message_id,body) VALUES(new.rowid,new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,''));
 END;
-CREATE TRIGGER IF NOT EXISTS source_fts_update AFTER UPDATE OF canonical_content,content,memory_excluded ON messages BEGIN
-  DELETE FROM source_fts WHERE chat_id=old.chat_id AND message_id=old.message_id;
-  INSERT INTO source_fts(chat_id,message_id,body) SELECT new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,'') WHERE new.memory_excluded=0;
+CREATE TRIGGER IF NOT EXISTS source_fts_update AFTER UPDATE OF canonical_content,content,memory_excluded,chat_id,message_id ON messages
+WHEN old.memory_excluded IS NOT new.memory_excluded OR (new.memory_excluded=0 AND (
+  COALESCE(old.canonical_content,old.content,'') IS NOT COALESCE(new.canonical_content,new.content,'')
+  OR old.chat_id IS NOT new.chat_id OR old.message_id IS NOT new.message_id)) BEGIN
+  DELETE FROM source_fts WHERE rowid=old.rowid;
+  INSERT INTO source_fts(rowid,chat_id,message_id,body) SELECT new.rowid,new.chat_id,new.message_id,COALESCE(new.canonical_content,new.content,'') WHERE new.memory_excluded=0;
 END;
 CREATE TRIGGER IF NOT EXISTS source_fts_delete AFTER DELETE ON messages BEGIN
-  DELETE FROM source_fts WHERE chat_id=old.chat_id AND message_id=old.message_id;
+  DELETE FROM source_fts WHERE rowid=old.rowid;
 END;
 
 CREATE TABLE IF NOT EXISTS translation_cache (
@@ -970,7 +975,7 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (![46, 47, 48, 49].includes(version)) {
+    if (![46, 47, 48, 49, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
@@ -980,9 +985,20 @@ export function openDatabase(path: string): DatabaseHandle {
       db.exec("ALTER TABLE messages ADD COLUMN memory_excluded INTEGER NOT NULL DEFAULT 0 CHECK(memory_excluded IN (0,1))");
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update");
     }
+    if (hasSchemaLedger && version < DATABASE_SCHEMA_VERSION) {
+      db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update; DROP TRIGGER IF EXISTS source_fts_delete");
+    }
     db.exec(schema);
+    if (hasSchemaLedger && version < DATABASE_SCHEMA_VERSION) {
+      // Older FTS rowids were independent and changed on every source edit.
+      // Rebuild this derived index once, atomically with the trigger upgrade.
+      db.exec(`DELETE FROM source_fts;
+        INSERT INTO source_fts(rowid,chat_id,message_id,body)
+        SELECT rowid,chat_id,message_id,COALESCE(canonical_content,content,'') FROM messages WHERE memory_excluded=0`);
+    }
     if (hasSchemaLedger && version < 48) db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
-    db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(49,?)").run(Date.now());
+    if (hasSchemaLedger && version < 49) db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(49,?)").run(Date.now());
+    db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)").run(DATABASE_SCHEMA_VERSION, Date.now());
   })();
   if (!hasSchemaLedger) {
     db.prepare("INSERT OR IGNORE INTO server_meta(key,value) VALUES('instance_id',?)").run(randomUUID());

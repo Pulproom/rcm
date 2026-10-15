@@ -56,8 +56,11 @@ export function resolveAssertionHolders(db: RcmDatabase, chatId: string, row: an
  * Historical supersession is distinct from source deletion and branch rollback. */
 export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcomeCapture, perspective = ""): StateEvidence[] {
   const result: StateEvidence[] = [];
-  const rejected = (kind: string, id: string, reason: string): void => trace?.record(perspective, { id: `${kind}:${id}`, kind }, "not_collected", { reason });
-  const sources = new Map((db.prepare("SELECT message_id,canonical_hash,content_hash,canonical_content,ordinal,lifecycle,host_visibility FROM messages WHERE chat_id=? AND memory_excluded=0").all(chatId) as any[]).map(row => [row.message_id, row]));
+  const pending: Array<() => void> = [];
+  const sourceIds = new Set<string>();
+  const sources = new Map<string, any>();
+  const recordRejection = (kind: string, id: string, reason: string): void => trace?.record(perspective, { id: `${kind}:${id}`, kind }, "not_collected", { reason });
+  const rejected = (kind: string, id: string, reason: string): void => { pending.push(() => recordRejection(kind, id, reason)); };
   const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
   const add = (kind: string, row: any, text: string, holders: string[], subjects: string[], current: boolean, evidence = parse(row.evidence_json), stateKind?: StateKind, automatic?: StateEvidence["automatic"]) => {
     const corrected=row.user_edit_ordinal != null || row.userEdited===true;
@@ -65,27 +68,30 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
     if (!corrected && row.source_memory_id && !memories.get(row.source_memory_id)?.active) { rejected(kind, row.id, "inactive_memory"); return; }
     const citationScope = evidence.length ? "atom" : "parent_memory";
     if (!evidence.length && row.source_memory_id) evidence = parse(memories.get(row.source_memory_id)?.evidence_json);
-    const validCitation=(entry:any):boolean=>{
-      if(!entry.messageId) return true;
-      const source=sources.get(entry.messageId);
-      return !!source && ["committed","client_pruned"].includes(source.lifecycle) && ["active","all_before"].includes(source.host_visibility)
-        && (!entry.canonicalHash || entry.canonicalHash===source.canonical_hash) && (!entry.quote || source.canonical_content?.includes(entry.quote));
-    };
-    if(corrected) evidence=evidence.filter(validCitation);
-    else if(evidence.some(entry=>!validCitation(entry))) { rejected(kind, row.id, "invalid_source_visibility_hash_or_quote"); return; }
-    const ids = evidence.flatMap((entry: any) => typeof entry.messageId === "string" ? [entry.messageId] : []);
-    const item = { id: `${kind}:${row.id}`, kind, text, holders: [...new Set(holders.filter(holder => holder !== NARRATOR_ARCHIVE_HOLDER))],
-      ...(stateKind ? { stateKind } : {}),
-      ...(kind === "relationship" ? {relationship: {from:row.from, to:row.to, stale:row.stale}} : {}),
-      subjects: [...new Set(subjects.filter(Boolean))], current, memoryId: row.source_memory_id || undefined, sourceIds: [...new Set<string>(ids)] };
-    const fingerprint = createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sources.get(id))])).digest("hex");
-    const accessKind=kind==="world_fact" || kind==="basic_relation"?"assertion":kind==="promise"?"promise":kind==="intimacy"?"physical_milestone":undefined;
-    result.push({ ...item, fingerprint, citations: evidence, citationScope, automatic,
-      updatedRevision: row.updated_revision ?? row.updatedRevision ?? row.valid_from_revision ?? row.created_revision,
-      updatedOrdinal: Math.max(row.user_edit_ordinal ?? row.userEditOrdinal ?? -1, row.source_end_ordinal ?? row.valid_from_ordinal ?? -1,
-        ...ids.map(id => sources.get(id)?.ordinal ?? -1)),
-      ...(kind === "promise" ? { promiseStatus: row.status, due: row.scheduled_for ?? undefined } : {}),
-      ...(accessKind?{knownByLabels:knownByLabels(db,chatId,accessKind,String(row.id),item.holders)}:{}) });
+    for (const entry of evidence) if (typeof entry.messageId === "string") sourceIds.add(entry.messageId);
+    pending.push(() => {
+      const validCitation=(entry:any):boolean=>{
+        if(!entry.messageId) return true;
+        const source=sources.get(entry.messageId);
+        return !!source && ["committed","client_pruned"].includes(source.lifecycle) && ["active","all_before"].includes(source.host_visibility)
+          && (!entry.canonicalHash || entry.canonicalHash===source.canonical_hash) && (!entry.quote || source.canonical_content?.includes(entry.quote));
+      };
+      if(corrected) evidence=evidence.filter(validCitation);
+      else if(evidence.some(entry=>!validCitation(entry))) { recordRejection(kind, row.id, "invalid_source_visibility_hash_or_quote"); return; }
+      const ids = evidence.flatMap((entry: any) => typeof entry.messageId === "string" ? [entry.messageId] : []);
+      const item = { id: `${kind}:${row.id}`, kind, text, holders: [...new Set(holders.filter(holder => holder !== NARRATOR_ARCHIVE_HOLDER))],
+        ...(stateKind ? { stateKind } : {}),
+        ...(kind === "relationship" ? {relationship: {from:row.from, to:row.to, stale:row.stale}} : {}),
+        subjects: [...new Set(subjects.filter(Boolean))], current, memoryId: row.source_memory_id || undefined, sourceIds: [...new Set<string>(ids)] };
+      const fingerprint = createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sources.get(id))])).digest("hex");
+      const accessKind=kind==="world_fact" || kind==="basic_relation"?"assertion":kind==="promise"?"promise":kind==="intimacy"?"physical_milestone":undefined;
+      result.push({ ...item, fingerprint, citations: evidence, citationScope, automatic,
+        updatedRevision: row.updated_revision ?? row.updatedRevision ?? row.valid_from_revision ?? row.created_revision,
+        updatedOrdinal: Math.max(row.user_edit_ordinal ?? row.userEditOrdinal ?? -1, row.source_end_ordinal ?? row.valid_from_ordinal ?? -1,
+          ...ids.map(id => sources.get(id)?.ordinal ?? -1)),
+        ...(kind === "promise" ? { promiseStatus: row.status, due: row.scheduled_for ?? undefined } : {}),
+        ...(accessKind?{knownByLabels:knownByLabels(db,chatId,accessKind,String(row.id),item.holders)}:{}) });
+    });
   };
   for (const row of db.prepare("SELECT * FROM assertions WHERE chat_id=? ORDER BY valid_from_revision DESC,id").iterate(chatId) as Iterable<any>) {
     const relation = parseSocialRelation(row.social_relation_json);
@@ -155,6 +161,13 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       add("landmark",{...row,id:`${row.id}:${index}`,source_memory_id:row.id},`${landmark.label || String(landmark.kind).replaceAll("_"," ")}${row.story_time ? ` — ${row.story_time}` : ""}`,[],parse(row.participants_json),false);
     }
   }
+  // Fetch only cited source rows, once, after parent-memory citation fallback.
+  // Keep the projection/order identical: source rows also enter the fingerprint.
+  if (sourceIds.size) for (const row of db.prepare(`SELECT message_id,canonical_hash,content_hash,canonical_content,ordinal,lifecycle,host_visibility
+    FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) AND memory_excluded=0`).all(chatId, JSON.stringify([...sourceIds])) as any[]) {
+    sources.set(row.message_id, row);
+  }
+  for (const collect of pending) collect();
   return result;
 }
 const stateKindLabels: Record<string, string> = {world_fact:"World fact",basic_relation:"Basic relation",belief:"Belief",promise:"Promise",promise_history:"Earlier promise",recognition:"Recognition",recognition_history:"Earlier recognition",relationship:"Relationship",relationship_history:"Relationship change",relationship_axis:"Recorded feeling",intimacy:"Physical intimacy",landmark:"Milestone"};

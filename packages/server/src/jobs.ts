@@ -699,22 +699,21 @@ export function enqueueExtractionJobs(
   // Reserve room for instructions, JSON wrapping and selected references. The
   // provider-ready prompt receives a second exact full-envelope guard.
   const maxSourceTokens = Math.max(512, Math.floor(configuredAuxiliaryInputBudget(db) * .7));
-  let groups = [...adaptiveExtractionGroups(historicalUnits, targetTurns, maxSourceTokens),
+  const groups = [...adaptiveExtractionGroups(historicalUnits, targetTurns, maxSourceTokens),
     ...adaptiveExtractionGroups(units.slice(0, completeUnitCount), targetTurns, maxSourceTokens)];
   const inputBudget = configuredAuxiliaryInputBudget(db);
-  const refined: PendingMessage[][] = [];
+  const refined: Array<{ messages: PendingMessage[]; promptTokens: number }> = [];
   const pendingGroups = [...groups];
   while (pendingGroups.length) {
     const group = pendingGroups.shift()!;
     const turns = extractionUnits(group, includeUserMessages);
     const planned = buildPrompt(db, chatId, profile, memoryLanguage, group);
     const estimated = estimateTokens(JSON.stringify([{ role: "system", content: planned.systemPrompt }, { role: "user", content: planned.userPrompt }]));
-    if (estimated <= inputBudget || turns.length <= 1) { refined.push(group); continue; }
+    if (estimated <= inputBudget || turns.length <= 1) { refined.push({ messages: group, promptTokens: estimated }); continue; }
     const middle = Math.ceil(turns.length / 2);
     pendingGroups.unshift(turns.slice(0, middle).flat(), turns.slice(middle).flat());
   }
-  groups = refined;
-  if (groups.length === 0) return 0;
+  if (refined.length === 0) return 0;
 
   const insert = db.prepare(`
     INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
@@ -735,15 +734,13 @@ export function enqueueExtractionJobs(
   const backfillRunId = sourceMode === "ledger" && force ? (requestedBackfillRunId ?? randomUUID()) : undefined;
   return db.transaction(() => {
     let count = 0;
-    for (const [groupIndex, group] of groups.entries()) {
+    for (const [groupIndex, { messages: group, promptTokens }] of refined.entries()) {
       const id = randomUUID();
       const batchId = randomUUID();
       const messageIds = group.map((message) => message.message_id);
       const fingerprint = sourceFingerprint(db, chatId, messageIds);
       const sourceTokens = group.reduce((sum, message) => sum + estimateTokens(modelContent(message)), 0);
-      const promptPlan = buildPrompt(db, chatId, profile, memoryLanguage, group);
-      const completedPromptTokens = estimateTokens(JSON.stringify([{ role: "system", content: promptPlan.systemPrompt }, { role: "user", content: promptPlan.userPrompt }]));
-      const oversizedSingleTurn = (sourceTokens > maxSourceTokens || completedPromptTokens > inputBudget) && extractionUnits(group, includeUserMessages).length === 1;
+      const oversizedSingleTurn = (sourceTokens > maxSourceTokens || promptTokens > inputBudget) && extractionUnits(group, includeUserMessages).length === 1;
       const episodeId = oversizedSingleTurn ? randomUUID() : undefined;
       if (episodeId) {
         const revision = (db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number }).revision;
@@ -756,7 +753,7 @@ export function enqueueExtractionJobs(
       insert.run(id, chatId, oversizedSingleTurn ? "episode" : "extract", JSON.stringify({
         sourceMessageIds: messageIds, sourceFingerprint: fingerprint, includeUserMessages, trigger: 'extraction',
         extractionGroupTurns: targetTurns, turnCount: extractionUnits(group, includeUserMessages).length, sourceTokens, episodeId, memoryLanguage, postExtractionReview: review,
-        batchId, ...(backfillRunId ? { backfillRunId, operationStage: "extraction", operationStageOrdinal: groupIndex + 1, operationStageTotal: groups.length } : {}),
+        batchId, ...(backfillRunId ? { backfillRunId, operationStage: "extraction", operationStageOrdinal: groupIndex + 1, operationStageTotal: refined.length } : {}),
       }), now(), now());
       insertBatch.run(batchId, chatId, id, oversizedSingleTurn ? "episode" : "extract", JSON.stringify(messageIds), JSON.stringify(fingerprint), group[0]?.ordinal ?? 0, group.at(-1)?.ordinal ?? 0, now(), now());
       const timestamp = now();

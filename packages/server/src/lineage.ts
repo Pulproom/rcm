@@ -308,6 +308,7 @@ function cloneLineage(
     const childProjection = new Map(sourcePairs.map(pair => [pair.parent.message_id, pair.child]));
     const parentMessages = db.prepare("SELECT * FROM messages WHERE chat_id=? AND ordinal<=? AND lifecycle IN ('committed','client_pruned','pending') ORDER BY ordinal").all(parent, fork) as any[];
     const addMessage = db.prepare(`INSERT OR IGNORE INTO messages(chat_id,message_id,role,ordinal,content,content_hash,canonical_content,canonical_hash,lifecycle,visible,event_time,generation_id,source_kind,source_record_id,display_content_hash,display_comparison_hash,host_visibility,extraction_state,completed_turn_seq,memory_excluded,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const updateMessage = db.prepare("UPDATE messages SET role=?,ordinal=?,content=?,content_hash=?,canonical_content=?,canonical_hash=?,lifecycle=?,visible=?,event_time=?,generation_id=?,source_kind=?,source_record_id=?,display_content_hash=?,display_comparison_hash=?,host_visibility=?,extraction_state=?,completed_turn_seq=?,memory_excluded=?,updated_at=? WHERE chat_id=? AND message_id=?");
     for (const row of parentMessages) {
       const visible = childProjection.get(row.message_id);
       if (!visible && row.lifecycle === "pending") continue;
@@ -321,8 +322,10 @@ function cloneLineage(
         : ["done", "encapsulated", "skipped_policy", "excluded_episode", "cancelled"].includes(row.extraction_state)
           ? row.extraction_state
           : "pending";
-      addMessage.run(child, row.message_id, row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, memoryExcluded, now);
-      db.prepare("UPDATE messages SET role=?,ordinal=?,content=?,content_hash=?,canonical_content=?,canonical_hash=?,lifecycle=?,visible=?,event_time=?,generation_id=?,source_kind=?,source_record_id=?,display_content_hash=?,display_comparison_hash=?,host_visibility=?,extraction_state=?,completed_turn_seq=?,memory_excluded=?,updated_at=? WHERE chat_id=? AND message_id=?").run(
+      const inserted = addMessage.run(child, row.message_id, row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, memoryExcluded, now).changes;
+      // A raw-only target shell may already own this source. Fresh inserts
+      // already contain the complete inherited row and need no second write.
+      if (!inserted) updateMessage.run(
         row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, memoryExcluded, now, child, row.message_id,
       );
       if (extractionState === "pending") pendingReextractionIds.add(row.message_id);
