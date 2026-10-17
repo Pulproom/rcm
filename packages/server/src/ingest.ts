@@ -1,4 +1,5 @@
-import { applySeedResolutions } from "./story-seeds.js";
+import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
+import { applySeedResolutions, recordSeedResolutionDrops } from "./story-seeds.js";
 import { activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope } from "./social-relations.js";
 import { storeSourcePassages } from "./source-evidence.js";
 import { randomUUID } from "node:crypto";
@@ -857,10 +858,13 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       if (!existingPromise || promise.access !== undefined) replaceAccess("promise", promiseId,
         promise.access !== undefined ? promise.access : [promise.promisor, promise.promisee].map((holder) => ({ holder, basis: "experienced", evidence: promise.evidence ?? [], confidence: 1 })));
       const sourceOrdinal = evidenceOrdinal(db,chatId,promise.evidence ?? []);
+      recordPromiseRecency(db, chatId, promiseId, existingPromise?.status, promise.status, "automatic");
+      const eventId = randomUUID();
       const effective=db.prepare("SELECT * FROM promises WHERE id=?").get(promiseId) as Record<string,any>;
       db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_batch_id,source_ordinal,created_revision,created_at,evidence_json,user_authored) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        randomUUID(), chatId, promiseId, effective.promise_key, effective.promisor, effective.promisee, effective.content, effective.status, effective.scheduled_for, effective.status_reason, effective.source_memory_id, effective.source_batch_id, sourceOrdinal, revision, timestamp, transitionEvidenceJson(db,chatId,promise.evidence ?? []), Number(userInitiated),
+        eventId, chatId, promiseId, effective.promise_key, effective.promisor, effective.promisee, effective.content, effective.status, effective.scheduled_for, effective.status_reason, effective.source_memory_id, effective.source_batch_id, sourceOrdinal, revision, timestamp, transitionEvidenceJson(db,chatId,promise.evidence ?? []), Number(userInitiated),
       );
+      snapshotPromiseRecency(db, eventId, promiseId);
     }
 
     if (additionsOnly) for (const item of result.socialKnowledge ?? []) {
@@ -895,7 +899,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const memoryId of new Set(memoryByKey.values())) refreshMemoryFts(db, memoryId);
-    if (!additionsOnly) applySeedResolutions(db, chatId, result.seedResolutions);
+    if (!additionsOnly) recordSeedResolutionDrops(db,sourceJobId,applySeedResolutions(db, chatId, result.seedResolutions));
     writeDialogueAccessIdentities(db, chatId, dialogueIdentities);
     pruneDetailAccessEdits(db, chatId);
     invalidateStory(db,chatId,revokedStorySupports);

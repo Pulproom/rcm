@@ -40,7 +40,7 @@ export function initialCalibrationView(db: RcmDatabase, chatId: string): Initial
 }
 
 export function initialCalibrationLedger(db: RcmDatabase, chatId: string): InitialCalibrationView & { entities: Array<Record<string, unknown>>; relationships: Array<Record<string, unknown>>; socialKnowledge: Array<Record<string, unknown>> } {
-  const entities = (db.prepare(`SELECT id,entity_key AS key,name AS internalName,display_name AS displayName,type,origin,
+  const entities = (db.prepare(`SELECT id,entity_key AS key,name AS internalName,display_name AS displayName,type,color,origin,
     setup_prominence AS prominence,source_json AS evidence,user_managed AS userManaged
     FROM entities WHERE chat_id=? AND (origin IN ('setup','manual') OR user_managed=1)
     ORDER BY CASE setup_prominence WHEN 'primary' THEN 0 WHEN 'supporting' THEN 1 ELSE 2 END,display_name`).all(chatId) as Array<Record<string, any>>)

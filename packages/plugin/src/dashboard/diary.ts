@@ -258,6 +258,7 @@ export function buildAnniversaries(data: DashboardData, pair: PairSummary, hidde
       place: Array.isArray(memory?.locations) ? String(memory.locations[0] ?? "").trim() || null : null,
       alwaysInject: landmarkAlwaysInjected(landmark),
       userDefined: landmark.kind === "anniversary_basis",
+      pair: landmark.pair!,
       sourceOrdinal: ordinalOf(memory),
       memoryIndex,
       explicitlyInjected: landmark.alwaysInject === true,
@@ -275,32 +276,69 @@ export function buildAnniversaries(data: DashboardData, pair: PairSummary, hidde
     }
     return left.memoryIndex - right.memoryIndex || left.index - right.index;
   };
-  const earliestConfession = candidates.filter((item) => item.kind === "confession").sort(compareOldest)[0]?.hideKey;
-  return candidates
+  const sameLandmarkDate = (left: typeof candidates[number], right: typeof candidates[number]): boolean => {
+    if (left.storyTime === right.storyTime) return true;
+    if (!left.storyTime || !right.storyTime) return false;
+    return compareParsedStoryTimes(parseStoryTime(left.storyTime), parseStoryTime(right.storyTime)) === 0;
+  };
+  const merged = candidates.filter((item) => {
+    if (item.kind !== "anniversary_basis") return true;
+    const firstMet = candidates.find((candidate) => candidate.kind === "first_met"
+      && candidate.memoryId === item.memoryId
+      && candidate.pair.map(normalizeName).sort().join("|") === item.pair.map(normalizeName).sort().join("|")
+      && sameLandmarkDate(candidate, item));
+    return !firstMet;
+  }).map((item) => {
+    if (item.kind !== "first_met") return item;
+    const basis = candidates.find((candidate) => candidate.kind === "anniversary_basis"
+      && candidate.memoryId === item.memoryId
+      && candidate.pair.map(normalizeName).sort().join("|") === item.pair.map(normalizeName).sort().join("|")
+      && sameLandmarkDate(candidate, item));
+    if (!basis || !sameLandmarkDate(item, basis)) return item;
+    return { ...item, hideKey: basis.hideKey, index: basis.index, label: basis.label, alwaysInject: basis.alwaysInject, userDefined: true };
+  });
+  const earliestConfession = merged.filter((item) => item.kind === "confession").sort(compareOldest)[0]?.hideKey;
+  return merged
     .filter((item) => !hiddenKeys.has(item.hideKey))
     .filter((item) => item.kind !== "confession" || item.hideKey === earliestConfession || item.explicitlyInjected)
     .sort(compareOldest)
-    .map(({ sourceOrdinal: _sourceOrdinal, memoryIndex: _memoryIndex, explicitlyInjected: _explicitlyInjected, ...item }) => item);
+    .map(({ sourceOrdinal: _sourceOrdinal, memoryIndex: _memoryIndex, explicitlyInjected: _explicitlyInjected, pair: _pair, ...item }) => item);
 }
 
 const numericDayOffset = (storyTime: string | null, firstMetStoryTime: string | null): number | null => {
   if (!storyTime || !firstMetStoryTime) return null;
   const start = parseStoryTime(firstMetStoryTime);
   const current = parseStoryTime(storyTime);
-  if (start.calendar !== "numeric" || current.calendar !== "numeric"
-    || start.year === undefined || start.month === undefined || start.day === undefined
-    || current.year === undefined || current.month === undefined || current.day === undefined) return null;
-  const startDay = Date.UTC(start.year, start.month - 1, start.day);
-  const currentDay = Date.UTC(current.year, current.month - 1, current.day);
-  return Math.floor((currentDay - startDay) / 86_400_000);
+  const partialDates = start.calendar === "partial" && current.calendar === "partial"
+    && start.month !== undefined && start.day !== undefined && current.month !== undefined && current.day !== undefined;
+  const numericDates = start.calendar === "numeric" && current.calendar === "numeric"
+    && start.year !== undefined && start.month !== undefined && start.day !== undefined
+    && current.year !== undefined && current.month !== undefined && current.day !== undefined;
+  if (!partialDates && !numericDates) return null;
+  const startDay = Date.UTC(partialDates ? 2000 : start.year!, start.month! - 1, start.day!);
+  const currentDay = Date.UTC(partialDates ? 2000 : current.year!, current.month! - 1, current.day!);
+  const offset = Math.floor((currentDay - startDay) / 86_400_000);
+  return offset >= 0 ? offset : null;
 };
 
 export function anniversaryDayOffset(anniversary: Anniversary, firstMetStoryTime: string | null): number | null {
+  if (anniversary.kind === "first_met") return 0;
   return numericDayOffset(anniversary.storyTime, firstMetStoryTime);
 }
 
+export function earliestFirstMetStoryTime(anniversaries: Anniversary[]): string | null {
+  let earliest: string | null = null;
+  for (const item of anniversaries) {
+    if (item.kind !== "first_met" || !item.storyTime) continue;
+    if (earliest === null) { earliest = item.storyTime; continue; }
+    const compared = compareParsedStoryTimes(parseStoryTime(item.storyTime), parseStoryTime(earliest));
+    if (compared !== null && compared < 0) earliest = item.storyTime;
+  }
+  return earliest;
+}
+
 export function daysSinceFirstMet(anniversaries: Anniversary[], currentStoryTime: string | null): number | null {
-  const firstMet = anniversaries.find((item) => item.kind === "first_met")?.storyTime;
+  const firstMet = earliestFirstMetStoryTime(anniversaries);
   if (!firstMet || !currentStoryTime) return null;
   const offset = numericDayOffset(currentStoryTime, firstMet);
   return offset !== null && offset >= 0 ? offset : null;

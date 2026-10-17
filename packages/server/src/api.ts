@@ -1,3 +1,5 @@
+import { EntityColorSchema } from "@rcm/shared";
+import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
 import { Api38ExtractionDraftResultSchema, ExtractionAuditSubmissionSchema } from "@rcm/shared";
 import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { isProviderAuthenticationError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES } from "@rcm/shared";
@@ -9,7 +11,7 @@ import { connectionFailureReason, type ConnectionFailureCode } from "@rcm/shared
 import { storySeedCounts } from "./story-seeds.js";
 import { z } from "zod";
 import { deleteLedgerRecord, rememberLedgerEditOrigin } from "./user-deletions.js";
-import { QuizAnswerRequestSchema, UserCorrectionEditSchema } from "@rcm/shared";
+import { QuizAnswerRequestSchema, UserCorrectionEditSchema, PromiseEditOptionsSchema, type PromiseEditOptions } from "@rcm/shared";
 import { committedEditOrdinal, correctionView } from "./user-corrections.js";
 import { answerQuiz, completeQuizJob, disableAllQuizzes, nextQuiz, quizStatus, regenerateQuizzes, resetQuizStats, setQuizEnabled } from "./quiz.js";
 import { TranslationLegacySettingsSchema } from "@rcm/shared";
@@ -78,7 +80,7 @@ import { BackupValidationError, exportCompleteArchive, exportChatArchive, restor
 import { deleteChats, listAdminChats, listSourceLedger, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
 import { recanonicalizeSourceLedger } from "./lifecycle.js";
 import { EmbeddingRequestError, type EmbeddingService } from "./embedding.js";
-import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failJob, leaseJob, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
+import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot } from "./lifecycle.js";
@@ -682,6 +684,8 @@ export function createApp(dependencies: Dependencies): Hono {
       ceilingDroppedState.add(selectedState.splice(index, 1)[0]!.item.id); packet = rebuildPacket();
     };
     while (estimateTokens(packet) > hardTokenCeiling) {
+      const supplemental = lastMatchingIndex(selectedState, row => !!row.promiseSlot);
+      if (supplemental >= 0) { dropState(supplemental); continue; }
       // 1. Peripheral memories yield before any current-state row.
       const peripheral = lastMatchingIndex(selectedItems, item => !protectedScene(item)
         && ["longterm", "association", "serendipity"].includes(selectedRoles.get(item.id) ?? ""));
@@ -729,7 +733,7 @@ export function createApp(dependencies: Dependencies): Hono {
     // Only genuinely unused capacity goes to remaining, non-scene state rows.
     let sharedBudgetUsed = Math.max(stateBudget, renderAutomaticState(selectedState).tokens);
     for (const row of stateCandidates) {
-      if (selectedState.includes(row) || ceilingDroppedState.has(row.item.id)) continue;
+      if (row.promiseSlot || selectedState.includes(row) || ceilingDroppedState.has(row.item.id)) continue;
       selectedState.push(row); const expanded = rebuildPacket();
       if (estimateTokens(expanded) <= hardTokenCeiling) {
         packet = expanded; sharedBudgetUsed = Math.max(sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
@@ -1826,6 +1830,10 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ items: retractSocialKnowledge(db, context.req.param("id"), holder, subject) });
     } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
   });
+  app.get("/v1/chats/:id/social-knowledge/backfill/preview", (context) => {
+    try { return context.json(previewSocialKnowledgeBackfill(db, context.req.param("id"))); }
+    catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+  });
   app.post("/v1/chats/:id/social-knowledge/backfill", async (context) => {
     try {
       const body = await context.req.json().catch(() => ({})) as { extractionReviewOverride?: unknown };
@@ -2489,6 +2497,16 @@ export function createApp(dependencies: Dependencies): Hono {
     return { items: listEntities(db, chatId).map((entity) => ({ ...entity, ...(prominence.get(entity.name.toLocaleLowerCase()) ?? { tier: "incidental", sceneCount: 0, durableLinks: 0, pinned: false }) })) };
   }
   app.get("/v1/chats/:id/entities", (context) => context.json(readDashboardEntities(context.req.param("id"))));
+  app.patch("/v1/chats/:id/entities/:entityId/color", async (context) => {
+    const body = z.object({ color: EntityColorSchema }).safeParse(await context.req.json());
+    if (!body.success) return context.json({ error: "색상은 #RRGGBB 형식 또는 null이어야 해요.", code: "INVALID_ENTITY_COLOR", path: "color" }, 400);
+    const color = body.data.color?.toLowerCase() ?? null;
+    const changed = db.prepare("UPDATE entities SET color=? WHERE id=? AND chat_id=?")
+      .run(color, context.req.param("entityId"), context.req.param("id")).changes;
+    if (!changed) return context.json({ error: "Entity not found" }, 404);
+    // Appearance never changes canonical revisions or schedules memory/model work.
+    return context.json({ ok: true, color });
+  });
   app.patch("/v1/chats/:id/entities/:entityId/prominence", async (context) => {
     const chatId = context.req.param("id");
     const entity = db.prepare("SELECT name FROM entities WHERE id=? AND chat_id=?").get(context.req.param("entityId"), chatId) as { name: string } | undefined;
@@ -2788,8 +2806,10 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/chats/:id/world-state", (context) => context.json(readDashboardWorld(context.req.param("id"), context.req.query())));
   app.post("/v1/chats/:id/world-state", async (context) => {
     const chatId = context.req.param("id");
-    const body = await context.req.json() as { kind?: string; subject?: string; predicate?: string; holder?: string; promisor?: string; promisee?: string; value?: string; stateKind?: string; confidence?: number; polarity?: string; status?: string; content?: string; scope?: string; scheduledFor?: string; statusReason?: string; sourceMessageId?: string; socialRelation?: unknown; knownBy?: string[]; knownByEveryone?: boolean; locked?: boolean };
+    const body = await context.req.json() as { kind?: string; subject?: string; predicate?: string; holder?: string; promisor?: string; promisee?: string; value?: string; stateKind?: string; confidence?: number; polarity?: string; status?: string; content?: string; scope?: string; scheduledFor?: string; statusReason?: string; sourceMessageId?: string; socialRelation?: unknown; knownBy?: string[]; knownByEveryone?: boolean; locked?: boolean } & PromiseEditOptions;
     if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
+    const promiseOptions = PromiseEditOptionsSchema.safeParse(body);
+    if (!promiseOptions.success) return context.json({ error: promiseOptions.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") }, 400);
     const parsedSocial = body.socialRelation == null ? undefined : SocialRelationSchema.safeParse(body.socialRelation);
     if (parsedSocial && !parsedSocial.success) return context.json({ error: "Invalid social relation" }, 400);
     if (body.stateKind !== undefined && !STATE_KIND_VALUES.includes(body.stateKind as typeof STATE_KIND_VALUES[number])) return context.json({ error: "unsupported state kind" }, 400);
@@ -2839,6 +2859,12 @@ export function createApp(dependencies: Dependencies): Hono {
         db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_ordinal,created_revision,created_at,user_authored) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,1)`).run(randomUUID(), chatId, id, key, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim(), status, body.scheduledFor?.trim() || null, body.statusReason?.trim() || null, ordinal, revision, Date.now());
       }
       if (kind === "assertion" && manualSocial) db.prepare("UPDATE assertions SET social_relation_json=? WHERE id=?").run(manualSocial, id);
+      if (kind === "promise") {
+        db.prepare("UPDATE promises SET pinned=? WHERE id=?").run(Number(body.pinned ?? false), id);
+        recordPromiseRecency(db, chatId, id, undefined, body.status ?? "open", body.recency ?? "already_past");
+        const event = db.prepare("SELECT id FROM promise_events WHERE promise_id=? ORDER BY created_revision DESC LIMIT 1").get(id) as { id: string };
+        snapshotPromiseRecency(db, event.id, id);
+      }
       db.prepare(`UPDATE ${kind === "assertion" ? "assertions" : kind === "belief" ? "beliefs" : "promises"} SET user_edit_ordinal=?,auto_locked=? WHERE id=? AND chat_id=?`)
         .run(committedEditOrdinal(db,chatId),Number(body.locked ?? false),id,chatId);
       db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
@@ -2849,8 +2875,10 @@ export function createApp(dependencies: Dependencies): Hono {
     const body = await context.req.json() as {
       kind?: string; id?: string; subject?: string; predicate?: string; holder?: string; promisor?: string; promisee?: string;
       value?: string; stateKind?: string; confidence?: number; polarity?: string; status?: string; content?: string; scheduledFor?: string; statusReason?: string; socialRelation?: unknown; knownBy?: string[]; knownByEveryone?: boolean; locked?: boolean;
-    };
+    } & PromiseEditOptions;
     const chatId = context.req.param("id");
+    const promiseOptions = PromiseEditOptionsSchema.safeParse(body);
+    if (!promiseOptions.success) return context.json({ error: promiseOptions.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") }, 400);
     const parsedSocial = body.socialRelation == null ? undefined : SocialRelationSchema.safeParse(body.socialRelation);
     if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
     if (parsedSocial && !parsedSocial.success) return context.json({ error: "Invalid social relation" }, 400);
@@ -2926,18 +2954,22 @@ export function createApp(dependencies: Dependencies): Hono {
         ).changes;
         if (changed) updatedItem = db.prepare("SELECT * FROM beliefs WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown>;
       } else if (body.kind === "promise") {
+        const previous = db.prepare("SELECT status FROM promises WHERE id=? AND chat_id=?").get(body.id, chatId) as { status: string } | undefined;
         rememberLedgerEditOrigin(db, chatId, "promise", body.id!);
-        changed = db.prepare(`UPDATE promises SET promisor=COALESCE(?,promisor),promisee=COALESCE(?,promisee),content=COALESCE(?,content),status=COALESCE(?,status),scheduled_for=COALESCE(?,scheduled_for),status_reason=COALESCE(?,status_reason),updated_revision=? WHERE id=? AND chat_id=?`).run(
-          body.promisor?.trim() ?? null, body.promisee?.trim() ?? null, body.content?.trim() ?? null, body.status ?? null, body.scheduledFor?.trim() ?? null, body.statusReason?.trim() ?? null, revision, body.id, chatId,
+        changed = db.prepare(`UPDATE promises SET promisor=COALESCE(?,promisor),promisee=COALESCE(?,promisee),content=COALESCE(?,content),status=COALESCE(?,status),scheduled_for=COALESCE(?,scheduled_for),status_reason=COALESCE(?,status_reason),pinned=COALESCE(?,pinned),updated_revision=? WHERE id=? AND chat_id=?`).run(
+          body.promisor?.trim() ?? null, body.promisee?.trim() ?? null, body.content?.trim() ?? null, body.status ?? null, body.scheduledFor?.trim() ?? null, body.statusReason?.trim() ?? null, body.pinned === undefined ? null : Number(body.pinned), revision, body.id, chatId,
         ).changes;
         if (changed) {
+          recordPromiseRecency(db, chatId, body.id!, previous?.status, body.status ?? previous!.status, body.recency ?? "already_past");
           updatedItem = db.prepare("SELECT * FROM promises WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown>;
           const sourceOrdinal = committedEditOrdinal(db,chatId);
+          const eventId = randomUUID();
           db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_ordinal,created_revision,created_at,user_authored)
             VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,1)`).run(
-            randomUUID(), chatId, body.id, updatedItem.promise_key, updatedItem.promisor, updatedItem.promisee,
+            eventId, chatId, body.id, updatedItem.promise_key, updatedItem.promisor, updatedItem.promisee,
             updatedItem.content, updatedItem.status, updatedItem.scheduled_for, updatedItem.status_reason, sourceOrdinal, revision, Date.now(),
           );
+          snapshotPromiseRecency(db, eventId, body.id!);
         }
       }
       if (changed && updatedItem) {

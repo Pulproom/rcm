@@ -23,8 +23,16 @@ import {
 export { describeModelResponse, type ModelResponseDiagnostic, sanitizeDiagnosticText, CONNECTION_FAILURE_LABELS, connectionFailureReason, isProviderAuthenticationError, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type ConnectionFailureCode } from "./support-diagnostics.js";
 export { isPermanentProviderError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES, type RisuAuxiliaryCallDiagnostic } from "./support-diagnostics.js";
 export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFailureMetadata } from './support-diagnostics.js';
-export const RCM_API_REVISION = 90;
+/** User-owned presentation metadata; never inferred by extraction. */
+export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
+
+export const RCM_API_REVISION = 91;
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
+export const PromiseEditOptionsSchema = z.object({
+  pinned: z.boolean().optional(),
+  recency: z.enum(["already_past", "recent"]).optional(),
+});
+export type PromiseEditOptions = z.infer<typeof PromiseEditOptionsSchema>;
 export const UserCorrectionViewSchema = z.object({ userEdited: z.boolean(), userEditOrdinal: z.number().int().nullable(), locked: z.boolean() });
 export const STATE_KIND_VALUES = ["condition", "goal", "secret"] as const;
 export type StateKind = typeof STATE_KIND_VALUES[number];

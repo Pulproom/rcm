@@ -1,3 +1,4 @@
+import { setAvatarColors } from "./dashboard/person-colors.js";
 import { sourceRecoverySummary, operationLabel, JOB_TRIGGER_LABELS, type JobTrigger } from "@rcm/shared";
 import { AUXILIARY_CENSORSHIP_RELAXATION } from "@rcm/shared";
 import { projectRisuAuxiliaryCallDiagnostic, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
@@ -34,12 +35,13 @@ import { installServerUpdate, pluginUpdateNeeded, refreshUpdateStatus } from "./
 import { createDashboardNavigationController, dashboardScrollOwner, documentScroller, handleDashboardNavigationAction, handleSentNowNavigation, NavigationStack, type DashboardNavigationRefresh, type ViewSnapshot } from "./dashboard/navigation.js";
 import { matchPersonaEntity } from "./persona.js";
 import { buildPairs, entityForName, entityProminence, milestoneLabel, pairKey, PERSON_PROMINENCE_OPTIONS, relationshipLabelTranslationKey, relationshipSummaryLabel } from "./dashboard/pairs.js";
+import { installRelationshipFlowScrub, layoutRelationshipFlow, renderFlowReadout, type RelationshipFlowView } from "./dashboard/relationship-flow-view.js";
 import { pairOpenPromises, pairSceneCount, renderRelationshipRow, renderPairDetail, type PairDiaryFilter, type PairDiarySort } from "./dashboard/pair-detail.js";
 import { buildSceneLog, storyWeekday } from "./dashboard/scene-log.js";
 import { landmarkLabel, remapHiddenAnniversariesAfterDelete } from "./dashboard/diary.js";
 import { isRecognitionMemory } from "@rcm/shared";
-import { addressEditorForm, buildPersonDetail, renderPersonDetail } from "./dashboard/person.js";
-import { buildNowPage, overduePromiseEntries, pendingAttentionCount, renderNowPage, runPromiseStatusMutation, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
+import { addressEditorForm, buildPersonDetail, renderPersonDetail, renderPersonColorPicker } from "./dashboard/person.js";
+import { buildNowPage, overduePromiseEntries, pendingAttentionCount, renderNowPage, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
 import { POLARITY_LABELS, predicateLabel, PROMISE_STATUS_LABELS, STATE_KIND_LABELS } from "./dashboard/record-history.js";
 import { renderLockHome } from "./dashboard/phone/home.js";
 import { MemoryLandmarkPatchQueue } from "./dashboard/landmark-mutations.js";
@@ -75,7 +77,7 @@ type NavGroup = { id: NavGroupId; label: string; icon: string; defaultTab: Tab; 
 type ActionState = { kind: "success" | "error"; message: string };
 type AttentionFilter = "all" | "duplicate" | "conflict" | "audit";
 type AttentionViewState = { selectedId: string; query: string; filter: AttentionFilter; mobileDetail: boolean };
-type WorldEditor = { social?: boolean; kind: "assertion" | "belief" | "promise"; id?: string; mode: "create" | "edit" | "end" | "delete"; stateKind?: string; subject?: string; target?: string; relationKind?: string; lockSubject?: boolean };
+type WorldEditor = { promiseStatus?: string; social?: boolean; kind: "assertion" | "belief" | "promise"; id?: string; mode: "create" | "edit" | "end" | "delete"; stateKind?: string; subject?: string; target?: string; relationKind?: string; lockSubject?: boolean };
 type IntimacyEditor = { id?: string; participantA?: string; participantB?: string };
 type SocialEditor = { locked?: boolean; description?: string; holder: string; subject: string; level: string; knownAs: string; addressTerms?: string; editing: boolean; focus?: "address" };
 export function relationshipSheetEditorsAfterSwitch(
@@ -124,6 +126,12 @@ export type TimelineViewState = {
 };
 
 const relationshipLandmarkKinds = new Set(["first_met", "romantic_relationship_established", "engagement", "marriage", "separation", "romantic_relationship_ended", "reunion", "divorce", "anniversary_basis"]);
+
+export function dateAnniversaryLandmarks(label: string, pair: [string, string], storyTime: string, firstMet: boolean): LandmarkKind[] {
+  const landmarks: LandmarkKind[] = [{ kind: "anniversary_basis", label, pair, storyTime }];
+  if (firstMet) landmarks.push({ kind: "first_met", pair, storyTime });
+  return landmarks;
+}
 
 export function editableLandmarkKinds(text: string, existing: LandmarkKind[], participants: string[], storyTime: string): LandmarkKind[] {
   const names = new Set<string>(LANDMARK_KIND_VALUES);
@@ -1860,6 +1868,37 @@ function memorySignals(memory: any): string {
 const memoryDisplayTitle = (memory: any, translations: TranslationView, display: TranslationDisplay): string =>
   displayText(String(memory.title ?? ""), translations.get(`${memory.id}:title`), display);
 
+const intimacySourceMemoryId = (item: any): string => String(item?.sourceMemoryId ?? item?.source_memory_id ?? "").trim();
+const intimacyPair = (item: any): string[] => {
+  const pair = Array.isArray(item?.participants) && item.participants.length === 2
+    ? item.participants
+    : [item?.participantA, item?.participantB];
+  return pair.map((name: unknown) => String(name ?? "").trim()).filter(Boolean);
+};
+const intimacyPairKey = (pair: string[]): string => pair.map((name) => name.normalize("NFKC").toLocaleLowerCase()).sort().join("|");
+
+/** A timeline intimacy landmark is backed by the active ledger rows from the same source scene. */
+export function intimacyLandmarkMarks(memoryId: string, landmark: any, physicalIntimacy: any[]): string {
+  const linked = physicalIntimacy.filter((item) => item?.active !== false && intimacySourceMemoryId(item) === memoryId);
+  if (!linked.length) return `<span class="mark is-key">${icon("landmark")}${escapeHtml(landmarkLabel(landmark))}</span>`;
+  const groups = new Map<string, { pair: string[]; labels: string[]; id: string }>();
+  for (const item of linked) {
+    const pair = intimacyPair(item);
+    const key = intimacyPairKey(pair) || `row:${String(item?.id ?? groups.size)}`;
+    const group = groups.get(key) ?? { pair, labels: [], id: String(item?.id ?? "") };
+    const label = milestoneLabel(item);
+    if (label && !group.labels.includes(label)) group.labels.push(label);
+    if (!group.id) group.id = String(item?.id ?? "");
+    groups.set(key, group);
+  }
+  const includePair = groups.size > 1;
+  return [...groups.values()].map((group) => {
+    const label = group.labels.join(" · ") || landmarkLabel(landmark);
+    const pair = includePair && group.pair.length === 2 ? ` (${group.pair.join(" · ")})` : "";
+    return `<button type="button" class="mark is-key hit" data-action="edit-intimacy" data-id="${escapeHtml(group.id)}" title="스킨십 기록 수정">${icon("landmark")}${escapeHtml(`${label}${pair}`)}</button>`;
+  }).join("");
+}
+
 function memoryRow(memory: any, selectedId: string, translations: TranslationView, translationEnabled: boolean, numbers: Map<string, number>): string {
   const display: TranslationDisplay = translationEnabled ? "ko" : "en";
   const title = memoryDisplayTitle(memory, translations, display);
@@ -2030,7 +2069,9 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
   }).join("");
   const evidenceFold = fold("원문 근거", evidenceRows ? phone ? `<div class="memory-card">${evidenceRows}</div>` : evidenceRows : '<p class="sub">연결된 원문 근거가 없습니다.</p>', { role: "section", count: evidence.length, preserveKey: `memory-evidence:${key}` });
   const people = participants.length ? `<div class="participants">${participants.map((name) => `${avatar(name, "sm")}${nameHtml(name)}`).join('<span class="dot" aria-hidden="true">·</span>')}</div>` : "";
-  const landmarkMarks = landmarkKinds.length ? `<div class="marks">${landmarkKinds.map((entry: any) => `<span class="mark is-key">${icon("landmark")}${escapeHtml(landmarkLabel(entry))}</span>`).join("")}</div>` : "";
+  const landmarkMarks = landmarkKinds.length ? `<div class="marks">${landmarkKinds.map((entry: any) => entry?.kind === "intimacy_milestone"
+    ? intimacyLandmarkMarks(key, entry, intimacyMilestones)
+    : `<span class="mark is-key">${icon("landmark")}${escapeHtml(landmarkLabel(entry))}</span>`).join("")}</div>` : "";
   const pager = `<nav class="pager" aria-label="기억 이동">${btn("이전", { kind: "quiet", icon: "back", action: "timeline-adjacent", data: { id: adjacent.previous?.id ?? "" }, disabled: !adjacent.previous, hit: true })}${btn("다음", { kind: "quiet", iconEnd: "chevron", action: "timeline-adjacent", data: { id: adjacent.next?.id ?? "" }, disabled: !adjacent.next, hit: true })}</nav>`;
   const actions = `<div class="reader__acts">${iconBtn("edit", "기억 수정", { action: "edit-memory" })}${memoryActionMenu(memory)}</div>`;
   const content = phone
@@ -2549,7 +2590,7 @@ function comparePeople(data: DashboardData, left: string, right: string): number
   return personProminence(data, left) - personProminence(data, right) || compareUiText([left, right]);
 }
 
-export function relationshipsV2(state: RuntimeState, data: DashboardData, selectedKey: string, translations: TranslationView, display: RuntimeState["settings"]["translationDisplay"], _mergePreview?: any, intimacyEditor?: IntimacyEditor, section = "state", editing = false, relationshipTier = "all", mobileDetail = false, queryText = "", socialEditor?: SocialEditor, basicEditor?: WorldEditor, editingDirection = "", diaryFilter: PairDiaryFilter = "all", diarySort: PairDiarySort = "newest", anniversaryEditorEntryId = ""): string {
+export function relationshipsV2(state: RuntimeState, data: DashboardData, selectedKey: string, translations: TranslationView, display: RuntimeState["settings"]["translationDisplay"], _mergePreview?: any, intimacyEditor?: IntimacyEditor, section = "state", editing = false, relationshipTier = "all", mobileDetail = false, queryText = "", socialEditor?: SocialEditor, basicEditor?: WorldEditor, editingDirection = "", diaryFilter: PairDiaryFilter = "all", diarySort: PairDiarySort = "newest", anniversaryEditorEntryId = "", flowView: RelationshipFlowView = {}): string {
   const allRelationships = [...data.relationships].sort((left, right) => comparePeople(data, relationshipFrom(left), relationshipFrom(right)) || comparePeople(data, relationshipTo(left), relationshipTo(right)));
   const allPairs = buildPairs(data, data.personaEntity);
   const selectedPair = allPairs.find((pair) => pair.key === selectedKey);
@@ -2598,6 +2639,7 @@ export function relationshipsV2(state: RuntimeState, data: DashboardData, select
     copy: (canonical, translationKey) => displayText(relationshipSummaryLabel(canonical), translations.get(translationKey), display),
     diaryFilter,
     diarySort,
+    flowView,
     anniversaryEditorEntryId,
     editingContent: intimacyEditor ? intimacyForm : socialEditor?.focus === "address" ? addressEditorForm(socialEditor) : editing ? relationshipEditor : undefined,
     canEditCalls: data.health?.capabilities?.socialKnowledge === true,
@@ -2763,12 +2805,12 @@ function worldEditorPanel(data: DashboardData, editor?: WorldEditor, backLabel =
     ? `${kindPick}<div class="form__row">${input("subject", "대상", item.subject, " required")}${input("predicate", "항목", item.predicate, " required")}</div>${textarea("value", "내용", item.value, " required")}${knownByField}`
     : editor.kind === "belief"
       ? `<div class="form__row">${input("holder", "관점 인물", item.holder, " required")}${input("subject", "대상", item.subject, " required")}</div><div class="form__row">${input("predicate", "속성", item.predicate, " required")}${select("polarity", "인식", ["believes", "suspects", "denies", "knows", "heard"].map((value) => `<option value="${value}" ${item.polarity === value ? "selected" : ""}>${POLARITY_LABELS[value]}</option>`).join(""))}</div>${textarea("value", "내용", item.value, " required")}`
-      : `<div class="form__row">${input("promisor", "약속한 인물", item.promisor, " required")}${input("promisee", "상대", item.promisee, " required")}</div><div class="form__row">${select("status", "상태", Object.entries(PROMISE_STATUS_LABELS).map(([value, text]) => `<option value="${value}" ${item.status === value ? "selected" : ""}>${text}</option>`).join(""))}${input("scheduledFor", "예정 시점", item.scheduled_for, ' placeholder="예: 화요일 점심"')}</div>${textarea("content", "약속 내용", item.content, " required")}${input("statusReason", "상태 메모", item.status_reason, ' placeholder="현재 상태의 근거"')}`;
+      : `<div class="form__row">${input("promisor", "약속한 인물", item.promisor, " required")}${input("promisee", "상대", item.promisee, " required")}</div><div class="form__row">${select("status", "상태", Object.entries(PROMISE_STATUS_LABELS).map(([value, text]) => `<option value="${value}" ${(editor.promiseStatus ?? item.status) === value ? "selected" : ""}>${text}</option>`).join(""))}${input("scheduledFor", "예정 시점", item.scheduled_for, ' placeholder="예: 화요일 점심"')}</div>${textarea("content", "약속 내용", item.content, " required")}${input("statusReason", "상태 메모", item.status_reason, ' placeholder="현재 상태의 근거"')}<fieldset class="promise-when"><legend>상태를 바꾼 일이 언제 일어났나요?</legend><label class="check"><input type="radio" name="recency" value="already_past" checked><span>이미 지난 일<small>메인 모델에는 따로 알리지 않아요.</small></span></label><label class="check"><input type="radio" name="recency" value="recent"><span>최근 일어난 일<small>한동안 메인 모델에 최근 끝난 약속으로 알려요.</small></span></label></fieldset><label class="check"><input name="pinned" type="checkbox"${item.pinned ? " checked" : ""}><span>계속 기억<small>끝난 약속이어도 메인 모델에 계속 알려요.</small></span></label>`;
   const scope = editor.kind === "promise" && editor.mode === "create" ? select("scope", "반복 여부", '<option value="future">한 번의 약속</option><option value="recurring">반복 약속</option>') : "";
   const verb = editor.mode === "create" ? "추가" : "수정";
   // The title follows the 종류 picker as it changes.
   const titleData = editor.kind === "assertion" ? ` data-title-verb="${verb}"` : "";
-  return `<article class="reader is-editing">${back}<h2 class="reader__title"${titleData}>${escapeHtml(label)} ${verb}</h2><form id="world-state-form" class="form" data-kind="${editor.kind}" data-id="${escapeHtml(editor.id ?? "")}" data-mode="${editor.mode}"${plainState || editor.kind !== "assertion" ? "" : ` data-social="true" data-original-predicate="${escapeHtml(item.predicate ?? "")}" data-original-label="${escapeHtml(item.socialRelation?.label ?? "")}" data-original-target="${escapeHtml(item.socialRelation?.target ?? "")}"`}>${fields}${scope}${autoLockCheckbox(item.locked)}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-world-edit" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form></article>`;
+  return `<article class="reader is-editing">${back}<h2 class="reader__title"${titleData}>${escapeHtml(label)} ${verb}</h2><form id="world-state-form" class="form" data-kind="${editor.kind}" data-id="${escapeHtml(editor.id ?? "")}" data-mode="${editor.mode}"${plainState || editor.kind !== "assertion" ? "" : ` data-social="true" data-original-predicate="${escapeHtml(item.predicate ?? "")}" data-original-label="${escapeHtml(item.socialRelation?.label ?? "")}" data-original-target="${escapeHtml(item.socialRelation?.target ?? "")}"`}>${fields}${scope}${autoLockCheckbox(item.locked)}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-world-edit" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form", data: { formId: "world-state-form" } })}</div></form></article>`;
 }
 
 
@@ -4153,6 +4195,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
   let relationshipPerson = "";
   let relationshipMobileDetail = false;
   let relationshipQuery = "";
+  const pairFlowViews = new Map<string, RelationshipFlowView>();
+  let pairEmotionMode: "now" | "flow" = "now";
   let pairDiaryFilter: PairDiaryFilter = "all";
   let pairDiarySort: PairDiarySort = "newest";
   let anniversaryEditorEntryId = "";
@@ -4648,7 +4692,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     : activeTab === "initial" ? initialCalibrationPage(data, peopleView, translations, activeDisplay(), entityMergePreview, socialEditor, entityDeletePreview)
     : activeTab === "story" ? storySpinePage(data, translations, storyView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.current ? state.settings.storyOverviewBackups[state.current.chatId] : undefined, datasetsLoaded("story"))
     : activeTab === "timeline" ? organizationView.open ? memoryOrganization(organizationView, data.memories, translations, organizationView.addition ? state.settings.translationDisplay : activeDisplay()) : timeline(data, selectedMemory, translations, timelineView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.translationActivity?.error)
-      : activeTab === "relationships" ? relationshipsV2(state, data, selectedRelationship, translations, activeDisplay(), entityMergePreview, intimacyEditor, relationshipSection, relationshipEditing, relationshipTier, relationshipMobileDetail, relationshipQuery, socialEditor, worldEditor, relationshipEditingDirection, pairDiaryFilter, pairDiarySort, anniversaryEditorEntryId)
+      : activeTab === "relationships" ? relationshipsV2(state, data, selectedRelationship, translations, activeDisplay(), entityMergePreview, intimacyEditor, relationshipSection, relationshipEditing, relationshipTier, relationshipMobileDetail, relationshipQuery, socialEditor, worldEditor, relationshipEditingDirection, pairDiaryFilter, pairDiarySort, anniversaryEditorEntryId, { mode: pairEmotionMode, ...pairFlowViews.get(selectedRelationship) })
         : activeTab === "world" ? worldEditor && worldEditorOnNow ? `<div class="now-edit">${worldEditorPanel(data, worldEditor, "현재")}</div>`
             : renderNowPage(data, data.personaEntity, nowFilter, nowSort, promiseStatusInFlight, translations, activeDisplay(), nowView)
           : activeTab === "reviews" ? attentionPage(data, translations, activeDisplay(), attentionView)
@@ -4883,6 +4927,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     else sheetShown = { scene: sheet.dataset.scene ?? "", top: 0 };
   };
   const render = (preservePageScroll = true, completeSourceNavigation = false) => {
+    setAvatarColors(data.entities ?? []);
     const previousSidebar = root.querySelector<HTMLElement>(".nav");
     const previousRows = root.querySelector<HTMLElement>("#memory-rows");
     const timelineAnchor = (() => {
@@ -4965,6 +5010,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     } else if (focusDisclosureKey) {
       root.querySelector<HTMLDetailsElement>(`[data-preserve-open="${focusDisclosureKey}"]`)?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
     }
+    layoutRelationshipFlow(root);
     if (activeTab === "timeline") applyTimelineSearch();
     if (activeTab === "story") applyStorySearch();
     if (activeTab === "story") presentSceneSheet();
@@ -5257,6 +5303,28 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     return true;
   };
 
+  const savePersonColor = async (form: HTMLFormElement, color: string | null) => {
+    const chatId = form.dataset.chatId;
+    if (!chatId || state.current?.chatId !== chatId || form.dataset.busy === "true") return;
+    form.dataset.busy = "true";
+    const errorLine = form.querySelector<HTMLElement>("[data-color-error]")!;
+    errorLine.hidden = true;
+    form.querySelectorAll<HTMLButtonElement>("button").forEach(button => { button.disabled = true; });
+    try {
+      await client.request(`/v1/chats/${encodeURIComponent(chatId)}/entities/${encodeURIComponent(form.dataset.entityId!)}/color`, { method: "PATCH", body: JSON.stringify({ color }) });
+      form.closest<HTMLDialogElement>("dialog")?.close();
+      if (state.current?.chatId === chatId) await refresh({ forceApply: true });
+    } catch (error) {
+      errorLine.textContent = error instanceof Error ? error.message : "색상을 저장하지 못했어요. 다시 시도해 주세요.";
+      errorLine.hidden = false;
+    } finally {
+      form.dataset.busy = "false";
+      form.querySelectorAll<HTMLButtonElement>("button").forEach(button => { button.disabled = false; });
+    }
+  };
+
+  installRelationshipFlowScrub(root);
+
   let dragScroll: { element: HTMLElement; pointerId: number; startX: number; scrollLeft: number; moved: boolean } | undefined;
   let suppressDragClickUntil = 0;
   root.addEventListener("pointerdown", (event) => {
@@ -5461,11 +5529,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     }
     if (["data-search", "data-filter", "select-probe-source", "ack-delete"].includes(action ?? "")) return;
     // The pair sheet shows one editor at a time; opening another asks before dropping typed changes, then closes the rest.
-    if (["edit-relationship", "new-intimacy", "edit-intimacy", "new-anniversary", "designate-anniversary", "edit-address", "new-social", "edit-social", "new-world", "edit-world", "end-world", "delete-world"].includes(action ?? "")
+    if (["edit-relationship", "new-intimacy", "edit-intimacy", "new-anniversary", "new-first-met", "designate-anniversary", "edit-address", "new-social", "edit-social", "new-world", "edit-world", "end-world", "delete-world"].includes(action ?? "")
       && activeTab === "relationships") {
       if (editorHasChanges() && !await confirmDashboard("저장하지 않은 변경을 버릴까요?")) return;
       formDirty = false;
-      if (!["new-anniversary", "designate-anniversary"].includes(action ?? "")) anniversaryEditorEntryId = "";
+      if (!["new-anniversary", "new-first-met", "designate-anniversary"].includes(action ?? "")) anniversaryEditorEntryId = "";
     }
     if (action === "restore-crumb") {
       const crumbs = screenCrumbs();
@@ -5783,6 +5851,28 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       resetTimelineDetailScroll(root);
       return;
     }
+    if (action === "pair-flow-scrub") {
+      const scene = Number(target.dataset.scene);
+      if (!Number.isInteger(scene) || scene < Number(target.dataset.first) || scene > Number(target.dataset.last)) return;
+      const view = pairFlowViews.get(selectedRelationship) ?? {};
+      Object.assign(view, { axis: target.dataset.axis, scene });
+      pairFlowViews.set(selectedRelationship, view);
+      const readout = target.closest(".duet-panel")?.querySelector<HTMLElement>("[data-flow-readout]");
+      if (readout) setHtmlIfChanged(readout, renderFlowReadout(data, [target.dataset.from!, target.dataset.to!], target.dataset.axis as import("./dashboard/relationship-flow.js").FlowAxis, scene,
+        (canonical, key) => displayText(canonical, translations.get(key), activeDisplay())));
+      return;
+    }
+    if (action === "pair-emotion-view" || action === "pair-flow-axis") {
+      const view = pairFlowViews.get(selectedRelationship) ?? {};
+      if (action === "pair-emotion-view") pairEmotionMode = target.dataset.value === "flow" ? "flow" : "now";
+      else Object.assign(view, { axis: target.dataset.axis, scene: undefined });
+      pairFlowViews.set(selectedRelationship, view);
+      const identity = { action, value: target.dataset.value, axis: target.dataset.axis };
+      render();
+      Array.from(root.querySelectorAll<HTMLElement>("[data-action]")).find(element => element.dataset.action === identity.action
+        && element.dataset.value === identity.value && element.dataset.axis === identity.axis)?.focus({ preventScroll: true });
+      return;
+    }
     if (action === "pair-diary-filter") {
       const next = target.dataset.value as PairDiaryFilter;
       if (["all", "key", "intimacy", "heart", "promise", "bookmark"].includes(next)) pairDiaryFilter = next;
@@ -5817,8 +5907,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       root.querySelector<HTMLInputElement>('#anniversary-form input[name="label"]')?.focus();
       return;
     }
-    if (action === "new-anniversary") {
-      anniversaryEditorEntryId = `new:${target.dataset.key ?? ""}`;
+    if (action === "new-anniversary" || action === "new-first-met") {
+      anniversaryEditorEntryId = action === "new-first-met" ? `new:first-met:${target.dataset.key ?? ""}` : `new:${target.dataset.key ?? ""}`;
       intimacyEditor = undefined;
       relationshipEditing = false;
       socialEditor = undefined;
@@ -6242,6 +6332,26 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       render(false);
       return;
     }
+    if (action === "open-person-color") {
+      if (lex().skin !== "phone" || !state.current) return;
+      const entity = data.entities.find(item => item.id === target.dataset.entityId);
+      if (!entity) return;
+      const dialog = document.createElement("dialog");
+      dialog.className = "dialog person-color-dialog";
+      dialog.setAttribute("aria-label", `${entity.name} 색상`);
+      dialog.innerHTML = renderPersonColorPicker(entity, state.current.chatId);
+      root.append(dialog);
+      dialog.addEventListener("close", () => { dialog.remove(); root.querySelector<HTMLElement>('[data-action="open-person-color"]')?.focus({ preventScroll: true }); }, { once: true });
+      dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
+      dialog.showModal();
+      return;
+    }
+    if (action === "close-person-color") { target.closest<HTMLDialogElement>("dialog")?.close(); return; }
+    if (action === "reset-person-color") {
+      const form = target.closest<HTMLFormElement>("form");
+      if (form) await savePersonColor(form, null);
+      return;
+    }
     if (action === "edit-person") {
       peopleView.editing = true;
       peopleView.management = "";
@@ -6404,35 +6514,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     if (action === "edit-world" || action === "end-world" || action === "delete-world") {
       const kind = target.dataset.kind as WorldEditor["kind"];
       if (!["assertion", "belief", "promise"].includes(kind) || !target.dataset.id) return;
-      if (action === "edit-world" && kind === "promise" && ["kept", "broken"].includes(target.dataset.status ?? "")) {
-        if (!state.current) return;
-        const promiseId = target.dataset.id;
-        const promiseStatus = target.dataset.status!;
-        const promiseChat = encodeURIComponent(state.current.chatId);
-        const renderPromiseBusyState = () => {
-          if (dashboardOpen && activeTab === "world") render();
-        };
-        await runPromiseStatusMutation(promiseStatusInFlight, promiseId, async () => {
-          try {
-            const result = await client.request<{ ok: boolean; item?: any }>(`/v1/chats/${promiseChat}/world-state`, {
-              method: "PATCH",
-              body: JSON.stringify({ kind: "promise", id: promiseId, status: promiseStatus }),
-            });
-            if (!result.ok || !result.item) throw new Error("약속 상태를 저장하지 못했습니다.");
-            data.promises = data.promises.map((item) => item.id === promiseId ? result.item : item);
-            await refresh({ forceApply: true });
-            showActionSaveState({ kind: "success", message: promiseStatus === "kept" ? "약속을 지킨 것으로 기록했습니다." : "약속이 깨진 것으로 기록했습니다." });
-          } catch (error) {
-            showActionSaveState({ kind: "error", message: `약속 상태 저장 실패 · ${String(error)}` });
-          }
-        }, renderPromiseBusyState);
-        return;
-      }
       // A person's 소속 opens its editor where the relations live, like adding one does.
       if (activeTab === "initial" && target.dataset.social === "true") {
         if (!await navigate({ tab: "relationships", selectedRelationship: "", relationshipPerson: "", relationshipMobileDetail: true }, { push: true })) return;
       }
-      worldEditor = { kind, id: target.dataset.id, mode: action === "edit-world" ? "edit" : action === "end-world" ? "end" : "delete", social: target.dataset.social === "true" };
+      worldEditor = { kind, id: target.dataset.id, promiseStatus: kind === "promise" ? target.dataset.status : undefined, mode: action === "edit-world" ? "edit" : action === "end-world" ? "end" : "delete", social: target.dataset.social === "true" };
       worldEditorOnNow = activeTab === "world";
       formDirty = false;
       render();
@@ -6983,6 +7069,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         await client.request(`/v1/chats/${chat}/social-knowledge`, { method: "DELETE", body: JSON.stringify({ holder: target.dataset.holder, subject: target.dataset.subject }) });
       } else if (action === "backfill-social") {
         requireChatMemoryEnabled(state, state.current.chatId);
+        const preview = await client.request<{ sourceGroups: number; postExtractionReview: boolean; busy: boolean }>(`/v1/chats/${chat}/social-knowledge/backfill/preview`);
+        if (preview.busy || preview.sourceGroups === 0) {
+          addLog(state.logs, "info", preview.busy ? "이미 지인 관계 백필이 진행 중입니다." : "처리할 원문이 없습니다.");
+          await refresh({ forceApply: true });
+          return;
+        }
+        const reviewNote = preview.postExtractionReview ? "\n검수가 켜져 있으면 보조 호출이 더해질 수 있어요." : "";
+        if (!await confirmDashboard(`지인 관계를 다시 찾을까요?\n원문 묶음 ${preview.sourceGroups}개 · 보조 호출 약 ${preview.sourceGroups}번${reviewNote}\n처리된 이야기 전체를 다시 읽습니다.`)) return;
         const result = await client.request<{ queuedJobs: number }>(`/v1/chats/${chat}/social-knowledge/backfill`, { method: "POST" });
         addLog(state.logs, "info", result.queuedJobs ? `지인 관계 백필 ${result.queuedJobs}개 묶음을 대기열에 추가했습니다.` : "이미 지인 관계 백필이 진행 중이거나 처리할 원문이 없습니다.");
       } else if (action === "drain-worker") {
@@ -7074,6 +7168,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     event.preventDefault();
     const form = event.target as HTMLFormElement;
     const values = Object.fromEntries(new FormData(form));
+    if (form.id === "person-color-form") { await savePersonColor(form, String(values.color ?? "")); return; }
     if (form.id === 'organization-search-form' || form.id === 'organization-jump-form' || form.id === 'organization-addition-form') {
       if (!state.current || organizationView.busy) return;
       const chatId = state.current.chatId, chat = encodeURIComponent(chatId);
@@ -7181,10 +7276,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         if (!storyTime) throw new Error("작중 날짜를 입력해 주세요.");
         if (!a || !b) throw new Error("기념일을 붙일 두 사람을 찾지 못했습니다.");
         const note = String(values.note ?? "").trim();
+        const firstMet = Boolean(values.firstMet);
         const chat = encodeURIComponent(state.current.chatId);
         const result = await client.request<{ ok: boolean; id: string }>(`/v1/chats/${chat}/memories`, { method: "POST", body: JSON.stringify({
           title: label, content: note || `${label} — ${a} · ${b} (설정상 과거)`, storyTime, participants: [a, b],
-          landmarkKinds: [{ kind: "anniversary_basis", label, pair: [a, b], storyTime }],
+          landmarkKinds: dateAnniversaryLandmarks(label, [a, b], storyTime, firstMet),
         }) });
         if (!result.ok || !result.id) throw new Error("기념일을 저장하지 못했습니다.");
         anniversaryEditorEntryId = "";
@@ -7340,9 +7436,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
         const itemId = form.dataset.id ?? "";
         const creating = form.dataset.mode === "create";
         const body: Record<string, unknown> = { kind, ...(creating ? {} : { id: itemId }), locked:(form.elements.namedItem("locked") as HTMLInputElement | null)?.checked ?? false };
-        for (const key of ["subject", "predicate", "holder", "promisor", "promisee", "value", "content", "polarity", "status", "scope", "scheduledFor", "statusReason", "sourceMessageId"]) {
+        for (const key of ["subject", "predicate", "holder", "promisor", "promisee", "value", "content", "polarity", "status", "scope", "scheduledFor", "statusReason", "sourceMessageId", "recency"]) {
           if (values[key] !== undefined) body[key] = String(values[key]).trim();
         }
+        if (kind === "promise") body.pinned = (form.elements.namedItem("pinned") as HTMLInputElement | null)?.checked ?? false;
         if (values.stateKind !== undefined) {
           body.stateKind = String(values.stateKind);
           if (["goal", "secret"].includes(String(values.stateKind))) body.knownBy = String(values.knownBy ?? "").split(",").map((value) => value.trim()).filter(Boolean);
@@ -7451,6 +7548,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
     const relationForm = (event.target as HTMLElement).closest<HTMLFormElement>('#world-state-form[data-social="true"]');
     if (relationForm) syncRelationForm(relationForm);
     const input = event.target as HTMLInputElement;
+    // The colour sheet's preview face follows the picker live; saving still goes through submit-form.
+    if (input.name === "color" && input.closest("#person-color-form")) input.closest("#person-color-form")?.querySelector<HTMLElement>(".person-color-preview")?.style.setProperty("--pick", input.value);
     if (input.closest('#organization-addition-form') && organizationView.addition) {
       organizationView.addition.request = input.value;
       organizationView.addition.estimate = undefined;

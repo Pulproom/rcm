@@ -16,6 +16,7 @@ function parseJson<T>(value: string, fallback: T): T {
 }
 
 export interface EntityItem {
+  color: string | null;
   id: string;
   key: string;
   name: string;
@@ -44,7 +45,7 @@ function entityIdentityTerms(entity: EntityItem, removed: (entityId: string, ali
 
 export function listEntities(db: RcmDatabase, chatId: string): EntityItem[] {
   const rows = db.prepare(`SELECT id,entity_key AS key,name,CASE WHEN display_name='' THEN name ELSE display_name END AS displayName,
-    type,origin,setup_prominence AS setupProminence,source_json AS source,user_managed AS userManaged
+    type,color,origin,setup_prominence AS setupProminence,source_json AS source,user_managed AS userManaged
     FROM entities WHERE chat_id=? ORDER BY displayName COLLATE NOCASE`).all(chatId) as Array<Omit<EntityItem, "aliases" | "source" | "userManaged"> & { source: string; userManaged: number }>;
   const aliases = db.prepare("SELECT alias FROM aliases WHERE entity_id=? ORDER BY alias COLLATE NOCASE");
   return rows.map((row) => ({ ...row, source: parseJson(row.source, []), userManaged: row.userManaged === 1,

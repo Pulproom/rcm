@@ -1,7 +1,7 @@
 {
   "name": "risu-cognitive-memory",
   "private": true,
-  "version": "1.0.17",
+  "version": "1.0.18",
   "packageManager": "pnpm@10.34.1",
   "engines": {
     "node": ">=22.12.0"

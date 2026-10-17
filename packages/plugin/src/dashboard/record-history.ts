@@ -42,7 +42,7 @@ export type RecordChain = {
 
 export const STATE_KIND_LABELS: Record<string, string> = { condition: "상태", goal: "목표", secret: "비밀" };
 export const POLARITY_LABELS: Record<string, string> = { believes: "믿음", suspects: "의심", denies: "부정", knows: "확신", heard: "전해 들음" };
-export const PROMISE_STATUS_LABELS: Record<string, string> = { open: "이행 전", kept: "이행됨", broken: "파기됨", released: "의무 해제", offscreen: "시점 경과", invalidated: "근거 무효", removed: "목록에서 지운 약속" };
+export const PROMISE_STATUS_LABELS: Record<string, string> = { open: "진행 중", kept: "지켜짐", broken: "깨짐", released: "취소됨", offscreen: "화면 밖에서 처리됨", invalidated: "근거 무효", removed: "목록에서 지운 약속" };
 const PREDICATE_LABELS: Record<string, string> = {
   located_in: "위치", controls: "통제", owns: "소유", is_open: "개방 상태", status: "상태",
   intends_to_leave: "떠날 의도", knows_about: "알고 있는 사실", trusts: "신뢰 판단",

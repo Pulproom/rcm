@@ -338,8 +338,8 @@ function cloneLineage(
     const entityMap = new Map<string, string>();
     for (const row of db.prepare("SELECT * FROM entities WHERE chat_id=?").all(parent) as any[]) {
       const id = randomUUID(); entityMap.set(row.id, id);
-      db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.entity_key, row.name, row.display_name ?? row.name, row.type, row.origin ?? "transcript", row.setup_prominence ?? "supporting", row.source_json ?? "[]", row.user_managed ?? 0, now);
+      db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,color,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.entity_key, row.name, row.display_name ?? row.name, row.type, row.origin ?? "transcript", row.setup_prominence ?? "supporting", row.source_json ?? "[]", row.user_managed ?? 0, row.color ?? null, now);
       for (const alias of db.prepare("SELECT alias,normalized FROM aliases WHERE entity_id=?").all(row.id) as any[]) db.prepare("INSERT INTO aliases(entity_id,alias,normalized) VALUES(?,?,?)").run(id, alias.alias, alias.normalized);
       mapItem(db, child, "entity", id, row.id);
     }
@@ -613,6 +613,9 @@ function cloneLineage(
     const promiseEvents = db.prepare(`SELECT * FROM promise_events WHERE chat_id=? AND active=1 AND
       (source_ordinal<=? OR ? AND user_authored=1 AND promise_id IN (SELECT id FROM promises WHERE user_edit_ordinal IS NOT NULL OR auto_locked=1))
       ORDER BY created_revision,created_at,rowid`).all(parent, fork, Number(options.preserveUserCorrections ?? false)) as any[];
+    const childTurn = (db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(child) as { completed_turn_count: number }).completed_turn_count;
+    const inheritedRecency = (event: any) => event.ended_at_turn != null && event.ended_at_turn <= childTurn
+      ? [event.ended_at_turn, event.recency_until_turn] : [null, null];
     const latestPromises = new Map<string, any>();
     for (const event of promiseEvents) latestPromises.set(event.promise_key, event);
     for (const event of latestPromises.values()) {
@@ -623,11 +626,11 @@ function cloneLineage(
         const eventId = randomUUID();
         db.prepare("INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_batch_id,source_ordinal,created_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(eventId, child, id, source.promise_key, source.promisor, source.promisee, source.content, source.status, source.scheduled_for ?? null, source.status_reason ?? null, memoryMap.get(source.source_memory_id) ?? null, source.source_batch_id ? `lineage:${source.source_batch_id}` : null, source.source_ordinal, source.created_revision, source.created_at);
         mapItem(db, child, "promise_event", eventId, source.id);
-        db.prepare("UPDATE promise_events SET evidence_json=?,user_authored=? WHERE id=?").run(source.evidence_json,source.user_authored,eventId);
+        db.prepare("UPDATE promise_events SET evidence_json=?,user_authored=?,ended_at_turn=?,recency_until_turn=? WHERE id=?").run(source.evidence_json,source.user_authored,...inheritedRecency(source),eventId);
       }
       mapItem(db, child, "promise", id, event.promise_id); counts.promises = (counts.promises ?? 0) + 1;
-      const original=db.prepare("SELECT user_edit_ordinal,auto_locked FROM promises WHERE id=? AND chat_id=?").get(event.promise_id,parent) as any;
-      if(original) db.prepare("UPDATE promises SET user_edit_ordinal=?,auto_locked=? WHERE id=?").run(original.user_edit_ordinal,original.auto_locked,id);
+      const original=db.prepare("SELECT user_edit_ordinal,auto_locked,pinned FROM promises WHERE id=? AND chat_id=?").get(event.promise_id,parent) as any;
+      if(original) db.prepare("UPDATE promises SET user_edit_ordinal=?,auto_locked=?,pinned=?,ended_at_turn=?,recency_until_turn=? WHERE id=?").run(original.user_edit_ordinal,original.auto_locked,original.pinned,...inheritedRecency(event),id);
     }
 
     const accessMaps = new Map<string, Map<string, string>>([

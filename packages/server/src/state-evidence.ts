@@ -1,3 +1,4 @@
+import { isEndedPromiseStatus } from "./promise-recency.js";
 import { EVERYONE_HOLDER, itemAccessKnowledge, intersectAccessKnowledge } from "./item-access.js";
 import { knownByLabels } from "./item-access.js";
 import { createHash } from "node:crypto";
@@ -21,6 +22,8 @@ export interface StateEvidence {
   updatedRevision?: number;
   updatedOrdinal?: number;
   promiseStatus?: string;
+  promisePinned?: boolean;
+  promiseRecent?: boolean;
   due?: string;
   /** Automatic presentation only; excluded from search text and the atom fingerprint. */
   automatic?: { subject: string; body: string; tensions?: string[]; recognitionLevel?: SocialKnowledgeLevel };
@@ -55,6 +58,7 @@ export function resolveAssertionHolders(db: RcmDatabase, chatId: string, row: an
 /** Re-materialize from canonical rows; cached prose never grants validity or access.
  * Historical supersession is distinct from source deletion and branch rollback. */
 export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcomeCapture, perspective = ""): StateEvidence[] {
+  const turn = Number((db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(chatId) as { completed_turn_count: number } | undefined)?.completed_turn_count ?? 0);
   const result: StateEvidence[] = [];
   const pending: Array<() => void> = [];
   const sourceIds = new Set<string>();
@@ -89,7 +93,8 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
         updatedRevision: row.updated_revision ?? row.updatedRevision ?? row.valid_from_revision ?? row.created_revision,
         updatedOrdinal: Math.max(row.user_edit_ordinal ?? row.userEditOrdinal ?? -1, row.source_end_ordinal ?? row.valid_from_ordinal ?? -1,
           ...ids.map(id => sources.get(id)?.ordinal ?? -1)),
-        ...(kind === "promise" ? { promiseStatus: row.status, due: row.scheduled_for ?? undefined } : {}),
+        ...(kind === "promise" ? { promiseStatus: row.status, promisePinned: row.pinned === 1 && (row.status === "open" || isEndedPromiseStatus(row.status)),
+          promiseRecent: isEndedPromiseStatus(row.status) && row.ended_at_turn != null && turn >= row.ended_at_turn && turn < row.recency_until_turn, due: row.scheduled_for ?? undefined } : {}),
         ...(accessKind?{knownByLabels:knownByLabels(db,chatId,accessKind,String(row.id),item.holders)}:{}) });
     });
   };
@@ -116,7 +121,7 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
   const promiseById = new Map(promises.map(row => [row.id, row]));
   for (const row of promises) {
     const scope = resolveItemAccess(access, "promise", row.id, [row.promisor, row.promisee]);
-    add("promise", row, `${row.promisor} → ${row.promisee}: ${row.content} [${row.status === "offscreen" ? "scheduled time passed; outcome unconfirmed" : row.status}]${row.scheduled_for ? ` Due: ${row.scheduled_for}.` : ""}${row.status_reason ? ` ${row.status_reason}` : ""}`, itemAccessKnowledge(scope), [row.promisor, row.promisee], row.status === "open" || row.status === "offscreen", undefined, undefined,
+    add("promise", row, `${row.promisor} → ${row.promisee}: ${row.content} [${row.status === "offscreen" ? "scheduled time passed; outcome unconfirmed" : row.status}]${row.scheduled_for ? ` Due: ${row.scheduled_for}.` : ""}${row.status_reason ? ` ${row.status_reason}` : ""}`, itemAccessKnowledge(scope), [row.promisor, row.promisee], row.status === "open", undefined, undefined,
       { subject: `${row.promisor} → ${row.promisee}`, body: row.content });
   }
   for (const row of db.prepare("SELECT * FROM promise_events WHERE chat_id=? AND active=1 ORDER BY source_ordinal DESC,created_revision DESC,id").iterate(chatId) as Iterable<any>) {
@@ -178,10 +183,11 @@ export const stateKindLabel = (kind: string, stateKind?: StateKind): string => k
 /** Rank channels, not incomparable raw scores. No prose is classified as true,
  * answered, secret, or resolved by lexical matching. */
 export function rankStateEvidence(items: StateEvidence[], query: string, options: {
-  trace?: StateOutcomeCapture; perspective: string; archive?: boolean; history?: boolean; continuity?: boolean; activeNames?: string[]; semantic?: Map<string, number>;
+  automaticPromises?: boolean; trace?: StateOutcomeCapture; perspective: string; archive?: boolean; history?: boolean; continuity?: boolean; activeNames?: string[]; semantic?: Map<string, number>;
 }): Array<{ item: StateEvidence; score: number }> {
+  const eligiblePromise = (item: StateEvidence) => options.automaticPromises && item.kind === "promise" && (item.promisePinned || item.promiseRecent);
   const visible = items.filter(item => {
-    if (!(options.history || item.current && item.kind !== "relationship_axis")) {
+    if (!(options.history || eligiblePromise(item) || item.current && item.kind !== "relationship_axis")) {
       options.trace?.record(options.perspective, item, "not_current", item.kind === "relationship_axis" ? { reason: "axis_not_in_current_ledger" } : {}); return false;
     }
     if (!(options.archive || options.perspective === "narrator" || item.holders.includes(EVERYONE_HOLDER)
@@ -198,10 +204,11 @@ export function rankStateEvidence(items: StateEvidence[], query: string, options
     .filter(entry => entry.score > 0 && (options.continuity || entry.score >= .2)).sort((a, b) => b.score - a.score);
   const semantic = visible.filter(item => (options.semantic?.get(item.id) ?? 0) >= .35).sort((a, b) => options.semantic!.get(b.id)! - options.semantic!.get(a.id)!);
   const names = new Set([options.perspective, ...(options.activeNames ?? [])].map(norm));
-  const associated = (options.continuity ?? !options.history) ? visible.filter(item => (item.current || options.history) && (item.kind === "relationship" && (options.activeNames?.length ?? 0) > 1 ? item.subjects.slice(1) : item.subjects).some(subject => names.has(norm(subject)))) : [];
+  const associated = (options.continuity ?? !options.history) ? visible.filter(item => (item.current || eligiblePromise(item) || options.history) && (item.kind === "relationship" && (options.activeNames?.length ?? 0) > 1 ? item.subjects.slice(1) : item.subjects).some(subject => names.has(norm(subject)))) : [];
   const scores = new Map<string, number>();
   for (const channel of [lexical.map(entry => entry.item), semantic, associated]) channel.forEach((item, index) => scores.set(item.id, (scores.get(item.id) ?? 0) + 1 / (60 + index + 1)));
   const ranked = visible.filter(item => {
+    if (options.automaticPromises && item.promisePinned) scores.set(item.id, scores.get(item.id) ?? 0);
     if (!scores.has(item.id)) { options.trace?.record(options.perspective, item, "not_linked"); return false; }
     if (!(options.history || item.kind !== "relationship" || (options.activeNames?.length ?? 0) <= 1
       || item.subjects.slice(1).some(subject=>names.has(norm(subject))) || (options.semantic?.get(item.id) ?? 0)>=.35)) {

@@ -60,7 +60,7 @@ ${USER_CORRECTION_GUIDANCE}
 Use eventDraft memory/detail keys for links when they fully establish a state. To add a recognition or other state detail to an existing event, use detailAdditions:[{memoryKey,detail}] with a NEW detail key. NEVER copy an existing event into state.memories or replace its details. state.memories is ONLY for a source-supported state lacking any suitable event parent; use fresh keys prefixed state_. Do not re-emit existing entities. An absent event detail is not permission to omit a source-established state. Never infer a role from shared affiliation, romance from intimacy, or knowledge from narrator access. Historical introductions stay events; recognition describes current source-supported understanding. Existing ledger entries are context, never new source evidence.
 Every NEW state.memories entry must contain at least one source-backed detail with role:"core" that states its essential claim, with explicit evidence and access. A title, summary, relationship reason, or supporting-only details cannot replace that core claim. detailAdditions may use role:"supporting" when adding context to an existing memory; do not relabel supporting information as core just to pass validation. Do not return keyDialogues in state memories; dialogue extraction and its source selectors belong exclusively to the event archivist.
 Return strict JSON {state:{entities:[],memories:[],detailAdditions:[],stateObservations:[],relationshipEvents:[],socialKnowledge:[],relationshipBaselines:[],physicalIntimacy:[]},decisions:[]}.
-Also return seedResolutions:[{detailId,status:"fulfilled"|"abandoned",evidence:[{sourceRef}]}] for supplied priorSeeds only when CURRENT SOURCE explicitly fulfils or abandons that particular wish, plan, noticed interest, promise or curiosity. Cite later source, never prior evidence. Silence, a deadline, a similar object, an attempt or uncertainty cannot close a seed. Omit ambiguous decisions and leave it open.
+Also return seedResolutions:[{detailId,status:"fulfilled"|"abandoned",evidence:[{sourceRef}]}] for supplied priorSeeds only when CURRENT SOURCE explicitly fulfils or abandons that particular wish, plan, noticed interest, promise or curiosity. Cite later source, never prior evidence. Making, repeating or reaffirming a promise or wish is not fulfilment; cite a later passage where it is actually carried out or abandoned. Silence, a deadline, a similar object, an attempt or uncertainty cannot close a seed. Omit ambiguous decisions and leave it open.
 Every stateObservation needs a unique key. Return exactly one decision {itemRef:"observation:<key>",action:"create|reinforce|supersede|end|coexist|dispute|ignore",targetIds:[],reason} per observation. Existing IDs must come from priorLedger and refer to the same subject/property/directional relation. Never change immutable records. create/coexist/ignore have no targets; other actions require targets. If an existing target is not supplied, do not guess its ID. Do not end a record from silence or a passed deadline. Empty arrays are valid; never invent changes to fill them.
 All NEW evidence and access use {sourceRef:"s1"} or {sourceRef:["s1","s2"]}, selecting supplied units from the same message. Omit quote so the server copies exact text. Add an exact partial quote only when necessary to narrow a mixed public/private unit. Never invent message IDs or copy old event citations as new selectors. Access is [{holder,basis:"experienced|witnessed|heard|told|inferred|internal",evidence:[{sourceRef}],confidence:0..1}]. Only grant what each holder knows in full.
 State record JSON schema: ${JSON.stringify(stateShape())}
@@ -94,10 +94,10 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   if(submission?.error)throw new Error(submission.error);
   if(submission?.candidateSetHash!==prepared.candidateSetHash||!submission.result?.state)throw new Error("Missing or stale state extraction result");
   const seedResolutions=submission.result.seedResolutions ?? [];
-  const suppliedSeeds=new Set(JSON.parse(prepared.userPrompt).priorSeeds.map((seed:{detailId:string})=>seed.detailId));
-  if(seedResolutions.some(patch=>!suppliedSeeds.has(patch.detailId)))throw new Error("Seed target was not supplied to the model");
-  validateSeedResolutions(db,chatId,seedResolutions,sourceIds);
-  const normalized=mergeStateExtraction(draft,submission.result);
+  const suppliedSeeds=new Set<string>(JSON.parse(prepared.userPrompt).priorSeeds.map((seed:{detailId:string})=>seed.detailId));
+  const validated=addition ? {accepted:[],dropped:seedResolutions.map(patch=>({detailId:patch.detailId,reason:"Memory additions cannot resolve existing seeds"}))}
+    : validateSeedResolutions(db,chatId,seedResolutions,sourceIds,suppliedSeeds);
+  const normalized=mergeStateExtraction(draft,{...submission.result,seedResolutions:validated.accepted});
   const merged=normalized.draft;
   const issues=inspectDraftEvidence(db,chatId,sourceIds,merged);
   if(issues.some(i=>i.blocking))throw new Error(`State extraction has unverified source evidence: ${issues.filter(i=>i.blocking).slice(0,3).map(i=>i.reason).join(", ")}`);
@@ -113,5 +113,5 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   // New observations are created locally by the existing writer; honor explicit ignores first.
   const ignored=new Set(decisions.filter(d=>local.has(d.itemRef)&&d.action==="ignore").map(d=>d.itemRef));
   merged.stateObservations=merged.stateObservations.filter(o=>!ignored.has(`observation:${o.key}`));
-  return {...normalized,draft:merged,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
+  return {...normalized,draft:merged,seedResolutionDrops:validated.dropped,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
 }

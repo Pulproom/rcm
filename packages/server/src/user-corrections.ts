@@ -158,8 +158,8 @@ function restoreCorrectedPromises(db: RcmDatabase, chatId: string, promiseIds: r
     if(!db.prepare("SELECT 1 FROM promises WHERE chat_id=? AND id=? AND user_edit_ordinal IS NOT NULL").get(chatId,id)) continue;
     const event=db.prepare(`SELECT * FROM promise_events WHERE chat_id=? AND promise_id=? AND active=1
       ORDER BY created_revision DESC,created_at DESC,rowid DESC LIMIT 1`).get(chatId,id) as Record<string,any>|undefined;
-    if(event) db.prepare("UPDATE promises SET promisor=?,promisee=?,content=?,status=?,scheduled_for=?,status_reason=?,source_memory_id=?,source_batch_id=?,updated_revision=? WHERE id=?")
-      .run(event.promisor,event.promisee,event.content,event.status,event.scheduled_for,event.status_reason,event.source_memory_id,event.source_batch_id,event.created_revision,id);
+    if(event) db.prepare("UPDATE promises SET promisor=?,promisee=?,content=?,status=?,scheduled_for=?,status_reason=?,source_memory_id=?,source_batch_id=?,updated_revision=?,ended_at_turn=?,recency_until_turn=? WHERE id=?")
+      .run(event.promisor,event.promisee,event.content,event.status,event.scheduled_for,event.status_reason,event.source_memory_id,event.source_batch_id,event.created_revision,event.ended_at_turn,event.recency_until_turn,id);
   }
 }
 

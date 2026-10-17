@@ -768,22 +768,42 @@ export function enqueueExtractionJobs(
   })();
 }
 
-export function enqueueSocialKnowledgeBackfill(db: RcmDatabase, chatId: string, postExtractionReview?: boolean): number {
+type SocialKnowledgeBackfillPlan = {
+  chat: { profile: RpProfile; include_user_messages: number; extraction_group_turns: number; memory_language: MemoryLanguage; post_extraction_review: number };
+  groups: PendingMessage[][];
+};
+
+function socialKnowledgeBackfillPlan(db: RcmDatabase, chatId: string): SocialKnowledgeBackfillPlan {
   const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns,memory_language,post_extraction_review FROM chats WHERE id=?").get(chatId) as
     | { profile: RpProfile; include_user_messages: number; extraction_group_turns: number; memory_language: MemoryLanguage; post_extraction_review: number }
     | undefined;
   if (!chat) throw new Error("Chat not found");
-  const busy = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='social_backfill' AND status IN ('queued','leased') LIMIT 1").get(chatId);
-  if (busy) return 0;
   const messages = originalExtractionUnits(db,chatId,true,['done','encapsulated','skipped_policy']).flat();
   const units = extractionUnits(messages, chat.include_user_messages !== 0);
   const target = Math.min(50, Math.max(1, Math.round(chat.extraction_group_turns || 6)));
+  const groups: PendingMessage[][] = [];
+  for (let index = 0; index < units.length; index += target) {
+    const group = units.slice(index, index + target).flat();
+    if (group.length) groups.push(group);
+  }
+  return { chat, groups };
+}
+
+export function previewSocialKnowledgeBackfill(db: RcmDatabase, chatId: string): { sourceGroups: number; postExtractionReview: boolean; busy: boolean } {
+  const plan = socialKnowledgeBackfillPlan(db, chatId);
+  const busy = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='social_backfill' AND status IN ('queued','leased') LIMIT 1").get(chatId);
+  return { sourceGroups: plan.groups.length, postExtractionReview: plan.chat.post_extraction_review !== 0, busy: Boolean(busy) };
+}
+
+export function enqueueSocialKnowledgeBackfill(db: RcmDatabase, chatId: string, postExtractionReview?: boolean): number {
+  const plan = socialKnowledgeBackfillPlan(db, chatId);
+  const { chat, groups } = plan;
+  const busy = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='social_backfill' AND status IN ('queued','leased') LIMIT 1").get(chatId);
+  if (busy) return 0;
   const insert = db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'social_backfill','queued',?,0,?,?)`);
   return db.transaction(() => {
     let count = 0;
-    for (let index = 0; index < units.length; index += target) {
-      const group = units.slice(index, index + target).flat();
-      if (!group.length) continue;
+    for (const group of groups) {
       const timestamp = now();
       insert.run(randomUUID(), chatId, JSON.stringify({ sourceMessageIds: group.map((item) => item.message_id), sourceFingerprint: sourceFingerprint(db, chatId, group.map((item) => item.message_id)), includeUserMessages: chat.include_user_messages !== 0, memoryLanguage: chat.memory_language, postExtractionReview: postExtractionReview ?? (chat.post_extraction_review !== 0) }), timestamp, timestamp);
       count += 1;
@@ -1335,7 +1355,7 @@ export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string
 export function projectJobListPayload(payload: Record<string, unknown>, kind?: string): Record<string, unknown> {
   const projected = Object.fromEntries([
     "sourceRecovery", "sourceRecoveryMetadata", "pipelineStage", "pipelineManualRetry", "pipelineRetryAttempt", "llmCallStats", "llmUsage", "llmCallDiagnostics",
-    "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus",
+    "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops",
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
   if (JOB_TRIGGER_VALUES.includes(payload.trigger as JobTrigger)) projected.trigger = payload.trigger;
   if (kind === 'story_consolidation' && ['segment','arc','overview'].includes(payload.level as string)

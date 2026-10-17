@@ -1,3 +1,5 @@
+import { avatarColorStyle } from "../person-colors.js";
+export { avatarHue } from "../person-colors.js";
 // Film component helpers. Each returns an HTML string; every label and attribute value is escaped here,
 // while `body`, `control`, `end`, `record`, and `action` slots take caller-built HTML.
 import { lex } from "../lexicon.js";
@@ -59,6 +61,11 @@ export const ICONS: Record<string, string> = {
   down: '<path d="m7 10 5 5 5-5"/>',
   up: '<path d="m7 14 5-5 5 5"/>',
   swap: '<path d="M7 7h12m-3-3 3 3-3 3M17 17H5m3-3-3 3 3 3"/>',
+  shield: '<path d="M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6z"/>',
+  rings: '<circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5"/>',
+  cloud: '<path d="M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.2 9.1 4.5 4.5 0 0 0 7 18z"/>',
+  flame: '<path d="M12 21c-3.5 0-6-2.4-6-5.6 0-3 2-4.6 3.3-6.6.2 1.6 1 2.6 2 3 0-3.2 1.4-5.8 3.7-7.8 0 3.8 3 5.6 3 10 0 4.2-2.6 7-6 7z"/>',
+  bolt: '<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>',
   heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',
   pencil: '<path d="m4.5 19.5 4-1 11-11-3-3-11 11z"/><path d="m14.5 5.5 3 3"/>',
   alert: '<path d="M12 4.2 2.8 20.2h18.4L12 4.2Z"/><path d="M12 10.2v4m0 3h.01"/>',
@@ -70,17 +77,10 @@ export const icon = (name: string): string =>
 
 export type ButtonKind = "primary" | "secondary" | "quiet" | "danger" | "danger-solid";
 
-const AVATAR_HUES = [350, 26, 62, 98, 134, 170, 206, 242, 278, 314];
-
-/** A monogram circle for a person; its hue is fixed by the name so the same person reads the same everywhere. Film hides it. */
 export function avatar(name: string, size: "sm" | "md" | "xl" = "md"): string {
   const text = String(name ?? "").trim();
-  // FNV-1a picks one of ten pastel hues spaced so neighbours in a list rarely look alike.
-  let hash = 2166136261;
-  for (const char of text.toLocaleLowerCase()) hash = Math.imul(hash ^ char.codePointAt(0)!, 16777619) >>> 0;
-  const hue = AVATAR_HUES[hash % AVATAR_HUES.length];
   const initial = Array.from(text)[0]?.toLocaleUpperCase() ?? "?";
-  return `<span class="av av--${size}" style="--av-h:${hue}" aria-hidden="true">${escapeHtml(initial)}</span>`;
+  return `<span class="av av--${size}" style="${avatarColorStyle(text)}" aria-hidden="true">${escapeHtml(initial)}</span>`;
 }
 
 export function btn(label: string, opts: {

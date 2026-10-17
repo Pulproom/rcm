@@ -14,6 +14,7 @@ export interface AutomaticStateRow {
   perspectives: string[];
   active: boolean;
   pinned: boolean;
+  promiseSlot?: "pinned" | "recent";
   relevance: number;
   rank: number;
   legend: string;
@@ -31,10 +32,10 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
   const active = new Set(options.activeNames.map(normalize));
   for (const perspective of options.perspectives) {
     const candidates = rankStateEvidence(corpus, options.query, { perspective, activeNames: options.activeNames,
-      continuity: true, semantic: options.semantic, trace: options.trace });
+      continuity: true, automaticPromises: true, semantic: options.semantic, trace: options.trace });
     for (const [index, { item, score }] of candidates.entries()) {
       const pinned = item.kind === "basic_relation" && item.subjects.length >= 2 && item.subjects.every(name => active.has(normalize(name)));
-      if (options.memoryOnly || !pinned && item.sourceIds.length && item.sourceIds.every(id => options.covered.has(id))) {
+      if (options.memoryOnly || !pinned && !item.promisePinned && !item.promiseRecent && item.sourceIds.length && item.sourceIds.every(id => options.covered.has(id))) {
         options.trace?.record(perspective, item, options.memoryOnly ? "memory_only" : "prompt_covered", { rank: index + 1 });
         continue;
       }
@@ -49,7 +50,8 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
       const line = renderAutomaticStateLine(item, options.perspectives, options.latestStoryTime);
       // Keep the existing canonical deduplication policy: shortening labels or
       // eliding scope tags must not merge previously distinct records.
-      const key = renderStateLine(item);
+      // A user pin is a separate delivery slot even when its prose matches an ordinary row.
+      const key = `${renderStateLine(item)}\0${item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : ""}`;
       const previous = rows.get(key);
       if (previous) {
         previous.perspectives.push(perspective);
@@ -57,11 +59,12 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
       } else rows.set(key, { item, line, perspectives: [perspective], rank: index + 1, legend: stateLegend(options.perspectives),
         relevance: score,
         pinned,
+        promiseSlot: item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : undefined,
         active: [...item.holders, ...item.subjects].some(name => active.has(normalize(name))) });
     }
   }
   const promisePriority = ({ item, active }: AutomaticStateRow): number => {
-    if (item.kind !== "promise" || !["open", "offscreen"].includes(item.promiseStatus ?? "")) return 0;
+    if (item.kind !== "promise" || item.promiseStatus !== "open") return 0;
     return overduePromise(item, options.latestStoryTime) ? 2 : Number(active);
   };
   // The existing lexical/semantic/participant RRF leads; an additional typed
@@ -83,7 +86,14 @@ export function renderStateLine(item: StateEvidence): string {
 
 export function selectAutomaticState(rows: AutomaticStateRow[], budget: number): AutomaticStateRow[] {
   const selected = rows.filter(row => row.pinned);
-  for (const row of rows) if (!row.pinned && renderAutomaticState([...selected, row]).tokens <= budget) selected.push(row);
+  for (const row of rows) if (!row.pinned && !row.promiseSlot && renderAutomaticState([...selected, row]).tokens <= budget) selected.push(row);
+  // Separate, bounded slots leave the ordinary/open-promise allowance intact.
+  for (const slot of ["pinned", "recent"] as const) {
+    const extra: AutomaticStateRow[] = [];
+    const slotBudget = Math.min(180, Math.floor(budget * .4));
+    for (const row of rows) if (row.promiseSlot === slot && renderAutomaticState([...extra, row]).tokens <= slotBudget) extra.push(row);
+    selected.push(...extra);
+  }
   return selected;
 }
 
@@ -102,7 +112,7 @@ export function fundAutomaticState(options: {
   const reserved = new Set(longterm.filter(options.canYield).slice(0, Math.max(0, floor - protectedCount)));
   const removed: string[] = [];
   for (const row of options.candidates) {
-    if (!row.active || options.selected.includes(row)) continue;
+    if (row.promiseSlot || !row.active || options.selected.includes(row)) continue;
     const previous = [...options.memories];
     options.selected.push(row);
     let tokens = options.renderTokens();
@@ -134,8 +144,10 @@ function renderAutomaticStateLine(item: StateEvidence, perspectives: string[], l
   let body = display?.body ?? item.text;
   if (display?.recognitionLevel) body += ` (${socialKnowledgeLevelLabel[display.recognitionLevel]})`;
   if (item.kind === "promise") {
+    if (item.promisePinned || item.promiseRecent) body = body.length > 220 ? `${body.slice(0, 219)}…` : body;
     const status = overduePromise(item, latestStoryTime) ? "overdue" : item.promiseStatus ?? "open";
-    body += ` (${status}${item.due ? ` · due ${item.due}` : ""})`;
+    const recentStatus: Record<string, string> = { kept: "recently kept", broken: "recently broken", released: "recently released", offscreen: "recently handled offscreen" };
+    body += ` (${item.promiseRecent && !item.promisePinned ? recentStatus[status] ?? status : status}${item.due ? ` · due ${item.due}` : ""})`;
   }
   if (item.kind === "relationship") {
     if (item.relationship?.stale) body += " [Last recorded relationship; update pending.]";
@@ -151,7 +163,7 @@ function renderAutomaticStateLine(item: StateEvidence, perspectives: string[], l
 
 function overduePromise(item: StateEvidence, latestStoryTime?: number): boolean {
   const due = item.due ? structuredStoryTimeEnd(item.due) : undefined;
-  return item.promiseStatus === "offscreen" || item.promiseStatus === "open" && due !== undefined && latestStoryTime !== undefined && due < latestStoryTime;
+  return item.promiseStatus === "open" && due !== undefined && latestStoryTime !== undefined && due < latestStoryTime;
 }
 
 function stateGroup(item: StateEvidence): number {
@@ -159,8 +171,8 @@ function stateGroup(item: StateEvidence): number {
   // Location/status facts use the canonical condition kind; prose is not classified.
   if (item.kind === "world_fact" && item.stateKind === "condition") return 1;
   if (item.kind === "belief" || item.stateKind === "goal") return 2;
-  if (item.kind === "promise") return 3;
-  return 4;
+  if (item.kind === "promise") return item.promisePinned ? 4 : item.promiseRecent ? 5 : 3;
+  return 6;
 }
 
 export function renderAutomaticState(rows: AutomaticStateRow[]) {
@@ -173,8 +185,8 @@ export function renderAutomaticState(rows: AutomaticStateRow[]) {
     if (item.kind === "promise") manifest.promiseIds.push(id);
     if (item.relationship) manifest.relationshipPairs.push(item.relationship);
   }
-  const headings = ["Relationships", "Now", "Goals and beliefs", "Promises", "Other"];
-  const openPromise = (row: AutomaticStateRow) => Number(["open", "offscreen"].includes(row.item.promiseStatus ?? ""));
+  const headings = ["Relationships", "Now", "Goals and beliefs", "Promises (story record; characters may keep, delay or break them as the story goes)", "Pinned promises", "Recently ended promises", "Other"];
+  const openPromise = (row: AutomaticStateRow) => Number(row.item.promiseStatus === "open");
   const ordered = [...rows].sort((a, b) => stateGroup(a.item) - stateGroup(b.item)
     || (a.item.kind === "promise" && b.item.kind === "promise" ? openPromise(b) - openPromise(a) : 0) || a.rank - b.rank);
   const groups = headings.flatMap((heading, index) => {

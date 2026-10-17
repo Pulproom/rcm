@@ -9,7 +9,7 @@ Risu Cognitive Memory(RCM)는 RisuAI와 PocketRisu의 장기 역할극을 위한
 
 각 ZIP의 `README.md`에 설치, 시작, 중지, 업데이트와 제거 방법이 안내되어 있습니다. macOS·Linux·Docker·Termux 경로는 실기기 검증 상태를 릴리스 설명에서 확인해 주세요.
 
-설치된 플러그인은 `Risu Cognitive Memory 1.0.17`로 표시됩니다. 관리 → 설정 → 서버에서 제품, 플러그인과 연결된 서버의 설치 버전을 확인할 수 있습니다.
+설치된 플러그인은 `Risu Cognitive Memory 1.0.18`로 표시됩니다. 관리 → 설정 → 서버에서 제품, 플러그인과 연결된 서버의 설치 버전을 확인할 수 있습니다.
 
 ## 소스 빌드
 

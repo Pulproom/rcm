@@ -21,6 +21,7 @@ export const PHONE_SKIN_CSS = `
   /* Aliases for selectors inherited from Film. */
   --t-small: var(--t-meta); --t-sub: var(--t-meta); --t-list: var(--t-ui); --t-micro: var(--t-meta); --t-credit: var(--t-cap);
   --r: 12px; --control: 36px; --hit: 44px;
+  --avatar-light-ink: #ffffff; --avatar-dark-ink: #000000;
   /* phone-only */
   --sep: rgba(84,84,88,.65); --fill: rgba(118,118,128,.24); --bubble: #26252A;
   --glass: rgba(30,30,32,.72); --glass-edge: rgba(255,255,255,.12); --glass-shade: 0 8px 24px -10px rgba(0,0,0,.6);
@@ -187,6 +188,12 @@ export const PHONE_SKIN_CSS = `
 .fold.job-group.job-burst > .fold__body > .job--child > summary { min-height: 40px; padding-block: 8px; }
 .job--child .job__name { font-size: var(--t-meta); font-weight: 400; color: var(--ink-2); }
 .job--child .job__time { font-size: var(--t-micro); }
+.nr__pin { display: inline-flex; align-items: center; gap: 3px; color: var(--ink-2); }
+.nr__pin svg { width: 12px; height: 12px; }
+/* promise edit: when did the status change happen */
+.promise-when { display: grid; gap: 10px; margin: 4px 0 6px; padding: 0; border: 0; }
+.promise-when legend { padding: 0; margin-bottom: 8px; font-size: var(--t-meta); color: var(--ink-2); }
+.check input[type="radio"] { border-radius: 50%; }
 /* withheld recognition: a quiet note inside a finished job, never an error tone */
 .withheld { margin: 4px 0 14px; padding: 12px 14px; border-radius: var(--r); background: var(--screen-2); }
 .withheld__head { margin: 0 0 8px; font-size: var(--t-meta); font-weight: 600; color: var(--ink-2); }
@@ -265,7 +272,7 @@ export const PHONE_SKIN_CSS = `
 }
 
 /* avatars: monogram circles, hue from the name */
-.av { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 50%; color: #fff; font: 600 var(--t-ui)/1 var(--sans); background: linear-gradient(hsl(var(--av-h, 220) 62% 66%), hsl(var(--av-h, 220) 52% 50%)); }
+.av { display: inline-grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 50%; color: var(--av-ink, var(--avatar-light-ink)); font: 600 var(--t-ui)/1 var(--sans); --avatar-fill: linear-gradient(var(--av-top, hsl(var(--av-h, 220) 62% 66%)), var(--av-base, hsl(var(--av-h, 220) 52% 50%))); background: var(--avatar-fill); }
 .av--sm { width: 28px; height: 28px; font-size: var(--t-cap); }
 .av--xl { width: 88px; height: 88px; font-size: 34px; }
 /* ---- 인물 · 관계 ---- */
@@ -332,6 +339,8 @@ export const PHONE_SKIN_CSS = `
 .pairsheet .facts > div { display: flex; align-items: baseline; gap: 4px; }
 .pairsheet .facts dd { font-size: var(--t-ui); font-weight: 600; letter-spacing: 0; }
 .pairsheet .facts dt { font-size: var(--t-meta); color: var(--ink-3); }
+.pairsheet .facts__empty { align-items: center; gap: 6px; font-size: var(--t-meta); color: var(--ink-3); }
+.pairsheet .facts__empty .btn { min-height: 0; padding: 4px 6px; font-size: var(--t-meta); }
 .pairsheet .pairs { margin: 10px 0 4px; justify-content: center; }
 .pair { height: 30px; border-radius: 15px; background: var(--fill); color: var(--ink); font-size: var(--t-ui); }
 .pair[aria-pressed="true"] { background: var(--tungsten); color: #fff; }
@@ -347,7 +356,7 @@ export const PHONE_SKIN_CSS = `
 .pov > .clamp:has(+ .tensions) { border-radius: 12px 12px 0 0; }
 .pov__text { font-size: var(--t-ui); font-weight: 400; color: var(--ink-2); line-height: 1.5; }
 .pov .tensions { margin: 0; padding: 0 16px 12px 34px; background: var(--screen); border-radius: 0 0 12px 12px; font-size: var(--t-ui); line-height: 1.5; }
-.emotion-table { border-collapse: separate; border-spacing: 0; border-radius: 12px; overflow: hidden; background: var(--screen); }
+.emotion-table { margin-top: 14px; border-collapse: separate; border-spacing: 0; border-radius: 12px; overflow: hidden; background: var(--screen); }
 .emotion-table th, .emotion-table td { padding: 11px 12px; }
 .emotion-table thead th { font-size: var(--t-meta); }
 .emotion-table tbody tr { border: 0; }
@@ -356,7 +365,12 @@ export const PHONE_SKIN_CSS = `
 .emotion-note { font-size: var(--t-meta); }
 
 /* anniversaries: a calendar list, D+ on the right */
-.pairsheet .reel { display: block; margin: 0; padding: 0; overflow: hidden; border-radius: 12px; background: var(--screen); }
+.pairsheet .reel { display: block; margin: 0; padding: 0; border-radius: 12px; background: var(--screen); }
+/* the list stays unclipped so a card's 더보기 popover can open past its edge; the end rows round their own hover */
+.pairsheet .reel > .anni:first-child .anni__open { border-radius: 12px 12px 0 0; }
+.pairsheet .reel > .anni:last-child .anni__open { border-radius: 0 0 12px 12px; }
+.pairsheet .reel > .anni:only-child .anni__open { border-radius: 12px; }
+.anni:has(> .anni__acts > details[open]) { position: relative; z-index: 2; }
 .anni { border-radius: 0; background: none; box-shadow: none; }
 .anni + .anni { background-image: linear-gradient(var(--sep), var(--sep)); background-size: calc(100% - 16px) .5px; background-position: right top; background-repeat: no-repeat; }
 .anni__open { grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 11px 48px 12px 16px; }
@@ -1355,6 +1369,70 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 .sent-call .sent-row { grid-template-columns: minmax(0, 1fr) auto; padding-left: 39px; }
 .sent-call .sent-row__k { display: none; }
 .sent-call .sent-row__m { grid-column: 1; }
+/* Two-person relationship flow: the same composition in the Phone palette. */
+.duet { --duet-a: hsl(var(--flow-a-h) var(--flow-a-s) clamp(58%, var(--flow-a-l), 74%)); --duet-b: hsl(var(--flow-b-h) var(--flow-b-s) clamp(58%, var(--flow-b-l), 74%)); }
+:root[data-theme^="day"] .duet { --duet-a: hsl(var(--flow-a-h) var(--flow-a-s) clamp(28%, var(--flow-a-l), 42%)); --duet-b: hsl(var(--flow-b-h) var(--flow-b-s) clamp(28%, var(--flow-b-l), 42%)); }
+.duet-head { gap: 14px; margin-block: 16px 20px; }
+.duet-avatars .av { width: 34px; height: 34px; font-size: var(--t-meta); background: var(--avatar-fill); color: var(--av-ink, var(--avatar-light-ink)); border: 0; font-weight: 600; }
+.duet-avatars .av + .av { margin-left: -12px; }
+.duet-credit { display: none; }
+.duet-head h3 { font-size: var(--t-head); font-weight: 700; letter-spacing: -.025em; }
+.duet-meta { font-family: var(--sans); font-size: var(--t-meta); }
+.duet-chips { gap: 8px; margin-bottom: 6px; padding-bottom: 12px; scrollbar-width: none; }
+/* one-line pills: the axis, then its present word */
+.duet-chips .duet-chip { display: inline-flex; align-items: baseline; gap: 5px; min-height: 36px; padding: 8px 14px; border: 0; border-radius: 999px; background: var(--screen); }
+.duet-chip b { font-size: var(--t-ui); font-weight: 600; }
+.duet-chip b, .duet-chip small { display: inline; margin: 0; }
+.duet-chip small { font-size: var(--t-meta); color: var(--ink-2); }
+.duet-chip[aria-pressed="true"] { background: var(--ink); }
+.duet-chip[aria-pressed="true"] b, .duet-chip[aria-pressed="true"] small { color: var(--house); }
+.duet-chip[aria-pressed="true"]::after { display: none; }
+.duet-panel { padding: 20px 18px 16px; border-radius: 16px; background: var(--screen); }
+.duet-legend { font-size: var(--t-meta); }
+.duet-legend i { border-radius: 2px; width: 18px; }
+.duet-plot { height: 210px; }
+.duet-grid { stroke: var(--sep); opacity: .65; }
+.duet-pin > i::before { display: none; }
+.duet-pin .i { display: block; width: 12px; height: 12px; fill: currentColor; stroke-width: 0; }
+.duet-pin__label { font: 400 var(--t-cap)/1.3 var(--sans); letter-spacing: 0; }
+.duet-ruler { font: 400 var(--t-cap)/1.3 var(--sans); letter-spacing: 0; }
+.duet-sync small { font: 500 var(--t-cap)/1.3 var(--sans); }
+.duet-readout { border-color: var(--sep); font-size: var(--t-meta); }
+.duet-readout .btn, .duet-memory .btn { color: var(--accent-text); font-size: var(--t-ui); }
+.duet-memory { border: 0; border-radius: 16px; padding: 18px; background: var(--screen); }
+.duet-memory figcaption { display: flex; align-items: center; gap: 6px; font: 500 var(--t-meta)/1.4 var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink-3); }
+.duet-memory figcaption::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--duet-a); }
+.duet-memory blockquote { font-size: var(--t-head); font-weight: 600; line-height: 1.5; }
+.duet-memory > p { font-size: var(--t-meta); }
+.duet-recent { padding: 18px; background: var(--screen); border-radius: 16px; }
+.duet-recent h4 { font-size: var(--t-ui); font-weight: 600; color: var(--ink); }
+.duet-recent li + li { border-color: var(--sep); }
+.duet-scene { padding: 3px 5px; border-radius: 4px; font: 500 var(--t-cap)/1.3 var(--sans); background: color-mix(in srgb, currentColor 10%, transparent); }
+.duet-recent li > button > span:nth-child(2) { font-size: var(--t-meta); }
+.duet-recent .duet-trend.is-up { color: color-mix(in srgb, var(--k-teal) 65%, var(--ink)); }
+.duet-recent .duet-trend.is-down { color: color-mix(in srgb, var(--k-red) 70%, var(--ink)); }
+.duet-quiet, .duet-hint { font-size: var(--t-meta); }
+
+.person__avatar-button { display: inline-flex; border-radius: 50%; justify-self: center; }
+.person__avatar-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.person-color-dialog { max-width: 340px; }
+.person-color-dialog .form { padding: 20px; }
+.person-color-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.person-color-preview { display: grid; place-items: center; flex: none; width: 56px; height: 56px; border-radius: 50%; color: #fff; font: 600 var(--t-head)/1 var(--sans);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--pick) 70%, #fff), var(--pick)); text-shadow: 0 1px 2px rgba(0,0,0,.25); transition: background var(--fast) var(--ease); }
+.person-color-dialog h2 { margin: 0; font-size: var(--t-head); font-weight: 700; letter-spacing: -.01em; }
+.person-color-note { margin: 3px 0 0; color: var(--ink-3); font-size: var(--t-meta); }
+/* the whole bar is the swatch; tapping it opens the platform colour picker */
+.person-color-field { position: relative; display: block; margin-bottom: 20px; }
+.person-color-field input { display: block; width: 100%; height: 52px; padding: 0; border: 0; border-radius: 14px; background: none; cursor: pointer; -webkit-appearance: none; appearance: none; }
+.person-color-field input::-webkit-color-swatch-wrapper { padding: 0; }
+.person-color-field input::-webkit-color-swatch { border: 0; border-radius: 14px; }
+.person-color-field input::-moz-color-swatch { border: 0; border-radius: 14px; }
+.person-color-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.person-color-hint { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: var(--t-meta); font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.35); pointer-events: none; }
+.person-color-dialog .form__bar { margin: 0; padding: 0; border: 0; background: none; }
+.person-color-dialog .form__bar > :first-child { margin-right: auto; }
+
 `;
 
 export const PHONE_CSS: string = FILM_CSS + PHONE_SKIN_CSS;

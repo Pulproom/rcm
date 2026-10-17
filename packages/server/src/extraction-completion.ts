@@ -22,6 +22,7 @@ import { canonicalizeExtraction } from "./entities.js";
 import type { RecallAtomReference } from "./atom-relations.js";
 import { scopeExtractionMemoryKeys } from "./extraction-memory-keys.js";
 import { finishStateExtraction, usesStateExtraction } from "./state-extraction.js";
+import { recordSeedResolutionDrops, type SeedResolutionDrop } from "./story-seeds.js";
 
 export interface DialogueRecoveryCandidate {
   /** A stable key for one frozen candidate, independent of repaired source IDs. */
@@ -98,6 +99,7 @@ export function completeExtractionJob(
   let submitted = reviewed.result;
   let recognitionReviewDraft: ExtractionDraftResult | undefined;
   let recognitionIssues: ReturnType<typeof normalizeRecognitionReferences>["rejected"] = [];
+  let seedResolutionDrops: SeedResolutionDrop[] = [];
   const budgetPayload = payload as typeof payload & { auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
   const reconciliationBudget = Number(budgetPayload.auxiliaryBudget?.maxInputTokens ?? budgetPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000);
   if (usesStateExtraction(job.type, payload) && !submitted.unfinishedSource?.length && !reviewed.pendingRefs.length
@@ -107,6 +109,7 @@ export function completeExtractionJob(
     reconciliation = completed.reconciliation;
     recognitionReviewDraft = completed.recognitionReviewDraft;
     recognitionIssues = completed.recognitionIssues;
+    seedResolutionDrops = completed.seedResolutionDrops;
   }
   const recognition = normalizeRecognitionReferences(submitted);
   if (recognition.rejected.length) {
@@ -289,6 +292,7 @@ export function completeExtractionJob(
     const relationWarnings = ingestExtraction(db, job.chat_id, storedResult, jobId, payload.batchId,
       { sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] });
     normalizedEpisodic.warnings.push(...relationWarnings);
+    recordSeedResolutionDrops(db,jobId,seedResolutionDrops);
     if (relationWarnings.length) {
       db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.atomRelationWarnings',json(?)) WHERE id=?")
         .run(JSON.stringify(relationWarnings), jobId);

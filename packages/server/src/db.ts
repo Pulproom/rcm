@@ -5,7 +5,9 @@ import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 50 as const;
+export const DATABASE_SCHEMA_VERSION = 52 as const;
+
+const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -113,6 +115,7 @@ CREATE TABLE IF NOT EXISTS entities (
   setup_prominence TEXT NOT NULL DEFAULT 'supporting',
   source_json TEXT NOT NULL DEFAULT '[]',
   user_managed INTEGER NOT NULL DEFAULT 0,
+  ${entityColorColumn},
   created_at INTEGER NOT NULL,
   UNIQUE(chat_id, entity_key),
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
@@ -465,6 +468,9 @@ CREATE TABLE IF NOT EXISTS promises (
   created_at INTEGER NOT NULL,
   user_edit_ordinal INTEGER,
   auto_locked INTEGER NOT NULL DEFAULT 0 CHECK(auto_locked IN (0,1)),
+  pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0,1)),
+  ended_at_turn INTEGER,
+  recency_until_turn INTEGER,
   UNIQUE(chat_id, promise_key),
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
@@ -488,6 +494,8 @@ CREATE TABLE IF NOT EXISTS promise_events (
   evidence_json TEXT NOT NULL DEFAULT '[]',
   user_authored INTEGER NOT NULL DEFAULT 0 CHECK(user_authored IN (0,1)),
   active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  ended_at_turn INTEGER,
+  recency_until_turn INTEGER,
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_promise_events_chat_ordinal ON promise_events(chat_id,source_ordinal,created_at);
@@ -975,21 +983,30 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (![46, 47, 48, 49, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
   }
   db.transaction(() => {
+    if (hasSchemaLedger && version < 52 && !(db.pragma("table_info(entities)") as Array<{ name: string }>).some(column => column.name === "color")) {
+      db.exec(`ALTER TABLE entities ADD COLUMN ${entityColorColumn}`);
+    }
+    if (hasSchemaLedger && version < 51) {
+      for (const [table, columns] of Object.entries({ promises: ["pinned", "ended_at_turn", "recency_until_turn"], promise_events: ["ended_at_turn", "recency_until_turn"] })) {
+        const existing = new Set((db.pragma(`table_info(${table})`) as Array<{ name: string }>).map(column => column.name));
+        for (const column of columns) if (!existing.has(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${column === "pinned" ? "INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0,1))" : "INTEGER"}`);
+      }
+    }
     if (hasSchemaLedger && !(db.pragma("table_info(messages)") as Array<{ name: string }>).some(column => column.name === "memory_excluded")) {
       db.exec("ALTER TABLE messages ADD COLUMN memory_excluded INTEGER NOT NULL DEFAULT 0 CHECK(memory_excluded IN (0,1))");
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update");
     }
-    if (hasSchemaLedger && version < DATABASE_SCHEMA_VERSION) {
+    if (hasSchemaLedger && version < 50) {
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update; DROP TRIGGER IF EXISTS source_fts_delete");
     }
     db.exec(schema);
-    if (hasSchemaLedger && version < DATABASE_SCHEMA_VERSION) {
+    if (hasSchemaLedger && version < 50) {
       // Older FTS rowids were independent and changed on every source edit.
       // Rebuild this derived index once, atomically with the trigger upgrade.
       db.exec(`DELETE FROM source_fts;

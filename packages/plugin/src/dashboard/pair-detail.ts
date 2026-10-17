@@ -3,16 +3,17 @@ import type { SocialKnowledgeApiItem } from "../api-client.js";
 import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
 import type { TranslationDisplay } from "../types.js";
-import { anniversaryDayOffset, buildAnniversaries, daysSinceFirstMet } from "./diary.js";
+import { anniversaryDayOffset, buildAnniversaries, daysSinceFirstMet, earliestFirstMetStoryTime } from "./diary.js";
 import { buildSceneLog, type SceneCard, type SceneChip, type SceneDay } from "./scene-log.js";
 import { milestoneLabel, normalizeName, type PairSummary, pairKey, relationshipLabelTranslationKey } from "./pairs.js";
 import { buildCast } from "./film/cast.js";
 import { isLatinName, nameHtml } from "./film/names.js";
 import { sceneDate } from "./film/scene.js";
-import { avatar, btn, contactRow, empty, field, filters, fold, icon, menu, type MenuItem } from "./film/ui.js";
+import { avatar, btn, contactRow, empty, field, filters, fold, icon, menu, seg, type MenuItem } from "./film/ui.js";
 import { promiseChainKey } from "./record-history.js";
 import { sceneLocator, sceneNumbers } from "./scenes.js";
 import { lex } from "./lexicon.js";
+import { renderRelationshipFlow, type RelationshipFlowView, type RelationshipFlowMeta } from "./relationship-flow-view.js";
 
 export type PairDiaryFilter = "all" | "key" | "intimacy" | "heart" | "promise" | "bookmark";
 export type PairDiarySort = "newest" | "oldest";
@@ -23,6 +24,7 @@ export type PairDetailRenderOptions = {
   copy(canonical: string, translationKey: string): string;
   diaryFilter: PairDiaryFilter;
   diarySort: PairDiarySort;
+  flowView?: RelationshipFlowView;
   anniversaryEditorEntryId?: string;
   /** The scene log shows 지정 on each scene while an anniversary is being picked from it. */
   picking?: boolean;
@@ -173,10 +175,14 @@ const emotionTable = (directions: readonly Direction[], axes: string[], valueOf:
   return `<table class="emotion-table" aria-label="${escapeHtml(label)}"><thead><tr><th scope="col"><span class="sr-only">감정</span></th>${directions.map(([from, to]) => `<th scope="col">${escapeHtml(from)} → ${escapeHtml(to)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>${unobserved ? '<p class="emotion-note">— 아직 관측되지 않음</p>' : ""}`;
 };
 
-const renderEmotions = (directions: readonly Direction[], options: PairDetailRenderOptions): string => {
+const renderEmotions = (data: DashboardData, directions: readonly Direction[], options: PairDetailRenderOptions, meta: RelationshipFlowMeta): string => {
   const others = [...new Set(directions.flatMap(([, , item]) => Object.keys(item?.axes ?? {})))].filter((axis) => !canonicalAxes.includes(axis)).sort();
   const axes = [...canonicalAxes, ...others];
-  return `<section class="psec"><h2 class="sec">감정 <span class="n">${axes.length}</span></h2>${emotionTable(directions, axes, options.axisValue, options, "서로의 감정")}</section>`;
+  const switcher = seg("감정 보기", [
+    { value: "now", label: "지금", pressed: options.flowView?.mode !== "flow", action: "pair-emotion-view" },
+    { value: "flow", label: "흐름", pressed: options.flowView?.mode === "flow", action: "pair-emotion-view" },
+  ]);
+  return `<section class="psec"><div class="sec-head"><h2 class="sec">감정 <span class="n">${axes.length}</span></h2>${switcher}</div>${options.flowView?.mode === "flow" ? renderRelationshipFlow(data, directions, options, meta) : emotionTable(directions, axes, options.axisValue, options, "서로의 감정")}</section>`;
 };
 
 const creditName = (name: string): string => `<span class="nm${isLatinName(name) ? "" : " is-cjk"}">${escapeHtml(name)}</span>`;
@@ -198,7 +204,7 @@ export function renderRelationshipRow(pair: PairSummary, scenes: number, selecte
 
 export function renderPairDetail(data: DashboardData, pair: PairSummary, options: PairDetailRenderOptions): string {
   const anniversaries = buildAnniversaries(data, pair, data.viewPreferences?.hiddenAnniversaries ?? []);
-  const firstMet = anniversaries.find((item) => item.kind === "first_met")?.storyTime ?? null;
+  const firstMet = earliestFirstMetStoryTime(anniversaries);
   const days = daysSinceFirstMet(anniversaries, latestStoryTime(data));
   const persona = normalizeName(data.personaEntity);
   const [lead, other] = persona && normalizeName(pair.b) === persona ? [pair.b, pair.a] : [pair.a, pair.b];
@@ -240,7 +246,7 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
 
   const sceneDays = buildSceneLog(data, pair, options.diaryFilter, options.diarySort);
   const sceneCount = sceneDays.reduce((sum, day) => sum + day.scenes.length, 0);
-  const facts = `<dl class="facts">${days === null ? "" : `<div><dd>${days}일</dd><dt>함께한 시간</dt></div>`}${firstMet ? `<div><dd>${escapeHtml(shortDate(firstMet))}</dd><dt>첫 만남</dt></div>` : ""}</dl>`;
+  const facts = `<dl class="facts">${days === null ? "" : `<div><dd>${days}일</dd><dt>함께한 시간</dt></div>`}${firstMet ? `<div><dd>${escapeHtml(shortDate(firstMet))}</dd><dt>첫 만남</dt></div>` : `<div class="facts__empty"><span>첫 만남이 아직 없어요</span>${btn("첫 만남 추가", { kind: "quiet", action: "new-first-met", data: { key: pair.key }, hit: true })}</div>`}</dl>`;
   const views = `<section class="psec"><h2 class="sec">지금 <span class="n">${directions.filter(([, , item]) => item).length}</span></h2><div class="povs">${directions.map(([from, to, item]) => renderView(item, from, to, options)).join("")}</div>${facts}</section>`;
   const numbers = sceneNumbers(data.memories ?? []);
   const memoryById = new Map((data.memories ?? []).map((memory: any) => [String(memory?.id ?? ""), memory]));
@@ -262,8 +268,9 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
     return `<article class="anni"><button type="button" class="anni__open" data-action="open-timeline-memory" data-memory-id="${escapeHtml(item.memoryId)}"><span class="anni__label">${label}</span><span class="anni__when">${when}${item.alwaysInject ? `<span class="anni__pin" title="항상 전달">${icon("pin")}</span>` : ""}</span><span class="anni__scene"><span class="anni__slug">${scene}</span>${memory ? `<span class="anni__title">${options.copy(String(memory.title ?? ""), `${item.memoryId}:title`)}</span>` : ""}</span>${line}</button><div class="anni__acts">${actions}</div></article>`;
   }).join("");
   // A date the story never showed becomes a short 설정상 과거 scene of the two, so it lives on the timeline and can be recalled.
-  const creatingMark = options.anniversaryEditorEntryId === `new:${pair.key}`;
-  const newMark = creatingMark ? `<form id="anniversary-new-form" class="form anniversary-new" data-a="${escapeHtml(lead)}" data-b="${escapeHtml(other)}"><h3 class="subhead">기념일 추가</h3><div class="form__row">${field({ id: "anniversary-new-label", label: "기념일 이름", control: '<input id="anniversary-new-label" class="input" name="label" required maxlength="120" placeholder="예: 처음 만난 날">' })}${field({ id: "anniversary-new-date", label: "작중 날짜", control: '<input id="anniversary-new-date" class="input" name="storyTime" required maxlength="240" placeholder="YYYY-MM-DD">' })}</div>${field({ id: "anniversary-new-note", label: "메모 (선택)", control: '<textarea id="anniversary-new-note" class="textarea" name="note" rows="2" maxlength="2000"></textarea>', hint: "타임라인에 설정상 과거 장면으로 함께 남습니다." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-anniversary" })}${btn("추가", { kind: "primary", icon: "add", action: "submit-form", data: { formId: "anniversary-new-form" } })}</div></form>` : "";
+  const creatingFirstMet = options.anniversaryEditorEntryId === `new:first-met:${pair.key}`;
+  const creatingMark = creatingFirstMet || options.anniversaryEditorEntryId === `new:${pair.key}`;
+  const newMark = creatingMark ? `<form id="anniversary-new-form" class="form anniversary-new" data-a="${escapeHtml(lead)}" data-b="${escapeHtml(other)}"><h3 class="subhead">기념일 추가</h3><div class="form__row">${field({ id: "anniversary-new-label", label: "기념일 이름", control: `<input id="anniversary-new-label" class="input" name="label" required maxlength="120" placeholder="예: 처음 만난 날"${creatingFirstMet ? ' value="처음 만난 날"' : ""}>` })}${field({ id: "anniversary-new-date", label: "작중 날짜", control: '<input id="anniversary-new-date" class="input" name="storyTime" required maxlength="240" placeholder="YYYY-MM-DD">' })}</div><label class="check"><input id="anniversary-new-first-met" name="firstMet" type="checkbox"${creatingFirstMet ? " checked" : ""}><span>첫 만남으로 쓰기<small>설정상 기억보다 앞선 첫 만남도 넣을 수 있어요.</small></span></label>${field({ id: "anniversary-new-note", label: "메모 (선택)", control: '<textarea id="anniversary-new-note" class="textarea" name="note" rows="2" maxlength="2000"></textarea>', hint: "타임라인에 설정상 과거 장면으로 함께 남습니다." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-anniversary" })}${btn("추가", { kind: "primary", icon: "add", action: "submit-form", data: { formId: "anniversary-new-form" } })}</div></form>` : "";
   const addMark = creatingMark ? "" : menu({ label: "기념일 추가", items: [
     { label: "날짜로 만들기", icon: "clock", action: "new-anniversary", data: { key: pair.key } },
     { label: "장면에서 고르기", icon: "film", action: "anniversary-pick", data: { key: pair.key } },
@@ -320,5 +327,5 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   const promiseSection = promises.length ? `<section class="psec"><h2 class="sec">약속 <span class="n">${promises.length}</span></h2><ul class="entries">${promiseRows.slice(0, 3).join("")}</ul>${promiseRows.length > 3 ? fold("더 보기", `<ul class="entries">${promiseRows.slice(3).join("")}</ul>`, { role: "more", count: promiseRows.length - 3, preserveKey: `pair-promises:${pair.key}` }) : ""}</section>` : "";
   const callRows = `${calls(lead, other)}${calls(other, lead)}`;
   const callSection = callRows ? `<section class="psec pair-calls"><h2 class="sec">이름·호칭</h2><ul class="entries">${callRows}</ul></section>` : "";
-  return `<article class="reader pairsheet">${bar}${picker}${titles}${relationSection}${callSection}${views}${renderEmotions(directions, options)}${promiseSection}${marks}${log}${intimacy}${initial}${basis}</article>`;
+  return `<article class="reader pairsheet">${bar}${picker}${titles}${relationSection}${callSection}${views}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes })}${promiseSection}${marks}${log}${intimacy}${initial}${basis}</article>`;
 }

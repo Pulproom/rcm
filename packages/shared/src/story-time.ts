@@ -82,8 +82,22 @@ export function parseStoryTime(value: unknown): ParsedStoryTime {
   const searchable = raw.replace(/\([^)]{1,20}\)/gu, " ").replace(/\s+/gu, " ").trim();
   const unitDate = searchable.match(/(?:^|\s)(\d{1,4})\s*(?:년|年)\s*(\d{1,2})\s*(?:월|月)\s*(\d{1,2})\s*(?:일|日)?/u);
   if (unitDate) return parsedNumeric(raw, Number(unitDate[1]), Number(unitDate[2]), Number(unitDate[3]), time);
+  const localizedMonthDay = searchable.match(/(?:^|\s)(\d{1,2})\s*(?:월|月)\s*(\d{1,2})\s*(?:일|日)?(?=\D|$)/u);
+  if (localizedMonthDay && validMonthDay(Number(localizedMonthDay[1]), Number(localizedMonthDay[2]))) return {
+    raw, calendar: "partial", calendarKey: "partial", month: Number(localizedMonthDay[1]), day: Number(localizedMonthDay[2]), ...time,
+  };
   const yearFirst = searchable.match(/(?:^|\s)(\d{1,4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})(?=\D|$)/u);
   if (yearFirst) return parsedNumeric(raw, Number(yearFirst[1]), Number(yearFirst[2]), Number(yearFirst[3]), time);
+  const dayFirstPartial = searchable.match(/(?:^|\s)(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?\s*(?!,?\s*\d)(?=\D|$)/iu);
+  const dayFirstPartialMonth = dayFirstPartial ? MONTHS.get(dayFirstPartial[2]!.toLocaleLowerCase()) : undefined;
+  if (dayFirstPartial && dayFirstPartialMonth && validMonthDay(dayFirstPartialMonth, Number(dayFirstPartial[1]))) return {
+    raw, calendar: "partial", calendarKey: "partial", month: dayFirstPartialMonth, day: Number(dayFirstPartial[1]), ...time,
+  };
+  const monthFirstPartial = searchable.match(/(?:^|\s)([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?!\s*,?\s*\d)(?=\D|$)/iu);
+  const monthFirstPartialMonth = monthFirstPartial ? MONTHS.get(monthFirstPartial[1]!.toLocaleLowerCase()) : undefined;
+  if (monthFirstPartial && monthFirstPartialMonth && validMonthDay(monthFirstPartialMonth, Number(monthFirstPartial[2]))) return {
+    raw, calendar: "partial", calendarKey: "partial", month: monthFirstPartialMonth, day: Number(monthFirstPartial[2]), ...time,
+  };
   const dayFirst = searchable.match(/(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?\s*,?\s*(\d{1,4})(?![\d:])/iu);
   const dayFirstMonth = dayFirst ? MONTHS.get(dayFirst[2]!.toLocaleLowerCase()) : undefined;
   if (dayFirst && dayFirstMonth) return parsedNumeric(raw, Number(dayFirst[3]), dayFirstMonth, Number(dayFirst[1]), time);

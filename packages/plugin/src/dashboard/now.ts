@@ -35,6 +35,8 @@ export type NowRow = {
   promisor?: string;
   promisee?: string;
   scheduledFor?: string;
+  /** Promise kept in the main-model packet whatever its status ("계속 기억"). */
+  pinned?: boolean;
   lastMention: { ordinal: number | null; storyTime: string | null };
   overdue: boolean;
 };
@@ -130,6 +132,7 @@ export function buildNowPage(
   const chains = buildRecordChains(data);
   const changes = (key: string): number => Math.max(0, (chains.get(key)?.versions.length ?? 1) - 1);
   const rows: OwnedNowRow[] = [];
+  const pinnedPromises = new Set((data.promises ?? []).filter((item: any) => Boolean(item?.pinned)).map((item: any) => String(item?.id ?? "")));
   if (mode === "past") {
     for (const chain of chains.values()) {
       const top = chain.versions[0];
@@ -142,6 +145,7 @@ export function buildNowPage(
         type: chain.type, text: top.text, subject: String(item?.subject ?? ""), predicate: String(item?.predicate ?? ""),
         holder: String(item?.holder ?? ""), polarity: String(item?.polarity ?? ""), promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""),
         lastMention: { ordinal: ended, storyTime: null }, overdue: false, owner: owner.owner, ownerRank: owner.ownerRank,
+        pinned: chain.kind === "promise" && pinnedPromises.has(String(item?.promise_id ?? item?.id ?? "")),
       });
     }
   } else {
@@ -151,7 +155,7 @@ export function buildNowPage(
     rows.push({
       id: String(item?.id ?? item?.promise_key ?? ""), key: liveChainKey(chains, "promise", item), changes: changes(liveChainKey(chains, "promise", item)), type: "promise", text: String(item?.content ?? ""),
       promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""),
-      scheduledFor: String(item?.scheduled_for ?? ""),
+      scheduledFor: String(item?.scheduled_for ?? ""), pinned: Boolean(item?.pinned),
       lastMention: lastMention(item), overdue: isPromiseOverdue(String(item?.scheduled_for ?? "").trim() || null, storyTime),
       owner: owner.owner, ownerRank: owner.ownerRank,
     });
@@ -275,7 +279,7 @@ const renderRow = (
   const endedScene = opts.past && row.endedAt !== undefined && row.endedAt !== null ? opts.sceneAt?.(row.endedAt) ?? null : null;
   const ended = !opts.past ? "" : row.deleted ? "직접 삭제함" : (endedScene?.number !== undefined ? `S#${endedScene.number}에 끝남` : "끝남");
   const changed = row.changes > 0 ? `<span class="chg-n">${icon("clock")}${row.changes}번 바뀜</span>` : "";
-  const meta = [polarity, row.scheduledFor && !opts.past ? `예정 · ${escapeHtml(formatStoryTime(row.scheduledFor))}` : "", opts.past ? escapeHtml(ended) : renderMention(opts.sceneAt?.(row.lastMention.ordinal) ?? null), row.overdue ? '<span class="is-due">예정 시각 지남</span>' : "", changed].filter(Boolean).join(" · ");
+  const meta = [polarity, row.scheduledFor && !opts.past ? `예정 · ${escapeHtml(formatStoryTime(row.scheduledFor))}` : "", opts.past ? escapeHtml(ended) : renderMention(opts.sceneAt?.(row.lastMention.ordinal) ?? null), row.overdue ? '<span class="is-due">예정 시각 지남</span>' : "", row.pinned ? `<span class="nr__pin">${icon("pin")}계속 기억</span>` : "", changed].filter(Boolean).join(" · ");
   // Every row reads the same: kind and who on a small line, then the text, then where it was seen.
   const lead = rowLead(row, owner, translations, display);
   const head = `<span class="nr__k"><b class="nr__kind">${TYPE_LABELS[row.type]}</b>${lead ? ` · ${lead}` : ""}</span>`;
@@ -338,7 +342,9 @@ export function renderNowPage(
     return `<section class="who"><h2 class="who-h">${head}<span class="n">${[rank, `${rows.length}`].filter(Boolean).join(" · ")}</span></h2>${rendered.slice(0, GROUP_LIMIT).join("")}${more}</section>`;
   }).join("");
   const body = dueSection + groups;
-  const hint = past ? `<p class="now-hint">끝난 기록이에요. 이어지는 기록의 지난 모습은 각 기록 안에 있어요.</p>` : "";
+  const hint = past
+    ? `<p class="now-hint">끝난 기록이에요. 이어지는 기록의 지난 모습은 각 기록 안에 있어요.</p>`
+    : `<p class="now-hint">지금도 이어지는 것만 모여요. 일어난 일은 타임라인에 있어요.</p>`;
   const emptyList = past ? empty("끝난 기록이 없습니다", "상태·인식이 끝나거나 약속이 마무리되면 여기에 모입니다.") : empty("표시할 현재 기록이 없습니다", "대화에서 약속·인식·상태가 생기면 인물별로 모입니다.");
   const chain = ordered.some(row => row.key === selected) ? page.chains.get(selected) : undefined;
   const detail = chain ? renderRecordDetail(chain, data, { translations, display, back: past ? "지난 기록" : "현재", actions: detailActions(chain, data, busy), fact: beliefFact(chain, data) }) : "";

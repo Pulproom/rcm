@@ -43,7 +43,7 @@ type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
   version: 31 | 32 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | typeof DATABASE_SCHEMA_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -165,9 +165,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, 50, 51, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49 or ${DATABASE_SCHEMA_VERSION})`);
+    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51 or ${DATABASE_SCHEMA_VERSION})`);
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -206,7 +206,10 @@ function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): voi
   for (const table of current) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
       .filter(column => !(manifest.schemaVersion === 46 && table === "translation_cache" && column === "model")
-        && !(manifest.schemaVersion < 49 && table === "messages" && column === "memory_excluded"));
+        && !(manifest.schemaVersion < 49 && table === "messages" && column === "memory_excluded")
+        && !(manifest.schemaVersion < 51 && ["promises", "promise_events"].includes(table) && ["ended_at_turn", "recency_until_turn"].includes(column))
+        && !(manifest.schemaVersion < 51 && table === "promises" && column === "pinned")
+        && !(manifest.schemaVersion < 52 && table === "entities" && column === "color"));
     // Rows are inserted by column name. Physical column order is not a backup contract.
     const archived = manifest.tables[table];
     if (!Array.isArray(archived) || archived.length !== columns.length || new Set(archived).size !== columns.length
@@ -418,7 +421,7 @@ function rewriteJson(value: unknown, ids: Map<string, string>): unknown {
 // quote offsets and revisions belong to separate clocks and are left alone.
 const archiveCoordinateFields = new Set([
   "start_ordinal", "end_ordinal", "source_start_ordinal", "source_end_ordinal", "source_ordinal",
-  "valid_from_ordinal", "valid_to_ordinal", "user_edit_ordinal", "completed_turn_seq", "last_recalled_turn_seq",
+  "valid_from_ordinal", "valid_to_ordinal", "user_edit_ordinal", "completed_turn_seq", "last_recalled_turn_seq", "ended_at_turn", "recency_until_turn",
   "sourceOrdinal", "sourceEndOrdinal", "startOrdinal", "endOrdinal",
 ]);
 function archiveCoordinate(value: Row[string]): Row[string] {

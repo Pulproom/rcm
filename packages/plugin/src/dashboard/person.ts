@@ -1,3 +1,6 @@
+import { lex } from "./lexicon.js";
+import { defaultPersonColor } from "./person-colors.js";
+import { EntityColorSchema } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
 import type { TranslationDisplay } from "../types.js";
@@ -47,6 +50,8 @@ export type AcquaintanceRow = {
 };
 
 export type PersonDetail = {
+  entityId?: string;
+  color?: string | null;
   name: string;
   prominence: string;
   aliases: string[];
@@ -135,6 +140,8 @@ export function buildPersonDetail(data: DashboardData, name: string, personaEnti
 
   return {
     name: canonicalName,
+    entityId: entity?.id,
+    color: entity?.color ?? null,
     prominence: String(entity?.setupProminence ?? entity?.prominence ?? entity?.tier ?? "supporting"),
     aliases,
     affiliations: [...new Set((data.assertions ?? [])
@@ -226,7 +233,7 @@ const promiseRow = (item: PromiseRow, options: RenderEssentials): string => {
   return promiseEntry({ direction: `${item?.promisor ?? ""} → ${item?.promisee ?? ""}`, scheduledFor: item?.scheduled_for, body: displayText(String(item?.content ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options) });
 };
 
-const PROMISE_STATUS_LABELS: Record<string, string> = { kept: "지켜짐", broken: "깨짐", released: "해제됨", cancelled: "취소됨", expired: "만료됨" };
+const PROMISE_STATUS_LABELS: Record<string, string> = { kept: "지켜짐", broken: "깨짐", released: "취소됨", offscreen: "화면 밖에서 처리됨", cancelled: "취소됨", expired: "만료됨" };
 
 const endedPromiseRow = (item: PromiseRow, options: RenderEssentials): string => {
   const key = `promise:${item?.id ?? item?.promise_key ?? ""}`;
@@ -354,7 +361,7 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
     // The persona cannot be deleted; unassign it first.
     ...(detail.isPersona ? [] : ["sep" as const, { label: "인물 삭제", icon: "delete", action: "open-entity-delete", data: { personName: detail.name }, danger: true }]),
   ] });
-  const header = `<div class="reader__bar"><button type="button" class="back hit" data-action="close-person">${icon("back")}<span>인물</span></button><div class="reader__acts">${personMenu}</div></div><h2 class="person__name">${avatar(detail.name, "xl")}${nameHtml(detail.name)}<span class="tc">${detail.isPersona ? "페르소나" : escapeHtml(prominence)} · 관계 ${pairs.length}</span></h2>`;
+  const header = `<div class="reader__bar"><button type="button" class="back hit" data-action="close-person">${icon("back")}<span>인물</span></button><div class="reader__acts">${personMenu}</div></div><h2 class="person__name">${lex().skin === "phone" && detail.entityId ? `<button type="button" class="person__avatar-button" data-action="open-person-color" data-entity-id="${escapeHtml(detail.entityId)}" aria-label="${escapeHtml(detail.name)} 색상 바꾸기">${avatar(detail.name, "xl")}</button>` : avatar(detail.name, "xl")}${nameHtml(detail.name)}<span class="tc">${detail.isPersona ? "페르소나" : escapeHtml(prominence)} · 관계 ${pairs.length}</span></h2>`;
 
   const tags: Record<string, string> = { condition: "", goal: "목표", secret: "비밀" };
   const currentRows = byRecentMention([
@@ -405,4 +412,10 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
 
   // Every person follows the same section order.
   return `<article class="reader person">${header}${profile}${now}${relationships}${promises}${beliefs}${acquaintances}</article>`;
+}
+
+export function renderPersonColorPicker(entity: { id: string; name: string; color?: string | null }, chatId: string): string {
+  const parsed = EntityColorSchema.safeParse(entity.color);
+  const color = parsed.success && parsed.data ? parsed.data : defaultPersonColor(entity.name).hex;
+  return `<form id="person-color-form" class="form" data-entity-id="${escapeHtml(entity.id)}" data-chat-id="${escapeHtml(chatId)}"><div class="person-color-head"><span class="person-color-preview" style="--pick:${color}" aria-hidden="true">${escapeHtml(Array.from(entity.name.trim())[0] ?? "?")}</span><div><h2>${escapeHtml(entity.name)}의 색</h2><p class="person-color-note">인물 카드와 관계 그래프에 함께 쓰여요</p></div></div><label class="person-color-field"><span class="sr-only">인물 색상</span><input type="color" name="color" value="${color}" aria-label="인물 색상"><span class="person-color-hint" aria-hidden="true">눌러서 색 고르기</span></label><p class="err" data-color-error aria-live="polite" hidden></p><div class="form__bar">${btn("기본 색으로", { kind: "quiet", action: "reset-person-color" })}${btn("취소", { kind: "quiet", action: "close-person-color" })}${btn("저장", { kind: "primary", action: "submit-form", data: { formId: "person-color-form" } })}</div></form>`;
 }
