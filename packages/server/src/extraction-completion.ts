@@ -1,7 +1,7 @@
 import type { JobTrigger } from "@rcm/shared";
 import { maybeEnqueueQuiz } from "./quiz.js";
 import { completeMemoryAddition } from './memory-addition.js';
-import { ExtractionAggregateSchema, validSourcePassageAccess, validateSourceRecoveryPatch } from "@rcm/shared";
+import { ExtractionAggregateSchema, normalizeRecognitionReferences, validSourcePassageAccess, validateSourceRecoveryPatch } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { storeSourcePassages } from "./source-evidence.js";
 import { ExtractionDraftResultSchema, ExtractionResultSchema, type ExtractionAuditSubmission, type ExtractionDraftResult, type ReconciliationSubmission, type StructuredIssue } from "@rcm/shared";
@@ -96,6 +96,8 @@ export function completeExtractionJob(
   if (payload.sourceRecovery && audit?.patch) validateSourceRecoveryPatch(audit.patch, original);
   const reviewed = audit?.patch ? applyExtractionAuditPatch(db, job.chat_id, sourceMessageIds, original, audit.patch) : { result: original, pendingRefs: [] as string[] };
   let submitted = reviewed.result;
+  let recognitionReviewDraft: ExtractionDraftResult | undefined;
+  let recognitionIssues: ReturnType<typeof normalizeRecognitionReferences>["rejected"] = [];
   const budgetPayload = payload as typeof payload & { auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
   const reconciliationBudget = Number(budgetPayload.auxiliaryBudget?.maxInputTokens ?? budgetPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000);
   if (usesStateExtraction(job.type, payload) && !submitted.unfinishedSource?.length && !reviewed.pendingRefs.length
@@ -103,7 +105,15 @@ export function completeExtractionJob(
     const completed = finishStateExtraction(db, job.chat_id, sourceMessageIds, submitted, reconciliation, reconciliationBudget);
     submitted = completed.draft;
     reconciliation = completed.reconciliation;
+    recognitionReviewDraft = completed.recognitionReviewDraft;
+    recognitionIssues = completed.recognitionIssues;
   }
+  const recognition = normalizeRecognitionReferences(submitted);
+  if (recognition.rejected.length) {
+    recognitionReviewDraft ??= submitted;
+    recognitionIssues.push(...recognition.rejected);
+  }
+  submitted = recognition.result;
   const evidenceIssues = inspectDraftEvidence(db, job.chat_id, sourceMessageIds, submitted);
   const statePreparation = prepareReconciliation(db, job.chat_id, submitted, reconciliationBudget);
   const unsafeStateDecision = reconciliation?.result?.decisions.some((decision) => statePreparation.items.some((entry) =>
@@ -245,7 +255,7 @@ export function completeExtractionJob(
       return;
     }
     if (audit?.patch && !rejectedExcerpts) recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, audited.pendingRefs.length ? original : input, audit, audited.pendingRefs.length ? "pending_review" : "applied", undefined, payload.sourceFingerprint);
-    pendingReconciliations = audited.pendingRefs.length;
+    pendingReconciliations = audited.pendingRefs.length + recognitionIssues.length;
     if (rejectedExcerpts) {
       recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, submitted, audit, "pending_review",
         `${sourceReviewSummary} could not be verified; valid memories retained`, payload.sourceFingerprint);
@@ -285,8 +295,11 @@ export function completeExtractionJob(
       recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, submitted, audit, pendingReconciliations ? "pending_review" : "applied",
         relationWarnings.join("; "), payload.sourceFingerprint);
     }
+    if (recognitionReviewDraft) recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, recognitionReviewDraft, audit, "pending_review",
+      [recognitionIssues.map(issue => `socialKnowledge[${issue.index}]: ${issue.reason}`).join("; "),
+        rejectedExcerpts ? `${sourceReviewSummary} could not be verified` : "", ...relationWarnings].filter(Boolean).join("; "), payload.sourceFingerprint);
     applyMemoryRecallObservations(db, job.chat_id, normalized.result.memoryRecallObservations, payload.recallCandidates ?? [], sourceMessageIds, payload.batchId);
-    if (payload.batchId) db.prepare("UPDATE extraction_batches SET status=?,draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(reconciled.pending ? "pending_review" : "applied", JSON.stringify(submitted), JSON.stringify(storedResult), audit?.patch ? JSON.stringify(audit.patch) : null, Date.now(), payload.batchId);
+    if (payload.batchId) db.prepare("UPDATE extraction_batches SET status=?,draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(reconciled.pending ? "pending_review" : "applied", JSON.stringify(recognitionReviewDraft ?? submitted), JSON.stringify(storedResult), audit?.patch ? JSON.stringify(audit.patch) : null, Date.now(), payload.batchId);
     if (job.type !== "social_backfill") lockInitialCalibration(db, job.chat_id);
     if (!markJobComplete(db, jobId, workerId)) throw new Error("Lease not found while completing extraction");
   })();
@@ -304,5 +317,5 @@ export function completeExtractionJob(
   }
   maybeEnqueueStorySpine(db, job.chat_id, payload.backfillRunId, payload.trigger ?? 'extraction');
   maybeEnqueueQuiz(db, job.chat_id);
-  return { chatId: job.chat_id, warnings: [...normalizedEpisodic.warnings, ...(rejectedExcerpts ? ["일부 원문 발췌 또는 접근 근거를 검토 상태로 보존하고 검증된 기억만 저장했습니다."] : [])], pendingReconciliations };
+  return { chatId: job.chat_id, warnings: [...normalizedEpisodic.warnings, ...(recognitionIssues.length ? ["접근 권한이 없는 인지 연결을 제외하고 원래 후보를 검토 상태로 보존했습니다. 나머지 기억은 저장했습니다."] : []), ...(rejectedExcerpts ? ["일부 원문 발췌 또는 접근 근거를 검토 상태로 보존하고 검증된 기억만 저장했습니다."] : [])], pendingReconciliations };
 }

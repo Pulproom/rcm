@@ -1,7 +1,7 @@
 import { ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
 import { canAutomaticallyChange, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash } from "node:crypto";
-import { estimateTokens, measureAuxiliaryPrompt, ExtractionAggregateSchema, Api38ExtractionDraftResultSchema, validateRecognitionReferences,
+import { estimateTokens, measureAuxiliaryPrompt, mergeStateExtraction,
   STORY_TIME_GUIDANCE, StateExtractionSchema, SOCIAL_MEMORY_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE,
   ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, buildSourceUnits, type ExtractionDraftResult, type ReconciliationSubmission } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
@@ -97,23 +97,8 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   const suppliedSeeds=new Set(JSON.parse(prepared.userPrompt).priorSeeds.map((seed:{detailId:string})=>seed.detailId));
   if(seedResolutions.some(patch=>!suppliedSeeds.has(patch.detailId)))throw new Error("Seed target was not supplied to the model");
   validateSeedResolutions(db,chatId,seedResolutions,sourceIds);
-  const state=StateExtractionSchema.parse(submission.result.state);
-  // The first pass has its own worker validation. Validate only newly authored
-  // memories here, then validate cross-stage references on the aggregate.
-  Api38ExtractionDraftResultSchema.parse({language:draft.language,memories:state.memories,sourcePassages:[],unfinishedSource:[]});
-  const keys=new Set(draft.memories.map(m=>m.key));
-  for(const memory of state.memories){if(keys.has(memory.key))throw new Error("State extraction cannot replace an event memory");keys.add(memory.key);}
-  const memories=structuredClone([...draft.memories,...state.memories]);
-  for(const addition of state.detailAdditions){
-    if(!addition.detail.role || addition.detail.access===undefined)throw new Error("State details require a role and explicit access");
-    const parent=memories.find(m=>m.key===addition.memoryKey);
-    if(!parent || parent.details?.some(d=>d.key===addition.detail.key))throw new Error("State detail addition needs an existing parent and a fresh key");
-    parent.details=[...(parent.details??[]),addition.detail];
-  }
-  const {detailAdditions: _additions, ...stateRecords}=state;
-  const merged=ExtractionAggregateSchema.parse({...draft,...stateRecords,
-    entities:[...draft.entities,...state.entities],memories,seedResolutions});
-  validateRecognitionReferences(merged,{addIssue:issue=>{throw new Error(issue.message);}});
+  const normalized=mergeStateExtraction(draft,submission.result);
+  const merged=normalized.draft;
   const issues=inspectDraftEvidence(db,chatId,sourceIds,merged);
   if(issues.some(i=>i.blocking))throw new Error(`State extraction has unverified source evidence: ${issues.filter(i=>i.blocking).slice(0,3).map(i=>i.reason).join(", ")}`);
   const narrow=prepareReconciliation(db,chatId,merged,maxInputTokens);
@@ -128,5 +113,5 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   // New observations are created locally by the existing writer; honor explicit ignores first.
   const ignored=new Set(decisions.filter(d=>local.has(d.itemRef)&&d.action==="ignore").map(d=>d.itemRef));
   merged.stateObservations=merged.stateObservations.filter(o=>!ignored.has(`observation:${o.key}`));
-  return {draft:merged,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
+  return {...normalized,draft:merged,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
 }

@@ -1,24 +1,24 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "productVersion": "1.0.16",
-  "pluginVersion": "1.0.15",
-  "serverVersion": "1.0.16",
+  "productVersion": "1.0.17",
+  "pluginVersion": "1.0.17",
+  "serverVersion": "1.0.17",
   "apiRevision": 90,
   "minimumPluginVersion": "1.0.0",
   "minimumServerVersion": "1.0.0",
-  "publishedAt": "2026-10-15T16:05:56.464Z",
-  "notesUrl": "https://github.com/Pulproom/rcm/releases/tag/v1.0.16",
-  "sourceUrl": "https://github.com/Pulproom/rcm/tree/v1.0.16",
+  "publishedAt": "2026-10-17T02:33:27.241Z",
+  "notesUrl": "https://github.com/Pulproom/rcm/releases/tag/v1.0.17",
+  "sourceUrl": "https://github.com/Pulproom/rcm/tree/v1.0.17",
   "pluginUrl": "https://raw.githubusercontent.com/Pulproom/rcm/main/channels/stable/risu-cognitive-memory.js",
   "assets": [
     {
       "kind": "server-bundle",
       "platform": "any",
       "arch": "any",
-      "url": "https://github.com/Pulproom/rcm/releases/download/v1.0.16/server.mjs",
-      "sha256": "97ff1a6e991efc7b3b94b349b60652a2c318913829cde46de269bae865488ed1",
-      "size": 1594464
+      "url": "https://github.com/Pulproom/rcm/releases/download/v1.0.17/server.mjs",
+      "sha256": "a72bf2e7a0a23bacdca6006656eedc4d736e809d1991c50f7503704d8ce0ce89",
+      "size": 1601442
     }
   ]
 }

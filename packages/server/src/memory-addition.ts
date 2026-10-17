@@ -8,7 +8,7 @@ import { buildPrompt, editProtectedMessageIds } from './jobs.js';
 import { rangeMessages, listSourceRanges, memoryTargetFingerprint, sourceAccessFingerprint, type RangeMessage } from './source-ranges.js';
 import { sourceFingerprint, fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from './source-fingerprint.js';
 import { inspectDraftEvidence } from './evidence-review.js';
-import { applyExtractionAuditPatch } from './extraction-audit.js';
+import { applyExtractionAuditPatch, recordExtractionAudit } from './extraction-audit.js';
 import { finishStateExtraction } from './state-extraction.js';
 import { additiveReconciliationResult } from './reconciliation.js';
 import { scopeExtractionMemoryKeys } from './extraction-memory-keys.js';
@@ -217,7 +217,9 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   if (errors.length) throw fail(errors.join('; '));
   db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
     .run(JSON.stringify({ ...payload, candidateStatus: 'ready', candidate, pipelineStage: 'complete' }), Date.now(), jobId);
-  return { chatId: job.chat_id, warnings: [], pendingReconciliations: 0 };
+  if (completed.recognitionReviewDraft) recordExtractionAudit(db, job.chat_id, jobId, payload.sourceMessageIds, completed.recognitionReviewDraft,
+    audit, 'pending_review', completed.recognitionIssues.map(issue => `socialKnowledge[${issue.index}]: ${issue.reason}`).join('; '), payload.sourceFingerprint);
+  return { chatId: job.chat_id, warnings: completed.recognitionIssues.length ? ['접근 권한이 없는 인지 연결을 제외하고 원래 후보를 검토 상태로 보존했습니다.'] : [], pendingReconciliations: completed.recognitionIssues.length };
 }
 
 export function listMemoryAdditions(db: RcmDatabase, chatId: string) {

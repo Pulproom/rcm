@@ -353,7 +353,7 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     const count = summary.queuedJobs;
     return { kind: "queued", label: `대기 ${count}`, detail: "백그라운드 기억 작업이 순서를 기다립니다." };
   }
-  if (summary.pendingReviews > 0) return { kind: "review", label: `상태 확인 ${summary.pendingReviews}`, detail: `${summary.pendingReconciliations ?? summary.pendingReviews}개 상태와 충돌의 확인을 기다립니다.` };
+  if (summary.pendingReviews > 0) return { kind: "review", label: `상태 확인 ${summary.pendingReviews}`, detail: `확인할 기록 ${summary.pendingReviews}개가 기다리고 있습니다.` };
   if ((summary.advisoryFailedJobs ?? 0) > 0) return {
     kind: "review", label: `부가 정리 확인 ${summary.advisoryFailedJobs}`,
     detail: "기억 추출은 계속 완료됐습니다. 관계·줄거리·최종 대조 실패는 처리 상태에서 확인할 수 있습니다.",

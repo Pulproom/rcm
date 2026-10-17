@@ -1,7 +1,7 @@
 import { withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { sanitizeDiagnosticText, assertProviderOutputAllowed } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
-import { parseReconciliationResult } from "@rcm/shared";
+import { parseReconciliationResult, repairStateRecognitionReferences } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch, type MemoryGroupingResult } from "@rcm/shared";
 import { createHash, randomUUID, sign } from "node:crypto";
@@ -54,7 +54,7 @@ import {
 import type { RcmDatabase } from "./db.js";
 import { saveSecret } from "./admin.js";
 import { normalizeAndValidateSetupEvidence } from "./initial-calibration.js";
-import { recordJobLlmCall, repairBudgetSpent, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
+import { recordJobLlmCall, repairBudgetSpent, stateRepairBudgetSpent, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, type CachedAuxiliaryPurpose } from "./auxiliary-page-cache.js";
 
 const CONFIG_KEY = "server_llm_config";
@@ -211,9 +211,10 @@ export class ServerLlmStore {
   recordCall(jobId: string, purpose: ServerLlmPurpose): void { recordJobLlmCall(this.db, jobId, purpose); }
   setTimingObserver(observer: (event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }) => void): void { this.#timingObserver = observer; }
   recordTiming(event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }): void { this.#timingObserver?.(event); }
-  canRepair(jobId: string): boolean {
+  canRepair(jobId: string, purpose: "general" | "state_response" = "general"): boolean {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(jobId) as { payload_json: string } | undefined;
-    return !repairBudgetSpent(JSON.parse(row?.payload_json ?? "{}"));
+    const payload = JSON.parse(row?.payload_json ?? "{}");
+    return !(purpose === "state_response" ? stateRepairBudgetSpent(payload) : repairBudgetSpent(payload));
   }
   stageOutput(jobId: string, output: string, storyValidationReason?: string): void { stageJobModelOutput(this.db, jobId, output, undefined, storyValidationReason); }
   settleCall(jobId: string, purpose: ServerLlmPurpose, outcome: "succeeded" | "failed", details?: { error?: unknown; usage?: Record<string, unknown> }): void { settleJobLlmCall(this.db, jobId, purpose, outcome, details); }
@@ -1006,7 +1007,7 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
 export async function reconcileWithServerLlm(
   store: ServerLlmStore,
   jobId: string,
-  prompts: { systemPrompt: string; userPrompt: string; stateExtraction?: boolean; sourceUnits?: import("@rcm/shared").SourceUnit[] },
+  prompts: { systemPrompt: string; userPrompt: string; stateExtraction?: boolean; sourceUnits?: import("@rcm/shared").SourceUnit[]; groundingDraft?: ExtractionDraftResult },
   signal: AbortSignal,
   onRepair?: () => void,
   accessRepair?: { plan: SourceAccessRepairPlan; onResponse: (value: unknown) => void },
@@ -1015,14 +1016,17 @@ export async function reconcileWithServerLlm(
     { role: "user" as const, content: accessRepair ? JSON.stringify({ ledger: JSON.parse(prompts.userPrompt), sourceAccess: JSON.parse(accessRepair.plan.userPrompt) }) : prompts.userPrompt }];
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
   const first = await callProvider(store, jobId, sourceMessages, signal, purpose);
+  let validatedOutput = first;
   const validate = (output: string, label: ServerLlmPurpose): ReconciliationResult => {
     const raw = parseServerJson(output, label);
     const result = parseReconciliationResult(raw, prompts.sourceUnits);
     if (prompts.stateExtraction && !result.state) throw new Error("State extraction response is missing state");
     accessRepair?.onResponse(raw);
+    validatedOutput = output;
     return result;
   };
-  try { return validate(first, purpose); } catch (firstError) {
+  let result: ReconciliationResult;
+  try { result = validate(first, purpose); } catch (firstError) {
     onRepair?.();
     const repairPurpose = prompts.stateExtraction ? "state_response_repair" : "reconciliation_repair";
     const reason = validationSummary(firstError);
@@ -1032,12 +1036,20 @@ export async function reconcileWithServerLlm(
       originalMessages: sourceMessages, invalidOutput: first, validationError: firstError, request: { kind: "reconciliation" },
     }), signal, repairPurpose)); }
     catch (error) { throw new Error(`State response repair failed: ${String(error)}; initial_validation=${reason}`); }
-    return validateStructuredRepairOrRegenerate({
+    result = await validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "reconciliation",
       regenerate: () => callProvider(store, jobId, sourceMessages, signal, "reconciliation"),
       validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
   }
+  if (prompts.stateExtraction && prompts.groundingDraft && store.canRepair(jobId, "state_response")) {
+    result = await repairStateRecognitionReferences({ draft: prompts.groundingDraft, result,
+      originalMessages: sourceMessages, invalidOutput: validatedOutput, sourceUnits: prompts.sourceUnits,
+      repair: async messages => parseServerJson(await callProvider(store, jobId, messages, signal, "state_response_repair"), "state_response_repair"),
+    });
+    signal.throwIfAborted();
+  }
+  return result;
 }
 
 export async function checkLedgerConsistencyWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal, onRepair?: () => void): Promise<LedgerConsistencyResult> {

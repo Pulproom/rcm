@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./api.js";
 import { loadConfig } from "./config.js";
 import { openDatabase } from "./db.js";
+import { reconcileUnrelatedProtectedReviews } from "./reconciliation.js";
 import { EmbeddingService } from "./embedding.js";
 import { ServerLlmStore } from "./server-llm.js";
 import { ServerExtractionWorker } from "./server-worker.js";
@@ -11,6 +12,7 @@ import { UpdateService } from "./update-service.js";
 const config = loadConfig();
 if (process.env.RCM_TASK_BUDGET_PATH) globalThis.fetch = new ProviderBudget(process.env.RCM_TASK_BUDGET_PATH).wrap(globalThis.fetch);
 const handle = openDatabase(config.dbPath);
+reconcileUnrelatedProtectedReviews(handle.db);
 const embeddings = new EmbeddingService(handle.db, {
   enabled: config.embeddings === "voyage",
   vectorEnabled: handle.vectorEnabled,

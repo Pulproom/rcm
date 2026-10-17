@@ -3,6 +3,7 @@ import { SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GU
 import { STORY_TIME_GUIDANCE } from "./story-time.js";
 import { z } from "zod";
 import { resolveModelSourceReferences } from "./source-references.js";
+import { buildAuxiliaryRepairMessages, type AuxiliaryRepairMessage } from "./structured-repair.js";
 export { composeQuerySignals, RISU_CONTINUATION_MARKER } from "./query-signals.js";
 export { modelImageRanges } from "./model-text.js";
 export { contiguousSourceRangeSelection } from "./source-range-selection.js";
@@ -1454,13 +1455,29 @@ Check only the unresolved excerpts in this frozen draft against the supplied sou
   ];
 }
 
+function recognitionDetailHasAccess(result: Pick<ExtractionDraftResult, "memories">, social: SocialKnowledge, key: string): boolean {
+  const detail = result.memories.find(memory => memory.key === social.memoryKey)?.details?.find(detail => detail.key === key);
+  return Boolean(detail?.access?.some(grant => grant.holder.trim().toLocaleLowerCase() === social.holder.trim().toLocaleLowerCase()));
+}
+
+/** Completion is loss-tolerant; the first-pass validator below still requests repair. */
+export function normalizeRecognitionReferences<T extends Pick<ExtractionDraftResult, "memories" | "socialKnowledge">>(result: T) {
+  const rejected: Array<{ index: number; detailKeys: string[]; reasonCode: "holder_access_unverified"; reason: string }> = [];
+  const socialKnowledge = result.socialKnowledge?.flatMap((social, index) => {
+    const cognitionDetailKeys = (social.cognitionDetailKeys ?? []).filter(key => recognitionDetailHasAccess(result, social, key));
+    const detailKeys = (social.cognitionDetailKeys ?? []).filter(key => !cognitionDetailKeys.includes(key));
+    if (detailKeys.length || !cognitionDetailKeys.length) rejected.push({ index, detailKeys, reasonCode: "holder_access_unverified",
+      reason: "Cognition requires a detail in memoryKey with explicit holder access; invalid links removed, empty recognition withheld from canonical state." });
+    return cognitionDetailKeys.length ? [{ ...social, cognitionDetailKeys }] : [];
+  });
+  return { result: { ...result, socialKnowledge }, rejected };
+}
+
 export function validateRecognitionReferences(result: Pick<ExtractionDraftResult, "memories" | "socialKnowledge">, context: {addIssue: (issue: {code: "custom"; path: (string | number)[]; message: string}) => void}): void {
   for (const [index, social] of (result.socialKnowledge ?? []).entries()) {
     if (!social.cognitionDetailKeys?.length) context.addIssue({ code: "custom", path: ["socialKnowledge", index, "cognitionDetailKeys"], message: "Every emitted recognition record requires a concise source-backed description linked by memoryKey and cognitionDetailKeys, including any explicitly stated limits." });
-    const memory = result.memories.find(memory => memory.key === social.memoryKey);
     for (const key of social.cognitionDetailKeys ?? []) {
-      const detail = memory?.details?.find(detail => detail.key === key);
-      if (!detail || !detail.access?.some(grant => grant.holder.trim().toLocaleLowerCase() === social.holder.trim().toLocaleLowerCase())) context.addIssue({ code: "custom", path: ["socialKnowledge", index, "cognitionDetailKeys"], message: "Cognition must reference a detail in memoryKey with explicit access for its holder." });
+      if (!recognitionDetailHasAccess(result, social, key)) context.addIssue({ code: "custom", path: ["socialKnowledge", index, "cognitionDetailKeys"], message: "Cognition must reference a detail in memoryKey with explicit access for its holder." });
     }
   }
 }
@@ -1512,11 +1529,69 @@ export const StateExtractionSchema = z.object({
 }).strict();
 export const ReconciliationResultSchema = z.object({ decisions: z.array(ReconciliationDecisionSchema), state: StateExtractionSchema.optional(), seedResolutions: z.array(SeedResolutionSchema).optional() });
 export type ReconciliationResult = z.infer<typeof ReconciliationResultSchema>;
+
+/** Both workers preview this exact completion view. Retain the authored submission
+ * separately so the server can preserve rejected recognition in the existing audit review. */
+export function mergeStateExtraction(draft: ExtractionDraftResult, result: ReconciliationResult) {
+  if (!result.state) throw new Error("State extraction response is missing state");
+  const state = StateExtractionSchema.parse(result.state);
+  Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: state.memories, sourcePassages: [], unfinishedSource: [] });
+  const keys = new Set(draft.memories.map(memory => memory.key));
+  for (const memory of state.memories) {
+    if (keys.has(memory.key)) throw new Error("State extraction cannot replace an event memory");
+    keys.add(memory.key);
+  }
+  const memories = structuredClone([...draft.memories, ...state.memories]);
+  for (const addition of state.detailAdditions) {
+    const parent = memories.find(memory => memory.key === addition.memoryKey);
+    if (!parent || parent.details?.some(detail => detail.key === addition.detail.key)) throw new Error("State detail addition needs an existing parent and a fresh key");
+    parent.details = [...(parent.details ?? []), addition.detail];
+  }
+  const { detailAdditions: _additions, ...stateRecords } = state;
+  const authored = ExtractionAggregateSchema.parse({ ...draft, ...stateRecords,
+    entities: [...draft.entities, ...state.entities], memories, seedResolutions: result.seedResolutions ?? [] });
+  const normalized = normalizeRecognitionReferences(authored);
+  return { draft: normalized.result, recognitionReviewDraft: normalized.rejected.length ? authored : undefined, recognitionIssues: normalized.rejected };
+}
 export function parseReconciliationResult(input: unknown, sourceUnits?: SourceUnit[]): ReconciliationResult {
   if (sourceUnits && input && typeof input === "object" && "state" in input) {
     return ReconciliationResultSchema.parse(resolveModelSourceReferences(input, sourceUnits));
   }
   return ReconciliationResultSchema.parse(input);
+}
+
+/** One state-response repair, charged by the worker's existing repair budget.
+ * Completion still validates evidence and withholds any unresolved recognition. */
+export async function repairStateRecognitionReferences(input: {
+  draft: ExtractionDraftResult;
+  result: ReconciliationResult;
+  originalMessages: ReadonlyArray<{ role: string; content: string }>;
+  invalidOutput: string;
+  sourceUnits?: SourceUnit[];
+  repair: (messages: AuxiliaryRepairMessage[]) => Promise<unknown>;
+}): Promise<ReconciliationResult> {
+  let completion: ReturnType<typeof mergeStateExtraction>;
+  try { completion = mergeStateExtraction(input.draft, input.result); }
+  catch { return input.result; } // Other completion errors retain their existing validation path.
+  if (!completion.recognitionIssues.length) return input.result;
+  const messages = buildAuxiliaryRepairMessages({
+    originalMessages: input.originalMessages, invalidOutput: input.invalidOutput,
+    validationError: new Error("Cognition must reference a detail in memoryKey with explicit access for its holder."),
+    request: { kind: "reconciliation" },
+  });
+  messages.at(-1)!.content += `\nRepair only these recognition links and their detail access: ${JSON.stringify(completion.recognitionIssues.map(issue => ({
+    holder: input.result.state!.socialKnowledge[issue.index]!.holder,
+    memoryKey: input.result.state!.socialKnowledge[issue.index]!.memoryKey,
+    cognitionDetailKeys: input.result.state!.socialKnowledge[issue.index]!.cognitionDetailKeys,
+  })))}. Add a missing holder access grant only when the supplied source supports that the holder knows the entire detail, citing supplied source IDs. Otherwise drop or change the unsupported link. Preserve unrelated content and decisions. Existing eventDraft details are immutable; use a source-supported fresh detailAddition and update the link when needed.`;
+  try {
+    const repaired = parseReconciliationResult(await input.repair(messages), input.sourceUnits);
+    mergeStateExtraction(input.draft, repaired);
+    return repaired;
+  } catch {
+    // No regeneration or second attempt: retain authored records for completion review.
+    return input.result;
+  }
 }
 
 export const ReconciliationSubmissionSchema = z.object({

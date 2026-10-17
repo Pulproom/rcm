@@ -1,7 +1,7 @@
 {
   "name": "@rcm/plugin",
   "private": true,
-  "version": "1.0.15",
+  "version": "1.0.17",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",

@@ -24,7 +24,7 @@ import { MemoryReferences } from "./memory-references.js";
 import { finalizeMcpAnswer } from "./mcp-answer.js";
 import { automaticDeliveryHistory, recordAutomaticDelivery, persistAutomaticActivationObservations, deliveredActivationObservation, type AutomaticActivationObservation } from "./recall-activation.js";
 import { projectJobListPayload, stageJobModelOutput, manualRetryPayload } from "./jobs.js";
-import { inspectDraftEvidence, describeEvidenceReview } from "./evidence-review.js";
+import { inspectDraftEvidence, describeEvidenceReview, countBlockingExtractionAudits, describeWithheldRecognitions } from "./evidence-review.js";
 import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "./packet-manifest.js";
 import { queueSourceRecovery, retrieveSourceEvidence, renderSourceEvidence, sourceEvidenceAtomKey } from "./source-evidence.js";
 import { trimAutomaticAtom, planAutomaticAtoms, selectCueAnchor, selectAutomaticPortfolio, AUTOMATIC_ROLE_SHARES, type AutomaticPortfolioCandidate, type AutomaticAtomPriority } from "./automatic-packet.js";
@@ -1292,7 +1292,7 @@ export function createApp(dependencies: Dependencies): Hono {
     db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND lease_owner=? AND status='leased'").run(JSON.stringify(jobPayload), Date.now(), context.req.param("id"), body.workerId);
     const parts = prepared.parts?.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(jobPayload as any, "reconciliation", part.systemPrompt, part.userPrompt) }));
     return context.json({ required: prepared.required, candidateSetHash: prepared.candidateSetHash, systemPrompt: prepared.systemPrompt,
-      userPrompt: prepared.userPrompt, parts, ...(evidenceIssues.length ? { groundingDraft: preparedResult, evidenceIssues } : {}) });
+      userPrompt: prepared.userPrompt, parts, ...('stateExtraction' in prepared || evidenceIssues.length ? { groundingDraft: preparedResult, evidenceIssues } : {}) });
   });
   app.get("/v1/update/status", async (context) => {
     const refresh = context.req.query("refresh") === "1";
@@ -2613,7 +2613,8 @@ export function createApp(dependencies: Dependencies): Hono {
       SUM(CASE WHEN status='failed' AND type IN ('ledger_consistency','relationship_projection','story_consolidation') THEN 1 ELSE 0 END) AS advisoryFailed
       FROM jobs WHERE chat_id=?`).get(chatId) as { completed: number | null; lastCompleted: number | null; queued: number | null; failed: number | null; blockingFailed: number | null; advisoryFailed: number | null };
     const pendingReconciliations = (db.prepare("SELECT count(*) AS count FROM reconciliation_items WHERE chat_id=? AND status='pending'").get(chatId) as { count: number }).count;
-    const pendingExtractionAudits = (db.prepare("SELECT count(*) AS count FROM extraction_audits WHERE chat_id=? AND status IN ('pending_review','failed')").get(chatId) as { count: number }).count;
+    const pendingExtractionAudits = countBlockingExtractionAudits(db, chatId);
+    const pendingConflicts = (db.prepare("SELECT count(*) AS count FROM conflicts WHERE chat_id=? AND status='pending' AND kind<>'static_projection_changed'").get(chatId) as { count: number }).count;
     const ingestion = ingestionSummary(db, chatId);
     const embeddingJobs = db.prepare(`SELECT
       SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) AS pending,
@@ -2685,7 +2686,7 @@ export function createApp(dependencies: Dependencies): Hono {
     return {
       serverInstanceId, memoryLanguage: chat?.memory_language,
       translationRevision: JSON.stringify([chat?.revision, memoryUpdatedAt, derivedCounts.memories, derivedCounts.details, jobs.completed, jobs.lastCompleted]),
-      queuedJobs: Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits,
+      queuedJobs: Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts,
       pendingReconciliations,
       ...ingestion,
       pendingEmbeddings: Number(embeddingJobs.pending ?? 0), failedEmbeddings: Number(embeddingJobs.failed ?? 0),
@@ -2997,11 +2998,36 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/chats/:id/conflicts", (context) => context.json(readDashboardConflicts(context.req.param("id"))));
   function readDashboardJobs(chatId: string) {
     const ingestion = ingestionSummary(db, chatId);
+    const jobMetadata = (job: any): Record<string, unknown> => {
+      let payload: Record<string, any> = {};
+      try { payload = JSON.parse(job.payload_json || "{}"); } catch { return {}; }
+      const audits = db.prepare(`SELECT draft_json AS draft,source_message_ids_json AS source_ids
+        FROM extraction_audits WHERE chat_id=? AND job_id=? AND status IN ('pending_review','failed') ORDER BY updated_at DESC`).all(chatId, job.id) as Array<{ draft: string; source_ids: string }>;
+      let withheld: ReturnType<typeof describeWithheldRecognitions> = [];
+      let sourceMessageIds: string[] = [];
+      for (const audit of audits) {
+        try {
+          const draft = JSON.parse(audit.draft) as any;
+          const found = describeWithheldRecognitions(draft);
+          if (found.length) { withheld = found; sourceMessageIds = JSON.parse(audit.source_ids || "[]"); break; }
+        } catch { /* A malformed audit remains visible through the normal audit endpoint. */ }
+      }
+      if (!withheld.length) return {};
+      const batchId = typeof payload.batchId === "string" ? payload.batchId : undefined;
+      const batch = batchId ? db.prepare("SELECT id,start_ordinal AS startOrdinal,end_ordinal AS endOrdinal FROM extraction_batches WHERE id=? AND chat_id=?").get(batchId, chatId) as { id: string; startOrdinal: number; endOrdinal: number } | undefined : undefined;
+      const sourceRange = batch ?? (sourceMessageIds.length ? listSourceRanges(db, chatId, sourceMessageIds).find((range) => sourceMessageIds.every((id) => range.sourceMessageIds.includes(id))) : undefined);
+      const memoriesSaved = batchId ? Number((db.prepare("SELECT count(*) AS count FROM memories WHERE chat_id=? AND source_batch_id=? AND active=1").get(chatId, batchId) as { count: number }).count) : 0;
+      return {
+        memoriesSaved,
+        withheldRecognitions: withheld,
+        ...(sourceRange ? { sourceRange: { id: sourceRange.id, startOrdinal: sourceRange.startOrdinal, endOrdinal: sourceRange.endOrdinal } } : {}),
+      };
+    };
     return {
       items: db.prepare(`
         SELECT id,type,status,attempts,leased_until,last_error,payload_json,created_at,updated_at FROM jobs
         WHERE chat_id=? AND status<>'archived' ORDER BY created_at DESC,rowid DESC LIMIT 200
-      `).all(chatId).map((job: any) => ({ ...job, payload_json: JSON.stringify(projectJobListPayload(JSON.parse(job.payload_json),job.type)) })),
+      `).all(chatId).map((job: any) => ({ ...job, payload_json: JSON.stringify({ ...projectJobListPayload(JSON.parse(job.payload_json),job.type), ...jobMetadata(job) }) })),
       cancelledMessages: (db.prepare("SELECT count(*) AS count FROM messages WHERE chat_id=? AND memory_excluded=0 AND extraction_state='cancelled'").get(chatId) as { count: number }).count,
       ...ingestion,
     };

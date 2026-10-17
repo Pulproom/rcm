@@ -76,7 +76,7 @@ export function normalizeLlmCallStats(value: unknown): OperationLlmCallStats {
 export const repairBudgetSpent = (payload: Record<string, unknown>, stats = normalizeLlmCallStats(payload.llmCallStats)): boolean =>
   typeof payload.repairBudgetUsed === "boolean" ? payload.repairBudgetUsed : stats.repairs > (stats.byPurpose.state_response_repair ?? 0);
 
-const stateRepairBudgetSpent = (payload: Record<string, unknown>, stats = normalizeLlmCallStats(payload.llmCallStats)): boolean =>
+export const stateRepairBudgetSpent = (payload: Record<string, unknown>, stats = normalizeLlmCallStats(payload.llmCallStats)): boolean =>
   typeof payload.stateRepairBudgetUsed === "boolean" ? payload.stateRepairBudgetUsed : (stats.byPurpose.state_response_repair ?? 0) > 0;
 
 export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string, workerId?: string): OperationLlmCallStats {
@@ -1198,7 +1198,7 @@ export function recordSourceRecoveryOutcome(db: RcmDatabase, jobId: string, resu
 }
 
 export function failJob(db: RcmDatabase, jobId: string, workerId: string, failure: unknown): JobFailureResult | undefined {
-  const error = failure instanceof Error ? failure.message : typeof failure==='string' ? failure : String((failure as any)?.message ?? 'Auxiliary call failed');
+  let error = failure instanceof Error ? failure.message : typeof failure==='string' ? failure : String((failure as any)?.message ?? 'Auxiliary call failed');
   const providerFailure=providerFailureMetadata(failure);
   const row = db.prepare("SELECT attempts,type,payload_json,chat_id FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(jobId, workerId) as
     | { attempts: number; type: string; payload_json: string; chat_id: string }
@@ -1208,8 +1208,16 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
   if (row.type === 'memory_group' && isProviderContextLimitError(error)
     && resplitMemoryGroupInput(db, jobId, JSON.parse(row.payload_json))) return { accepted: true, status: 'queued', attempt: row.attempts, maxAttempts: 3, retryable: true };
   const maxAttempts = 3;
-  const nonRetryable = isPermanentProviderError(failure);
   const originalPayload = JSON.parse(row.payload_json || "{}") as Record<string, unknown>;
+  // Server completion has no provider calls. Plain application errors and schema
+  // errors here describe a deterministic rejected result. Keep typed transport,
+  // SQLite and runtime failures on their existing retry path.
+  const completionInvalid = originalPayload.pipelineStage === "storing" && failure instanceof Error && (
+    failure.name === "ZodError"
+    || (failure.constructor === Error && !providerFailure.code && providerFailure.status === undefined)
+    || ["EXTRACTION_SOURCE_INVALID", "MEMORY_ADDITION_INVALID", "SOURCE_CHANGED"].includes(providerFailure.code ?? ""));
+  const nonRetryable = isPermanentProviderError(failure) || completionInvalid;
+  if (completionInvalid) error = `EXTRACTION_COMPLETION_INVALID: ${error}`;
   const status = nonRetryable || repairBudgetSpent(originalPayload) || stateRepairBudgetSpent(originalPayload) || row.attempts >= maxAttempts ? "failed" : "queued";
   const failedPayload = {
     ...originalPayload,

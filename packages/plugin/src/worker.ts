@@ -5,7 +5,7 @@ import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { isChatMemoryEnabled } from "./settings.js";
-import { parseReconciliationResult, type SourceUnit } from "@rcm/shared";
+import { parseReconciliationResult, mergeStateExtraction, repairStateRecognitionReferences, type SourceUnit } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
 import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch } from "@rcm/shared";
@@ -626,7 +626,7 @@ async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unkn
   }
 }
 
-async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; systemPrompt?: string; userPrompt?: string; parts?: Array<{ systemPrompt: string; userPrompt: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; cachedResult?: unknown }> }, onRepair?: () => void,
+async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; groundingDraft?: ExtractionDraftResult; canRepairStateResponse?: () => boolean; systemPrompt?: string; userPrompt?: string; parts?: Array<{ systemPrompt: string; userPrompt: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; cachedResult?: unknown }> }, onRepair?: () => void,
   accessRepair?: { plan: SourceAccessRepairPlan; apply: (response: unknown) => void }): Promise<ReconciliationSubmission> {
   if (prepared.candidateSetHash && prepared.parts?.length) {
     const decisions = [];
@@ -635,7 +635,7 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
     for (const [index, part] of prepared.parts.entries()) {
       const submission = part.cachedResult !== undefined
         ? { candidateSetHash: prepared.candidateSetHash, result: ReconciliationResultSchema.parse(part.cachedResult) }
-        : await reconcileState(state, { candidateSetHash: prepared.candidateSetHash, ...part }, onRepair, index === 0 ? accessRepair : undefined);
+        : await reconcileState(state, { candidateSetHash: prepared.candidateSetHash, groundingDraft: prepared.groundingDraft, canRepairStateResponse: prepared.canRepairStateResponse, ...part }, onRepair, index === 0 ? accessRepair : undefined);
       if (part.cachedResult === undefined) await validatedPartRecorders.get(state)?.("reconciliation", part, submission.result);
       decisions.push(...(submission.result?.decisions ?? []));
       seedResolutions.push(...(submission.result?.seedResolutions ?? []));
@@ -654,14 +654,17 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
   }
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
   const first = await runModel(state, messages, purpose);
+  let validatedOutput = first;
   const validate = (output: string, label: WorkerJsonPurpose): ReconciliationSubmission => {
     const raw = parseWorkerJson(state, output, label);
     const result = parseReconciliationResult(raw, prepared.sourceUnits);
     if (prepared.stateExtraction && !result.state) throw new Error("State extraction response is missing state");
     accessRepair?.apply(raw);
+    validatedOutput = output;
     return { candidateSetHash: prepared.candidateSetHash, result };
   };
-  try { return validate(first, purpose); }
+  let submission: ReconciliationSubmission;
+  try { submission = validate(first, purpose); }
   catch (firstError) {
     onRepair?.();
     const repairPurpose = prepared.stateExtraction ? "state_response_repair" : "reconciliation_repair";
@@ -672,12 +675,19 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
       originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "reconciliation" },
     }), repairPurpose); }
     catch (error) { throw new Error(`State response repair failed: ${String(error)}; initial_validation=${reason}`); }
-    return validateStructuredRepairOrRegenerate({
+    submission = await validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "reconciliation",
       regenerate: () => runModel(state, messages, "reconciliation"),
       validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
   }
+  if (prepared.stateExtraction && prepared.groundingDraft && submission.result && prepared.canRepairStateResponse?.() !== false) {
+    submission.result = await repairStateRecognitionReferences({ draft: prepared.groundingDraft, result: submission.result,
+      originalMessages: messages, invalidOutput: validatedOutput, sourceUnits: prepared.sourceUnits,
+      repair: async repairMessages => parseWorkerJson(state, await runModel(state, repairMessages, "state_response_repair"), "state_response_repair"),
+    });
+  }
+  return submission;
 }
 
 async function projectRelationships(state: RuntimeState, job: LeasedJob): Promise<unknown> {
@@ -875,7 +885,14 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
             if (state.currentJob) state.currentJob.phase = "state_reconciliation";
             state.publishActivity?.();
             await client.progress(job.id, state.workerId, "state_reconciliation").catch(() => undefined);
-            reconciliation = await reconcileState(state, prepared, undefined, accessPlan ? { plan: accessPlan, apply: applyAccess } : undefined);
+            reconciliation = await reconcileState(state, { ...prepared, groundingDraft: prepared.groundingDraft ?? result as ExtractionDraftResult, canRepairStateResponse: () => !stateRepairBudgetUsed }, undefined, accessPlan ? { plan: accessPlan, apply: applyAccess } : undefined);
+            if (reconciliation.result?.state) {
+              const completion = mergeStateExtraction(prepared.groundingDraft ?? result as ExtractionDraftResult, reconciliation.result);
+              // Submit authored records for audit preservation; this shared view is exactly
+              // what server completion uses for canonical state, including cached responses.
+              if (completion.recognitionIssues.length) addLog(state.logs, "warn",
+                `인지 연결 ${completion.recognitionIssues.length}개 후보의 유효하지 않은 참조를 제외하고 나머지 기억을 저장해요. 원래 후보는 검토 상태로 보존해요.`);
+            }
           } else if (accessPlan) {
             try {
               const response = await runModel(state, [{ role: "system", content: accessPlan.systemPrompt }, { role: "user", content: accessPlan.userPrompt }], "extraction_repair");

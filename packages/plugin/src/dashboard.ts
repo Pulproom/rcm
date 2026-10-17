@@ -39,7 +39,7 @@ import { buildSceneLog, storyWeekday } from "./dashboard/scene-log.js";
 import { landmarkLabel, remapHiddenAnniversariesAfterDelete } from "./dashboard/diary.js";
 import { isRecognitionMemory } from "@rcm/shared";
 import { addressEditorForm, buildPersonDetail, renderPersonDetail } from "./dashboard/person.js";
-import { buildNowPage, overduePromiseEntries, renderNowPage, runPromiseStatusMutation, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
+import { buildNowPage, overduePromiseEntries, pendingAttentionCount, renderNowPage, runPromiseStatusMutation, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
 import { POLARITY_LABELS, predicateLabel, PROMISE_STATUS_LABELS, STATE_KIND_LABELS } from "./dashboard/record-history.js";
 import { renderLockHome } from "./dashboard/phone/home.js";
 import { MemoryLandmarkPatchQueue } from "./dashboard/landmark-mutations.js";
@@ -313,6 +313,7 @@ export interface DashboardData {
   endedBeliefs: any[];
   userDeletedBeliefs: any[];
   promiseHistory: any[];
+  pendingReviews?: number;
   conflicts: any[];
   reconciliationReviews: any[];
   extractionAudits: any[];
@@ -1047,10 +1048,9 @@ function invalidateRestoredChatState(state: RuntimeState,chatId:string):void {
   }
 }
 
-export function syncReviewActivity(state: RuntimeState, data: Pick<DashboardData, "reconciliationReviews"> & { extractionAudits?: any[] }): void {
+export function syncReviewActivity(state: RuntimeState, data: Pick<DashboardData, "reconciliationReviews"> & Partial<Pick<DashboardData, "conflicts" | "pendingReviews">> & { extractionAudits?: any[] }): void {
   const pendingReconciliations = data.reconciliationReviews.filter((item) => item.status === "pending").length;
-  const pendingAudits = (data.extractionAudits ?? []).filter((item) => item.status === "pending_review" || item.status === "failed").length;
-  const pendingReviews = pendingReconciliations + pendingAudits;
+  const pendingReviews = pendingAttentionCount(data);
   const current = state.statusSummary;
   if (current?.pendingReconciliations === pendingReconciliations
     && current?.pendingReviews === pendingReviews) return;
@@ -1062,11 +1062,20 @@ export function syncReviewActivity(state: RuntimeState, data: Pick<DashboardData
   state.publishStatusSummary?.();
 }
 
+export function syncPendingReviewCount(state: RuntimeState, pendingReviews?: number): void {
+  const count = Number(pendingReviews);
+  if (!Number.isFinite(count)) return;
+  const normalized = Math.max(0, count);
+  if (state.statusSummary?.pendingReviews === normalized) return;
+  state.statusSummary = {
+    ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }),
+    pendingReviews: normalized,
+  };
+  state.publishStatusSummary?.();
+}
+
 export function reviewBadgeVisible(state: RuntimeState): boolean {
-  return (state.statusSummary?.pendingReviews ?? 0) > 0
-    && (state.statusSummary?.queuedJobs ?? 0) === 0
-    && !state.currentJob
-    && (state.serverWorker?.activeCalls ?? 0) === 0;
+  return (state.statusSummary?.pendingReviews ?? 0) > 0;
 }
 
 export async function pauseWorkerForQueueMutation(
@@ -1405,14 +1414,13 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const recentSection = `<section class="home__recent"><h2 class="sec">최근 씬 ${btn("씬 목록", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "timeline" }, hit: true })}</h2>${recentFrames ? `<div class="strip3">${recentFrames}</div>` : ""}</section>`;
 
   const pencil = homePencilCounts(data);
-  const pencilTotal = pencil.overdue + pencil.attention;
   const notices = [
     data.connectionIssue ? notice(`${healthTitle} · ${healthDetail}`, { tone: "cut", action: btn("서버 설정 열기", { kind: "quiet", action: "tab", data: { tab: "settings", settingsSection: "server" }, hit: true }) }) : "",
     blockingAlert ? notice(`${blockingTitle} · ${blockingCopy}`, { tone: "cut", action: `<span class="notice__acts">${btn("다시 시도", { kind: "primary", action: "retry-failed" })}${btn("처리 상태", { kind: "quiet", action: "tab", data: { tab: "operations" } })}</span>` }) : "",
     retry && !blockingAlert && !data.connectionIssue ? notice(`${retry.label} · ${retry.detail}`, { tone: "plain", action: btn("처리 상태", { kind: "quiet", action: "tab", data: { tab: "operations" } }) }) : "",
     pendingConflicts ? notice(`확인이 필요한 충돌 ${pendingConflicts}건`, { tone: "cut", action: btn("관리로", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "reviews", attentionFilter: "conflict" }, hit: true }) }) : "",
-    // One thing to do, said plainly: what is waiting and how many.
-    pencilTotal ? notice([pencil.overdue ? `기한 지난 약속 ${pencil.overdue}개` : "", pencil.attention ? `확인할 기록 ${pencil.attention}개` : ""].filter(Boolean).join(" · "), { tone: "cut", action: btn("확인하기", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "world" }, hit: true }) }) : "",
+    pencil.overdue ? notice(`기한 지난 약속 ${pencil.overdue}개`, { tone: "cut", action: btn("확인하기", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "world" }, hit: true }) }) : "",
+    pencil.attention ? notice(`확인할 기록 ${pencil.attention}개`, { tone: "cut", action: btn("확인하기", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "reviews" }, hit: true }) }) : "",
   ].join("");
 
   const homePairs = buildHomePairs(data);
@@ -1538,7 +1546,8 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
         ] }] : []),
         ...(retry && !blockingAlert && !data.connectionIssue ? [{ tone: "wait" as const, text: retry.label, body: retry.detail, action: "tab", data: { tab: "operations" } }] : []),
         ...(pendingConflicts ? [{ tone: "cut" as const, text: `확인이 필요한 충돌 ${pendingConflicts}건`, action: "tab", data: { tab: "reviews", attentionFilter: "conflict" } }] : []),
-        ...(pencil.attention ? [{ tone: "wait" as const, text: `확인할 기록 ${pencil.attention}개`, action: "tab", data: { tab: "world" } }] : []),
+        ...(pencil.overdue ? [{ tone: "wait" as const, text: `기한 지난 약속 ${pencil.overdue}개`, action: "tab", data: { tab: "world" } }] : []),
+        ...(pencil.attention ? [{ tone: "wait" as const, text: `확인할 기록 ${pencil.attention}개`, action: "tab", data: { tab: "reviews" } }] : []),
         ...(phoneAdvisoryAlert ? [{ tone: "wait" as const, text: healthTitle, action: "tab", data: { tab: "operations" } }] : []),
       ],
       noticesHtml: alerts,
@@ -2898,7 +2907,7 @@ type AttentionItem = { id: string; type: Exclude<AttentionFilter, "all">; title:
 
 export function attentionPage(data: DashboardData, translations: TranslationView, display: RuntimeState["settings"]["translationDisplay"], view: AttentionViewState): string {
   const audits: AttentionItem[] = data.extractionAudits
-    .filter((item) => item.status === "pending_review" || item.status === "failed")
+    .filter((item) => (item.status === "pending_review" || item.status === "failed") && item.evidenceReview?.blocking !== false)
     .map((item) => ({
       id: `audit:${item.id}`, type: "audit", title: item.evidenceReview?.blocking === false ? "일부 발췌 보류 · 기억 처리 계속" : "상태 확인 필요 · 후속 기억 처리 보류",
       summary: `저장된 기억 ${Number(item.evidenceReview?.appliedMemories ?? 0)}개 · 확인할 근거 ${item.evidenceReview?.issues?.length ?? 0}개`,
@@ -2943,7 +2952,7 @@ export function attentionPage(data: DashboardData, translations: TranslationView
       : field({ id: `recon-value-${escapeHtml(item.id)}`, label: "내용", control: `<textarea id="recon-value-${escapeHtml(item.id)}" class="textarea" name="canonicalValue">${escapeHtml(incoming.value ?? incoming.content ?? "")}</textarea>` });
     const id = String(item.id), targetId = String(target?.id ?? "");
     const mergeLabel = item.itemKind === "promise_event" ? "기존 약속에 반영" : "기존 상태에 근거 추가";
-    const distinctLabel = item.itemKind === "promise_event" ? "별도 약속으로 보존" : "별도 상태로 보존";
+    const distinctLabel = item.itemKind === "promise_event" ? "별도 약속으로 보존" : "둘 다 유지";
     detail = `<article class="reader">${back}<div class="frame__slug"><b>${stateKind}</b></div><h2 class="reader__title">${escapeHtml(selected.title)}</h2><p class="sub">${escapeHtml(selected.summary)}</p><div class="cmp"><div><div class="lab">지금 기록</div><p>${displayText(String(candidateCopy), candidateTranslation, display)}</p></div><div class="new"><div class="lab">새로 들어온 기록</div><p>${displayText(String(canonical), incomingTranslation, display)}</p></div></div>${fold("새 기록 내용 편집", `<form class="form reconciliation-edit" data-review-id="${escapeHtml(item.id)}">${editFields}<p class="sub">편집한 내용은 아래에서 고른 처리에만 적용됩니다.</p></form>`, { preserveKey: `recon-edit:${id}` })}<div class="decide">${btn(mergeLabel, { kind: "primary", action: "resolve-reconciliation", data: { resolution: "merge", id, targetId }, disabled: !target })}${btn("새 기록으로 바꾸기", { kind: "secondary", action: "resolve-reconciliation", data: { resolution: "update", id, targetId }, disabled: !target })}${btn(distinctLabel, { kind: "secondary", action: "resolve-reconciliation", data: { resolution: "distinct", id } })}${btn("새 기록 버리기", { kind: "danger", action: "resolve-reconciliation", data: { resolution: "discard", id } })}</div></article>`;
   } else if (selected?.type === "conflict") {
     const item = selected.value, presentation = describeConflict(item);
@@ -3099,12 +3108,21 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const metadata = [triggerLabel, target].filter(Boolean).join(' · ');
     const groupDetail = (metadata ? `<p class="sub">${escapeHtml(metadata)}</p>` : '')
       + (storyLevel && typeof payload.targetGroupId === 'string' ? `<p class="sub">대상 그룹 · ${escapeHtml(payload.targetGroupId)}</p>` : '');
+    const withheldRecognitions = Array.isArray(payload.withheldRecognitions) ? payload.withheldRecognitions.filter((item): item is { holder?: unknown; what?: unknown } => Boolean(item && typeof item === "object")) : [];
+    const sourceRange = payload.sourceRange && typeof payload.sourceRange === "object" ? payload.sourceRange as { id?: unknown } : undefined;
+    // Withheld recognition is a note on a finished job, not an error: the row names it, the body lists it once.
+    const withheldNote = withheldRecognitions.length ? `기억 ${Number(payload.memoriesSaved ?? 0)}개 저장 · 인물 인지 ${withheldRecognitions.length}건 보류` : "";
+    const withheldFold = withheldRecognitions.length ? `<section class="withheld" aria-label="보류한 인물 인지"><p class="withheld__head">보류한 인물 인지 ${withheldRecognitions.length}건</p><ul class="withheld__list">${withheldRecognitions.map((item) => {
+      const holder = String(item.holder ?? "").trim() || "인물";
+      const what = String(item.what ?? "").trim() || "인식 기록";
+      return `<li><b>${escapeHtml(holder)}</b><span>${escapeHtml(what)}</span></li>`;
+    }).join("")}</ul><p class="withheld__why">연결된 기억에 이 인물이 사실을 알게 된 장면이 없어 보류했어요. 맞다면 원문에서 직접 추가할 수 있어요.</p>${sourceRange?.id ? btn("원문에서 기억 추가", { kind: "quiet", icon: "search", action: "organization-add-memory", data: { id: String(sourceRange.id) } }) : ""}</section>` : "";
     const rowDetail = [job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : job.status === "leased" ? stageLabel || "기억 처리 중" : "", metadata].filter(Boolean).join(' · ');
     const terminalTag = terminalState ? `<span class="job__status is-${escapeHtml(statusKey)}">${escapeHtml(statusLabel)}</span>` : "";
     // Inside a same-kind burst the kind is already the parent's title; a child names only what differs.
     const childName = child ? target || triggerLabel || title : title;
-    const childDetail = child ? (job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : "") : rowDetail;
-    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
+    const childDetail = [child ? (job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : "") : rowDetail, withheldNote].filter(Boolean).join(" · ");
+    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}${withheldFold}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
   };
   const isUnresolvedJob = (job: any): boolean => ["queued", "leased", "failed"].includes(job.status);
   const currentRunId = data.coldStartProgress?.acknowledged ? undefined : data.coldStartProgress?.backfillRunId;
@@ -3167,12 +3185,20 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     if (!group.length) runs.set(String(runId), group);
     group.push(job);
   }
+  // A group names withheld recognition too, so it is visible without opening every child.
+  const withheldIn = (jobs: any[]): string => {
+    const count = jobs.reduce((sum, job) => {
+      const items = parseJson<Record<string, unknown>>(job.payload_json, {}).withheldRecognitions;
+      return sum + (Array.isArray(items) ? items.length : 0);
+    }, 0);
+    return count ? `인물 인지 ${count}건 보류` : "";
+  };
   const countLabels: Record<string, string> = { "대화 기억 정리": "기억 정리", "줄거리 갱신": "줄거리", "관계 상태 갱신": "관계", "최종 장부 대조": "장부 대조", "퀴즈 만들기": "퀴즈" };
   for (const [runId, group] of runs) {
     const endAt = Math.max(...group.map((job) => Number(job.updated_at)));
     entries.push({ at: endAt, html: () => {
       const kinds = [...byKind(group)];
-      const meta = kinds.map(([kind, jobs]) => `${countLabels[kind] ?? kind} ${jobs.length}`).join(" · ");
+      const meta = [...kinds.map(([kind, jobs]) => `${countLabels[kind] ?? kind} ${jobs.length}`), withheldIn(group)].filter(Boolean).join(" · ");
       const body = kinds.map(([kind, jobs]) => {
         jobs.sort((left, right) => Number(parseJson<Record<string, unknown>>(left.payload_json, {}).operationStageOrdinal ?? 0) - Number(parseJson<Record<string, unknown>>(right.payload_json, {}).operationStageOrdinal ?? 0) || Number(left.updated_at) - Number(right.updated_at));
         const startAt = Math.min(...jobs.map((job) => Number(job.created_at ?? job.updated_at)));
@@ -3202,7 +3228,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
         // A burst shares its cause; name it once on the parent instead of on every child.
         const triggers = new Set(run.map((item) => parseJson<Record<string, unknown>>(item.job.payload_json, {}).trigger).filter((value) => typeof value === "string" && Object.hasOwn(JOB_TRIGGER_LABELS, value)));
         const cause = triggers.size === 1 ? JOB_TRIGGER_LABELS[[...triggers][0] as JobTrigger] : "";
-        out.push(jobGroup(`${kind} · ${run.length}건`, [cause, clockRange(startAt, first.at)].filter(Boolean).join(" · "), clockTime(first.at), run.map((item) => jobRow(item.job, true, true)).join(""), `operation-burst:${first.job.id}`)
+        out.push(jobGroup(`${kind} · ${run.length}건`, [cause, clockRange(startAt, first.at), withheldIn(run.map((item) => item.job))].filter(Boolean).join(" · "), clockTime(first.at), run.map((item) => jobRow(item.job, true, true)).join(""), `operation-burst:${first.job.id}`)
           .replace('class="fold job-group', 'class="fold job-group job-burst'));
       }
       index = end;
@@ -3961,6 +3987,7 @@ export async function loadDashboardData(
     extractionGroupTurns: previous.extractionGroupTurns, recoverableMessages: previous.recoverableMessages,
     historicalBackfillMessages: previous.historicalBackfillMessages, ingestionState: previous.ingestionState,
   });
+  const statusState = value("status", { pendingReviews: previous.pendingReviews, progress: previous.coldStartProgress });
   const lineage = value("lineage", previous.lineage ?? { status: "none" }) as ChatLineageStatus;
   const currentAdmin = context ? adminChats.find((chat: any) => chat.id === context.chatId) : undefined;
   const currentHasDerived = currentAdmin && ["memories", "relationships", "assertions", "beliefs", "promises"].some((key) => Number(currentAdmin[key] ?? 0) > 0);
@@ -3980,7 +4007,8 @@ export async function loadDashboardData(
     messages: value("messages", { items: previous.messages }).items,
     relationships: relationshipState.items,
     relationshipEvents: relationshipState.events ?? [],
-    coldStartProgress: value("status", { progress: previous.coldStartProgress }).progress,
+    coldStartProgress: statusState.progress,
+    pendingReviews: Number.isFinite(Number(statusState.pendingReviews)) ? Math.max(0, Number(statusState.pendingReviews)) : previous.pendingReviews,
     physicalIntimacy: value("physicalIntimacy", { items: previous.physicalIntimacy }).items,
     entities,
     socialKnowledge: value("socialKnowledge", { items: previous.socialKnowledge }).items,
@@ -5022,6 +5050,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
       });
       if (recovered && refreshed.health && state.serverWorker) refreshed.health.serverWorker = state.serverWorker;
       if (generation !== refreshGeneration || !dashboardOpen) return;
+      syncPendingReviewCount(state, refreshed.pendingReviews);
       if (activeTab === "reviews") syncReviewActivity(state, refreshed);
       await hydrateCachedMemoryTranslations(refreshed);
       if (generation !== refreshGeneration || !dashboardOpen) return;
@@ -6524,6 +6553,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient): 
           else if (action === 'organization-list') { organizationView.mobileDetail = false; organizationView.candidateId = ''; organizationView.addition = undefined; }
           else if (action === 'organization-back-detail') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = Boolean(organizationView.focusedId); }
           else if (action === 'organization-add-memory') {
+            if (!organizationView.open) {
+              organizationView.open = true;
+              activeTab = 'timeline';
+              organizationView.data = await client.request<OrganizationData>(`/v1/chats/${chat}/memory-organization`);
+            }
             if (!id) organizationView.focusedId = '';
             await openMemoryAddition(id ? [id] : organizationView.selection);
             if (organizationView.addition) organizationView.addition.origin = id ? 'detail' : 'selection';

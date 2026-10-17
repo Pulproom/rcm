@@ -98,7 +98,7 @@ export async function finalizeExtractPage(options: FinalizeExtractPageOptions) {
       options.onStage?.("state_reconciliation");
       reconciliation = { candidateSetHash: prepared.candidateSetHash,
         result: await reconcileWithServerLlm(store, job.id,
-          { systemPrompt: prepared.systemPrompt!, userPrompt: prepared.userPrompt!, stateExtraction: true, sourceUnits: "sourceUnits" in prepared ? prepared.sourceUnits : undefined }, signal, undefined,
+          { systemPrompt: prepared.systemPrompt!, userPrompt: prepared.userPrompt!, stateExtraction: true, groundingDraft: draft, sourceUnits: "sourceUnits" in prepared ? prepared.sourceUnits : undefined }, signal, undefined,
           accessPlan ? { plan: accessPlan, onResponse: response => { result = applySourceAccessRepair(draft, accessPlan, response); } } : undefined) };
       signal.throwIfAborted();
     } else if (accessPlan) {

@@ -624,27 +624,31 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       const requestedTargets = [...new Set(assertion.targetAssertionIds ?? [])]
         .map((id) => activeAssertions.find((row) => row.id === id && sameSocialRelationScope(row.social_relation_json, assertion.socialRelation)))
         .filter((row): row is typeof activeAssertions[number] => Boolean(row));
-      const protectedTargets = (requestedTargets.length ? requestedTargets : assertion.changeType === "initial" ? activeAssertions.filter(row=>sameSocialRelationScope(row.social_relation_json,assertion.socialRelation)) : matchingCurrent).filter(row => !canAutomaticallyChange(db,chatId,row,assertion.evidence));
+      const protectedTargets = (requestedTargets.length ? requestedTargets : matchingCurrent).filter(row => !canAutomaticallyChange(db,chatId,row,assertion.evidence));
       const compatible = assertion.changeType === "initial" && protectedTargets.every(row=>normalizeLedgerPredicate(row.predicate)!==assertion.predicate && assertion.compatibleWithIds?.includes(row.id));
       if (!userInitiated && protectedTargets.length && !compatible) {
         db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
           .run(randomUUID(),chatId,"assertion_auto_protected",JSON.stringify(protectedTargets),JSON.stringify(assertion),revision,timestamp);
         continue;
       }
-      if (current && assertion.changeType === "initial" && current.state_kind === stateKind && normalizeLedgerText(current.value) === normalizeLedgerText(assertion.value)) {
+      // Explicit, non-compatible targets authorize the same transition as update.
+      // Resolve scope and enforce protections above before interpreting this intent.
+      const transitionTargets = requestedTargets.filter(row => assertion.changeType !== "initial" || !assertion.compatibleWithIds?.includes(row.id));
+      const changeType = assertion.changeType === "initial" && transitionTargets.length ? "update" : assertion.changeType;
+      if (current && changeType === "initial" && current.state_kind === stateKind && normalizeLedgerText(current.value) === normalizeLedgerText(assertion.value)) {
         const evidence = [...JSON.parse(current.evidence_json), ...assertion.evidence].filter((item, index, all) => all.findIndex((candidate) => candidate.messageId === item.messageId && (candidate.quote ?? "") === (item.quote ?? "")) === index);
         db.prepare("UPDATE assertions SET predicate=?,confidence=MAX(confidence,?),evidence_json=?,social_relation_json=COALESCE(?,social_relation_json) WHERE id=?").run(assertion.predicate, assertion.confidence, JSON.stringify(evidence), socialRelation, current.id);
         continue;
       }
       const allowsConcurrentValues = stateKind === "goal" || stateKind === "secret";
-      if (current && assertion.changeType === "initial" && !allowsConcurrentValues) {
+      if (current && changeType === "initial" && !allowsConcurrentValues) {
         db.prepare(`
           INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at)
           VALUES(?,?,?,?,?,?,?)
         `).run(randomUUID(), chatId, "assertion", JSON.stringify(current), JSON.stringify(assertion), revision, timestamp);
         continue;
       }
-      if (assertion.changeType === "update" && allowsConcurrentValues && matchingCurrent.length > 0 && requestedTargets.length === 0) {
+      if (changeType === "update" && allowsConcurrentValues && matchingCurrent.length > 0 && requestedTargets.length === 0) {
         db.prepare(`
           INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at)
           VALUES(?,?,?,?,?,?,?)
@@ -658,7 +662,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         `).run(randomUUID(), chatId, "unattributed_claim", JSON.stringify(current ?? null), JSON.stringify(assertion), revision, timestamp);
         continue;
       }
-      const assertionsToClose = assertion.changeType === "initial" ? [] : requestedTargets.length ? requestedTargets : current ? [current] : [];
+      const assertionsToClose = changeType === "initial" ? [] : requestedTargets.length ? transitionTargets : current ? [current] : [];
       const insertedAssertionId=randomUUID();
       for (const target of assertionsToClose) db.prepare("UPDATE assertions SET valid_to_revision=?,valid_to_ordinal=?,automatic_closure_evidence_json=? WHERE id=?").run(
         revision,
@@ -692,7 +696,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       const requestedTargets = requestedIds.map((id) => candidates.find((row) => row.id === id)).filter((row): row is typeof candidates[number] => Boolean(row));
       const requestedTarget = requestedTargets[0];
       const target = requestedTarget && normalizeLedgerPredicate(requestedTarget.predicate) === belief.predicate ? requestedTarget : undefined;
-      const protectedTargets = candidates.filter(row => (["new","coexist"].includes(belief.action ?? "new") || requestedIds.includes(row.id) || normalizeLedgerPredicate(row.predicate) === belief.predicate)
+      const protectedTargets = candidates.filter(row => (requestedIds.includes(row.id) || normalizeLedgerPredicate(row.predicate) === belief.predicate)
         && !canAutomaticallyChange(db,chatId,row,belief.evidence));
       const compatible = belief.action === "coexist" && protectedTargets.every(row => belief.compatibleWithIds?.includes(row.id));
       if (!userInitiated && protectedTargets.length && !compatible) {
@@ -827,7 +831,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       const sourceBatchId = batchFor(promise.evidence ?? []);
       const existingPromise = db.prepare("SELECT * FROM promises WHERE chat_id=? AND promise_key=?").get(chatId, promise.key) as Record<string,any> | undefined;
       if (additionsOnly && existingPromise) continue;
-      const protectedPromises = (existingPromise ? [existingPromise] : db.prepare("SELECT * FROM promises WHERE chat_id=? AND promisor=? COLLATE NOCASE AND promisee=? COLLATE NOCASE").all(chatId,promise.promisor,promise.promisee) as Array<Record<string,any>>).filter(row=>!canAutomaticallyChange(db,chatId,row,promise.evidence ?? []));
+      const protectedPromises = (existingPromise ? [existingPromise] : db.prepare("SELECT * FROM promises WHERE chat_id=? AND promisor=? COLLATE NOCASE AND promisee=? COLLATE NOCASE").all(chatId,promise.promisor,promise.promisee) as Array<Record<string,any>>).filter(row=>normalizeLedgerPredicate(row.promise_key) === normalizeLedgerPredicate(promise.key) && !canAutomaticallyChange(db,chatId,row,promise.evidence ?? []));
       const compatible = !existingPromise && protectedPromises.every(row=>promise.compatibleWithIds?.includes(row.id));
       if (!userInitiated && protectedPromises.length && !compatible) {
         db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")

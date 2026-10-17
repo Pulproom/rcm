@@ -94,10 +94,13 @@ export function isPromiseOverdue(scheduledFor: string | null, storyTime: string 
   return compared !== null && compared < 0;
 }
 
-const pendingAttentionCount = (data: DashboardData): number =>
-  (data.extractionAudits ?? []).filter((item: any) => item?.status === "pending_review" || item?.status === "failed").length
-  + (data.reconciliationReviews ?? []).filter((item: any) => item?.status === "pending").length
-  + (data.conflicts ?? []).filter((item: any) => item?.status === "pending").length;
+export function pendingAttentionCount(data: Partial<Pick<DashboardData, "pendingReviews" | "extractionAudits" | "reconciliationReviews" | "conflicts">>): number {
+  const reported = Number(data.pendingReviews);
+  if (Number.isFinite(reported)) return Math.max(0, reported);
+  return (data.extractionAudits ?? []).filter((item: any) => (item?.status === "pending_review" || item?.status === "failed") && item?.evidenceReview?.blocking !== false).length
+    + (data.reconciliationReviews ?? []).filter((item: any) => item?.status === "pending").length
+    + (data.conflicts ?? []).filter((item: any) => item?.status === "pending").length;
+}
 
 export function buildNowPage(
   data: DashboardData,

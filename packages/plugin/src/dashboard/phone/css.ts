@@ -187,6 +187,15 @@ export const PHONE_SKIN_CSS = `
 .fold.job-group.job-burst > .fold__body > .job--child > summary { min-height: 40px; padding-block: 8px; }
 .job--child .job__name { font-size: var(--t-meta); font-weight: 400; color: var(--ink-2); }
 .job--child .job__time { font-size: var(--t-micro); }
+/* withheld recognition: a quiet note inside a finished job, never an error tone */
+.withheld { margin: 4px 0 14px; padding: 12px 14px; border-radius: var(--r); background: var(--screen-2); }
+.withheld__head { margin: 0 0 8px; font-size: var(--t-meta); font-weight: 600; color: var(--ink-2); }
+.withheld__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.withheld__list li { display: grid; grid-template-columns: minmax(2.5em, max-content) 1fr; gap: 12px; align-items: baseline; font-size: var(--t-ui); color: var(--ink); line-height: 1.45; }
+.withheld__list b { font-weight: 600; color: var(--ink-2); overflow-wrap: anywhere; }
+.withheld__list span { min-width: 0; overflow-wrap: anywhere; }
+.withheld__why { margin: 10px 0 6px; font-size: var(--t-meta); color: var(--ink-3); line-height: 1.5; }
+.withheld .btn { margin-left: -8px; }
 /* a summary of bare text: the chevron is its only span and keeps to its icon size at the right */
 .fold > summary > .chev:first-child { flex: none; margin-left: auto; }
 .fold[open] > summary { border-radius: 12px 12px 0 0; }

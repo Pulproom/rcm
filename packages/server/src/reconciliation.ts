@@ -6,6 +6,7 @@ import {
   estimateTokens, measureAuxiliaryPrompt,
   STORY_TIME_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE,
   ExtractionResultSchema,
+  StateObservationSchema,
   ReconciliationResultSchema,
   type ExtractionDraftResult,
   type ExtractionResult,
@@ -29,6 +30,15 @@ const parseEvidence = (value: unknown): unknown[] => {
   try { return Array.isArray(value) ? value : JSON.parse(String(value ?? "[]")); }
   catch { return []; }
 };
+
+function requiresProtectedStateReview(entry: CandidateEntry, decision: ReconciliationResult['decisions'][number]): boolean {
+  const predicate = normalizePredicate(entry.observation.kind === 'promise_event' ? entry.observation.promiseKeyHint : entry.observation.predicateHint);
+  const protectedProperty = entry.candidates.filter(candidate => candidate.immutable && normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key)) === predicate);
+  const compatible = decision.action === 'coexist' && entry.observation.kind === 'character_belief'
+    && protectedProperty.every(candidate => decision.compatibleWithIds?.includes(candidate.id));
+  return decision.targetIds.some(id => entry.candidates.some(candidate => candidate.id === id && candidate.immutable))
+    || decision.action !== 'ignore' && protectedProperty.length > 0 && !compatible;
+}
 
 const placeholders = (values: string[]): string => values.map(() => "?").join(",");
 
@@ -227,13 +237,8 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
     const needsTarget = ["reinforce", "supersede", "end", "dispute"].includes(decision.action);
     if (needsTarget && targets.length === 0) throw new Error(`${decision.action} requires a target for ${entry.itemRef}`);
     if (["create", "coexist", "ignore"].includes(decision.action) && targets.length > 0) throw new Error(`${decision.action} cannot select a target for ${entry.itemRef}`);
-    const predicate = normalizePredicate(entry.observation.kind === "promise_event" ? entry.observation.promiseKeyHint : entry.observation.predicateHint);
-    const protectedProperty = entry.candidates.filter(candidate => candidate.immutable && (["create","coexist"].includes(decision.action) || normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key)) === predicate));
-    const compatible = ((decision.action === "coexist" && entry.observation.kind === "character_belief")
-      || decision.action === "create" && entry.observation.kind !== "character_belief" && protectedProperty.every(candidate => normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key)) !== predicate))
-      && protectedProperty.every(candidate => decision.compatibleWithIds?.includes(candidate.id));
     if (decision.compatibleWithIds?.some(id => !entry.candidates.some(candidate => candidate.id === id))) throw new Error("Coexistence references an unavailable candidate");
-    if (targets.some((target) => target.immutable) || decision.action !== "ignore" && protectedProperty.length && !compatible) {
+    if (requiresProtectedStateReview(entry, decision)) {
       recordReview(db, chatId, jobId, sourceIds, entry, decision, "User-managed canonical state cannot be changed automatically");
       pending += 1;
       continue;
@@ -261,7 +266,7 @@ export function listReconciliationReviews(db: RcmDatabase, chatId: string): Reco
   return rows.map((row) => ({ id: row.id, itemRef: row.item_ref, itemKind: row.item_kind, incoming: JSON.parse(row.incoming_json).item, candidates: JSON.parse(row.candidates_json), decision: row.model_decision_json ? JSON.parse(row.model_decision_json) : undefined, error: row.model_error ?? undefined, status: row.status, createdAt: row.created_at, resolvedAt: row.resolved_at ?? undefined }));
 }
 
-export function resolveReconciliationReview(db: RcmDatabase, chatId: string, reviewId: string, input: { action: "merge" | "distinct" | "update" | "discard"; targetId?: string; editedItem?: unknown }): void {
+export function resolveReconciliationReview(db: RcmDatabase, chatId: string, reviewId: string, input: { action: "merge" | "distinct" | "update" | "discard"; targetId?: string; editedItem?: unknown; automatic?: true }): void {
   const row = db.prepare("SELECT * FROM reconciliation_items WHERE id=? AND chat_id=? AND status='pending'").get(reviewId, chatId) as Record<string, any> | undefined;
   if (!row) throw Object.assign(new Error("Reconciliation review is no longer pending"), { code: "RECONCILIATION_REVIEW_NOT_PENDING" });
   const observation = (input.editedItem ?? JSON.parse(row.incoming_json).item) as StateObservation;
@@ -299,4 +304,49 @@ export function resolveReconciliationReview(db: RcmDatabase, chatId: string, rev
     })();
   }
   db.prepare("UPDATE reconciliation_items SET status=?,resolution_json=?,resolved_at=? WHERE id=?").run(input.action === "discard" ? "discarded" : input.action === "distinct" ? "kept_separate" : input.action === "update" ? "updated" : "merged", JSON.stringify(input), Date.now(), reviewId);
+}
+
+/** One-time startup repair of reviews blocked only by unrelated protected properties.
+ * Eligibility uses saved observations/decisions/candidates, never a fresh model decision.
+ * Application deliberately follows the same transactional path as an explicit distinct.
+ */
+export function reconcileUnrelatedProtectedReviews(db: RcmDatabase): number {
+  const marker = 'reconciliation_protected_property_cleanup_v1';
+  if (db.prepare('SELECT 1 FROM server_meta WHERE key=?').get(marker)) return 0;
+  return db.transaction(() => {
+    const rows = db.prepare(`SELECT id,chat_id,item_ref,item_kind,incoming_json,candidates_json,model_decision_json
+      FROM reconciliation_items WHERE status='pending' AND model_error=? AND model_decision_json IS NOT NULL
+      ORDER BY created_at,rowid`).all('User-managed canonical state cannot be changed automatically') as Array<{
+        id: string; chat_id: string; item_ref: string; item_kind: ObservationKind;
+        incoming_json: string; candidates_json: string; model_decision_json: string;
+      }>;
+    let resolved = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const decision = ReconciliationResultSchema.parse({ decisions: [JSON.parse(row.model_decision_json)] }).decisions[0]!;
+        if (!['create', 'coexist'].includes(decision.action) || decision.targetIds.length || decision.itemRef !== row.item_ref) continue;
+        const observation = StateObservationSchema.parse(JSON.parse(row.incoming_json).item);
+        const candidates = JSON.parse(row.candidates_json) as Candidate[];
+        if (observation.kind !== row.item_kind || !Array.isArray(candidates) || !candidates.length
+          || candidates.some(candidate => !candidate || typeof candidate.id !== 'string' || candidate.kind !== observation.kind
+            || !candidate.value || typeof (candidate.value.predicate ?? candidate.value.promise_key) !== 'string')) continue;
+        const entry = { itemRef: row.item_ref, observation, candidates };
+        const predicate = normalizePredicate(observation.kind === 'promise_event' ? observation.promiseKeyHint : observation.predicateHint);
+        if (!candidates.some(candidate => candidate.immutable === true && normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key)) !== predicate)
+          || requiresProtectedStateReview(entry, decision)
+          || decision.compatibleWithIds?.some(id => !candidates.some(candidate => candidate.id === id))) continue;
+        // The recorded protection error proves the previous rule blocked this item.
+        // The shared current rule can accept it only because the property scope shrank.
+        db.transaction(() => resolveReconciliationReview(db, row.chat_id, row.id, { action: 'distinct', automatic: true }))();
+        resolved += 1;
+      } catch {
+        // Invalid saved payloads or a distinct that current state cannot accept stay pending.
+        failed += 1;
+      }
+    }
+    db.prepare('INSERT INTO server_meta(key,value) VALUES(?,?)').run(marker, String(Date.now()));
+    if (failed) console.warn(`[RCM] Protected-property review cleanup left ${failed} item(s) pending`);
+    return resolved;
+  })();
 }

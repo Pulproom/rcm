@@ -290,7 +290,7 @@ export class ServerExtractionWorker {
           this.store.planPages(job.id, "reconciliation", prepared.parts!);
           for (const part of prepared.parts!) {
             const cached = this.store.cachedPage(job.id, "reconciliation", part.systemPrompt, part.userPrompt);
-            const page = cached === undefined ? await reconcileWithServerLlm(this.store, job.id, part, controller.signal) : ReconciliationResultSchema.parse(cached);
+            const page = cached === undefined ? await reconcileWithServerLlm(this.store, job.id, { ...part, groundingDraft: draft }, controller.signal) : ReconciliationResultSchema.parse(cached);
             const expected = new Set(part.itemRefs);
             if (stateExtraction) {
               if (!page.state) throw new Error("State extraction response is missing state");
