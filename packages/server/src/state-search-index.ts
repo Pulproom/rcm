@@ -35,7 +35,8 @@ export class StateSearchIndex {
       this.status.lastError = error instanceof Error ? error.message : String(error);
     }
   }
-  async index(chatId: string, embed: (texts: string[]) => Promise<number[][]>): Promise<number> {
+  async index(chatId: string, embed: (texts: string[]) => Promise<number[][]>, signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
     // In-memory canonical databases intentionally have no persistent sidecar.
     if (this.path === ":memory:") return 0;
     this.status.chatId = chatId;
@@ -55,6 +56,7 @@ export class StateSearchIndex {
     for (let offset = 0; offset < pending.length; offset += 16) {
       const batch = pending.slice(offset, offset + 16);
       const vectors = await embed(batch.map(item => `${item.kind}; ${item.current ? "current" : "historical"}; ${item.text}`));
+      signal?.throwIfAborted();
       const current = new Map(collectStateEvidence(this.canonical, chatId).map(item => [item.id, item.fingerprint]));
       this.use(cache => cache.transaction(() => {
         batch.forEach((item, index) => {

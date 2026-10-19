@@ -6,6 +6,7 @@ import { refreshMemoryFts } from "./memory-search-document.js";
 import { canAutomaticallyChangeSocialKnowledge } from "./social-knowledge.js";
 import { invalidateStorySupports, storyMemorySupportIds } from "./story-spine.js";
 import { pruneDetailAccessEdits, readDetailAccessEdits } from "./item-access.js";
+import { canAutomaticallyChange, type UserCorrection } from "./user-corrections.js";
 
 
 // Setup citations are not transcript message IDs. Keep their fingerprint and exact
@@ -17,6 +18,11 @@ export function storeSetupRecognition(db: RcmDatabase, chatId: string, fingerpri
     const holder = names.get(item.holderKey)?.name, subject = names.get(item.subjectKey)?.name;
     if (!holder || !subject || holder === subject) throw new Error("Invalid setup recognition pair");
     if (!canAutomaticallyChangeSocialKnowledge(db,chatId,holder,subject,[])) continue;
+    // Replacement removes only untouched setup rows. A retained pair owns its
+    // original identity/evidence even when the new setup fingerprint changes.
+    if (db.prepare(`SELECT 1 FROM social_knowledge_events s JOIN memories m ON m.id=s.source_memory_id
+      WHERE s.chat_id=? AND s.holder=? COLLATE NOCASE AND s.subject=? COLLATE NOCASE
+        AND is_initial_calibration_memory(m.memory_key)`).get(chatId,holder,subject)) continue;
     const memoryId = randomUUID(), detailId = randomUUID();
     const key = `${INITIAL_CALIBRATION_MEMORY_KEY_PREFIX}${fingerprint}:${item.holderKey}:${item.subjectKey}`;
     const evidence = JSON.stringify(item.evidence.map(e => ({...e, sourceKind:"setup", setupFingerprint:fingerprint})));
@@ -40,9 +46,17 @@ export function storeSetupRecognition(db: RcmDatabase, chatId: string, fingerpri
 }
 
 export function updateSetupRecognition(db: RcmDatabase, chatId: string, action: "activate"|"delete", entity?: string): void {
-  const rows = db.prepare(`SELECT id FROM memories WHERE chat_id=? AND is_initial_calibration_memory(memory_key)
+  const rows = (db.prepare(`SELECT id,user_managed FROM memories WHERE chat_id=? AND is_initial_calibration_memory(memory_key)
     AND (? IS NULL OR EXISTS (SELECT 1 FROM social_knowledge_events s WHERE s.source_memory_id=memories.id AND (s.holder=? OR s.subject=?)))`)
-    .all(chatId,entity ?? null,entity ?? null,entity ?? null) as Array<{id:string}>;
+    .all(chatId,entity ?? null,entity ?? null,entity ?? null) as Array<{id:string;user_managed:number}>).filter(row => {
+      if (row.user_managed) return false;
+      const events = db.prepare("SELECT * FROM social_knowledge_events WHERE chat_id=? AND source_memory_id=?")
+        .all(chatId,row.id) as Array<UserCorrection & {holder:string;subject:string;manual:number}>;
+      // Check before removing evidence or Story supports. Public edits/deletions
+      // live in separate manual events; source-linked corrections also survive.
+      return events.every(event => !event.manual && canAutomaticallyChange(db,chatId,event,[])
+        && canAutomaticallyChangeSocialKnowledge(db,chatId,event.holder,event.subject,[]));
+    });
   const supports=action==='delete' ? storyMemorySupportIds(db,chatId,rows.map(row=>row.id)) : new Set<string>();
   for (const {id} of rows) {
     if (action === "delete") {
@@ -54,8 +68,6 @@ export function updateSetupRecognition(db: RcmDatabase, chatId: string, action: 
       db.prepare("DELETE FROM memories WHERE chat_id=? AND id=?").run(chatId,id);
       pruneDetailAccessEdits(db, chatId);
     } else {
-      const pairs=db.prepare("SELECT holder,subject FROM social_knowledge_events WHERE chat_id=? AND source_memory_id=?").all(chatId,id) as Array<{holder:string;subject:string}>;
-      if (pairs.some(pair=>!canAutomaticallyChangeSocialKnowledge(db,chatId,pair.holder,pair.subject,[]))) continue;
       db.prepare("UPDATE memories SET active=1 WHERE id=?").run(id);
       db.prepare("UPDATE memory_details SET active=1 WHERE memory_id=?").run(id);
       db.prepare(`UPDATE item_access SET active=1 WHERE chat_id=? AND item_kind='detail'

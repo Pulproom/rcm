@@ -1,7 +1,7 @@
 import { auxiliaryInputOutcome } from './auxiliary-input-cache.js';
 import { relationshipInputFingerprint, recordRelationshipInputs } from './relationship-projections.js';
 import { recordLedgerInputs } from './ledger-consistency.js';
-import { providerFailureMetadata } from '@rcm/shared';
+import { auxiliaryInputBudgetMessage, providerFailureMetadata } from '@rcm/shared';
 import { ROLEPLAY_ARCHIVE_FRAMING, JOB_TRIGGER_VALUES, type JobTrigger, type SourceRecoveryMetadata } from "@rcm/shared";
 import { isPermanentProviderError, isProviderContextLimitError, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
@@ -568,8 +568,8 @@ export function enqueueInitialCalibration(
     randomUUID(), chatId, JSON.stringify({ sourceMessageIds: [], resolvedSetup: projection, identityHints, memoryLanguage,
       ...(backfillRunId ? { backfillRunId, operationStage: "initial_calibration", operationStageOrdinal: 1, operationStageTotal: 1 } : {}) }), timestamp, timestamp,
   );
-  db.prepare("UPDATE initial_calibrations SET status='queued',setup_fingerprint=?,last_error=NULL,updated_at=? WHERE chat_id=?")
-    .run(projection.fingerprint, timestamp, chatId);
+  db.prepare("UPDATE initial_calibrations SET status='queued',setup_fingerprint=?,setup_json=?,last_error=NULL,updated_at=? WHERE chat_id=?")
+    .run(projection.fingerprint, JSON.stringify(projection), timestamp, chatId);
   return true;
 }
 
@@ -848,6 +848,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       FROM jobs j JOIN chats c ON c.id=j.chat_id
       WHERE (j.status='queued' OR (j.status='leased' AND j.leased_until < ?))
         AND j.attempts < 3
+        AND NOT EXISTS (SELECT 1 FROM chat_work_state held WHERE held.chat_id=j.chat_id AND held.enabled=0)
         AND COALESCE(json_extract(j.payload_json,'$.nextAttemptAt'),0) <= ?
         AND (?=0 OR j.type='story_consolidation')
         AND j.id NOT IN (SELECT value FROM json_each(?))
@@ -960,7 +961,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       return Object.assign(buildLedgerConsistencyJob({
         id: row.id, chatId: row.chat_id, profile: row.profile, memoryLanguage, attempt: row.attempts + 1,
         payload: { backfillRunId: payload.backfillRunId, groups: payload.groups as any,
-          auxiliaryBudget: (payload as any).auxiliaryBudget as { maxInputTokens?: number } | undefined },
+          auxiliaryBudget: { maxInputTokens: configuredAuxiliaryInputBudget(db) } },
       }), operationMeta);
     }
     if (row.type === "initial_calibration") {
@@ -1106,54 +1107,62 @@ export function renewJobLease(db: RcmDatabase, jobId: string, workerId: string, 
 
 export function attachAuxiliaryPlan(db: RcmDatabase, job: LeasedJob | null, budget: AuxiliaryBudgetSnapshot): LeasedJob | null {
   if (!job) return null;
-  const row = db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(job.id) as { payload_json: string } | undefined;
+  const row = db.prepare("SELECT payload_json,lease_owner FROM jobs WHERE id=?").get(job.id) as { payload_json: string; lease_owner: string } | undefined;
   const existingPayload = row ? JSON.parse(row.payload_json || "{}") as { auxiliaryBudget?: AuxiliaryBudgetSnapshot } : {};
-  budget = existingPayload.auxiliaryBudget ? { ...budget, ...existingPayload.auxiliaryBudget } : budget;
-  if (job.kind === "initial_calibration" && job.initialCalibration && job.systemPrompt) {
-    const emptyEnvelope = JSON.stringify([{ role: "system", content: job.systemPrompt }, { role: "user", content: JSON.stringify({ identityHints: job.initialCalibration.identityHints, renderedSetup: [] }) }]);
-    const setup = job.initialCalibration.resolvedSetup.messages.flatMap((message, sourceIndex) => {
-      let target = Math.max(1, budget.maxInputTokens - estimateTokens(emptyEnvelope) - 128);
-      let pieces = splitAuxiliarySource(message.content, estimateTokens, target);
-      const renderOne = (text: string) => JSON.stringify({ identityHints: job!.initialCalibration!.identityHints, renderedSetup: [{ sourceIndex, role: message.role, content: text }] });
-      while (pieces.some((piece) => !measureAuxiliaryPrompt([{ role: "system", content: job!.systemPrompt! }, { role: "user", content: renderOne(piece.text) }], estimateTokens, budget).fits)) {
-        if (target === 1) throw new Error(`Initial setup source ${sourceIndex} cannot fit the configured input budget`);
-        target = Math.max(1, Math.floor(target * .75));
-        pieces = splitAuxiliarySource(message.content, estimateTokens, target);
+  // Saved budgets describe the previous attempt, never the next lease.
+  try {
+    if (job.kind === "initial_calibration" && job.initialCalibration && job.systemPrompt) {
+      const emptyEnvelope = JSON.stringify([{ role: "system", content: job.systemPrompt }, { role: "user", content: JSON.stringify({ identityHints: job.initialCalibration.identityHints, renderedSetup: [] }) }]);
+      const setup = job.initialCalibration.resolvedSetup.messages.flatMap((message, sourceIndex) => {
+        let target = Math.max(1, budget.maxInputTokens - estimateTokens(emptyEnvelope) - 128);
+        let pieces = splitAuxiliarySource(message.content, estimateTokens, target);
+        const renderOne = (text: string) => JSON.stringify({ identityHints: job!.initialCalibration!.identityHints, renderedSetup: [{ sourceIndex, role: message.role, content: text }] });
+        while (pieces.some((piece) => !measureAuxiliaryPrompt([{ role: "system", content: job!.systemPrompt! }, { role: "user", content: renderOne(piece.text) }], estimateTokens, budget).fits)) {
+          if (target === 1) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
+          target = Math.max(1, Math.floor(target * .75));
+          pieces = splitAuxiliarySource(message.content, estimateTokens, target);
+        }
+        return pieces.map((piece) => ({ sourceIndex, role: message.role, content: piece.text, startOffset: piece.start, endOffset: piece.end }));
+      });
+      const groups: Array<typeof setup> = [];
+      let current: typeof setup = [];
+      const render = (items: typeof setup) => JSON.stringify({ identityHints: job!.initialCalibration!.identityHints, renderedSetup: items });
+      for (const item of setup) {
+        const trial = [...current, item];
+        const fits = measureAuxiliaryPrompt([{ role: "system", content: job.systemPrompt }, { role: "user", content: render(trial) }], estimateTokens, budget).fits;
+        if (!fits && current.length) { groups.push(current); current = [item]; }
+        else if (!fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
+        else current = trial;
       }
-      return pieces.map((piece) => ({ sourceIndex, role: message.role, content: piece.text, startOffset: piece.start, endOffset: piece.end }));
-    });
-    const groups: Array<typeof setup> = [];
-    let current: typeof setup = [];
-    const render = (items: typeof setup) => JSON.stringify({ identityHints: job!.initialCalibration!.identityHints, renderedSetup: items });
-    for (const item of setup) {
-      const trial = [...current, item];
-      const fits = measureAuxiliaryPrompt([{ role: "system", content: job.systemPrompt }, { role: "user", content: render(trial) }], estimateTokens, budget).fits;
-      if (!fits && current.length) { groups.push(current); current = [item]; }
-      else if (!fits) throw new Error(`Initial setup source ${item.sourceIndex} cannot fit the configured input budget`);
-      else current = trial;
+      if (current.length) groups.push(current);
+      const promptParts = groups.map((items) => {
+        const userPrompt = render(items);
+        return { systemPrompt: job!.systemPrompt!, userPrompt, sourceIndices: [...new Set(items.map((item) => item.sourceIndex))],
+          estimatedInputTokens: measureAuxiliaryPrompt([{ role: "system", content: job!.systemPrompt! }, { role: "user", content: userPrompt }], estimateTokens, budget).estimatedInputTokens };
+      });
+      job = { ...job, initialCalibration: { ...job.initialCalibration, promptParts }, plannedParts: promptParts.length,
+        estimatedInputTokens: promptParts.reduce((sum, part) => sum + part.estimatedInputTokens, 0) };
     }
-    if (current.length) groups.push(current);
-    const promptParts = groups.map((items) => {
-      const userPrompt = render(items);
-      return { systemPrompt: job!.systemPrompt!, userPrompt, sourceIndices: [...new Set(items.map((item) => item.sourceIndex))],
-        estimatedInputTokens: measureAuxiliaryPrompt([{ role: "system", content: job!.systemPrompt! }, { role: "user", content: userPrompt }], estimateTokens, budget).estimatedInputTokens };
-    });
-    job = { ...job, initialCalibration: { ...job.initialCalibration, promptParts }, plannedParts: promptParts.length,
-      estimatedInputTokens: promptParts.reduce((sum, part) => sum + part.estimatedInputTokens, 0) };
+    if (job.kind === "initial_calibration" && job.initialCalibration?.promptParts) job = { ...job, initialCalibration: { ...job.initialCalibration,
+      promptParts: job.initialCalibration.promptParts.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(existingPayload as any, "initial_calibration", part.systemPrompt, part.userPrompt) })) } };
+    if (job.kind === "ledger_consistency" && job.ledgerConsistency?.promptParts) job = { ...job, ledgerConsistency: { ...job.ledgerConsistency,
+      promptParts: job.ledgerConsistency.promptParts.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(existingPayload as any, "ledger_consistency", part.systemPrompt, part.userPrompt) })) } };
+    const messages = job.systemPrompt && job.userPrompt
+      ? [{ role: "system", content: job.systemPrompt }, { role: "user", content: job.userPrompt }]
+      : [{ role: "user", content: job.prompt }];
+    const cachePurpose = job.kind === "initial_calibration" ? "initial_calibration" : job.kind === "ledger_consistency" ? "ledger_consistency" : undefined;
+    const cacheParts = job.kind === "initial_calibration" ? job.initialCalibration?.promptParts : job.kind === "ledger_consistency" ? job.ledgerConsistency?.promptParts : undefined;
+    const planned = { auxiliaryBudget: { ...budget }, estimatedInputTokens: job.estimatedInputTokens ?? estimateTokens(JSON.stringify(messages)), plannedParts: job.plannedParts ?? 1,
+      ...(cachePurpose && cacheParts ? { auxiliaryPromptParts: cacheParts.map((part) => ({ purpose: cachePurpose, systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) } : {}) };
+    if (row) db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?").run(JSON.stringify({ ...existingPayload, ...planned }), now(), job.id);
+    return { ...job, ...planned };
+  } catch (error) {
+    // Planning happens after leasing, outside either worker's model-call try/catch.
+    // Release the lease into an observable failure instead of stranding it.
+    if (!row?.lease_owner) throw error;
+    failJob(db, job.id, row.lease_owner, error);
+    return null;
   }
-  if (job.kind === "initial_calibration" && job.initialCalibration?.promptParts) job = { ...job, initialCalibration: { ...job.initialCalibration,
-    promptParts: job.initialCalibration.promptParts.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(existingPayload as any, "initial_calibration", part.systemPrompt, part.userPrompt) })) } };
-  if (job.kind === "ledger_consistency" && job.ledgerConsistency?.promptParts) job = { ...job, ledgerConsistency: { ...job.ledgerConsistency,
-    promptParts: job.ledgerConsistency.promptParts.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(existingPayload as any, "ledger_consistency", part.systemPrompt, part.userPrompt) })) } };
-  const messages = job.systemPrompt && job.userPrompt
-    ? [{ role: "system", content: job.systemPrompt }, { role: "user", content: job.userPrompt }]
-    : [{ role: "user", content: job.prompt }];
-  const cachePurpose = job.kind === "initial_calibration" ? "initial_calibration" : job.kind === "ledger_consistency" ? "ledger_consistency" : undefined;
-  const cacheParts = job.kind === "initial_calibration" ? job.initialCalibration?.promptParts : job.kind === "ledger_consistency" ? job.ledgerConsistency?.promptParts : undefined;
-  const planned = { auxiliaryBudget: { ...budget }, estimatedInputTokens: job.estimatedInputTokens ?? estimateTokens(JSON.stringify(messages)), plannedParts: job.plannedParts ?? 1,
-    ...(cachePurpose && cacheParts ? { auxiliaryPromptParts: cacheParts.map((part) => ({ purpose: cachePurpose, systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) } : {}) };
-  if (row) db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?").run(JSON.stringify({ ...existingPayload, ...planned }), now(), job.id);
-  return { ...job, ...planned };
 }
 
 export function setJobPipelineStage(db: RcmDatabase, jobId: string, stage: JobPipelineStage, workerId?: string, repairDelta = 0, llmCallStats?: OperationLlmCallStats, llmCallDiagnostic?: LlmCallDiagnostic): boolean {

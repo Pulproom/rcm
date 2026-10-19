@@ -71,7 +71,7 @@ export function isProviderAuthenticationError(error: unknown): boolean {
 
 export function isProviderContextLimitError(error: unknown): boolean {
   const message = typeof error === "string" ? error : (error as { message?: unknown } | null)?.message;
-  return typeof message === "string" && /context_length_exceeded|context (?:length|window)|too many (?:input )?tokens|input token.{0,80}(?:exceed|limit)/i.test(message);
+  return typeof message === "string" && /AUXILIARY_INPUT_(?:TOO_LARGE|BUDGET_EXCEEDED)|context_length_exceeded|context (?:length|window)|too many (?:input )?tokens|input token.{0,80}(?:exceed|limit)/i.test(message);
 }
 
 export function isPermanentProviderError(error: unknown): boolean {

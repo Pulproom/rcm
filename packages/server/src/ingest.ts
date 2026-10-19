@@ -11,7 +11,7 @@ import { now } from "./db.js";
 import { normalizeUnitScore } from "./scores.js";
 import { normalizeLedgerPredicate, normalizeLedgerText } from "./normalization.js";
 import { RELATIONSHIP_AXES } from "./relationship-scale.js";
-import { ingestSocialKnowledge } from "./social-knowledge.js";
+import { addressTermAliasGuard, ingestSocialKnowledge } from "./social-knowledge.js";
 import { queueRelationshipProjection } from "./relationship-projections.js";
 import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
@@ -424,6 +424,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
 
     const entityIds = new Map<string, string>();
     const removedAlias = aliasRemovalGuard(db, chatId);
+    const addressTerm = addressTermAliasGuard(db, chatId, result.socialKnowledge);
     for (const entity of result.entities) {
       const existing = db.prepare("SELECT id FROM entities WHERE chat_id=? AND entity_key=?").get(chatId, entity.key) as
         | { id: string }
@@ -436,7 +437,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       `).run(id, chatId, entity.key, entity.name, entity.name, entity.type, timestamp);
       entityIds.set(entity.key, id);
       const aliasInsert = db.prepare("INSERT OR IGNORE INTO aliases(entity_id,alias,normalized) VALUES(?,?,?)");
-      for (const alias of [entity.name, ...entity.aliases]) if (!removedAlias(id, alias)) aliasInsert.run(id, alias, normalizeEntityName(alias));
+      for (const alias of [entity.name, ...entity.aliases]) if (!removedAlias(id, alias) && !addressTerm(entity.name, alias)) aliasInsert.run(id, alias, normalizeEntityName(alias));
     }
 
     const memoryByKey = new Map<string, string>();

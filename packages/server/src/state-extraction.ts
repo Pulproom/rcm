@@ -1,4 +1,4 @@
-import { ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
+import { auxiliaryInputBudgetMessage, ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
 import { canAutomaticallyChange, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, mergeStateExtraction,
@@ -68,7 +68,8 @@ Write state descriptions in ${draft.language}; keep proper names as in source. E
   if (addition) systemPrompt += `\n${MEMORY_ADDITION_GUIDANCE}`;
   const userPrompt = JSON.stringify({priorSeeds,sources:sources.map(s=>({role:s.role,number:s.ordinal+1,units:sourceUnits.filter(u=>u.messageId===s.id).map(u=>({ref:u.ref,text:u.text}))})),eventDraft:{language:draft.language,entities:draft.entities,memories:draft.memories.map(m=>({key:m.key,title:m.title,details:m.details?.map(d=>({key:d.key,kind:d.kind,text:d.text,holders:d.access?.map(a=>a.holder)}))}))},priorLedger:ledger,recognition,relationships,
     ...(addition ? { existingMemories: addition.existingMemories, userNote: memoryAdditionUserNote(addition.userRequest) } : {})});
-  if (!measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0}).fits) throw new Error("State extraction source and relevant ledger exceed configured input budget; no partial state was applied");
+  const measurement = measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0});
+  if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(maxInputTokens)} 상태 추출 원문과 관련 장부: 예상 ${measurement.estimatedInputTokens.toLocaleString("ko-KR")}토큰. 부분 상태는 저장하지 않았어요.`);
   const candidateSetHash=createHash("sha256").update(userPrompt).digest("hex");
   return {required:true,stateExtraction:true,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
 }

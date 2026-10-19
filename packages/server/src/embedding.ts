@@ -1,3 +1,4 @@
+import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD } from "./chat-work.js";
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
 import { StateSearchIndex } from "./state-search-index.js";
 import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
@@ -150,6 +151,7 @@ export class EmbeddingService {
   readonly #fetch: typeof fetch;
   #timeoutMs: number;
   #warming: Promise<void> | null = null;
+  #indexSignal?: AbortSignal;
   #indexQueue: Promise<number> = Promise.resolve(0);
   #indexRetryAfter = 0;
   #queryRetryAfter = 0;
@@ -174,6 +176,31 @@ export class EmbeddingService {
 
   get ready(): boolean {
     return this.options.enabled && this.options.vectorEnabled && Boolean(this.options.apiKey);
+  }
+
+  failedWork(chatId: string): { count: number; lastError?: string } {
+    const rows = this.db.prepare(`SELECT last_error,updated_at,attempts>=? AS exhausted FROM embedding_failures WHERE chat_id=?
+      UNION ALL SELECT last_error,updated_at,status='failed' AS exhausted FROM embedding_blocks WHERE chat_id=? AND (status='failed' OR status='queued' AND last_error IS NOT NULL)
+      ORDER BY updated_at DESC`).all(MAX_ITEM_ATTEMPTS, chatId, chatId) as Array<{ last_error: string | null; exhausted: number }>;
+    return { count: rows.filter(row => row.exhausted).length, lastError: rows[0]?.last_error ?? undefined };
+  }
+
+  async retryFailed(chatId: string): Promise<number> {
+    if (this.#indexSignal) throw new Error("검색 임베딩 처리 중이에요. 끝나면 다시 시도해 주세요.");
+    // Serialize the reset with indexing so it never resets an in-flight attempt.
+    const reset = this.#indexQueue.then(() => {
+      if (isChatWorkHeld(this.db, chatId)) throw new Error(CHAT_WORK_HELD);
+      if (!this.ready) throw new Error("검색 임베딩 연결을 먼저 확인해 주세요.");
+      const count = this.db.transaction(() => {
+        const items = this.db.prepare("DELETE FROM embedding_failures WHERE chat_id=? AND attempts>=?").run(chatId, MAX_ITEM_ATTEMPTS).changes;
+        const blocks = this.db.prepare("UPDATE embedding_blocks SET status='queued',attempts=0,last_error=NULL,updated_at=? WHERE chat_id=? AND status='failed'").run(now(), chatId).changes;
+        return items + blocks;
+      })();
+      if (count) { this.#indexRetryAfter = 0; this.#indexError = ""; }
+      return count;
+    });
+    this.#indexQueue = reset.then(() => 0, () => 0);
+    return reset;
   }
 
   get status(): {
@@ -207,20 +234,21 @@ export class EmbeddingService {
     }).finally(() => { this.#warming = null; });
   }
 
-  async #requestWithKey(inputs: string[][], inputType: "document" | "query", timeoutMs: number, apiKey: string, deadline = Date.now() + timeoutMs): Promise<number[][][]> {
+  async #requestWithKey(inputs: string[][], inputType: "document" | "query", timeoutMs: number, apiKey: string, deadline = Date.now() + timeoutMs, signal?: AbortSignal): Promise<number[][][]> {
     const split = async (): Promise<number[][][]> => {
       if (inputs.length > 1) {
         const middle = Math.ceil(inputs.length / 2);
-        return [...await this.#requestWithKey(inputs.slice(0, middle), inputType, timeoutMs, apiKey, deadline),
-          ...await this.#requestWithKey(inputs.slice(middle), inputType, timeoutMs, apiKey, deadline)];
+        return [...await this.#requestWithKey(inputs.slice(0, middle), inputType, timeoutMs, apiKey, deadline, signal),
+          ...await this.#requestWithKey(inputs.slice(middle), inputType, timeoutMs, apiKey, deadline, signal)];
       }
       const chunks = inputs[0] ?? [];
       if (chunks.length <= 1) throw new Error("Voyage input exceeds the manual chunk request limit");
       const middle = Math.ceil(chunks.length / 2);
-      const left = await this.#requestWithKey([chunks.slice(0, middle)], inputType, timeoutMs, apiKey, deadline);
-      const right = await this.#requestWithKey([chunks.slice(middle)], inputType, timeoutMs, apiKey, deadline);
+      const left = await this.#requestWithKey([chunks.slice(0, middle)], inputType, timeoutMs, apiKey, deadline, signal);
+      const right = await this.#requestWithKey([chunks.slice(middle)], inputType, timeoutMs, apiKey, deadline, signal);
       return [[...left[0]!, ...right[0]!]];
     };
+    signal?.throwIfAborted();
     if (Date.now() >= deadline) throw new Error("Voyage request deadline exceeded");
     if (inputs.flat().reduce((sum, text) => sum + estimateTokens(text), 0) > 28_000) return split();
     const controller = new AbortController();
@@ -236,8 +264,9 @@ export class EmbeddingService {
           output_dimension: this.dimension,
           output_dtype: "float",
         }),
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
       });
+      signal?.throwIfAborted();
       if (!response.ok) {
         const errorText = await response.text();
         if ([400, 413].includes(response.status) && /token|context.{0,20}(?:length|limit)|too (?:large|long)/i.test(errorText)
@@ -245,6 +274,7 @@ export class EmbeddingService {
         throw new EmbeddingRequestError(response.status);
       }
       const payload = await response.json() as VoyageResponse;
+      signal?.throwIfAborted();
       const groups = payload.data
         ? payload.data.sort((a, b) => a.index - b.index).map((group) =>
             group.data
@@ -263,7 +293,7 @@ export class EmbeddingService {
 
   async #request(inputs: string[][], inputType: "document" | "query"): Promise<number[][][]> {
     const timeoutMs = Math.max(inputType === "query" ? QUERY_TIMEOUT_MS : INDEX_TIMEOUT_MS, this.#timeoutMs);
-    const result = await this.#requestWithKey(inputs, inputType, timeoutMs, this.options.apiKey);
+    const result = await this.#requestWithKey(inputs, inputType, timeoutMs, this.options.apiKey, undefined, inputType === "document" ? this.#indexSignal : undefined);
     if (inputType === "query") this.#queryError = "";
     return result;
   }
@@ -328,6 +358,7 @@ export class EmbeddingService {
     contentHash: string;
     vector: number[];
   }): void {
+    this.#indexSignal?.throwIfAborted();
     this.db.transaction(() => {
       this.db.prepare(`
         INSERT INTO embedding_items(
@@ -436,6 +467,7 @@ export class EmbeddingService {
         });
         indexed += batch.length;
       } catch (error) {
+        this.#indexSignal?.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         const record = this.db.prepare(`
           INSERT INTO embedding_failures(item_id,chat_id,content_hash,attempts,last_error,updated_at)
@@ -490,7 +522,8 @@ export class EmbeddingService {
         members.forEach((row, index) => this.#storeItem({ itemId: `detail:${row.id}`, chatId: row.chat_id, kind: "memory_detail", sourceId: row.id,
           sourceIds: [row.memory_id], content: documents[index]!, contentHash: hashes[index]!, vector: vectors[contexts.length + index]! }));
         indexed += members.length;
-      } catch (error) { this.#recordFailure(error, "index"); break; }
+      } catch (error) {
+        this.#indexSignal?.throwIfAborted(); this.#recordFailure(error, "index"); break; }
     }
     return indexed;
   }
@@ -532,6 +565,7 @@ export class EmbeddingService {
         for (const row of batch) this.db.prepare("DELETE FROM embedding_failures WHERE item_id=?").run(row.itemId);
         indexed += batch.length;
       } catch (error) {
+        this.#indexSignal?.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         const record = this.db.prepare(`INSERT INTO embedding_failures(item_id,chat_id,content_hash,attempts,last_error,updated_at)
           VALUES(?,?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET chat_id=excluded.chat_id,
@@ -584,6 +618,7 @@ export class EmbeddingService {
       this.db.prepare("UPDATE embedding_blocks SET attempts=attempts+1,updated_at=? WHERE id=?").run(now(), block.id);
       try {
         const vectors = (await this.#request([chunks.map((chunk) => chunk.text)], "document"))[0]!;
+        this.#indexSignal?.throwIfAborted();
         const oldRows = this.db.prepare("SELECT rowid FROM embedding_items WHERE block_id=?").all(block.id) as Array<{ rowid: number }>;
         this.#deleteRows(oldRows.map((row) => row.rowid));
         chunks.forEach((chunk, index) => this.#storeItem({
@@ -595,6 +630,10 @@ export class EmbeddingService {
         );
         indexed += chunks.length;
       } catch (error) {
+        if (this.#indexSignal?.aborted) {
+          this.db.prepare("UPDATE embedding_blocks SET attempts=MAX(0,attempts-1) WHERE id=?").run(block.id);
+          throw error;
+        }
         const attempts = block.attempts + 1;
         const status = attempts >= MAX_BLOCK_ATTEMPTS ? "failed" : "queued";
         const message = error instanceof Error ? error.message : String(error);
@@ -608,7 +647,7 @@ export class EmbeddingService {
 
   indexPending(chatId?: string): Promise<number> {
     if (!this.ready || Date.now() < this.#indexRetryAfter) return Promise.resolve(0);
-    const run = async () => {
+    const runChat = async (chatId: string) => {
       if (Date.now() < this.#indexRetryAfter) return 0;
       this.#requeueRowIdCollisionBlocks(chatId);
       this.#discardStaleBlocks(chatId);
@@ -626,11 +665,22 @@ export class EmbeddingService {
         if (result.selected < BLOCK_PAGE_SIZE || result.indexed === 0) break;
       }
       if (Date.now() < this.#indexRetryAfter) return memories + details + spine + blocks;
-      let states = 0;
-      const chats = chatId ? [{id:chatId}] : this.db.prepare("SELECT id FROM chats").all() as {id:string}[];
-      for (const chat of chats) states += await this.stateIndex.index(chat.id, async texts => (await this.#request(texts.map(text => [text]), "document")).map(group => group[0]!));
+      const states = await this.stateIndex.index(chatId, async texts => (await this.#request(texts.map(text => [text]), "document")).map(group => group[0]!), this.#indexSignal);
       this.#indexError = "";
       return memories + details + spine + blocks + states;
+    };
+    const run = async () => {
+      let indexed = 0;
+      const chats = chatId ? [{ id: chatId }] : this.db.prepare("SELECT id FROM chats WHERE NOT EXISTS (SELECT 1 FROM chat_work_state held WHERE held.chat_id=chats.id AND held.enabled=0)").all() as Array<{ id: string }>;
+      for (const chat of chats) {
+        if (isChatWorkHeld(this.db, chat.id)) continue;
+        const scope = beginChatWork(this.db, chat.id);
+        this.#indexSignal = scope.controller.signal;
+        try { indexed += await runChat(chat.id); }
+        catch (error) { if (!this.#indexSignal.aborted) throw error; }
+        finally { scope.finish(); this.#indexSignal = undefined; }
+      }
+      return indexed;
     };
     this.#indexQueue = this.#indexQueue.then(run, run).catch((error) => {
       this.#recordFailure(error, "index");

@@ -26,7 +26,8 @@ export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFail
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 91;
+export const RCM_API_REVISION = 95;
+export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
   pinned: z.boolean().optional(),
@@ -58,7 +59,7 @@ export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, withM
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory, isRecognitionMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
-export { consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
+export { auxiliaryInputBudgetMessage, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
 export { buildSourceUnits, findAtomicDisplaySpans, resolveSourceQuote, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";
@@ -276,8 +277,6 @@ export type LineageProbeApplyRequest = z.infer<typeof LineageProbeApplyRequestSc
 export const StaticProjectionSchema = z.object({
   hash: z.string().min(1),
   characterName: z.string().default(""),
-  description: z.string().default(""),
-  lore: z.array(z.object({ title: z.string().default(""), content: z.string().default("") })).default([]),
 });
 
 export const ResolvedSetupProjectionSchema = z.object({
@@ -287,6 +286,11 @@ export const ResolvedSetupProjectionSchema = z.object({
     content: z.string().min(1),
   })),
 });
+// These headers are plugin-owned framing, not a heuristic for natural-language content.
+export const PickerSetupProjectionSchema = ResolvedSetupProjectionSchema.refine(value =>
+  value.messages.length > 0 && value.messages.every(message => message.role === "system"
+    && /^\[(?:Character description|First message|Persona|Author's note|Lorebook: [^\r\n]+)\]\n\S/u.test(message.content)),
+  "Choose setup materials in the picker; main-request captures are not accepted");
 export type ResolvedSetupProjection = z.infer<typeof ResolvedSetupProjectionSchema>;
 
 export const InitialCalibrationStatusSchema = z.enum([
@@ -433,7 +437,7 @@ export const TurnPrepareRequestSchema = z.object({
   promptSourceMessageIds: z.array(z.string().min(1)).max(512).optional(),
   memoryReferenceMode: z.enum(["short", "none"]).optional(),
   memoryGeneration: z.string().min(1).max(120).optional(),
-  resolvedSetup: ResolvedSetupProjectionSchema.optional(),
+  resolvedSetup: PickerSetupProjectionSchema.optional(),
   forceBackfill: z.boolean().optional().default(false),
   deferExtraction: z.boolean().optional().default(false),
   postExtractionReview: z.boolean().optional(),
@@ -1632,7 +1636,8 @@ export const ReconciliationReviewResolutionSchema = z.object({
   editedItem: z.unknown().optional(),
 });
 
-export const LeaseJobRequestSchema = z.object({ workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional() });
+const ChatWorkSettingsSchema = z.record(z.string().min(1).max(500), z.boolean()).optional();
+export const LeaseJobRequestSchema = z.object({ chatEnabled: ChatWorkSettingsSchema, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional() });
 export const CompleteJobRequestSchema = z.object({
   workerId: z.string().min(1),
   // The stored job kind selects the result schema at the completion boundary.
@@ -1739,7 +1744,7 @@ export const mcpRequestTimeoutMs = (config: Pick<McpSelectorConfig,"enabled"|"ll
   config.enabled ? config.llmTimeoutMs * (config.retries + 1) + config.retries * 2000 + 15000 : 15000;
 export const MCP_MAX_REQUEST_TIMEOUT_MS = 920000;
 
-export const WorkerControlSchema = z.object({ workerId: z.string().min(1).max(200), chatId: z.string().min(1).max(500).optional() });
+export const WorkerControlSchema = z.object({ chatEnabled: ChatWorkSettingsSchema, workerId: z.string().min(1).max(200), chatId: z.string().min(1).max(500).optional() });
 
 export interface ServerLlmPublicConfig {
   relaxAuxiliaryCensorship?: boolean;
@@ -1760,6 +1765,7 @@ export interface ServerLlmPublicConfig {
 }
 
 export interface ServerWorkerStatus {
+  chatHeld?: boolean;
   modelConfigured?: boolean;
   embeddingConfigured?: boolean;
   state: "risu" | "standby" | "running" | "paused" | "faulted";

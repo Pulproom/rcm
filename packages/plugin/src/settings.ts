@@ -49,6 +49,7 @@ export const defaults: PluginSettings = {
   autoTranslate: true,
   dashboardTheme: "light",
   dashboardSkin: "phone",
+  christmasSnow: true,
   defaultMemoryBudget: 6_000,
   memoryBudgets: {},
   mcpCap: 4_000,
@@ -144,6 +145,7 @@ export async function loadSettings(): Promise<PluginSettings> {
     autoTranslate: translationDisplay === "ko",
     dashboardTheme: stored?.dashboardTheme ?? defaults.dashboardTheme,
     dashboardSkin: stored?.dashboardSkin ?? defaults.dashboardSkin,
+    christmasSnow: stored?.christmasSnow !== false,
     defaultMemoryBudget: stored?.defaultMemoryBudget ?? defaults.defaultMemoryBudget,
     mcpCap: stored?.mcpCap ?? defaults.mcpCap,
     memoryToolsEnabled: stored?.memoryToolsEnabled ?? defaults.memoryToolsEnabled,
@@ -191,6 +193,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.autoTranslate === right.autoTranslate
     && left.dashboardTheme === right.dashboardTheme
     && left.dashboardSkin === right.dashboardSkin
+    && left.christmasSnow === right.christmasSnow
     && left.defaultMemoryBudget === right.defaultMemoryBudget
     && JSON.stringify(left.memoryBudgets) === JSON.stringify(right.memoryBudgets)
     && left.mcpCap === right.mcpCap

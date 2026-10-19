@@ -6,10 +6,11 @@ import {
 } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
-import { normalizeEntityName } from "./entities.js";
+import { buildEntityIdentityResolver, normalizeEntityName } from "./entities.js";
 import { RELATIONSHIP_AXES } from "./relationship-scale.js";
 import { storeSetupRecognition, updateSetupRecognition } from "./setup-recognition.js";
-import { aliasRemovalGuard, deletionGuard, rememberAliasReplacement } from "./user-deletions.js";
+import { aliasRemovalGuard, deletionGuard, rememberAliasReplacement, rememberUserDeletion } from "./user-deletions.js";
+import { addressTermAliasGuard } from "./social-knowledge.js";
 
 export interface InitialCalibrationView {
   status: InitialCalibrationStatus;
@@ -91,6 +92,9 @@ export function deleteInitialEntity(db: RcmDatabase, chatId: string, id: string)
   const entity = db.prepare("SELECT id,name FROM entities WHERE id=? AND chat_id=? AND origin IN ('setup','manual')").get(id, chatId) as { id: string; name: string } | undefined;
   if (!entity) return false;
   return db.transaction(() => {
+    const identity = db.prepare("SELECT entity_key,display_name FROM entities WHERE id=?").get(id) as { entity_key: string; display_name: string };
+    const aliases = db.prepare("SELECT alias FROM aliases WHERE entity_id=?").all(id) as Array<{ alias: string }>;
+    rememberUserDeletion(db, chatId, "entity", [identity.entity_key, identity.display_name, entity.name, ...aliases.map(item => item.alias)].map(normalizeEntityName), undefined, id);
     updateSetupRecognition(db, chatId, "delete", entity.name);
     db.prepare("DELETE FROM relationship_projections WHERE chat_id=? AND projection_origin='setup' AND (from_entity=? OR to_entity=?)")
       .run(chatId, entity.name, entity.name);
@@ -161,9 +165,12 @@ export function resolveInitialCalibrationConfirmation(db: RcmDatabase, chatId: s
   db.transaction(() => {
     if (action === "skip") {
       updateSetupRecognition(db, chatId, "delete");
-      db.prepare("DELETE FROM relationship_projections WHERE chat_id=? AND projection_origin='setup'").run(chatId);
-      db.prepare("DELETE FROM relationship_baselines WHERE chat_id=? AND source='setup'").run(chatId);
-      db.prepare("DELETE FROM entities WHERE chat_id=? AND origin='setup' AND user_managed=0").run(chatId);
+      db.prepare(`DELETE FROM relationship_projections WHERE chat_id=? AND projection_origin='setup' AND user_edit_ordinal IS NULL AND auto_locked=0
+        AND NOT EXISTS (SELECT 1 FROM relationship_baselines b WHERE b.chat_id=relationship_projections.chat_id AND b.from_entity=relationship_projections.from_entity AND b.to_entity=relationship_projections.to_entity AND b.user_managed=1)`).run(chatId);
+      db.prepare("DELETE FROM relationship_baselines WHERE chat_id=? AND source='setup' AND user_managed=0").run(chatId);
+      db.prepare(`DELETE FROM entities WHERE chat_id=? AND origin='setup' AND user_managed=0
+        AND NOT EXISTS (SELECT 1 FROM relationship_baselines b WHERE b.chat_id=entities.chat_id AND (b.from_entity=entities.name OR b.to_entity=entities.name))
+        AND NOT EXISTS (SELECT 1 FROM relationship_projections p WHERE p.chat_id=entities.chat_id AND (p.from_entity=entities.name OR p.to_entity=entities.name))`).run(chatId);
     }
     if (action === "confirm") {
       materializeInitialRelationshipProjections(db, chatId);
@@ -195,16 +202,14 @@ export function initialCalibrationRetryInput(db: RcmDatabase, chatId: string): {
   return { projection: JSON.parse(row.setup_json) as ResolvedSetupProjection, identityHints, ...(backfillRunId ? { backfillRunId } : {}) };
 }
 
-export function clearInitialCalibrationDraft(db: RcmDatabase, chatId: string): void {
+export function prepareInitialCalibrationRetry(db: RcmDatabase, chatId: string): void {
   const row = db.prepare("SELECT status,locked_at FROM initial_calibrations WHERE chat_id=?").get(chatId) as { status: string; locked_at: number | null } | undefined;
-  if (!row || !["awaiting_confirmation", "failed"].includes(row.status)) throw new Error("Initial setup is not replaceable");
-  if (row.locked_at != null) throw new Error("Initial setup is locked");
-  db.transaction(() => {
-    db.prepare("DELETE FROM relationship_baselines WHERE chat_id=? AND source='setup'").run(chatId);
-    updateSetupRecognition(db, chatId, "delete");
-    db.prepare("DELETE FROM entities WHERE chat_id=? AND origin IN ('setup','manual')").run(chatId);
-    db.prepare("DELETE FROM relationship_projections WHERE chat_id=? AND projection_origin='setup'").run(chatId);
-  })();
+  if (!row || !["awaiting_setup", "awaiting_confirmation", "failed", "ready", "inherited", "skipped"].includes(row.status)) throw new Error("Initial setup is not replaceable");
+  // Re-reading merges into the ledger. Never clear identities, corrections or deletion guards.
+  // An established ledger remains usable and does not return to editable initial axes.
+  if (["ready", "inherited", "skipped"].includes(row.status) || row.locked_at != null) {
+    db.prepare("UPDATE initial_calibrations SET confirmation_required=0,pending_force_backfill=0 WHERE chat_id=?").run(chatId);
+  }
 }
 
 export function beginInitialCalibration(
@@ -226,7 +231,7 @@ export function beginInitialCalibration(
       pending_extraction_review=COALESCE(excluded.pending_extraction_review,initial_calibrations.pending_extraction_review),
       last_error=NULL,updated_at=excluded.updated_at`).run(
     chatId, status, origin, projection?.fingerprint ?? null, options.confirmationRequired ? 1 : 0,
-    projection ? JSON.stringify(projection) : null, options.forceBackfill ? 1 : 0,
+    null, options.forceBackfill ? 1 : 0,
     options.extractionReview === undefined ? null : options.extractionReview ? 1 : 0, timestamp, timestamp,
   );
   return initialCalibrationView(db, chatId);
@@ -351,29 +356,39 @@ export function completeInitialCalibrationJob(
   const calibration = db.prepare("SELECT confirmation_required FROM initial_calibrations WHERE chat_id=?").get(job.chat_id) as { confirmation_required: number } | undefined;
   const deleted = deletionGuard(db, job.chat_id);
   const removedAlias = aliasRemovalGuard(db, job.chat_id);
+  const addressTerm = addressTermAliasGuard(db, job.chat_id, validatedResult.socialKnowledge.map(item => ({ subject: item.subjectKey, knownAs: item.knownAs })));
   db.transaction(() => {
     for (const entity of entities) {
       if (deleted("entity", [entity.key, entity.displayName, ...entity.aliases].map(normalizeEntityName))) continue;
-      const existing = db.prepare("SELECT id,name FROM entities WHERE chat_id=? AND entity_key=?").get(job.chat_id, entity.key) as { id: string; name: string } | undefined;
+      const resolve = buildEntityIdentityResolver(db, job.chat_id);
+      const identity = resolve(entity.displayName);
+      const existing = db.prepare(`SELECT id,name,entity_key,user_managed FROM entities WHERE chat_id=? AND
+        (entity_key=? OR (?=0 AND name=?)) ORDER BY (entity_key=?) DESC LIMIT 1`)
+        .get(job.chat_id, entity.key, Number(identity.ambiguous), identity.canonical, entity.key) as
+        { id: string; name: string; entity_key: string; user_managed: number } | undefined;
       const id = existing?.id ?? randomUUID();
       const canonicalName = existing?.name ?? entity.displayName;
       db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,created_at)
         VALUES(?,?,?,?,?,?, 'setup',?,?,0,?) ON CONFLICT(chat_id,entity_key) DO UPDATE SET
-        display_name=CASE WHEN entities.user_managed=1 THEN entities.display_name ELSE excluded.display_name END,
-        type=excluded.type,origin=CASE WHEN entities.origin='manual' THEN entities.origin ELSE 'setup' END,
-        setup_prominence=excluded.setup_prominence,source_json=excluded.source_json`).run(
-        id, job.chat_id, entity.key, canonicalName, entity.displayName, entity.role === "npc" ? "person" : "character",
+        display_name=CASE WHEN entities.user_managed=1 OR entities.origin<>'setup' THEN entities.display_name ELSE excluded.display_name END,
+        type=CASE WHEN entities.user_managed=1 THEN entities.type ELSE excluded.type END,
+        origin=entities.origin,
+        setup_prominence=CASE WHEN entities.user_managed=1 THEN entities.setup_prominence ELSE excluded.setup_prominence END,
+        source_json=CASE WHEN entities.user_managed=1 THEN entities.source_json ELSE excluded.source_json END`).run(
+        id, job.chat_id, existing?.entity_key ?? entity.key, canonicalName, entity.displayName, entity.role === "npc" ? "person" : "character",
         entity.prominence, JSON.stringify(entity.evidence), timestamp,
       );
-      const stored = db.prepare("SELECT id,name FROM entities WHERE chat_id=? AND entity_key=?").get(job.chat_id, entity.key) as { id: string; name: string };
+      const stored = { id, name: canonicalName };
       byKey.set(entity.key, stored);
       const insertAlias = db.prepare("INSERT OR IGNORE INTO aliases(entity_id,alias,normalized) VALUES(?,?,?)");
-      for (const alias of [entity.displayName, ...entity.aliases]) if (!removedAlias(stored.id, alias)) insertAlias.run(stored.id, alias, normalizeEntityName(alias));
+      for (const alias of existing?.user_managed ? [] : [entity.displayName, ...entity.aliases]) if (!removedAlias(stored.id, alias) && !addressTerm(stored.name, alias, entity.displayName)) insertAlias.run(stored.id, alias, normalizeEntityName(alias));
     }
     for (const relationship of validatedResult.relationships) {
       const from = byKey.get(relationship.fromKey);
       const to = byKey.get(relationship.toKey);
       if (!from || !to || from.id === to.id) continue;
+      const current = db.prepare("SELECT * FROM relationship_baselines WHERE chat_id=? AND from_entity=? AND to_entity=?").get(job.chat_id, from.name, to.name) as Record<string, any> | undefined;
+      if (current && (current.user_managed === 1 || current.source !== "setup" || !canAutomaticallyChange(db, job.chat_id, current, []))) continue;
       const knownAxes = RELATIONSHIP_AXES.filter((axis) => relationship.axes[axis] !== "unknown");
       if (!knownAxes.length) continue;
       const quote = relationship.evidence[0]?.quote ?? null;

@@ -104,6 +104,7 @@ export function renderShell(opts: {
   crumbs: Crumb[];
   translation: "ko" | "en";
   pencilCount: number;
+  setupPending?: boolean;
   chatTitle?: string;
 }): { nav: string; bar: string } {
   const selectedTab = activeShellTab(opts.tab);
@@ -112,7 +113,8 @@ export function renderShell(opts: {
     const current = item.tab === selectedTab ? ' aria-current="page"' : "";
     const badge = item.tab === "world" && opts.pencilCount > 0
       ? `<span class="badge" aria-label="대조 필요 ${opts.pencilCount}개">${opts.pencilCount}</span>`
-      : "";
+      : item.tab === "initial" && opts.setupPending
+        ? '<span class="badge" aria-label="설정 재료 선택 필요">1</span>' : "";
     return `<button type="button" data-action="tab" data-tab="${item.tab}"${current}>${icon(item.icon)}<span>${item.label}</span>${badge}</button>`;
   }).join("")}`;
   const crumbs = opts.crumbs.map((crumb, index) => {

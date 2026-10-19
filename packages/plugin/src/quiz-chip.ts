@@ -1,7 +1,7 @@
 import { quizDateLabel, type QuizAnswerResponse, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
 import type { ChipSkin } from "./attention.js";
 
-/** What the chip shows while the quiz is open. `index`/`total` count this sitting: answered so far plus what remains. */
+/** `index` counts attempts in this sitting; `total` is fixed when the sitting starts. */
 export type QuizView =
   | { mode: "question"; question: QuizQuestion; stats: QuizStats; index: number; total: number }
   | { mode: "result"; question: QuizQuestion; answer: QuizAnswerResponse; index: number; total: number }
@@ -90,7 +90,7 @@ export function quizViewHtml(view: QuizView, skin: ChipSkin): string {
     return `${header(skin, "퀴즈")}<div role="alert" style="font-size:13px;color:${skin.cut}">${escapeHtml(view.message)}</div><button type="button" data-rcm-quiz-retry="true" style="${quietButton(skin)}">다시 시도</button>`;
   }
   if (view.mode === "done") {
-    return `${header(skin, "퀴즈")}<p style="margin:0;font-size:15px;font-weight:600;line-height:1.45;color:${skin.ink}">준비된 문제를 다 풀었어요 🎉</p><p style="margin:6px 0 0;font-size:13px;line-height:1.5;color:${skin.ink2}">다음 장면이 쌓이거나 지난 장면이 다시 열리면 새 퀴즈가 생겨요.</p>${statsRow(skin, view.stats)}<button type="button" data-rcm-quiz-done="true" style="${quietButton(skin)}">닫기</button>`;
+    return `${header(skin, "퀴즈")}<p style="margin:0;font-size:15px;font-weight:600;line-height:1.45;color:${skin.ink}">이번 퀴즈를 마쳤어요 🎉</p><p style="margin:6px 0 0;font-size:13px;line-height:1.5;color:${skin.ink2}">닫은 뒤 남은 문제가 있으면 새로 시작할 수 있어요.</p>${statsRow(skin, view.stats)}<button type="button" data-rcm-quiz-done="true" style="${quietButton(skin)}">닫기</button>`;
   }
   const title = `퀴즈 ${view.index}/${view.total}`;
   if (view.mode === "question") {
@@ -103,6 +103,6 @@ export function quizViewHtml(view: QuizView, skin: ChipSkin): string {
     : `<p role="status" style="margin:0 0 2px;font-size:16px;font-weight:700;color:${skin.cut}">❌ 아쉬워요</p>`;
   const explanation = answer.explanation ? `<p style="margin:10px 0 0;font-size:13px;line-height:1.5;color:${skin.ink2}">${escapeHtml(answer.explanation)}</p>` : "";
   const quote = answer.quote ? `<p style="margin:6px 0 0;padding-left:8px;border-left:2px solid ${skin.rule};font-size:12px;line-height:1.5;color:${skin.ink3}">“${escapeHtml(answer.quote)}”</p>` : "";
-  const nextLabel = answer.remaining > 0 ? "다음 문제" : "결과 보기";
-  return `${header(skin, title, answer.stats.streak)}<div aria-live="polite">${verdict}${questionText(skin, question)}</div>${optionList(skin, question, states, false)}${explanation}${quote}${sceneLine(skin, answer)}${statsRow(skin, answer.stats)}<button type="button" data-rcm-quiz-next="true" style="${primaryButton(skin)}">${nextLabel}</button>`;
+  const nextLabel = view.index < view.total && answer.remaining > 0 ? "다음 문제" : "결과 보기";
+  return `${header(skin, title, answer.stats.streak)}<div aria-live="polite">${verdict}${questionText(skin, question)}</div>${optionList(skin, question, states, false)}${explanation}${quote}${sceneLine(skin, answer)}${statsRow(skin, answer.stats)}<div data-rcm-quiz-next-bar="true" style="position:sticky;bottom:-10px;z-index:1;margin:8px -10px -10px;padding:8px 10px 10px;background:${skin.screen};border-top:1px solid ${skin.rule}"><button type="button" data-rcm-quiz-next="true" style="${primaryButton(skin)}">${nextLabel}</button></div>`;
 }

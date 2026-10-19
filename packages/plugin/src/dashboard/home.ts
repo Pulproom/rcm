@@ -83,6 +83,7 @@ export function homeTranslationRecords(
   data: Pick<DashboardData, "memories" | "assertions" | "promises" | "beliefs">,
   /** The full view of this turn's delivery is open, so every 현재 record it lists is visible. */
   sentOpen = false,
+  dailyMemory?: any,
 ): HomeTranslationRecord[] {
   const visible = [
     // Injected scene titles are short and lead the widget; 현재 records show only in the full view.
@@ -90,7 +91,7 @@ export function homeTranslationRecords(
       const memory: any = byId(data.memories as any[], id);
       return memory && text(memory.title) ? [{ kind: "memory-title", itemId: `${memory.id}:title`, text: text(memory.title) }] : [];
     }),
-    ...homeRecentMemories(data.memories).flatMap((memory) => {
+    ...[...homeRecentMemories(data.memories), ...(dailyMemory ? [dailyMemory] : [])].flatMap((memory) => {
       const lines: any[] = Array.isArray(memory.keyDialogues) ? memory.keyDialogues : [];
       const index = lines.findIndex((line) => text(line?.text));
       return [
@@ -98,6 +99,8 @@ export function homeTranslationRecords(
         ...(index < 0 ? [] : [{ kind: "dialogue", itemId: `${memory.id}:dialogue:${index}`, text: text(lines[index].text) }]),
       ];
     }),
+    ...(dailyMemory?.landmarkKinds ?? []).flatMap((landmark: any, index: number) => landmark.kind === "anniversary_basis" && text(landmark.label)
+      ? [{ kind: "landmark-label", itemId: `landmark:${dailyMemory.id}#${index}:label`, text: text(landmark.label) }] : []),
     ...(manifest && sentOpen ? [
       ...manifest.assertionIds.flatMap((id) => { const item: any = byId(data.assertions as any[], id); return item ? [{ kind: "assertion", itemId: `assertion:${item.id}`, text: text(item.value) }] : []; }),
       ...(manifest.beliefIds ?? []).flatMap((id) => { const item: any = byId(data.beliefs as any[], id); return item ? [{ kind: "belief", itemId: `belief:${item.id}`, text: text(item.value) }] : []; }),

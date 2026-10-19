@@ -107,6 +107,32 @@ function socialKnowledgeView(db: RcmDatabase, chatId: string): Array<SocialKnowl
     .sort((left, right) => left.holder.localeCompare(right.holder) || left.subject.localeCompare(right.subject));
 }
 
+/** Compare typed address terms only; never classify natural-language pet names. */
+export function addressTermAliasGuard(db: RcmDatabase, chatId: string, incoming: Array<{ subject: string; addressTerms?: string[]; knownAs?: string[] }> = []): (subject: string, alias: string, displayName?: string) => boolean {
+  const resolve = buildEntityIdentityResolver(db, chatId);
+  const terms = new Map<string, Set<string>>();
+  const names = new Map<string, Set<string>>();
+  for (const entity of listEntities(db, chatId)) {
+    names.set(normalizeEntityName(entity.name), new Set([entity.name, entity.displayName,
+      ...(entity.userManaged ? entity.aliases : [])].map(normalizeEntityName)));
+  }
+  for (const item of [...socialKnowledgeView(db, chatId), ...incoming]) {
+    const subject = normalizeEntityName(resolve(item.subject).canonical);
+    const values = terms.get(subject) ?? new Set<string>();
+    for (const term of item.addressTerms ?? []) values.add(normalizeEntityName(term));
+    terms.set(subject, values);
+    const identities = names.get(subject) ?? new Set<string>();
+    for (const name of item.knownAs ?? []) identities.add(normalizeEntityName(name));
+    names.set(subject, identities);
+  }
+  return (subject, alias, displayName = subject) => {
+    const canonical = normalizeEntityName(resolve(subject).canonical);
+    const candidate = normalizeEntityName(alias);
+    return candidate !== normalizeEntityName(subject) && candidate !== normalizeEntityName(displayName)
+      && !names.get(canonical)?.has(candidate) && (terms.get(canonical)?.has(candidate) ?? false);
+  };
+}
+
 function listRecordedSocialKnowledge(db: RcmDatabase, chatId: string): SocialKnowledgeItem[] {
   return socialKnowledgeView(db, chatId).map(({detailIds,...item}) => ({...item, cognition: detailIds.flatMap(id => {
     const detail = db.prepare(`SELECT d.id,d.text FROM memory_details d JOIN memories m ON m.id=d.memory_id
@@ -285,7 +311,9 @@ export function setManualSocialKnowledge(
       refreshMemoryFts(db, memoryId);
     }
 
-    if (socialKnowledgeView(db, chatId).some((item) => normalizeEntityName(item.holder) === normalizeEntityName(previousHolder) && normalizeEntityName(item.subject) === normalizeEntityName(previousSubject))) {
+    // A moved pair must also retract a pending setup recognition, which is not
+    // in the active view yet; confirmation must not resurrect the old pair.
+    if (!samePair || socialKnowledgeView(db, chatId).some((item) => normalizeEntityName(item.holder) === normalizeEntityName(previousHolder) && normalizeEntityName(item.subject) === normalizeEntityName(previousSubject))) {
       db.prepare(`INSERT INTO social_knowledge_events(id,chat_id,holder,subject,action,level,known_as_json,evidence_json,source_start_ordinal,source_end_ordinal,manual,active,created_revision,created_at)
         VALUES(?,?,?,?,'retract',NULL,'[]','[]',?,?,1,1,?,?)`)
         .run(randomUUID(), chatId, previousHolder, previousSubject, ordinal, ordinal, chat.revision, timestamp);

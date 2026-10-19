@@ -22,7 +22,7 @@ const pluginUpdateUrl = repository ? `${rawPluginBase}/channels/${releaseChannel
 const out = resolve(base, 'RCM-windows-x64');
 const releaseConfig=JSON.parse(readFileSync(join(root,'release-config.json'),'utf8'));
 const SERVER_VERSION=releaseConfig.serverVersion;
-const releaseBody = `# RCM ${PRODUCT_VERSION}\n\n일반 사용자는 GitHub Releases에서 운영체제에 맞는 설치 파일을 받아 주세요.\n\nWindows 10/11 x64: RCM-windows-x64.zip\nmacOS x64/arm64, Linux glibc x64/arm64, Docker, Android Termux PRoot: RCM-node-install.zip\n\nmacOS·Linux·Docker·Android Termux PRoot는 실기기에서 검증하지 않았습니다.\n\n## 변경 사항\n\n${releaseConfig.releaseNotes.map(note => `- ${note}`).join('\n')}\n`;
+const releaseBody = `# RCM ${PRODUCT_VERSION}\n\n**처음 사용한다면** 아래에서 운영체제에 맞는 zip 파일을 받아 설치해 주세요.\n\n**이미 사용 중이라면** 대시보드 홈에서 업데이트해 주세요.\n\nWindows 10/11 x64: RCM-windows-x64.zip\nmacOS x64/arm64, Linux glibc x64/arm64, Docker, Android Termux PRoot: RCM-node-install.zip\n\nmacOS·Linux·Docker·Android Termux PRoot는 실기기에서 검증하지 않았습니다.\n\n## 변경 사항\n\n${releaseConfig.releaseNotes.map(note => `- ${note}`).join('\n')}\n`;
 if (existsSync(out)) {
   if(!process.argv.includes('--replace'))throw new Error('Output exists; use --replace for this exact generated directory.');
   if(dirname(out)!==base||realpathSync(out)!==out)throw new Error('Unsafe generated output path');

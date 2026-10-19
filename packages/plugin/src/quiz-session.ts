@@ -23,6 +23,8 @@ export class QuizSession {
   view: QuizView | undefined;
   /** Questions answered in this sitting, so the header can say 3/8. */
   answered = 0;
+  /** Fixed attempt budget for this sitting; retries and refills never extend it. */
+  private total: number | undefined;
   /** The last refresh failed for a reason other than an old server; the chip offers 다시 시도 instead of the entry button. */
   loadFailed = false;
   private busy = false;
@@ -37,6 +39,7 @@ export class QuizSession {
     this.next = undefined;
     this.view = undefined;
     this.answered = 0;
+    this.total = undefined;
     this.loadFailed = false;
     this.busy = false;
     this.retry = undefined;
@@ -69,6 +72,7 @@ export class QuizSession {
   /** Opens the quiz on the question already loaded for the entry button. */
   start(): void {
     this.answered = 0;
+    this.total = undefined;
     this.showQuestion();
   }
 
@@ -134,8 +138,10 @@ export class QuizSession {
   private showQuestion(): void {
     if (!this.deps.connectionReady()) { this.view = undefined; return; }
     const next = this.next;
-    this.view = next?.question
-      ? { mode: "question", question: next.question, stats: next.stats, index: this.answered + 1, total: this.answered + Math.max(next.remaining, 1) }
+    if (next?.question) this.total ??= Math.max(next.remaining, 1);
+    const total = this.total ?? 0;
+    this.view = next?.question && this.answered < total
+      ? { mode: "question", question: next.question, stats: next.stats, index: this.answered + 1, total }
       : { mode: "done", stats: next?.stats ?? { streak: 0, bestStreak: 0, answered: 0, correct: 0 } };
   }
 }

@@ -21,6 +21,10 @@ export interface AuxiliaryPromptMeasurement {
   fits: boolean;
 }
 
+export function auxiliaryInputBudgetMessage(maxInputTokens: number): string {
+  return `입력 토큰 상한(현재 ${maxInputTokens.toLocaleString("ko-KR")})보다 큰 묶음이에요. 상한을 올리거나 묶음을 나눠 주세요.`;
+}
+
 /** Measure the serialized, provider-ready message contents. Callers must pass
  * every instruction, source, reference, repair request and JSON envelope. */
 export function measureAuxiliaryPrompt(

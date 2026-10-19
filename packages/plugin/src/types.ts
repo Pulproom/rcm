@@ -51,6 +51,7 @@ export interface PluginSettings {
   autoTranslate: boolean;
   dashboardTheme: DashboardTheme;
   dashboardSkin: DashboardSkin;
+  christmasSnow: boolean;
   defaultMemoryBudget: MemoryBudgetPreset;
   memoryBudgets: Record<string, MemoryBudgetPreset>;
   mcpCap: number;
@@ -108,12 +109,14 @@ export interface CurrentContext {
   memoryLanguage: MemoryLanguage;
   sourceMessageCount: number;
   sourceActiveMessageCount: number;
+  /** Local dashboard metadata only; never sent as a server/API field. Risu time is epoch milliseconds. */
+  sourceMessageTimes?: Array<{ id: string; ordinal: number; time: number }>;
   estimatedSourceTokens: number;
   snapshotScope: "full" | "tail";
   snapshot: Array<{ id: string; role: "user" | "assistant" | "system"; content: string; ordinal: number; time?: number; generationId?: string; sourceKind: "risu_display" | "yumi_model"; disabled: boolean }>;
   messageVisibility?: Array<{ id: string; ordinal: number; visibility: MessageHostVisibility; role?: "user" | "assistant" | "system"; contentHash?: string }>;
   lineageHint?: ChatLineageHint;
-  staticProjection: { hash: string; characterName: string; description: string; lore: Array<{ title: string; content: string }> };
+  staticProjection: { hash: string; characterName: string };
   query: string;
   querySourceHash?: string;
   querySignals: SearchQuerySignal[];
@@ -221,6 +224,7 @@ export interface RuntimeState {
   serverHeartbeatTimer?: number;
   leaseHeartbeatTimer?: ReturnType<typeof setInterval>;
   statusWidgetTimer?: number;
+  setupAttention?: Record<string, { completedTurns: number; lastRequestId?: string; counting?: Promise<void> }>;
   activityTimer?: number;
   updateNextCheckAt?: number;
   updateLocalRecheckAt?: number;
@@ -255,7 +259,7 @@ export interface RuntimeState {
     queuedJobs: number; failedJobs: number; blockingFailedJobs?: number; advisoryFailedJobs?: number; pendingReviews: number; pendingReconciliations?: number;
     waitingForAssistant?: number; bufferedMessages?: number; bufferedTurns?: number; bufferedSourceTokens?: number;
     extractionGroupTurns?: number; recoverableMessages?: number; historicalBackfillMessages?: number;
-    ingestionState?: "historical_pending" | "managed" | "cleared"; pendingEmbeddings: number; failedEmbeddings: number;
+    ingestionState?: "historical_pending" | "managed" | "cleared"; pendingEmbeddings: number; failedEmbeddings: number; embeddingError?: string;
     auxiliaryAuthFailed?: boolean;
     modelResponseDiagnostic?: import("@rcm/shared").ModelResponseDiagnostic;
     lastJobSourceRecovery?: import("@rcm/shared").SourceRecoveryMetadata;

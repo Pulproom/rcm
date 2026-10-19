@@ -1,4 +1,5 @@
 import { supportFailure } from "./support-diagnostics.js";
+import { captureSetupRequest, discardSetupCapture, observeSetupAttention, completeSetupAttentionTurn } from "./setup-sources.js";
 declare const __RCM_DISTRIBUTION__: boolean;
 import { withMemoryGuidance } from "@rcm/shared";
 import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
@@ -282,8 +283,9 @@ function reuseExistingContext(state: RuntimeState, client: ServerClient, message
   return injected.messages;
 }
 
-async function syncCommittedOutput(state: RuntimeState, client: ServerClient, chatId: string): Promise<void> {
+async function syncCommittedOutput(state: RuntimeState, client: ServerClient, chatId: string, requestId: string | undefined): Promise<void> {
   if (state.unloaded) return;
+  let completed = false;
   try {
     const context = await readCurrentContext(state);
     if (state.unloaded) return;
@@ -292,11 +294,15 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
       return;
     }
     state.current = context;
+    completed = true;
     void syncQuizEnabled(state, client).catch(() => undefined);
-    await client.prepare(makePrepareRequest(context, 0, { deferExtraction: false }), 5_000);
+    const statusRevision = state.statusSummaryRevision ?? 0;
+    const response = await client.prepare(makePrepareRequest(context, 0, { deferExtraction: false }), 5_000);
+    if ((state.statusSummaryRevision ?? 0) === statusRevision) observeSetupAttention(state, chatId, response.initialCalibration?.status);
   } catch (error) {
     addLog(state.logs, "warn", `Post-response memory sync deferred: [오류 원문 제외]`);
   } finally {
+    if (completed) completeSetupAttentionTurn(state, chatId, requestId);
     scheduleWorker(state, client);
   }
 }
@@ -391,7 +397,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           state.automaticTurnPacket = undefined;
           state.memoryToolOpportunity = undefined;
           state.memoryReferenceSnapshot = undefined;
-          state.lastResolvedSetup = undefined;
+          await discardSetupCapture(state, currentChatId);
           beginMemoryReferenceTurn(state, crypto.randomUUID());
           await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
           return stripRcmPromptContent(messages);
@@ -405,7 +411,9 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         const knownRetryChatId = state.automaticTurnPacket?.chatId;
         if (knownRetryChatId === currentChatId) {
           const retrySetup = await resolvedSetupProjection(messages);
-          if (retrySetup) state.lastResolvedSetup = { chatId: knownRetryChatId, projection: retrySetup };
+          await assertCurrentRequest();
+          captureSetupRequest(state, knownRetryChatId, retrySetup);
+          await assertCurrentRequest();
         }
         if (existing.contexts.length > 0 && knownRetryChatId) {
           if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId)
@@ -481,6 +489,13 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         let choice: ReturnType<typeof prepareChoice> | undefined;
         let sentWithoutMemory = false;
         try {
+        // Also refresh in-memory sources on zero-budget and cached-packet turns.
+        if (knownRetryChatId !== currentChatId) {
+          const resolvedSetup = await resolvedSetupProjection(messages);
+          await assertCurrentRequest();
+          captureSetupRequest(state, context.chatId, resolvedSetup);
+          await assertCurrentRequest();
+        }
         let response: TurnPrepareResponse | undefined;
         let packet = "";
         let reused = false;
@@ -535,14 +550,11 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             prepareTimeoutMs = PREPARE_CHOICE_BLOCK_MS;
             try {
               const promptSourceMessageIds = protectedPromptSourceMessageIds(messages, sourceProtectionTurns);
-              const resolvedSetup = await resolvedSetupProjection(messages);
-              await assertCurrentRequest();
-              if (resolvedSetup) state.lastResolvedSetup = { chatId: context.chatId, projection: resolvedSetup };
               state.lastPromptSourceMessageIds = promptSourceMessageIds;
               const prepareRequest = makePrepareRequest(context, autoBudget, {
                 deferExtraction: false,
                 promptSourceMessageIds,
-                resolvedSetup,
+                // The picker alone submits setup. Capturing a main request never starts calibration.
                 memoryReferenceMode: state.settings.memoryToolsEnabled ? "short" : "none",
                 memoryGeneration: referenceTurnKey,
                 traceContext: {
@@ -619,7 +631,6 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                   response = await choice.run(makePrepareRequest(context, inheritedBudget, {
                     deferExtraction: false,
                     promptSourceMessageIds,
-                    resolvedSetup,
                     memoryReferenceMode: state.settings.memoryToolsEnabled ? "short" : "none",
                 memoryGeneration: referenceTurnKey,
                     traceContext: {
@@ -796,6 +807,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           startedAt: Date.now(), packet: injected.packet,
           plannedTools: sentWithoutMemory ? [] : currentTurnMemoryToolNames(state, context.chatId),
         };
+        observeSetupAttention(state, context.chatId, response?.initialCalibration?.status);
         addLog(
           state.logs,
           "info",
@@ -856,7 +868,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             state.pendingOutputSyncChatId = undefined;
             state.pendingOutputSyncRequestId = undefined;
             state.postResponseTimer = undefined;
-            void syncCommittedOutput(state, client, activeRequest.chatId);
+            void syncCommittedOutput(state, client, activeRequest.chatId, requestId);
           }, 1_500);
         }
       }
@@ -910,7 +922,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           }
           // Chat listeners are awaited by Risu in sequence. Keep server work in
           // the background so RCM never delays rendering or later output hooks.
-          void syncCommittedOutput(state, client, chatId);
+          void syncCommittedOutput(state, client, chatId, requestId);
         })().catch(() => addLog(state.logs, "warn", "Committed-output observation could not be confirmed"));
       }),
     ] : []),

@@ -1,6 +1,6 @@
 import { sha256 } from './context.js';
 import { operationLabel, providerFailureMetadata, assertProviderOutputAllowed } from "@rcm/shared";
-import { withAuxiliaryStoryFraming } from "@rcm/shared";
+import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming } from "@rcm/shared";
 import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
@@ -34,7 +34,7 @@ export async function reconcileAutomaticServerPause(
 ): Promise<boolean> {
   if (state.settings.extractionEngine !== "server" || !state.settings.workerAttention || !observation.available) return false;
   const worker = observation.worker;
-  if (!worker || Number(observation.failedJobs ?? 0) > 0 || worker.state === "faulted" || worker.state === "risu") return false;
+  if (!worker || worker.chatHeld || Number(observation.failedJobs ?? 0) > 0 || worker.state === "faulted" || worker.state === "risu") return false;
   const existing = attentionReconciliationFlights.get(state);
   if (existing) return existing;
   const flight = (async () => {
@@ -375,7 +375,7 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     const preparedMessages = withAuxiliaryStoryFraming(messages, modelPromptRelaxation.get(state) === true).map(message => ({ ...message, content: typeof message.content === "string" ? prepareAuxiliaryText(message.content) : message.content }));
     const budget = modelJobBudgets.get(state) ?? { maxInputTokens: 80000, maxOutputTokens: 24000, llmTimeoutMs: 300000 };
     const measurement = measureAuxiliaryPrompt(preparedMessages, estimateTokens, budget);
-    if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${measurement.estimatedInputTokens}/${budget.maxInputTokens} input tokens; source retained for replanning`);
+    if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
     await modelCallRecorders.get(state)?.(purpose, "started");
     // Main beforeRequest may arrive during progress reporting. Check again at
     // the dispatch boundary; the main path never waits for this worker.
@@ -754,7 +754,7 @@ export function scheduleWorker(state: RuntimeState, client: ServerClient): void 
 export async function heartbeatServerWorker(state: RuntimeState, client: ServerClient): Promise<void> {
   if (state.unloaded || isServerApiIncompatible(state) || state.settings.workerPaused || state.settings.extractionEngine !== "server" || !isServerConfigured(state.settings)) return;
   try {
-    state.serverWorker = await client.heartbeat(state.workerId, state.current && isChatMemoryEnabled(state.settings, state.current.chatId) ? state.current.chatId : undefined);
+    state.serverWorker = await client.heartbeat(state.workerId, state.current?.chatId);
     if (!isServerApiIncompatible(state)) {
       state.serverConnectionIssue = undefined;
       state.activityStatusError = undefined;

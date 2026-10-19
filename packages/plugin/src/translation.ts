@@ -1,9 +1,19 @@
+import { CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { risuModelSlot, runRisuModel } from "./worker.js";
 import { withAuxiliaryStoryFraming, planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
 import type { RuntimeState, TranslationDisplay, TranslationProvider } from "./types.js";
 import type { MemoryLanguage } from "@rcm/shared";
 import { ServerClient } from "./api-client.js";
-import { addLog } from "./settings.js";
+import { addLog, isChatMemoryEnabled } from "./settings.js";
+
+const chatTranslationGeneration = new Map<string, number>();
+export function invalidateChatTranslations(chatId: string): void {
+  chatTranslationGeneration.set(chatId, (chatTranslationGeneration.get(chatId) ?? 0) + 1);
+}
+function translationCurrent(state: RuntimeState, chatIds: string[], current: () => boolean) {
+  const generations = chatIds.map(id => chatTranslationGeneration.get(id));
+  return () => current() && chatIds.every((id, index) => isChatMemoryEnabled(state.settings, id) && chatTranslationGeneration.get(id) === generations[index]);
+}
 
 const GOOGLE_URL_BYTE_LIMIT = 6_000;
 const GOOGLE_431_RETRY_BYTE_LIMIT = 3_000;
@@ -149,7 +159,7 @@ async function translateGoogle(text: string, sourceLanguage: MemoryLanguage, isC
 }
 export const translationOutputBudget = (state: RuntimeState) => state.settings.translationProvider === "server" ? state.settings.translationServerMaxOutput : state.settings.translationMaxOutput;
 export const backgroundTranslationEnabled = (state: RuntimeState) => state.settings.translationProvider === "google" || state.settings.translationBackground;
-export async function callTranslationBatch(state: RuntimeState, items: import("@rcm/shared").TranslationPart[], provider = state.settings.translationProvider, background = false) {
+export async function callTranslationBatch(state: RuntimeState, items: import("@rcm/shared").TranslationPart[], provider = state.settings.translationProvider, background = false, chatId = state.current?.chatId) {
   const stats = state.translationStats ??= { calls: 0, items: 0 };
   stats.calls += 1;
   state.translationBackgroundRunning = background;
@@ -158,7 +168,7 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
   try {
     const call = async () => {
       if (provider === "server") return clientFor(state).request<{ items: Array<{ id: string; partIndex: number; ko: string }>; usage?: any; model: string }>("/v1/translations/batch", {
-        method: "POST", body: JSON.stringify({ items, model: state.settings.translationServerModel, temperature: state.settings.translationTemperature, thinking: state.settings.translationThinking, maxOutput: state.settings.translationServerMaxOutput }),
+        method: "POST", body: JSON.stringify({ chatId, items, model: state.settings.translationServerModel, temperature: state.settings.translationTemperature, thinking: state.settings.translationThinking, maxOutput: state.settings.translationServerMaxOutput }),
       }, TRANSLATION_TIMEOUT_MS + 5000);
       const { config } = await clientFor(state).request<{ config: { relaxAuxiliaryCensorship?: boolean } }>("/v1/admin/server-llm");
       const response = await runRisuModel(state, { messages: withAuxiliaryStoryFraming([{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], config.relaxAuxiliaryCensorship === true), ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
@@ -185,7 +195,7 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
     state.publishActivity?.(); state.refreshStatusWidget?.();
   }
 }
-async function translateRisuBatch(state: RuntimeState, records: Pick<TranslationSource, "text">[], provider: TranslationProvider, isCurrent: () => boolean, background: boolean, completed: (index: number, text: string, model: string) => Promise<void>): Promise<{ translated: Map<string, string>; model: string }> {
+async function translateRisuBatch(state: RuntimeState, records: Pick<TranslationSource, "text">[], provider: TranslationProvider, isCurrent: () => boolean, background: boolean, completed: (index: number, text: string, model: string) => Promise<void>, chatId = state.current?.chatId): Promise<{ translated: Map<string, string>; model: string }> {
   return withRisuSlot(async () => {
     if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
     if(provider === "server") {
@@ -198,7 +208,8 @@ async function translateRisuBatch(state: RuntimeState, records: Pick<Translation
     const translated = new Map<string, string>(); let model = "";
     for (const items of batches) {
       if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
-      const response = await callTranslationBatch(state, items, provider, background);
+      const response = await callTranslationBatch(state, items, provider, background, chatId);
+      if (!isCurrent()) throw new TranslationError("CHAT_WORK_HELD", CHAT_WORK_HELD_MESSAGE);
       model = response.model;
       for (const item of response.items) {
         translated.set(item.id, (translated.get(item.id) ?? "") + item.ko);
@@ -215,6 +226,8 @@ const packetTag = () => /<!--[\s\S]*?-->|<\/?[A-Za-z_][\w:.-]*(?:[^<>"']|"[^"]*"
 /** Explicit, ephemeral translation: deliberately bypasses every cache and prefetch path. */
 export async function translatePacket(state: RuntimeState, packet: string, sourceLanguage: MemoryLanguage, isCurrent: () => boolean = () => true): Promise<string> {
   const provider = state.settings.translationProvider;
+  const chatId = state.current?.chatId;
+  isCurrent = translationCurrent(state, chatId ? [chatId] : [], isCurrent);
   try {
     if (provider === "google") return await translateGoogle(packet, sourceLanguage, isCurrent);
     const tags = [...packet.matchAll(packetTag())];
@@ -229,7 +242,7 @@ export async function translatePacket(state: RuntimeState, packet: string, sourc
     for (const tag of tags) { text(packet.slice(offset, tag.index)); pieces.push(tag[0]); offset = tag.index! + tag[0].length; }
     text(packet.slice(offset));
     if (!records.length) return packet;
-    const result = await translateRisuBatch(state, records, provider, isCurrent, false, async () => {});
+    const result = await translateRisuBatch(state, records, provider, isCurrent, false, async () => {}, chatId);
     positions.forEach((position, index) => {
       const value = result.translated.get(String(index));
       if (!value?.trim()) throw new TranslationError("MISSING_ITEMS", "번역 항목 누락");
@@ -257,6 +270,7 @@ function changeActivity(state: RuntimeState, delta: number, error?: string): voi
 
 async function translateRecordsUnlocked(state: RuntimeState, records: TranslationSource[], provider = state.settings.translationProvider, isCurrent: () => boolean = () => true, background = false, replaceGoogle = false): Promise<TranslationResult[]> {
   if (!records.length) return [];
+  isCurrent = translationCurrent(state, [...new Set(records.map(record => record.chatId))], isCurrent);
   if (records.every((record) => record.sourceLanguage === "ko")) return records.map((source) => ({ ...source, translated: source.text, cached: true }));
   let pendingStarted = 0;
   try {
@@ -297,7 +311,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
           // Persist each completed source before another paid call. A later failure must not erase this work.
           await clientFor(state).request("/v1/translations/cache/upsert", { method: "POST", body: JSON.stringify({ items: [{ key: item.key, ...item.source, sourceHash: item.sourceHash, provider, model, targetLanguage: "ko", translated: text }] }) }, 8000);
           fresh.set(item.key, text);
-        });
+        }, records[0]!.chatId);
         const translated = response.translated; model = response.model;
         for (const [index, item] of missing.entries()) {
           const value = translated.get(String(index));
@@ -308,6 +322,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
         missing.filter(item => !fresh.has(item.key)).forEach((item) => fail(item, error));
       }
     }
+    if (!isCurrent()) { changeActivity(state, -pendingStarted); return []; }
     const cacheItems = missing.flatMap((item) => {
       const translated = fresh.get(item.key);
       if (!translated) return [];
@@ -339,10 +354,12 @@ function releaseTranslation(): void {
 }
 
 /** Screen requests take the next slot before background batches. */
-export async function translateRecords(state: RuntimeState, records: TranslationSource[], provider = state.settings.translationProvider): Promise<TranslationResult[]> {
+export async function translateRecords(state: RuntimeState, records: TranslationSource[], provider?: TranslationProvider): Promise<TranslationResult[]> {
+  const current = translationCurrent(state, [...new Set(records.map(record => record.chatId))], () => true);
   if (translationBusy) await new Promise<void>(resolve => screenTranslationWaiters.push(resolve));
   else translationBusy = true;
-  try { return await translateRecordsUnlocked(state, records, provider); }
+  // An explicit provider is a one-off override; normal screen work resolves it after waiting.
+  try { return await translateRecordsUnlocked(state, records, provider ?? state.settings.translationProvider, current); }
   finally { releaseTranslation(); }
 }
 
@@ -405,6 +422,18 @@ export async function clearTranslationCache(state: RuntimeState): Promise<void> 
 }
 export async function invalidateTranslationCache(state: RuntimeState, match: Partial<Pick<TranslationSource, "serverInstanceId" | "chatId" | "kind" | "itemId">> & { itemIdPrefix?: string }): Promise<void> {
   await clientFor(state).request("/v1/translations/cache/invalidate", { method: "POST", body: JSON.stringify(match) });
+}
+
+/** Wait out old cache writes before clearing, so late responses cannot restore the old translation. */
+export async function retranslateChatRecords(state: RuntimeState, scope: Pick<TranslationSource, "chatId" | "serverInstanceId">, records: TranslationSource[]): Promise<TranslationResult[]> {
+  invalidateChatTranslations(scope.chatId);
+  const current = translationCurrent(state, [scope.chatId], () => true);
+  if (translationBusy) await new Promise<void>(resolve => screenTranslationWaiters.push(resolve)); else translationBusy = true;
+  try {
+    if (!current()) throw new Error("번역 설정이 바뀌었어요. 다시 시도해 주세요.");
+    await invalidateTranslationCache(state, scope);
+    return await translateRecordsUnlocked(state, records, state.settings.translationProvider, current);
+  } finally { releaseTranslation(); }
 }
 
 /** Explicitly approved replacement uses the same visible background call path, even when automatic prefetch is off. */

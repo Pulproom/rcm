@@ -1,3 +1,4 @@
+import { staticMetadata } from "./setup-storage.js";
 import { reopenSeedsBySource } from "./story-seeds.js";
 import { syncManualCognition } from "./social-knowledge.js";
 import { UNCORRECTED_SQL, invalidateAutomaticTransitions, rebaseCorrectionsAfterTailRollback } from "./user-corrections.js";
@@ -293,7 +294,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
       requestedMemoryLanguage,
       initialIngestionState,
       request.staticProjection?.hash ?? null,
-      request.staticProjection ? JSON.stringify(request.staticProjection) : null,
+      request.staticProjection ? staticMetadata(request.staticProjection) : null,
       timestamp,
       timestamp,
     );

@@ -1,4 +1,5 @@
 import { prefetchCurrentChatTranslations } from "./dashboard.js";
+import { observeSetupAttention } from "./setup-sources.js";
 import { backgroundTranslationEnabled, googleTranslationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
 import { observeCurrentHostGeneration, readCurrentChatId, readOptionalDashboardContext } from "./context.js";
 import { SERVER_STATUS_TIMEOUT_MS, type ServerClient } from "./api-client.js";
@@ -32,6 +33,7 @@ interface StatusResponse {
   ingestionState?: "historical_pending" | "managed" | "cleared";
   pendingEmbeddings: number;
   failedEmbeddings: number;
+  embeddingError?: string;
   progress?: NonNullable<RuntimeState["statusSummary"]>["progress"];
   initialCalibration?: NonNullable<RuntimeState["statusSummary"]>["initialCalibration"];
   worker: RuntimeState["serverWorker"];
@@ -124,7 +126,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         if (!state.current) state.quizSynced = undefined;
         const now = Date.now();
         // Release discovery is advisory and must never make the memory server look offline.
-        if (!isServerApiIncompatible(state)) void refreshUpdateStatus(state, client);
+        if (!isServerApiIncompatible(state) || state.serverConnectionIssue?.requiredUpdate !== "plugin") void refreshUpdateStatus(state, client);
         if (isServerApiIncompatible(state)) {
           const health = await client.request<{ apiRevision: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
           const mismatch = new ServerCompatibilityError(health.apiRevision);
@@ -139,10 +141,12 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), isActive(state) ? 1_000 : 4_000);
           return;
         }
+        observeSetupAttention(state, chatId, result.initialCalibration?.status);
         state.statusSummary = {
           queuedJobs: Number(result.queuedJobs ?? 0), failedJobs: Number(result.failedJobs ?? 0), blockingFailedJobs: Number(result.blockingFailedJobs ?? result.failedJobs ?? 0), advisoryFailedJobs: Number(result.advisoryFailedJobs ?? 0),
           pendingReviews: Number(result.pendingReviews ?? 0), pendingReconciliations: Number(result.pendingReconciliations ?? 0), waitingForAssistant: Number(result.waitingForAssistant ?? 0), bufferedMessages: Number(result.bufferedMessages ?? 0), bufferedTurns: Number(result.bufferedTurns ?? 0), bufferedSourceTokens: Number(result.bufferedSourceTokens ?? 0), extractionGroupTurns: Number(result.extractionGroupTurns ?? 6), recoverableMessages: Number(result.recoverableMessages ?? 0), historicalBackfillMessages: Number(result.historicalBackfillMessages ?? 0), ingestionState: result.ingestionState, pendingEmbeddings: Number(result.pendingEmbeddings ?? 0),
           failedEmbeddings: Number(result.failedEmbeddings ?? 0),
+          embeddingError: result.embeddingError,
           auxiliaryAuthFailed: result.auxiliaryAuthFailed === true,
           modelResponseDiagnostic: result.modelResponseDiagnostic,
           lastJobSourceRecovery: result.lastJobSourceRecovery,

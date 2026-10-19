@@ -1,3 +1,4 @@
+import { setupPickerNeeded } from "./setup-sources.js";
 import { sourceRecoverySummary, operationLabel } from "@rcm/shared";
 import { modelResponseFailureDetail } from "./support-diagnostics.js";
 import { RISU_AUXILIARY_AUTH_FAILURE_MESSAGE } from "@rcm/shared";
@@ -282,9 +283,7 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
   const calibration = summary.initialCalibration;
   const setupCaptured = Boolean(state.current && state.lastResolvedSetup?.chatId === state.current.chatId);
   const historicalBackfillPending = summary.ingestionState === "historical_pending" || Number(summary.historicalBackfillMessages ?? 0) > 0;
-  if (calibration?.status === "awaiting_setup") return setupCaptured
-    ? { kind: "review", label: "과거 기억 생성 준비됨", detail: "기억 홈에서 ‘과거 대화로 기억 생성’을 눌러 주세요." }
-    : { kind: "review", label: "초기 설정 캡처 필요", detail: "채팅에 메시지를 한 번 보내 설정을 가져온 뒤 ‘과거 대화로 기억 생성’을 다시 눌러 주세요." };
+  if (setupPickerNeeded(calibration?.status)) return { kind: "review", label: "설정 재료를 골라 주세요", detail: "기억 홈에서 읽을 설정 재료를 골라 주세요. 채팅은 계속할 수 있어요." };
   if (calibration?.status === "awaiting_confirmation") return { kind: "review", label: "초기 장부 확인 필요", detail: "분석된 인물과 초기 관계를 확인하면 과거 기억 생성을 이어서 시작합니다." };
   if (calibration?.status === "queued") {
     const startedAt = activeStartedAt(state);
@@ -295,7 +294,7 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
       startedAt,
     };
   }
-  if (setupCaptured && historicalBackfillPending && (!calibration || calibration.status === "unseeded")) return {
+  if (setupCaptured && historicalBackfillPending && !calibration) return {
     kind: "review",
     label: "과거 기억 생성 준비됨",
     detail: "기억 홈에서 ‘과거 대화로 기억 생성’을 눌러 주세요.",
@@ -461,15 +460,21 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     let renderedStatusKey = "";
     // The quiz lives inside the expanded chip; QuizSession keeps its state and drops replies from another chat.
     const quizConnectionReady = (): boolean => isServerConnectionReady(state);
+    const quizOn = (): boolean => {
+      const setup = state.statusSummary?.initialCalibration?.status;
+      return quizConnectionReady() && state.settings.statusWidgetVisible !== false
+        && state.settings.quizEnabled === true && state.quizSupported !== false
+        && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId)
+        && setup !== "awaiting_setup" && setup !== "unseeded";
+    };
     const quiz = new QuizSession({
       client, chatId: () => state.current?.chatId,
       connectionReady: quizConnectionReady,
       connectionFailed: (error) => { noteServerConnectionFailure(state, state.settings, error); },
-      enabled: () => state.settings.quizEnabled === true && state.quizSupported !== false && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId),
+      enabled: quizOn,
       setSupported: (supported) => { state.quizSupported = supported; },
       log: (message) => addLog(state.logs, "warn", message),
     });
-    const quizOn = (): boolean => quizConnectionReady() && state.settings.quizEnabled === true && state.quizSupported !== false && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId);
     let elapsedLabelElement: SafeRootElement | undefined;
     let elapsedRowElements: SafeRootElement[] = [];
     let elapsedMarkerErrorReported = false;
@@ -657,7 +662,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
       await widget.setAttribute("x-rcm-expanded", String(expanded));
       await widget.setAttribute(STATUS_TIMED_ATTRIBUTE, current.startedAt ? "true" : "false");
-      await widget.setInnerHTML(`<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);overflow:auto;box-sizing:border-box">${body}</div>` : ""}`);
+      await widget.setInnerHTML(`<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);max-height:calc(100dvh - 60px);overflow:auto;overscroll-behavior:contain;box-sizing:border-box">${body}</div>` : ""}`);
       await cacheElapsedClockElements(expanded ? activeStatusTimingRows(state).length : 0);
       await syncElapsedClocks(current);
       await keepInViewport();
@@ -724,14 +729,10 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       await quiz.refresh();
       await render();
     };
-    let quizReadiness = "";
     state.refreshStatusWidget = () => {
-      const readiness = `${quizOn()}:${state.serverWorker?.modelConfigured}`;
-      if (readiness !== quizReadiness) {
-        quizReadiness = readiness;
-        if (!quizOn()) quiz.reset();
-        else if (expanded && !quiz.view) void quiz.refresh().then(render);
-      }
+      // Settings/status transitions only repaint. Opening the chip or advancing
+      // a question remains the normal request trigger, never switching RCM/UI on.
+      if (!quizOn()) quiz.reset();
       const next = currentVisual().current;
       const nextKey = `${statusVisualKey(next)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
       // An open quiz is not rebuilt by status polls; only a chat or skin change redraws it.

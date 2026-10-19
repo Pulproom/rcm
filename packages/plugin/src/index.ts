@@ -1,3 +1,4 @@
+import { cleanupSetupCaptures } from "./setup-sources.js";
 import { openDashboard } from "./dashboard.js";
 import { registerMaskToolBridge } from "./mask-bridge.js";
 import { createRuntime, installInitializationRequestGate, installRequestHooks } from "./runtime.js";
@@ -16,6 +17,7 @@ void (async () => {
   // be noticeably delayed immediately after a PocketRisu reload.
   await installInitializationRequestGate(() => requestHooksReady);
   const { state, client } = await createRuntime();
+  await cleanupSetupCaptures(state);
   // Request hooks are the core automatic-memory path. Register them before
   // optional provider tool adapters so a slow or unavailable bridge cannot
   // prevent automatic injection.

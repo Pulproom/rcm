@@ -1,4 +1,4 @@
-import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
+import { auxiliaryInputBudgetMessage, ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, LedgerConsistencyResultSchema, type LedgerConsistencyResult, type LeasedJob, type MemoryLanguage, type RpProfile } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
@@ -191,10 +191,10 @@ You perform a final bounded consistency check on an already extracted roleplay l
     for (const state of group.states) {
       const trial = [...states, state];
       if (trial.length >= 2 && !fits([{ ...group, states: trial }])) {
-        if (states.length < 2) throw new Error(`Ledger state ${state.id} and required prior context cannot fit the configured input budget`);
+        if (states.length < 2) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(maxInputTokens)}`);
         pages.push([{ ...group, states }]);
         states = [states.at(-1)!, state];
-        if (!fits([{ ...group, states }])) throw new Error(`Ledger state ${state.id} and required prior context cannot fit the configured input budget`);
+        if (!fits([{ ...group, states }])) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(maxInputTokens)}`);
       } else states = trial;
     }
     if (states.length >= 2) pages.push([{ ...group, states }]);

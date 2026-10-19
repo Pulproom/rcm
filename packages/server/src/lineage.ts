@@ -1,4 +1,5 @@
 import { syncManualCognition } from "./social-knowledge.js";
+import { readRemovedAliases, removedAliasesKey } from "./user-deletions.js";
 import { parseSocialRelation } from "./social-relations.js";
 import { createHash, randomUUID } from "node:crypto";
 import { bindInheritedMemoryGroups, invalidateChangedMemoryGroups } from './memory-grouping.js';
@@ -344,6 +345,12 @@ function cloneLineage(
       mapItem(db, child, "entity", id, row.id);
     }
     counts.entities = entityMap.size;
+    // Branches and regeneration shadows get new UUIDs; preserve the user's
+    // alias suppressions under those UUIDs before any extraction can run.
+    const removals = Object.fromEntries(Object.entries(readRemovedAliases(db, parent))
+      .flatMap(([id, terms]) => entityMap.has(id) ? [[entityMap.get(id)!, terms]] : []));
+    if (Object.keys(removals).length) db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(removedAliasesKey(child), JSON.stringify(removals));
     const parentCalibration = db.prepare("SELECT * FROM initial_calibrations WHERE chat_id=?").get(parent) as any;
     if (parentCalibration) db.prepare(`INSERT OR REPLACE INTO initial_calibrations(chat_id,status,origin,setup_fingerprint,confirmation_required,locked_at,confirmed_at,last_error,setup_json,pending_force_backfill,pending_extraction_review,created_at,updated_at)
       VALUES(?,'inherited','inherited',?,0,?,?,NULL,NULL,0,NULL,?,?)`).run(child, parentCalibration.setup_fingerprint, parentCalibration.locked_at, parentCalibration.confirmed_at, now, now);

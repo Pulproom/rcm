@@ -1,3 +1,4 @@
+import { installSetupStorageGuards, migrateSetupStorage } from "./setup-storage.js";
 import { migrateTranslationKeys } from "./translation-cache.js";
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
@@ -5,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 52 as const;
+export const DATABASE_SCHEMA_VERSION = 54 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -18,6 +19,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS server_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+-- Holds can precede the first sync, so this chat-owned setting has no chat FK.
+CREATE TABLE IF NOT EXISTS chat_work_state (
+  chat_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1))
 );
 
 CREATE TABLE IF NOT EXISTS chats (
@@ -983,7 +990,7 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (![46, 47, 48, 49, 50, 51, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
@@ -1006,6 +1013,8 @@ export function openDatabase(path: string): DatabaseHandle {
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update; DROP TRIGGER IF EXISTS source_fts_delete");
     }
     db.exec(schema);
+    installSetupStorageGuards(db);
+    if (hasSchemaLedger && version < 53) migrateSetupStorage(db);
     if (hasSchemaLedger && version < 50) {
       // Older FTS rowids were independent and changed on every source edit.
       // Rebuild this derived index once, atomically with the trigger upgrade.

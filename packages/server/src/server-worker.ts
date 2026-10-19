@@ -1,3 +1,4 @@
+import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD } from "./chat-work.js";
 import { completeQuizJob } from "./quiz.js";
 import { inspectDraftEvidence } from "./evidence-review.js";
 import { groupMemoriesWithServerLlm } from "./server-llm.js";
@@ -30,6 +31,7 @@ interface ActiveJob {
   owner: string;
   job: LeasedJob;
   controller: AbortController;
+  finish: () => void;
   startedAt: number;
   phase: "first_extraction" | "relationship_projection" | "story_consolidation" | "social_backfill" | "post_extraction_audit" | "state_reconciliation" | "ledger_consistency" | "storing";
 }
@@ -80,7 +82,8 @@ export class ServerExtractionWorker {
     const engine = this.store.config.engine;
     const controlled = this.#controlLeaseUntil > Date.now();
     const visible = [...this.#active.values()].filter(item => item.job.kind !== "quiz" && (!chatId || item.job.chatId === chatId));
-    const state = engine === "risu" ? "risu"
+    const chatHeld = Boolean(chatId && isChatWorkHeld(this.db, chatId));
+    const state = chatHeld ? "paused" : engine === "risu" ? "risu"
       : this.#faulted ? "faulted"
         : this.#manualPaused ? "paused"
           : visible.length ? "running"
@@ -89,14 +92,15 @@ export class ServerExtractionWorker {
     const quiz = [...this.#active.values()].find(item => item.job.kind === "quiz" && (!chatId || item.job.chatId === chatId));
     return {
       state,
+      chatHeld,
       ...(engine === "server" ? { modelConfigured: this.store.modelReady } : {}),
       embeddingConfigured: this.embeddings.status?.configured,
       activeCalls: visible.length,
       ...(quiz ? { quizGenerating: { chatId: quiz.job.chatId, startedAt: quiz.startedAt } } : {}),
       ...(controlled ? { controlLeaseUntil: this.#controlLeaseUntil } : {}),
-      ...(this.#lastError ? { lastError: this.#lastError } : {}),
+      ...(chatHeld ? { lastError: CHAT_WORK_HELD } : this.#lastError ? { lastError: this.#lastError } : {}),
       queuedJobs: (this.db.prepare("SELECT count(*) AS count FROM jobs WHERE status IN ('queued','leased') AND type<>'quiz'").get() as { count: number }).count,
-      phase: this.#faulted ? "faulted" : this.#manualPaused ? "paused" : active?.phase ?? "idle",
+      phase: chatHeld ? "paused" : this.#faulted ? "faulted" : this.#manualPaused ? "paused" : active?.phase ?? "idle",
       ...(active ? { activeJob: { chatId: active.job.chatId, sourceMessageCount: active.job.sourceMessageIds.length, sourceTurnCount: active.job.sourceTurnCount, startedAt: active.startedAt, kind: active.job.kind, sourceRecovery: active.job.sourceRecovery, sourceRecoveryMetadata: active.job.sourceRecoveryMetadata } } : {}),
       ...(chatId && this.#auxiliaryCalls.get(chatId)?.length ? { auxiliaryCalls: this.#auxiliaryCalls.get(chatId) } : {}),
       ...(this.#lastCompletedAt ? { lastCompletedAt: this.#lastCompletedAt } : {}),
@@ -202,7 +206,7 @@ export class ServerExtractionWorker {
         });
         if (!job) break;
         this.store.snapshotJob(job.id);
-        const active: ActiveJob = { owner, job, controller: new AbortController(), startedAt: Date.now(), phase: job.kind === "quiz" ? "storing" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction" };
+        const active: ActiveJob = { owner, job, ...beginChatWork(this.db, job.chatId), startedAt: Date.now(), phase: job.kind === "quiz" ? "storing" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction" };
         this.#active.set(job.id, active);
         void this.#process(active);
       }
@@ -338,6 +342,7 @@ export class ServerExtractionWorker {
         // leaseJob isolates failed cumulative work to its chat; other chats keep running.
       }
     } finally {
+      active.finish();
       if(this.#active.get(job.id)===active) this.#active.delete(job.id);
       if (this.#canRun()) this.wake();
     }

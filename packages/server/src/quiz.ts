@@ -4,6 +4,7 @@ import { acceptQuizItems, compareStoryMemories, estimateTokens, measureAuxiliary
   type QuizRegenerateResponse, type QuizStatus, type LeasedJob, type MemoryLanguage, type RpProfile, type QuizJobMeta, type QuizAnswerResponse, type QuizDraftItem, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
 import { now, type RcmDatabase } from "./db.js";
 import { auxiliaryModelReady } from "./server-llm.js";
+import { initialCalibrationView } from "./initial-calibration.js";
 
 export interface QuizSceneRow {
   id: string; memory_key: string; type: string; title: string; content: string;
@@ -76,7 +77,8 @@ export function preserveRegenerationQuizzes(db: RcmDatabase, chatId: string, bef
 const SOURCE_REF = "source-chunk:";
 const QUIZ_SOURCE_LAG = 2;
 const QUIZ_SOURCE_REFILL_TURNS = 3;
-const QUIZ_MEMORY_ONLY_SCENES = 6;
+const QUIZ_MIN_SOURCE_TURNS = 6;
+const QUIZ_MIN_MEMORIES = 3;
 
 /** No boundary means no approved source range, never permission to consume history. */
 function quizSourceBoundary(db: RcmDatabase, chatId: string): number {
@@ -86,17 +88,25 @@ function quizSourceBoundary(db: RcmDatabase, chatId: string): number {
   return row && Number.isSafeInteger(Number(row.value)) ? Number(row.value) : Number.MAX_SAFE_INTEGER;
 }
 
-function sourceProgress(db: RcmDatabase, chatId: string): { cutoff: number | null; turns: number } {
+function sourceProgress(db: RcmDatabase, chatId: string): { cutoff: number | null; turns: number; completedTurns: number } {
   const floor = quizSourceBoundary(db, chatId);
   const replies = db.prepare(`SELECT COUNT(*) n FROM messages WHERE chat_id=? AND role='assistant'
     AND ordinal>? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`).get(chatId, floor) as { n: number };
   const boundary = db.prepare(`SELECT ordinal FROM messages WHERE chat_id=? AND role='assistant'
     AND ordinal>? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal DESC LIMIT 1 OFFSET ?`).get(chatId, floor, QUIZ_SOURCE_LAG) as { ordinal: number } | undefined;
-  return { cutoff: boundary?.ordinal ?? null, turns: Math.max(0, replies.n - QUIZ_SOURCE_LAG) };
+  return { cutoff: boundary?.ordinal ?? null, turns: Math.max(0, replies.n - QUIZ_SOURCE_LAG), completedTurns: replies.n };
+}
+
+/** Check before enqueue and again before lease; a toggle never authorizes a model call. */
+function quizGenerationEligible(db: RcmDatabase, chatId: string): boolean {
+  const { status } = initialCalibrationView(db, chatId);
+  if (status === "awaiting_setup" || status === "unseeded") return false;
+  const memories = db.prepare("SELECT COUNT(*) n FROM memories WHERE chat_id=? AND active=1").get(chatId) as { n: number };
+  return memories.n >= QUIZ_MIN_MEMORIES || sourceProgress(db, chatId).completedTurns >= QUIZ_MIN_SOURCE_TURNS;
 }
 
 function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows(db, chatId)): QuizSceneRow[] {
-  if (scenes.length >= QUIZ_MEMORY_ONLY_SCENES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
+  if (scenes.length >= QUIZ_MIN_MEMORIES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
   const { cutoff } = sourceProgress(db, chatId);
   const rows = db.prepare(`SELECT message_id,role,ordinal,content,updated_at,memory_excluded FROM messages WHERE chat_id=?
     AND ordinal>? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal`)
@@ -147,7 +157,7 @@ export function quizUnits(db: RcmDatabase, chatId: string): QuizUnit[] {
       AND msg.host_visibility IN ('active','all_before')) GROUP BY memory_id`).all(chatId) as Array<{memory_id:string;n:number}>;
   const detailCounts = new Map(details.map(row => [row.memory_id,row.n]));
   const sourceSizes = new Map(sizes.map(row => [row.memory_id,row.n]));
-  return quizContentRows(db, chatId, scenes).filter(row => scenes.length < QUIZ_MEMORY_ONLY_SCENES ? row.sourceOnly : !row.sourceOnly).map(row => {
+  return quizContentRows(db, chatId, scenes).filter(row => scenes.length < QUIZ_MIN_MEMORIES ? row.sourceOnly : !row.sourceOnly).map(row => {
     const quota = row.sourceOnly ? 2 : Math.max(3, Math.min(8, (detailCounts.get(row.id) ?? 0) + Math.ceil((sourceSizes.get(row.id) ?? 0) / 4000)));
     const asked = history.filter(item => item.memory_id === row.id);
     let used = 0, lastTurn: number | undefined;
@@ -202,8 +212,7 @@ export function setQuizEnabled(db: RcmDatabase, chatId: string, enabled: boolean
   db.transaction(() => {
     ensureState(db, chatId);
     db.prepare("UPDATE quiz_state SET enabled=?,updated_at=? WHERE chat_id=?").run(enabled ? 1 : 0, now(), chatId);
-    if (enabled) maybeEnqueueQuiz(db, chatId);
-    else db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE chat_id=? AND type='quiz' AND status='queued'").run(now(), chatId);
+    if (!enabled) db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE chat_id=? AND type='quiz' AND status='queued'").run(now(), chatId);
   })();
 }
 
@@ -232,6 +241,7 @@ export function regenerateQuizzes(db: RcmDatabase, chatId: string): QuizRegenera
     if (quizGenerating(db, chatId)) return { retired: 0, enqueued: false, reason: "generating" };
     ensureState(db, chatId);
     if (!quizState(db, chatId).enabled) return { retired: 0, enqueued: false, reason: "disabled" };
+    if (!quizGenerationEligible(db, chatId)) return { retired: 0, enqueued: false, reason: "no_material" };
     const retired = db.prepare("UPDATE quiz_items SET retired_at=? WHERE chat_id=? AND retired_at IS NULL AND answered_at IS NULL").run(now(), chatId).changes;
     if (!quizUnits(db, chatId).some(unit => unit.remaining > 0)) return { retired, enqueued: false, reason: "no_material" };
     enqueueQuiz(db, chatId, quizSceneRows(db, chatId).length);
@@ -241,7 +251,7 @@ export function regenerateQuizzes(db: RcmDatabase, chatId: string): QuizRegenera
 
 export function maybeEnqueueQuiz(db: RcmDatabase, chatId: string): boolean {
   return db.transaction(() => {
-    if (!auxiliaryModelReady(db)) return false;
+    if (!auxiliaryModelReady(db) || !quizGenerationEligible(db, chatId)) return false;
     ensureState(db, chatId);
     const state = quizState(db, chatId);
     if (!state.enabled) return false;
@@ -326,7 +336,7 @@ export function nextQuiz(db: RcmDatabase, chatId: string, random: () => number =
     const ready = auxiliaryModelReady(db);
     const generating = ready && Boolean(db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='quiz' AND status='leased'").get(chatId));
     const waitingReason = !enabled || question ? undefined : !ready ? "model_not_configured" as const
-      : !quizUnits(db, chatId).length ? "conversation_too_short" as const
+      : !quizGenerationEligible(db, chatId) || !quizUnits(db, chatId).length ? "conversation_too_short" as const
         : !quizGenerating(db, chatId) ? "material_exhausted" as const : undefined;
     return { enabled, available: enabled && question !== null,
       remaining, generating, question, stats: quizStats(db, chatId), ...(waitingReason ? { waitingReason } : {}) };
@@ -507,7 +517,7 @@ Never ask about things the scenes do not state, about the future, or about the r
 
 export function buildQuizJob(db: RcmDatabase, row: { id: string; chatId: string; profile: RpProfile; memoryLanguage: MemoryLanguage; attempt: number; payload: { sceneCount?: number } }): LeasedJob | null {
   ensureState(db, row.chatId);
-  if (!quizState(db, row.chatId).enabled) return null;
+  if (!quizState(db, row.chatId).enabled || !quizGenerationEligible(db, row.chatId)) return null;
   const material = selectQuizMaterial(db, row.chatId);
   if (!material.scenes.length) return null;
   const current = new Map(quizContentRows(db, row.chatId).map(scene => [scene.id, scene]));

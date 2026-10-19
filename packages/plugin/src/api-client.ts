@@ -1,5 +1,5 @@
 import type { QuizAnswerRequest, SourceReferenceIssue } from "@rcm/shared";
-import { RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type QuizStatus, type QuizRegenerateResponse, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
+import { PickerSetupProjectionSchema, RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type QuizStatus, type QuizRegenerateResponse, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
 import type { PluginSettings } from "./types.js";
 
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 15_000;
@@ -181,6 +181,12 @@ export class ServerClient {
   }
 
   async raw(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<Response> {
+    // Every setup sender shares this network boundary; raw captures never reach fetch.
+    if (typeof init.body === "string" && init.body.includes('"resolvedSetup":') && (path === "/v1/turn/prepare" || /\/initial-calibration\/retry$|\/reprocess$/u.test(path))) {
+      const body = JSON.parse(init.body) as { resolvedSetup?: unknown };
+      if (body.resolvedSetup !== undefined && !PickerSetupProjectionSchema.safeParse(body.resolvedSetup).success)
+        throw new Error("설정 재료를 선택 화면에서 골라 주세요. 요청 캡처는 전송할 수 없어요.");
+    }
     const settings = this.settings();
     const controller = new AbortController();
     const externalSignal = init.signal;
@@ -198,6 +204,10 @@ export class ServerClient {
     try {
       const method = (init.method ?? "GET").toUpperCase();
       const body = init.body ?? (["POST", "PUT"].includes(method) ? "{}" : undefined);
+      // Frozen recovery protocol: released API90 servers reject either plugin
+      // header on revision mismatch. Keep these authenticated requests unversioned.
+      const recoveryRequest = method === "GET" && ["/v1/health", "/v1/update/status"].includes(path.split("?")[0]!)
+        || method === "POST" && ["/v1/update/stage", "/v1/update/apply"].includes(path);
       const response = await Promise.race([risuai.nativeFetch(`${settings.serverUrl.replace(/\/$/, "")}${path}`, {
         ...init,
         method,
@@ -205,8 +215,10 @@ export class ServerClient {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${settings.serverToken}`,
-          "X-RCM-Plugin-Version": RCM_PLUGIN_VERSION,
-          "X-RCM-API-Revision": String(RCM_API_REVISION),
+          ...(!recoveryRequest ? {
+            "X-RCM-Plugin-Version": RCM_PLUGIN_VERSION,
+            "X-RCM-API-Revision": String(RCM_API_REVISION),
+          } : {}),
           ...(init.headers ?? {}),
         },
         signal: controller.signal,
@@ -282,7 +294,7 @@ export class ServerClient {
 
   async lease(workerId: string, modelSettingsFingerprint?:string): Promise<LeasedJob | null> {
     const result = await this.request<{ job: LeasedJob | null }>("/v1/jobs/lease", {
-      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint }),
+      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled }),
     });
     return result.job;
   }
@@ -329,7 +341,7 @@ export class ServerClient {
 
   async heartbeat(workerId: string, chatId?: string): Promise<ServerWorkerStatus> {
     const result = await this.request<{ worker: ServerWorkerStatus }>("/v1/worker/heartbeat", {
-      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}) }),
+      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), chatEnabled: this.settings().chatEnabled }),
     });
     return result.worker;
   }
@@ -341,7 +353,7 @@ export class ServerClient {
 
   async resumeServerWorker(workerId: string): Promise<ServerWorkerStatus> {
     const result = await this.request<{ worker: ServerWorkerStatus }>("/v1/worker/resume", {
-      method: "POST", body: JSON.stringify({ workerId }),
+      method: "POST", body: JSON.stringify({ workerId, chatEnabled: this.settings().chatEnabled }),
     });
     return result.worker;
   }

@@ -216,9 +216,9 @@ export function frame(opts: {
   return `<${tag}${type} class="frame${opts.mark ? " is-mark" : ""}"${expanded}${actionAttrs(opts.action, opts.data)}>${slug}<div class="frame__title">${opts.titleHtml ?? escapeHtml(opts.title)}</div>${subtitle}${record}</${tag}>`;
 }
 
-export function notice(text: string, opts: { tone?: "cut" | "plain"; action?: string } = {}): string {
+export function notice(text: string, opts: { tone?: "cut" | "plain"; body?: string; action?: string } = {}): string {
   const cut = opts.tone === "cut";
-  return `<div class="notice${cut ? " notice--cut" : ""}" role="status">${icon(cut ? "alert" : "clock")}<span>${escapeHtml(text)}</span>${opts.action ?? ""}</div>`;
+  return `<div class="notice${cut ? " notice--cut" : ""}" role="status">${icon(cut ? "alert" : "clock")}<span>${escapeHtml(text)}${opts.body ? `<br><span class="sub">${escapeHtml(opts.body)}</span>` : ""}</span>${opts.action ?? ""}</div>`;
 }
 
 const statusIcons = { ok: "check", wait: "clock", bad: "error" } as const;

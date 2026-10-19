@@ -12,6 +12,7 @@ export type LockHomeInput = {
   daysTogether: number | null;
   scenes: number;
   latest: { memoryId: string; speaker: string; lineHtml: string | null; titleHtml: string; sceneNo: number } | null;
+  dailyMemoryHtml?: string;
   overduePromise: { textHtml: string; who: string; when: string; more: number } | null;
   chapter: { label: string; titleHtml: string; scenes: number } | null;
   pairs: Array<{ key: string; a: string; b: string; labelHtml: string; days: number | null }>;
@@ -52,6 +53,7 @@ export function renderLockHome(input: LockHomeInput): string {
 
   const notes = [
     ...input.alerts.map((alert) => notification({ tone: alert.tone === "cut" ? "red" : "gray", iconName: "alert", head: escapeHtml(alert.text), meta: "", body: escapeHtml(alert.body ?? ""), action: alert.action, data: alert.data, actions: alert.actions })),
+    input.dailyMemoryHtml ?? "",
     input.latest
       ? notification({
         tone: "green", iconName: "film",

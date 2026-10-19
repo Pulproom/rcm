@@ -1,3 +1,4 @@
+import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
 import { EntityColorSchema } from "@rcm/shared";
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
 import { Api38ExtractionDraftResultSchema, ExtractionAuditSubmissionSchema } from "@rcm/shared";
@@ -56,7 +57,7 @@ import {
   InitialCalibrationResultSchema,
   LedgerConsistencyResultSchema,
   LandmarkKindSchema,
-  ResolvedSetupProjectionSchema,
+  PickerSetupProjectionSchema,
   ManualLineageApplyRequestSchema,
   ManualLineagePreviewRequestSchema,
   LineageProbeApplyRequestSchema,
@@ -111,7 +112,7 @@ import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
 import { replaceItemAccess } from "./ingest.js";
 import { buildRetrievalQuerySignals, sourceQuerySignals } from "./retrieval-planner.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage } from "./auxiliary-page-cache.js";
-import { beginInitialCalibration, clearInitialCalibrationDraft, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
+import { beginInitialCalibration, prepareInitialCalibrationRetry, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
 import { previewRegeneration, applyCanonicalRegeneration, applyEpisodeRegeneration, discardRegeneration, listExtractionBatches, listRegenerations, regenerationRun, startCanonicalRegeneration, startEpisodeRegeneration } from "./regeneration.js";
 import { listSourceRanges, rangeMessages, setMemoryExclusion } from "./source-ranges.js";
 import { additionSources, additionMessageReason, previewMemoryAddition, startMemoryAddition, listMemoryAdditions, applyMemoryAddition, discardMemoryAddition } from './memory-addition.js';
@@ -272,9 +273,12 @@ export function createApp(dependencies: Dependencies): Hono {
     const token = context.req.header("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
     if (!equalToken(token, config.token)) return context.json({ error: "Unauthorized" }, 401);
     const revision = context.req.header("X-RCM-API-Revision");
-    // Health and authenticated read-only update discovery remain usable across API changes.
+    // Recovery uses a frozen, unversioned protocol. Also accept versioned update
+    // writes from a newer plugin; an older plugin must still update itself first.
     const updateDiscovery = context.req.method === "GET" && context.req.path === "/v1/update/status";
-    if (!updateDiscovery && (revision !== undefined || context.req.header("X-RCM-Plugin-Version")) && revision !== String(RCM_API_REVISION)) {
+    const updateRecovery = context.req.method === "POST" && ["/v1/update/stage", "/v1/update/apply"].includes(context.req.path)
+      && Number.isInteger(Number(revision)) && Number(revision) > RCM_API_REVISION;
+    if (!updateDiscovery && !updateRecovery && (revision !== undefined || context.req.header("X-RCM-Plugin-Version")) && revision !== String(RCM_API_REVISION)) {
       return context.json({ error: "RCM API revision mismatch; update the plugin and server together", code: "API_REVISION_MISMATCH", expectedApiRevision: RCM_API_REVISION }, 409);
     }
     await next();
@@ -316,6 +320,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const items = body.items.filter((item: any) => item && ["key", "serverInstanceId", "chatId", "kind", "itemId", "sourceHash", "provider", "sourceLanguage", "targetLanguage", "translated"]
       .every((field) => typeof item[field] === "string"));
     if (items.length !== body.items.length) return context.json({ error: "Invalid translation cache item" }, 400);
+    if (items.some((item: any) => isChatWorkHeld(db, item.chatId))) return context.json({ code: "CHAT_WORK_HELD", error: CHAT_WORK_HELD }, 409);
     upsertTranslations(db, items);
     return context.json({ ok: true, ...translationCacheStats(db) });
   });
@@ -364,9 +369,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const continuingColdStart = initialCalibration.status === "awaiting_setup" && initialCalibration.origin === "cold_start";
     const mayStartInitialCalibration = parsed.forceBackfill || continuingColdStart || isTrueNewRootOpening;
     const operationRunId = parsed.forceBackfill || continuingColdStart ? randomUUID() : undefined;
-    if (!lineagePending && lineage.status !== "inherited" && mayStartInitialCalibration && (parsed.resolvedSetup || parsed.forceBackfill) && ["unseeded", "awaiting_setup"].includes(initialCalibration.status)) {
+    if (!lineagePending && lineage.status !== "inherited" && mayStartInitialCalibration && ["unseeded", "awaiting_setup"].includes(initialCalibration.status)) {
       initialCalibration = beginInitialCalibration(db, parsed.chatId, parsed.forceBackfill || continuingColdStart ? "cold_start" : "new_root", parsed.resolvedSetup, {
-        confirmationRequired: parsed.forceBackfill || continuingColdStart,
+        confirmationRequired: !parsed.resolvedSetup || parsed.forceBackfill || continuingColdStart,
         forceBackfill: parsed.forceBackfill || continuingColdStart,
         extractionReview: continuingColdStart ? undefined : effectiveExtractionReview,
       });
@@ -1005,6 +1010,7 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/initial-calibration/skip", (context) => {
     try {
       const chatId = context.req.param("id");
+      if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined);
       const pending = resolveInitialCalibrationConfirmation(db, chatId, "skip");
       const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
       const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
@@ -1016,7 +1022,7 @@ export function createApp(dependencies: Dependencies): Hono {
     try {
       const chatId = context.req.param("id");
       const body = await context.req.json().catch(() => ({})) as { resolvedSetup?: unknown; identityHints?: unknown };
-      const setupResult = body.resolvedSetup === undefined ? undefined : ResolvedSetupProjectionSchema.safeParse(body.resolvedSetup);
+      const setupResult = body.resolvedSetup === undefined ? undefined : PickerSetupProjectionSchema.safeParse(body.resolvedSetup);
       if (setupResult && !setupResult.success) return context.json({ error: "resolvedSetup is invalid", issues: setupResult.error.issues }, 400);
       if (body.identityHints !== undefined && (typeof body.identityHints !== "object" || body.identityHints === null || Array.isArray(body.identityHints))) {
         return context.json({ error: "identityHints must be an object" }, 400);
@@ -1025,9 +1031,8 @@ export function createApp(dependencies: Dependencies): Hono {
         ? { projection: setupResult.data, identityHints: (body.identityHints ?? {}) as Record<string, unknown> }
         : initialCalibrationRetryInput(db, chatId);
       const queued = db.transaction(() => {
-        clearInitialCalibrationDraft(db, chatId);
-        if (setupResult?.success) db.prepare(`UPDATE initial_calibrations SET setup_json=?,setup_fingerprint=?,updated_at=? WHERE chat_id=?`)
-          .run(JSON.stringify(retry.projection), retry.projection.fingerprint, Date.now(), chatId);
+        if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined, { confirmationRequired: true });
+        prepareInitialCalibrationRetry(db, chatId);
         if (!enqueueInitialCalibration(db, chatId, retry.projection, retry.identityHints, retry.backfillRunId)) throw new Error("Initial calibration is already queued");
         return true;
       })();
@@ -1182,8 +1187,17 @@ export function createApp(dependencies: Dependencies): Hono {
     } finally { if (!wasPaused) serverWorker.resume("server-chat-transplant"); }
   });
 
+  const syncChatWork = (settings: Record<string, boolean> = {}) => {
+    for (const [chatId, enabled] of Object.entries(settings)) {
+      if (isChatWorkHeld(db, chatId) === !enabled) continue;
+      setChatWorkEnabled(db, chatId, enabled);
+      if (enabled) void embeddings.indexPending(chatId);
+    }
+  };
+
   app.post("/v1/jobs/lease", async (context) => {
     const body = LeaseJobRequestSchema.parse(await context.req.json());
+    syncChatWork(body.chatEnabled);
     if (llmStore.config.engine === "server") return context.json({ job: null });
     if(body.modelSettingsFingerprint) db.prepare("INSERT INTO server_meta(key,value) VALUES('risu_model_settings_fingerprint',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(body.modelSettingsFingerprint);
     const job = attachAuxiliaryPlan(db, leaseJob(db, body.workerId, config.leaseSeconds), {
@@ -1624,10 +1638,13 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/translations/batch", async context => {
     const parsed = TranslationLegacySettingsSchema.extend({
+      chatId: z.string().min(1),
       items: z.array(z.object({ id: z.string().max(512), text: z.string(), partIndex: z.number().int().nonnegative(), partCount: z.number().int().positive() })).min(1).max(10000),
     }).safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation batch" }, 400);
     const body = parsed.data;
+    if (isChatWorkHeld(db, body.chatId)) return context.json({ code: "CHAT_WORK_HELD", error: CHAT_WORK_HELD }, 409);
+    const scope = beginChatWork(db, body.chatId);
     let apiKey = "";
     try {
       const resolved = translationConnection.resolve(body);
@@ -1636,14 +1653,16 @@ export function createApp(dependencies: Dependencies): Hono {
       if (estimateTokens(JSON.stringify({ items: body.items })) > Math.floor(config.maxOutputTokens / 1.5)) throw new TranslationError("INVALID_CONFIG", "Translation batch exceeds output budget");
       const result = await requestStructuredProvider(llmStore, config, apiKey,
         [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items: body.items }) }],
-        AbortSignal.any([context.req.raw.signal, AbortSignal.timeout(TRANSLATION_TIMEOUT_MS)]), config.maxOutputTokens);
+        AbortSignal.any([scope.controller.signal, context.req.raw.signal, AbortSignal.timeout(TRANSLATION_TIMEOUT_MS)]), config.maxOutputTokens);
+      scope.controller.signal.throwIfAborted();
       return context.json({ items: validateTranslation(result.content, body.items, result.finishReason), usage: result.usage, model: config.model });
     } catch (error) {
+      if (scope.controller.signal.aborted) return context.json({ code: "CHAT_WORK_HELD", error: CHAT_WORK_HELD }, 409);
       const code = error instanceof TranslationError ? error.code : error instanceof ProviderRequestError
         ? error.kind === "timeout" ? "TIMEOUT" : error.kind === "json" ? "INVALID_RESPONSE" : error.kind === "transport" ? "NETWORK_ERROR" : error.status === 401 || error.status === 403 ? "AUTH_FAILED" : error.status === 429 ? "RATE_LIMITED" : "PROVIDER_HTTP_ERROR"
         : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "TIMEOUT" : "INVALID_CONFIG";
       return context.json({ code, error: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [apiKey]) }, 502);
-    }
+    } finally { scope.finish(); }
   });
   app.put("/v1/admin/server-llm", async (context) => {
     const input = ServerLlmConfigSchema.parse(await context.req.json());
@@ -1664,11 +1683,13 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/worker/heartbeat", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
+    syncChatWork(body.chatEnabled);
     serverWorker.heartbeat(body.workerId);
     return context.json({ ok: true, worker: body.chatId ? serverWorker.statusForChat(body.chatId) : serverWorker.status });
   });
   app.post("/v1/worker/resume", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
+    syncChatWork(body.chatEnabled);
     return context.json({ ok: true, worker: serverWorker.resume(body.workerId) });
   });
   app.post("/v1/worker/pause", (context) => context.json({ ok: true, worker: serverWorker.pause() }));
@@ -1710,7 +1731,7 @@ export function createApp(dependencies: Dependencies): Hono {
       if (body.activatePendingMemoryLanguage !== undefined && typeof body.activatePendingMemoryLanguage !== "boolean") return context.json({ error: "activatePendingMemoryLanguage must be boolean" }, 400);
       if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
       if (body.expectedSourceMessages !== undefined && (!Number.isInteger(body.expectedSourceMessages) || Number(body.expectedSourceMessages) < 0)) return context.json({ error: "expectedSourceMessages must be a non-negative integer" }, 400);
-      const setupResult = body.resolvedSetup === undefined ? undefined : ResolvedSetupProjectionSchema.safeParse(body.resolvedSetup);
+      const setupResult = body.resolvedSetup === undefined ? undefined : PickerSetupProjectionSchema.safeParse(body.resolvedSetup);
       if (setupResult && !setupResult.success) return context.json({ error: "resolvedSetup is invalid", issues: setupResult.error.issues }, 400);
       if (body.identityHints !== undefined && (typeof body.identityHints !== "object" || body.identityHints === null || Array.isArray(body.identityHints))) {
         return context.json({ error: "identityHints must be an object" }, 400);
@@ -1737,7 +1758,7 @@ export function createApp(dependencies: Dependencies): Hono {
       }
       if (needsCalibration && !setupResult?.success) {
         return context.json({
-          error: "Rendered setup is required before the first cold start. Run one normal chat request, then try rebuilding again.",
+          error: "Choose setup materials in the picker before rebuilding initial memory.",
           code: "INITIAL_SETUP_REQUIRED",
           calibration: calibrationBefore,
         }, 409);
@@ -2168,6 +2189,15 @@ export function createApp(dependencies: Dependencies): Hono {
   app.delete("/v1/chats/:id/messages/:messageId", (context) => context.json({
     ok: hardDeleteMessage(db, context.req.param("id"), context.req.param("messageId")),
   }));
+  app.put("/v1/chats/:id/work", async context => {
+    const body = z.object({ enabled: z.boolean() }).safeParse(await context.req.json().catch(() => null));
+    if (!body.success) return context.json({ error: "enabled must be boolean" }, 400);
+    const chatId = context.req.param("id");
+    const wasHeld = isChatWorkHeld(db, chatId);
+    setChatWorkEnabled(db, chatId, body.data.enabled);
+    if (body.data.enabled && wasHeld) { serverWorker.wake(); void embeddings.indexPending(chatId); }
+    return context.json({ ok: true, worker: serverWorker.statusForChat(chatId) });
+  });
   app.patch("/v1/chats/:id", async (context) => {
     const body = await context.req.json() as { profile?: unknown; includeUserMessages?: unknown; memoryLanguage?: unknown; backfill?: boolean; extractionReviewOverride?: unknown };
     const chatId = context.req.param("id");
@@ -2634,10 +2664,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const pendingExtractionAudits = countBlockingExtractionAudits(db, chatId);
     const pendingConflicts = (db.prepare("SELECT count(*) AS count FROM conflicts WHERE chat_id=? AND status='pending' AND kind<>'static_projection_changed'").get(chatId) as { count: number }).count;
     const ingestion = ingestionSummary(db, chatId);
-    const embeddingJobs = db.prepare(`SELECT
-      SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) AS pending,
-      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed
-      FROM embedding_blocks WHERE chat_id=?`).get(chatId) as { pending: number | null; failed: number | null };
+    const embeddingJobs = db.prepare("SELECT count(*) AS pending FROM embedding_blocks WHERE chat_id=? AND status='queued'").get(chatId) as { pending: number };
+    const embeddingFailures = embeddings.failedWork(chatId);
     const sourceProgress = db.prepare(`SELECT SUM(CASE WHEN memory_excluded=0 THEN 1 ELSE 0 END) total,
       SUM(CASE WHEN memory_excluded=0 AND extraction_state IN ('done','encapsulated','skipped_policy') THEN 1 ELSE 0 END) processed
       FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') AND content IS NOT NULL`).get(chatId) as { total: number; processed: number | null };
@@ -2707,7 +2735,8 @@ export function createApp(dependencies: Dependencies): Hono {
       queuedJobs: Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts,
       pendingReconciliations,
       ...ingestion,
-      pendingEmbeddings: Number(embeddingJobs.pending ?? 0), failedEmbeddings: Number(embeddingJobs.failed ?? 0),
+      pendingEmbeddings: embeddingJobs.pending, failedEmbeddings: embeddingFailures.count,
+      embeddingError: embeddingFailures.lastError,
       auxiliaryAuthFailed: (db.prepare("SELECT last_error FROM jobs WHERE chat_id=? AND status='failed'").all(chatId) as Array<{ last_error: string | null }>).some(job => isProviderAuthenticationError(job.last_error)),
       progress: { processedMessages: Number(sourceProgress.processed ?? 0), totalMessages: Number(sourceProgress.total ?? 0), excludedMessages: ingestion.excludedMessages,
         processedGroups: Number(groupProgress.processed ?? 0), totalGroups: Number(groupProgress.total ?? 0), failedGroups: Number(groupProgress.failed ?? 0),
@@ -3065,9 +3094,36 @@ export function createApp(dependencies: Dependencies): Hono {
     };
   }
   app.get("/v1/chats/:id/jobs", (context) => context.json(readDashboardJobs(context.req.param("id"))));
+  // Snapshot IDs for the confirmation; never include work queued after the user saw it.
+  const queuedReviewJobs = () => db.prepare("SELECT id FROM jobs WHERE status='queued' AND type IN ('extract','episode','social_backfill','memory_group')").all() as Array<{ id: string }>;
+  app.get('/v1/jobs/extraction-review', context => context.json({ jobIds: queuedReviewJobs().map(job => job.id) }));
+  app.put('/v1/jobs/extraction-review', async context => {
+    const { jobIds, enabled } = z.object({ jobIds: z.array(z.string().min(1)), enabled: z.boolean() }).parse(await context.req.json());
+    const updated = db.transaction(() => {
+      const eligible = new Set(queuedReviewJobs().map(job => job.id));
+      const update = db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.postExtractionReview',json(?)),updated_at=? WHERE id=? AND status='queued'");
+      return [...new Set(jobIds)].reduce((count, id) => count + (eligible.has(id) ? update.run(JSON.stringify(enabled), Date.now(), id).changes : 0), 0);
+    })();
+    return context.json({ updated });
+  });
+  app.post('/v1/chats/:id/embeddings/retry-failed', async context => {
+    const chatId = context.req.param('id');
+    try {
+      const retried = await embeddings.retryFailed(chatId);
+      if (!retried) return context.json({ error: "다시 시도할 임베딩 작업이 없어요. 처리 상태를 확인해 주세요." }, 409);
+      void embeddings.indexPending(chatId);
+      return context.json({ retried });
+    } catch (error) {
+      return context.json({ error: error instanceof Error ? error.message : "임베딩 재시도를 요청하지 못했어요." }, 409);
+    }
+  });
   app.get('/v1/chats/:id/jobs/retry-failed/estimate',context=>context.json(estimateFailedJobCalls(db,context.req.param('id'))));
   app.post("/v1/chats/:id/jobs/retry-failed", (context) => {
     const chatId = context.req.param("id");
+    if (db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND status='failed' AND type='initial_calibration'
+      AND COALESCE(json_array_length(payload_json,'$.resolvedSetup.messages'),0)=0`).get(chatId)) {
+      return context.json({ code: "INITIAL_SETUP_REQUIRED", error: "초기 설정 입력은 보관하지 않아요. 인물 → 초기 설정에서 재료를 다시 선택해 주세요." }, 409);
+    }
     const retriedRunIds = (db.prepare(`SELECT DISTINCT json_extract(payload_json,'$.backfillRunId') runId FROM jobs
       WHERE chat_id=? AND status='failed' AND json_extract(payload_json,'$.backfillRunId') IS NOT NULL`).all(chatId) as Array<{ runId: string }>).map((row) => row.runId);
     const result = db.transaction(() => {

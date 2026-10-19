@@ -330,6 +330,8 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
     extractionGroupTurns: state.settings.extractionGroupTurns[chatId] ?? 6,
     memoryLanguage: state.settings.memoryLanguages[chatId] ?? "en",
     sourceMessageCount: messages.length, sourceActiveMessageCount: messageVisibility.filter((item: any) => item.visibility === "active").length,
+    sourceMessageTimes: messages.flatMap((message: any, ordinal: number) => typeof message?.time === "number" && Number.isFinite(message.time) && message.time > 0
+      ? [{ id: String(message.chatId ?? message.id ?? `${chatId}:${ordinal}`), ordinal, time: message.time }] : []),
     messageVisibility, serverInstanceId: state.settings.serverInstances[state.settings.serverUrl.replace(/\/$/, "")],
     backfillApproved: scopeKey ? state.settings.backfillApproved[scopeKey] === true : false, postExtractionReview: state.settings.postExtractionReview,
   };
@@ -413,7 +415,7 @@ export async function readCurrentContext(
   generation?.observe(chatId, chat);
   state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   const [lore, database] = await Promise.all([
-    risuai.getCurrentLorebookEntries(),
+    risuai.getCurrentLorebookEntries?.() ?? Promise.resolve([]),
     risuai.getDatabase(["personas", "selectedPersona", "characters"]),
   ]);
   const { characterId, chatTitle, chatTitles } = chatIdentityFields(characterIndex, character, chatIndex, chat);
@@ -478,8 +480,6 @@ export async function readCurrentContext(
   const staticProjection = {
     hash: await sha256(JSON.stringify({ characterName, description, lore: loreProjection })),
     characterName,
-    description,
-    lore: loreProjection,
   };
   const canonicalSnapshot = snapshot.map((message) => ({
     ...message,

@@ -1,4 +1,4 @@
-import { syncManualCognition } from "./social-knowledge.js";
+import { addressTermAliasGuard, syncManualCognition } from "./social-knowledge.js";
 import type { ExtractionResult } from "@rcm/shared";
 import { createHash } from "node:crypto";
 import type { RcmDatabase } from "./db.js";
@@ -354,6 +354,8 @@ export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: 
     if (promise.access) for (const grant of promise.access) grant.holder = canonical(grant.holder);
   }
   for (const item of result.socialKnowledge ?? []) { item.holder = canonical(item.holder); item.subject = canonical(item.subject); }
+  const addressTerm = addressTermAliasGuard(db, chatId, result.socialKnowledge);
+  for (const entity of result.entities) entity.aliases = entity.aliases.filter(alias => !addressTerm(entity.name, alias));
   for (const item of result.relationshipBaselines ?? []) { item.from = canonical(item.from); item.to = canonical(item.to); }
   for (const item of result.physicalIntimacy ?? []) {
     item.participants = [canonical(item.participants[0]), canonical(item.participants[1])];

@@ -43,13 +43,15 @@ interface ChatOutputListenerArg {
 }
 
 interface RisuPluginApi {
+  alert?(message: string): Promise<void>;
+  parseRisuChat?(text: string, options: { processRegex: false; runVar: false; rmVar: true }): Promise<string>;
   getCharacter(): Promise<any>;
   getCurrentCharacterIndex(): Promise<number>;
   getCurrentChatIndex(): Promise<number>;
   getChatFromIndex(characterIndex: number, chatIndex: number): Promise<any | null>;
   getTranslationCache?(key: string): Promise<string | null>;
   searchTranslationCache?(partialKey: string): Promise<Array<{key: string; value: string}>>;
-  getCurrentLorebookEntries(): Promise<any[]>;
+  getCurrentLorebookEntries?(): Promise<any[]>;
   getDatabase(includeOnly?: string[] | "all"): Promise<any | null>;
   getRootDocument(): Promise<SafeRootDocument>;
   getArgument(key: string): Promise<string | number | undefined>;

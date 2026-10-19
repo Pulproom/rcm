@@ -1,3 +1,4 @@
+import { sanitizeSetupRows } from "./setup-storage.js";
 import { syncManualCognition } from "./social-knowledge.js";
 import { memoryReferenceHighWater } from "./memory-references.js";
 import { DATABASE_SCHEMA_VERSION, type RcmDatabase } from "./db.js";
@@ -43,7 +44,7 @@ type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
   version: 31 | 32 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | typeof DATABASE_SCHEMA_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -136,12 +137,17 @@ function exportArchive(db: RcmDatabase, privateData: CompleteBackupPrivateData, 
   for (const row of db.prepare(`SELECT id FROM chats${chatId ? " WHERE id=?" : ""}`).all(...(chatId ? [chatId] : [])) as Array<{ id: string }>) invalidateChangedMemoryGroups(db, row.id);
   const files: Record<string, Uint8Array> = {};
   const tables = persistentTables(db);
+  const detached: Record<string, Row[]> = {};
   for (const table of tables) {
     const rows = (db.prepare(`SELECT * FROM ${table}${chatId ? ` WHERE ${chatTableWhere(db,table)}` : ""}`).all(...(chatId ? chatTableBindings(table, chatId) : [])) as Row[]).map((row) => {
       if (table === "jobs" && ["leased", "processing"].includes(String(row.status))) return { ...row, status: "queued", lease_owner: null, leased_until: null };
       if ((table === "extraction_batches" || table === "embedding_blocks") && row.status === "processing") return { ...row, status: "queued" };
       return row;
     });
+    detached[table] = rows;
+  }
+  sanitizeSetupRows(detached);
+  for (const [table, rows] of Object.entries(detached)) {
     // Packet budgets are runtime hints, not portable canonical state.
     files[`tables/${table}.jsonl`] = strToU8(rows.filter(row => table !== "server_meta" || !String(row.key).startsWith("chat_packet_budget:")).map((row) => JSON.stringify(row)).join("\n"));
   }
@@ -165,9 +171,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, 50, 51, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, 50, 51, 52, 53, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51 or ${DATABASE_SCHEMA_VERSION})`);
+    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53 or ${DATABASE_SCHEMA_VERSION})`);
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -197,11 +203,12 @@ function archiveTables(files: Record<string, Uint8Array>): Record<string, Row[]>
     const text = strFromU8(bytes).trim();
     tables[match[1]] = text ? text.split(/\r?\n/u).map((line) => JSON.parse(line) as Row) : [];
   }
+  sanitizeSetupRows(tables);
   return tables;
 }
 
 function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): void {
-  const current = persistentTables(db).filter(table => manifest.version !== 31 || table !== "memory_references");
+  const current = persistentTables(db).filter(table => (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state"));
   if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError(`Backup database contract does not match schema ${manifest.schemaVersion}`);
   for (const table of current) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)

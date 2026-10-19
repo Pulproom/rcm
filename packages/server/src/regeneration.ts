@@ -1,4 +1,5 @@
 import { syncManualCognition } from "./social-knowledge.js";
+import { removedAliasesKey } from "./user-deletions.js";
 import { preserveRegenerationQuizzes, snapshotRegenerationQuizzes } from "./quiz.js";
 import { createHash, randomUUID } from "node:crypto";
 import { estimateTokens, ExtractionResultSchema, type ExtractionResult } from "@rcm/shared";
@@ -481,7 +482,7 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
   })();
   flushRelationshipProjectionQueue(db, chatId);
   maybeEnqueueStorySpine(db, chatId, undefined, 'regeneration');
-  db.prepare("DELETE FROM server_meta WHERE key=? AND EXISTS (SELECT 1 FROM chats WHERE id=? AND is_internal=1)").run(chatPacketBudgetKey(run.shadow_chat_id), run.shadow_chat_id);
+  db.prepare("DELETE FROM server_meta WHERE key IN (?,?) AND EXISTS (SELECT 1 FROM chats WHERE id=? AND is_internal=1)").run(chatPacketBudgetKey(run.shadow_chat_id), removedAliasesKey(run.shadow_chat_id), run.shadow_chat_id);
   db.prepare("DELETE FROM chats WHERE id=? AND is_internal=1").run(run.shadow_chat_id);
   return { batches: targetSuffixBatches.length, relationWarnings };
 }
@@ -492,7 +493,7 @@ export function discardRegeneration(db: RcmDatabase, chatId: string, runId: stri
   if (!changed.changes) throw Object.assign(new Error("Regeneration run cannot be discarded"), { code: "RUN_NOT_DISCARDABLE" });
   db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE id=(SELECT job_id FROM regeneration_runs WHERE id=?) AND status IN ('queued','leased','failed')").run(now(), runId);
   if (run?.shadow_chat_id) {
-    db.prepare("DELETE FROM server_meta WHERE key=? AND EXISTS (SELECT 1 FROM chats WHERE id=? AND is_internal=1)").run(chatPacketBudgetKey(run.shadow_chat_id), run.shadow_chat_id);
+    db.prepare("DELETE FROM server_meta WHERE key IN (?,?) AND EXISTS (SELECT 1 FROM chats WHERE id=? AND is_internal=1)").run(chatPacketBudgetKey(run.shadow_chat_id), removedAliasesKey(run.shadow_chat_id), run.shadow_chat_id);
     db.prepare("DELETE FROM chats WHERE id=? AND is_internal=1").run(run.shadow_chat_id);
   }
 }

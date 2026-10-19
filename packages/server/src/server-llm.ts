@@ -1,4 +1,4 @@
-import { withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
+import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { sanitizeDiagnosticText, assertProviderOutputAllowed } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
 import { parseReconciliationResult, repairStateRecognitionReferences } from "@rcm/shared";
@@ -619,7 +619,7 @@ async function callProvider(
   const apiKey = store.apiKeyFor(config.provider);
   if (!apiKey) throw new Error("Server LLM API key is not configured");
   const measurement = measureAuxiliaryPrompt(messages, estimateTokens, config);
-  if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: completed input needs about ${measurement.estimatedInputTokens} tokens; limit is ${measurement.maxInputTokens}. Source and intermediate results were preserved for retry.`);
+  if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(measurement.maxInputTokens)}`);
   const startedAt = Date.now();
   const timingId = randomUUID();
   store.recordTiming({ id: timingId, jobId, purpose, startedAt, outcome: "running" });
