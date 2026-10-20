@@ -39,7 +39,7 @@ export interface SocialKnowledgeItem {
   level: SocialKnowledgeLevel;
   knownAs: string[];
   addressTerms: string[];
-  cognition: Array<{ id: string; text: string }>;
+  cognition: Array<{ id: string; text: string; userEdited?:boolean }>;
   evidence: SocialEvidence[];
   manual: boolean;
   userEdited: boolean;
@@ -135,12 +135,12 @@ export function addressTermAliasGuard(db: RcmDatabase, chatId: string, incoming:
 
 function listRecordedSocialKnowledge(db: RcmDatabase, chatId: string): SocialKnowledgeItem[] {
   return socialKnowledgeView(db, chatId).map(({detailIds,...item}) => ({...item, cognition: detailIds.flatMap(id => {
-    const detail = db.prepare(`SELECT d.id,d.text FROM memory_details d JOIN memories m ON m.id=d.memory_id
+    const detail = db.prepare(`SELECT d.id,d.text,d.user_edited FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1 AND EXISTS
       (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id AND a.item_kind='detail'
        AND a.item_id=d.id AND a.active=1 AND (a.holder=? COLLATE NOCASE OR a.holder=?))`)
-      .get(id, chatId, item.holder, EVERYONE_HOLDER) as { id: string; text: string } | undefined;
-    return detail ? [detail] : [];
+      .get(id, chatId, item.holder, EVERYONE_HOLDER) as { id: string; text: string; user_edited:number } | undefined;
+    return detail ? [{id:detail.id,text:detail.text,...(detail.user_edited ? {userEdited:true} : {})}] : [];
   })}));
 }
 
@@ -224,6 +224,7 @@ export function ingestSocialKnowledge(
   memoryByKey: Map<string, string> = new Map(),
   sourceBatchId?: string,
   additionsOnly = false,
+  detailByKey: ReadonlyMap<string,string> = new Map(),
 ): number {
   const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
   if (!chat) return 0;
@@ -238,10 +239,11 @@ export function ingestSocialKnowledge(
     const addressTerms = [...new Set((item.addressTerms ?? []).map((value) => value.trim()).filter(Boolean))];
     const cognitionIds = (item.cognitionDetailKeys ?? []).map(key => {
       const memoryId = item.memoryKey && memoryByKey.get(item.memoryKey);
-      const detail = db.prepare(`SELECT d.id FROM memory_details d WHERE d.chat_id=? AND d.memory_id=?
-        AND d.detail_key=? AND d.active=1 AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id
+      const detailId = detailByKey.get(JSON.stringify([item.memoryKey,key]));
+      const detail = db.prepare(`SELECT d.id FROM memory_details d WHERE d.chat_id=?
+        AND (d.id=? OR (? IS NULL AND d.memory_id=? AND d.detail_key=?)) AND d.active=1 AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id
         AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`)
-        .get(chatId, memoryId ?? null, key, item.holder) as { id: string } | undefined;
+        .get(chatId, detailId ?? null, detailId ?? null, memoryId ?? null, key, item.holder) as { id: string } | undefined;
       if (!detail) throw new Error("Cognition detail requires live evidence and access for its holder");
       return detail.id;
     });

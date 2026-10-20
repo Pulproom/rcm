@@ -67,6 +67,8 @@ export type MemoryDetailAccessPatch = { holders: string[]; everyone: boolean; ba
 
 export type MemoryDetailAccessResponse = { ok: boolean; access: import("@rcm/shared").MemoryDetailAccess; knownBy: string[] };
 export type MemoryDetailApiItem = import("@rcm/shared").MemoryContextItem["details"][number] & {
+  userEdited?: boolean;
+  hidden?: boolean;
   access: import("@rcm/shared").MemoryDetailAccess;
   evidence: Array<{ messageId: string; quote?: string }>;
   sourceOrdinal: number | null;

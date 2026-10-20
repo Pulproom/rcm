@@ -1,3 +1,5 @@
+import { readSmallReviews, smallReviewView, resolveSmallReviews } from "./small-review.js";
+import { patchMemoryLine } from './memory-detail-edits.js';
 import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
 import { EntityColorSchema } from "@rcm/shared";
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
@@ -252,7 +254,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const health = {
       ok: true, version: RCM_SERVER_VERSION, apiRevision: RCM_API_REVISION, instanceId: serverInstanceId,
       vectorEnabled, embeddingReady: embeddings.ready, embedding: embeddings.status, reranker: reranker.status, serverTranslationCache: true, completeMemoryBackup: true,
-      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
+      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, memoryLineEditing: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
     };
     Object.assign(health.capabilities, {
       chatOperationLifecycleV2: true,
@@ -1873,9 +1875,22 @@ export function createApp(dependencies: Dependencies): Hono {
       const sourceMessageIds = JSON.parse(item.sourceMessageIds || "[]");
       const draft = JSON.parse(item.draft);
       return { ...item, sourceMessageIds, sourceFingerprint: JSON.parse(item.sourceFingerprint || "[]"), draft,
+        smallReviews: readSmallReviews(draft).map(candidate => smallReviewView(db, context.req.param("id"), sourceMessageIds, candidate)),
         patch: item.patch ? JSON.parse(item.patch) : undefined, usage: JSON.parse(item.usage || "{}"),
         ...(["pending_review", "failed"].includes(item.status) ? { evidenceReview: describeEvidenceReview(db, context.req.param("id"), item.jobId, draft, sourceMessageIds) } : {}) };
     }) });
+  });
+  app.post("/v1/chats/:id/small-reviews/resolve", async context => {
+    const body = await context.req.json().catch(() => null);
+    if (!body || !["keep", "hold", "discard", "retry"].includes(body.action) || !Array.isArray(body.items)
+      || !body.items.length || !body.items.every((item: any) => item && typeof item.auditId === "string" && typeof item.candidateId === "string")
+      || body.items.length > 1 && !["hold", "discard"].includes(body.action)) return context.json({error: "후보와 처리 방법을 확인해 주세요."}, 400);
+    try {
+      const items = resolveSmallReviews(db, context.req.param("id"), body.items, body.action);
+      if (body.action === "retry") serverWorker.wake();
+      if (body.action === "keep") void embeddings.indexPending(context.req.param("id"));
+      return context.json({items});
+    } catch (error) { return context.json({error: error instanceof Error ? error.message : "후보를 처리하지 못했어요."}, 409); }
   });
   app.get("/v1/chats/:id/extraction-batches", (context) => context.json({ items: listExtractionBatches(db, context.req.param("id")) }));
   app.post("/v1/chats/:id/extraction-batches/:batchId/preview-regeneration", async (context) => {
@@ -2037,6 +2052,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const originalJob = db.prepare("SELECT status,payload_json FROM jobs WHERE id=?").get(audit.job_id) as { status: string; payload_json: string } | undefined;
     const originalPayload = JSON.parse(originalJob?.payload_json ?? "{}");
     let retryDraft = JSON.parse(audit.draft_json);
+    if (readSmallReviews(retryDraft).length) return context.json({error: "작은 확인 목록에서 후보별로 다시 확인해 주세요."}, 409);
     const issues = inspectDraftEvidence(db, chatId, sourceMessageIds, retryDraft);
     const sourceRecovery = originalJob?.status === "done" || originalPayload.sourceRecovery === true;
     const dialogueRecovery: DialogueRecoveryCandidate[] = [];
@@ -2101,7 +2117,7 @@ export function createApp(dependencies: Dependencies): Hono {
     `).all(chatId) as Array<Record<string, unknown> & { id: string }>;
     const dialogueQuery = db.prepare("SELECT id,speaker,text,message_id AS messageId,evidence_json AS evidence,kind FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal");
     const detailQuery = db.prepare(`SELECT id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,locations_json AS locations,
-      epistemic,salience,retention_class AS retention,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal
+      user_edited AS userEdited,user_hidden AS hidden,epistemic,salience,retention_class AS retention,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal
       FROM memory_details WHERE memory_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`);
     return { items: items.map((item) => {
       let locations: string[] = [];
@@ -2122,14 +2138,26 @@ export function createApp(dependencies: Dependencies): Hono {
       })) : [];
       const details = (detailQuery.all(item.id) as Array<Record<string, any>>).map((detail) => {
         const access = memoryDetailAccess(db, chatId, detail.id);
-        return { ...detail, access, participants: JSON.parse(detail.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
+        return { ...detail, userEdited:detail.userEdited===1,hidden:detail.hidden===1, access, participants: JSON.parse(detail.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
           locations: JSON.parse(detail.locations || "[]"), evidence: JSON.parse(detail.evidence || "[]") };
       });
       const keyDialogues = (dialogueQuery.all(item.id) as Array<Record<string,any>>).map(dialogue => ({...dialogue,access:memoryDetailAccess(db,chatId,dialogue.id,"dialogue"),evidence:JSON.parse(dialogue.evidence)}));
       return { ...rest, known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
-        active: item.active === 1, bookmarked: bookmarks.has(item.id), keyDialogues, details, detailCount: details.length, episode, sections };
+        active: item.active === 1, bookmarked: bookmarks.has(item.id), keyDialogues, details, detailCount: details.filter(detail => !detail.hidden).length, episode, sections };
     }) };
   }
+  for (const kind of ['detail','event'] as const) app.patch(`/v1/chats/:id/memories/:memoryId/${kind === 'detail' ? 'details' : 'events'}/:lineId`, async context => {
+    const body = await context.req.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['text','hidden'].includes(key))
+      || (body.text === undefined && body.hidden === undefined) || (body.text !== undefined && (typeof body.text !== 'string' || !body.text.trim()))
+      || (body.hidden !== undefined && typeof body.hidden !== 'boolean')) return context.json({error:'Expected non-empty text and/or boolean hidden'},400);
+    const chatId=context.req.param('id'), memoryId=context.req.param('memoryId'), id=context.req.param('lineId');
+    const item=patchMemoryLine(db,chatId,memoryId,id,kind,body);
+    if (!item) return context.json({error:'Active memory line not found'},404);
+    if (kind==='detail') embeddings.removeDetail(id);
+    void embeddings.indexPending(chatId);
+    return context.json(item);
+  });
   app.get("/v1/chats/:id/memories", (context) => context.json(readDashboardMemories(context.req.param("id"))));
   app.get("/v1/chats/:id/messages", (context) => context.json({ items: db.prepare(`
     SELECT message_id,role,ordinal,content,lifecycle,host_visibility,visible,event_time,generation_id,extraction_state,updated_at
@@ -2148,7 +2176,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const rows = db.prepare(`SELECT d.id,d.memory_id AS memoryId,d.detail_key AS key,d.kind,d.text,d.participants_json AS participants,
         d.known_by_json AS knownBy,d.locations_json AS locations,d.epistemic,d.salience,d.retention_class AS retention,
         d.evidence_json AS evidence,d.source_start_ordinal AS sourceOrdinal,bm25(memory_detail_fts) AS rank
-        FROM memory_detail_fts JOIN memory_details d ON d.id=memory_detail_fts.detail_id
+        FROM memory_detail_fts JOIN visible_memory_details d ON d.id=memory_detail_fts.detail_id
         JOIN memories m ON m.id=d.memory_id AND m.active=1
         WHERE memory_detail_fts MATCH ? AND memory_detail_fts.chat_id=? AND d.active=1
           AND NOT ${recognitionOnlyMemorySql('m')} AND NOT ${recognitionDetailSql('d')}
@@ -2416,9 +2444,9 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   function readDashboardRelationships(chatId: string) {
     const events = (db.prepare(`SELECT id,from_entity AS "from",to_entity AS "to",changes_json AS changes,reason,evidence_json AS evidence,
-      source_memory_id AS sourceMemoryId,source_detail_id AS sourceDetailId,source_start_ordinal AS sourceOrdinal,created_revision AS createdRevision
+      user_edited AS userEdited,user_hidden AS hidden,source_memory_id AS sourceMemoryId,source_detail_id AS sourceDetailId,source_start_ordinal AS sourceOrdinal,created_revision AS createdRevision
       FROM relationship_events WHERE chat_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`).all(chatId) as Array<Record<string, any>>)
-      .map((event) => ({ ...event, changes: JSON.parse(event.changes || "[]"), evidence: JSON.parse(event.evidence || "[]") }));
+      .map((event) => ({ ...event, userEdited:event.userEdited===1,hidden:event.hidden===1, changes: JSON.parse(event.changes || "[]"), evidence: JSON.parse(event.evidence || "[]") }));
     return { items: listRelationshipProjections(db, chatId), events };
   }
   app.get("/v1/chats/:id/relationships", (context) => context.json(readDashboardRelationships(context.req.param("id"))));
@@ -2671,7 +2699,7 @@ export function createApp(dependencies: Dependencies): Hono {
       FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') AND content IS NOT NULL`).get(chatId) as { total: number; processed: number | null };
     const derivedCounts = db.prepare(`SELECT
       (SELECT COUNT(*) FROM memories WHERE chat_id=? AND active=1) memories,
-      (SELECT COUNT(*) FROM memory_details WHERE chat_id=? AND active=1) details,
+      (SELECT COUNT(*) FROM visible_memory_details WHERE chat_id=? AND active=1) details,
       (SELECT COUNT(*) FROM relationship_projection_queue WHERE chat_id=?) projectionPairs`).get(chatId, chatId, chatId) as { memories: number; details: number; projectionPairs: number };
     const latestBackfill = db.prepare(`SELECT json_extract(payload_json,'$.backfillRunId') runId,created_at createdAt
       FROM jobs WHERE chat_id=? AND type IN ('initial_calibration','extract','episode','ledger_consistency','relationship_projection','story_consolidation')

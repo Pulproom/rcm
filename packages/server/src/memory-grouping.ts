@@ -1,3 +1,4 @@
+import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { randomUUID } from "node:crypto";
 import { buildSourceUnits, estimateTokens, groupingSystemPrompt, planGroupingInputs, validateGroupingResult,
   type GroupInputStage, type GroupInputUnit, type LeasedJob, type MemoryGroupingResult, type MemoryLanguage, type RpProfile } from "@rcm/shared";
@@ -43,7 +44,7 @@ function prepareGroup(db: RcmDatabase, chatId: string, batchIds: string[], revie
     units.push({ id: ref, batchId: sourceBatch.get(unit.messageId)!, text: JSON.stringify({ ...unit, role: rows.find((row) => row.id === unit.messageId)!.role, accessibleTo: access[ref] }), supportIds: [ref], sourceRefs: [unit.ref] });
   }
   for (const memory of memories) {
-    const details = db.prepare("SELECT * FROM memory_details WHERE memory_id=? AND active=1 ORDER BY source_start_ordinal,id").all(memory.id) as any[];
+    const details = db.prepare("SELECT * FROM visible_memory_details WHERE memory_id=? AND active=1 ORDER BY source_start_ordinal,id").all(memory.id) as any[];
     const dialogues = db.prepare("SELECT * FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal,id").all(memory.id) as any[];
     const evidenceIds = [...JSON.parse(memory.evidence_json), ...details.flatMap((row) => JSON.parse(row.evidence_json))].map((item: any) => item.messageId);
     evidenceIds.push(...dialogues.map((row) => row.message_id));
@@ -225,7 +226,7 @@ export function ungroupMemories(db: RcmDatabase, chatId: string, episodeId: stri
     db.prepare("DELETE FROM memory_fts WHERE memory_id=?").run(episode.memory_id);
     db.prepare("DELETE FROM embedding_items WHERE kind='memory' AND source_id=?").run(episode.memory_id);
     const supports=storyMemorySupportIds(db,chatId,episode.memory_id ? [episode.memory_id] : []);
-    db.prepare("DELETE FROM memories WHERE chat_id=? AND id=?").run(chatId, episode.memory_id);
+    db.prepare(`DELETE FROM memories WHERE chat_id=? AND id=? AND NOT (${memoryHasLineCorrectionSql()})`).run(chatId, episode.memory_id);
     pruneDetailAccessEdits(db, chatId);
     db.prepare("DELETE FROM episode_sections WHERE episode_id=?").run(episodeId);
     db.prepare("UPDATE episodes SET status=?,memory_id=NULL,updated_at=? WHERE id=?").run(invalidated ? 'stale' : 'discarded', now(), episodeId);

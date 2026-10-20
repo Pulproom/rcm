@@ -485,7 +485,7 @@ export class EmbeddingService {
   }
 
   async #indexContextualDetails(chatId?: string): Promise<number> {
-    const rows = this.db.prepare(`SELECT d.* FROM memory_details d JOIN memories m ON m.id=d.memory_id
+    const rows = this.db.prepare(`SELECT d.* FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.active=1 AND m.active=1 AND ${searchableMemoryParentSql("m")} AND NOT ${recognitionDetailSql('d')} ${chatId ? "AND d.chat_id=?" : ""}
       ORDER BY d.chat_id,d.memory_id,d.created_at,d.id`).all(...(chatId ? [chatId] : [])) as any[];
     const groups = new Map<string, any[]>();
@@ -582,7 +582,7 @@ export class EmbeddingService {
     const rows = this.db.prepare(`
       SELECT item.rowid FROM embedding_items item
       LEFT JOIN memories memory ON memory.id=item.source_id AND memory.active=1 AND ${searchableMemoryParentSql("memory")}
-      LEFT JOIN memory_details detail ON detail.id=item.source_id AND detail.active=1
+      LEFT JOIN visible_memory_details detail ON detail.id=item.source_id AND detail.active=1
       LEFT JOIN story_spine_nodes spine ON spine.id=item.source_id AND spine.generation_id='active' AND spine.status='active' AND spine.hidden=0
       WHERE ((item.kind='memory' AND memory.id IS NULL) OR (item.kind='memory_detail' AND detail.id IS NULL)
         OR (item.kind='story_overview')
@@ -687,6 +687,11 @@ export class EmbeddingService {
       return 0;
     });
     return this.#indexQueue;
+  }
+
+  removeDetail(id: string): void {
+    const rows=this.db.prepare("SELECT rowid FROM embedding_items WHERE kind='memory_detail' AND source_id=?").all(id) as Array<{rowid:number}>;
+    this.#deleteRows(rows.map(row=>row.rowid));
   }
 
   removeMemory(memoryId: string): void {

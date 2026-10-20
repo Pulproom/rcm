@@ -51,13 +51,13 @@ export function storeAtomRelations(
   const details = new Map<string, DetailRow>();
   const currentDetails = new Set(result.memories.flatMap(memory => (memory.details ?? []).map(detail => JSON.stringify([memory.key, detail.key]))));
   const getDetail = db.prepare(`SELECT d.id,d.memory_id,d.kind,d.text,d.epistemic,d.evidence_json
-    FROM memory_details d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
+    FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
     WHERE d.chat_id=? AND d.id=? AND d.active=1 AND m.active=1`);
   const resolve = (ref: ExtractedAtomRelation["target"]): DetailRow | undefined => {
     let id: string | undefined;
     if ("atomRef" in ref) id = referenceByName.get(ref.atomRef)?.detailId;
     else if (currentDetails.has(JSON.stringify([ref.memoryKey, ref.detailKey]))) {
-      id = (db.prepare("SELECT id FROM memory_details WHERE chat_id=? AND memory_id=? AND detail_key=?")
+      id = (db.prepare("SELECT id FROM visible_memory_details WHERE chat_id=? AND memory_id=? AND detail_key=?")
         .get(chatId, memoryByKey.get(ref.memoryKey) ?? "", ref.detailKey) as { id: string } | undefined)?.id;
     }
     if (!id) return undefined;

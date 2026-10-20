@@ -1,3 +1,5 @@
+import { refreshDetailFts, memoryHasLineCorrectionSql } from './memory-detail-edits.js';
+import { refreshMemoryFts } from './memory-search-document.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { removedAliasesKey } from "./user-deletions.js";
 import { preserveRegenerationQuizzes, snapshotRegenerationQuizzes } from "./quiz.js";
@@ -441,14 +443,15 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
     db.prepare(`UPDATE physical_intimacy_milestones SET source_memory_id=NULL,source_batch_id=NULL
       WHERE chat_id=? AND manual_override=1 AND source_memory_id IN (SELECT id FROM memories WHERE chat_id=? AND user_managed=0 AND NOT is_initial_calibration_memory(memory_key))`).run(chatId, chatId);
     db.prepare("DELETE FROM atom_relations WHERE chat_id=?").run(chatId);
-    db.prepare(`DELETE FROM memories WHERE chat_id=? AND user_managed=0 AND NOT is_initial_calibration_memory(memory_key)`).run(chatId);
+    db.prepare(`DELETE FROM memories WHERE chat_id=? AND user_managed=0 AND NOT is_initial_calibration_memory(memory_key)
+      AND NOT (${memoryHasLineCorrectionSql()})`).run(chatId);
     pruneDetailAccessEdits(db, chatId);
     rewindAutomaticSuccessorsToCorrections(db,chatId);
     db.prepare("DELETE FROM assertions WHERE chat_id=? AND user_edit_ordinal IS NULL AND auto_locked=0").run(chatId);
     db.prepare("DELETE FROM beliefs WHERE chat_id=? AND user_edit_ordinal IS NULL AND auto_locked=0").run(chatId);
     db.prepare("DELETE FROM promises WHERE chat_id=? AND user_edit_ordinal IS NULL AND auto_locked=0").run(chatId);
     db.prepare("DELETE FROM promise_events WHERE chat_id=? AND promise_id NOT IN (SELECT id FROM promises WHERE chat_id=? AND user_edit_ordinal IS NOT NULL)").run(chatId,chatId);
-    db.prepare("DELETE FROM relationship_events WHERE chat_id=? AND source_batch_id IS NOT NULL").run(chatId);
+    db.prepare("DELETE FROM relationship_events WHERE chat_id=? AND source_batch_id IS NOT NULL AND user_edited=0 AND user_hidden=0").run(chatId);
     db.prepare("UPDATE physical_intimacy_milestones SET active=0 WHERE chat_id=? AND source_batch_id IS NOT NULL AND manual_override=0").run(chatId);
     db.prepare("DELETE FROM social_knowledge_events WHERE chat_id=? AND manual=0 AND (source_memory_id IS NULL OR source_memory_id NOT IN (SELECT id FROM memories WHERE is_initial_calibration_memory(memory_key)))").run(chatId);
     db.prepare("DELETE FROM relationship_projection_queue WHERE chat_id=?").run(chatId);
@@ -474,6 +477,10 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
         `replay:${runId}:${id}`, id));
       replayBatchMap.set(row.id, id);
       targetSuffixBatches.push({ id, result });
+    }
+    for (const memory of db.prepare(`SELECT id FROM memories WHERE chat_id=? AND (${memoryHasLineCorrectionSql()})`).all(chatId) as Array<{id:string}>) {
+      refreshMemoryFts(db,memory.id);
+      for (const detail of db.prepare('SELECT id FROM memory_details WHERE memory_id=?').all(memory.id) as Array<{id:string}>) refreshDetailFts(db,detail.id);
     }
     relationWarnings.push(...restoreCanonicalRelations(db, chatId, relationSnapshots, replayBatchMap));
     syncManualCognition(db,chatId);

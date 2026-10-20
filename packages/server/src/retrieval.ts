@@ -871,7 +871,7 @@ function intentCandidateIds(db: RcmDatabase, chatId: string, intent: RecallInten
   }
   if (intent === "relationship") {
     const rows = db.prepare(`
-      SELECT source_memory_id AS id FROM relationship_events
+      SELECT source_memory_id AS id FROM visible_relationship_events
       WHERE chat_id=? AND active=1 AND source_memory_id IS NOT NULL
       ORDER BY created_revision DESC LIMIT 120
     `).all(chatId) as Array<{ id: string }>;
@@ -991,7 +991,7 @@ function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuery
       });
       const details = db.prepare(`SELECT detail_id AS id,memory_id,text,participants,locations,bm25(memory_detail_fts) AS rank FROM memory_detail_fts
         WHERE memory_detail_fts MATCH ? AND chat_id=?
-          AND detail_id IN (SELECT d.id FROM memory_details d WHERE NOT ${recognitionDetailSql('d')})
+          AND detail_id IN (SELECT d.id FROM visible_memory_details d WHERE NOT ${recognitionDetailSql('d')})
         ORDER BY rank LIMIT 120`).all(ftsQuery, chatId) as Array<{ id: string; memory_id: string; text: string; participants: string; locations: string }>;
       details.forEach((row) => {
         const { score, matched } = coverage(`${row.text} ${row.participants} ${row.locations}`);
@@ -1536,7 +1536,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       WHERE m.chat_id=? AND m.active=1 AND ${searchableMemoryParentSql("m")}
         AND EXISTS (SELECT 1 FROM json_each(m.participants_json) p JOIN json_each(?) person ON p.value=person.value COLLATE NOCASE)
       ORDER BY h.last_turn_seq IS NOT NULL,h.last_turn_seq,m.created_revision,m.id LIMIT 256`).all(options.chatId, JSON.stringify(people)) as Array<{id:string}>;
-    const seedCandidates=db.prepare(`SELECT DISTINCT d.memory_id id FROM memory_details d JOIN memories m ON m.id=d.memory_id
+    const seedCandidates=db.prepare(`SELECT DISTINCT d.memory_id id FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND json_extract(d.seed_json,'$.status')='open'
       AND EXISTS(SELECT 1 FROM json_each(d.seed_json,'$.noticedBy') observer JOIN json_each(?) actor ON observer.value=actor.value COLLATE NOCASE)
       ORDER BY d.source_start_ordinal,d.id`).all(options.chatId,JSON.stringify(options.activePerspectives ?? [perspective])) as Array<{id:string}>;
@@ -1571,7 +1571,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     WHERE chat_id=? AND memory_id IN (${placeholders}) ORDER BY memory_id,ordinal
   `).all(options.chatId, ...candidates) as Array<{ id: string; memory_id: string; speaker: string; text: string; message_id: string; evidence_json: string; kind: KeyDialogue["kind"]; ordinal: number }> : [];
   const detailRows = candidates.length > 0 ? db.prepare(`SELECT id,memory_id,detail_key,kind,role,seed_json,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal
-    FROM memory_details d WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) AND NOT ${recognitionDetailSql('d')}
+    FROM visible_memory_details d WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) AND NOT ${recognitionDetailSql('d')}
     ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`).all(options.chatId, ...candidates) as Array<Record<string, any>> : [];
   const accessByItem = loadItemAccess(db, options.chatId, [
     ...dialogueRows.map((row) => ({ kind: "dialogue" as const, id: row.id })),

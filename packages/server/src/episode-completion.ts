@@ -1,3 +1,5 @@
+import { recordSmallReviews } from "./small-review.js";
+import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import type { JobTrigger } from "@rcm/shared";
 import { maybeEnqueueQuiz } from "./quiz.js";
 import { randomUUID } from "node:crypto";
@@ -64,6 +66,7 @@ export function completeEpisodeJob(
     | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
   const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; episodeId?: string; postExtractionReview?: boolean; batchId?: string; backfillRunId?: string; trigger?: JobTrigger };
+  recordAuditAdditionDrops(db, jobId, payload, audit);
   const sourceMessageIds = payload.sourceMessageIds ?? [];
   const episodeId = payload.episodeId ?? "";
   const sourceSet = new Set(sourceMessageIds);
@@ -160,6 +163,8 @@ export function completeEpisodeJob(
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status='applied',draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(JSON.stringify(prepared), JSON.stringify(extraction), audit?.patch ? JSON.stringify(audit.patch) : null, now(), payload.batchId);
     lockInitialCalibration(db, job.chat_id);
     const parent = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=?").get(job.chat_id, `episode:${episodeId}`) as { id: string };
+    pendingReconciliations = Math.max(0, pendingReconciliations - recordSmallReviews(db, job.chat_id, jobId, sourceMessageIds, reviewDraft,
+      payload.batchId ?? jobId, audit?.patch?.keepPendingItemRefs, new Map([[`episode:${episodeId}`, parent.id]])));
     const children = previousChildren.filter((id) => id !== parent.id);
     if (children.length > 0) {
       const placeholders = children.map(() => "?").join(",");

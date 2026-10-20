@@ -60,12 +60,17 @@ export const ICONS: Record<string, string> = {
   landmark: '<path d="M12 3.5 20.5 12 12 20.5 3.5 12z"/>',
   down: '<path d="m7 10 5 5 5-5"/>',
   up: '<path d="m7 14 5-5 5 5"/>',
+  rise: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
+  fall: '<path d="M12 5v14m-6-6 6 6 6-6"/>',
   swap: '<path d="M7 7h12m-3-3 3 3-3 3M17 17H5m3-3-3 3 3 3"/>',
   shield: '<path d="M12 3 5 6v6c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6z"/>',
   rings: '<circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5"/>',
   cloud: '<path d="M7 18h10a4 4 0 0 0 .6-7.96A6 6 0 0 0 6.2 9.1 4.5 4.5 0 0 0 7 18z"/>',
   flame: '<path d="M12 21c-3.5 0-6-2.4-6-5.6 0-3 2-4.6 3.3-6.6.2 1.6 1 2.6 2 3 0-3.2 1.4-5.8 3.7-7.8 0 3.8 3 5.6 3 10 0 4.2-2.6 7-6 7z"/>',
   bolt: '<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>',
+  calendar: '<rect x="4" y="5" width="16" height="15" rx="3"/><path d="M8 3v4M16 3v4M4 10h16"/>',
+  sparkle: '<path d="M12 3.5c.6 4.2 2.8 6.4 7 7-4.2.6-6.4 2.8-7 7-.6-4.2-2.8-6.4-7-7 4.2-.6 6.4-2.8 7-7Z"/>',
+  quote: '<path d="M5 18c4-1 6-4 6-9V6H5v6h4M14 18c4-1 6-4 6-9V6h-6v6h4"/>',
   heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',
   pencil: '<path d="m4.5 19.5 4-1 11-11-3-3-11 11z"/><path d="m14.5 5.5 3 3"/>',
   alert: '<path d="M12 4.2 2.8 20.2h18.4L12 4.2Z"/><path d="M12 10.2v4m0 3h.01"/>',
@@ -171,12 +176,12 @@ export function menu(opts: { label: string; title?: string; items: Array<MenuIte
 }
 
 /** `actions` (a `menu()`) sits at the summary's right edge, outside the summary so it never toggles the fold. */
-export function fold(summary: string, body: string, opts: { count?: number; open?: boolean; preserveKey?: string; actions?: string; role?: "more" | "section" } = {}): string {
+export function fold(summary: string, body: string, opts: { count?: number; open?: boolean; preserveKey?: string; actions?: string; role?: "more" | "section" | "hidden-lines"; marks?: string } = {}): string {
   const more = opts.role === "more" && lex().skin === "phone";
   const label = more ? `${opts.count ?? 0}개 더 보기` : summary;
   const count = more || opts.count === undefined ? "" : `<span class="n">${opts.count}</span>`;
   const preserve = opts.preserveKey ? ` data-preserve-open="${escapeHtml(opts.preserveKey)}"` : "";
-  const details = `<details class="fold${opts.role ? ` fold--${opts.role}` : ""}"${opts.open ? " open" : ""}${preserve}><summary><span>${escapeHtml(label)}</span>${count}<span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${body}</div></details>`;
+  const details = `<details class="fold${opts.role ? ` fold--${opts.role}` : ""}"${opts.open ? " open" : ""}${preserve}><summary><span>${escapeHtml(label)}</span>${opts.marks ?? ""}${count}<span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${body}</div></details>`;
   return opts.actions ? `<div class="foldbox">${details}<div class="foldbox__acts">${opts.actions}</div></div>` : details;
 }
 

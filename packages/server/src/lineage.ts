@@ -1,3 +1,4 @@
+import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { readRemovedAliases, removedAliasesKey } from "./user-deletions.js";
 import { parseSocialRelation } from "./social-relations.js";
@@ -375,6 +376,7 @@ function cloneLineage(
 
     const boundaryMessageIds = new Set<string>();
     const eligibleMemory = (row: any): boolean => {
+      if (options.preserveUserCorrections && (row.user_edited || row.user_hidden || db.prepare(`SELECT 1 FROM memories WHERE id=? AND (${memoryHasLineCorrectionSql()})`).get(row.id))) return true;
       const ids = json<Array<{ messageId?: string }>>(row.evidence_json, []).map((item) => item.messageId).filter(Boolean);
       if (!ids.length) return row.created_revision <= parentChat.revision;
       const located = ids.map((id) => ({ id, ordinal: (db.prepare("SELECT ordinal FROM messages WHERE chat_id=? AND message_id=?").get(parent, id) as { ordinal: number } | undefined)?.ordinal })).filter((item): item is { id: string; ordinal: number } => item.ordinal !== undefined);
@@ -414,7 +416,8 @@ function cloneLineage(
         if (seed?.closureEvidence) seed.closureEvidence=seed.closureEvidence.map((e:{messageId:string})=>({...e,messageId:messageMap.get(e.messageId)??e.messageId}));
         db.prepare(`INSERT INTO memory_details(id,chat_id,memory_id,detail_key,kind,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal,source_end_ordinal,active,created_revision,created_at,updated_at,role,original_kind,seed_json)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(detailId, child, id, detail.detail_key, detail.kind, detail.text, detail.participants_json, detail.known_by_json, detail.locations_json, detail.epistemic, detail.salience, detail.retention_class, detail.evidence_json, detail.source_start_ordinal, detail.source_end_ordinal, detail.active, detail.created_revision, now, now, detail.role, detail.original_kind, seed ? JSON.stringify(seed) : null);
-        db.prepare("INSERT INTO memory_detail_fts(detail_id,chat_id,memory_id,text,participants,locations) VALUES(?,?,?,?,?,?)").run(detailId, child, id,
+        db.prepare("UPDATE memory_details SET user_edited=?,user_hidden=?,original_text=? WHERE id=?").run(detail.user_edited,detail.user_hidden,detail.original_text,detailId);
+        if (!detail.user_hidden) db.prepare("INSERT INTO memory_detail_fts(detail_id,chat_id,memory_id,text,participants,locations) VALUES(?,?,?,?,?,?)").run(detailId, child, id,
           augmentSearchText(detail.text, inheritedLanguage), augmentSearchText(detail.participants_json, inheritedLanguage), augmentSearchText(detail.locations_json, inheritedLanguage));
         mapItem(db, child, "memory_detail", detailId, detail.id);
       }
@@ -581,11 +584,12 @@ function cloneLineage(
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.participant_a, row.participant_b, row.milestone_key, row.act, row.custom_label, row.initiator, row.interaction_context, row.circumstance, row.evidence_json, memoryMap.get(row.source_memory_id) ?? null, row.source_start_ordinal, row.auto_inject ?? 1, row.manual_override ?? 0, row.deleted_by_user ?? 0, row.active, row.created_revision, row.created_at);
       mapItem(db, child, "physical_intimacy_milestone", id, row.id);
     }
-    for (const row of db.prepare("SELECT * FROM relationship_events WHERE chat_id=? AND active=1 AND COALESCE(source_end_ordinal,?)<=? ORDER BY created_at").all(parent, fork, fork) as any[]) {
+    for (const row of db.prepare("SELECT * FROM relationship_events WHERE chat_id=? AND active=1 AND (COALESCE(source_end_ordinal,?)<=? OR ? AND (user_edited=1 OR user_hidden=1)) ORDER BY created_at").all(parent, fork, fork,Number(options.preserveUserCorrections)) as any[]) {
       const id = randomUUID();
       relationshipEventMap.set(row.id, id);
       db.prepare(`INSERT INTO relationship_events(id,chat_id,from_entity,to_entity,changes_json,reason,evidence_json,source_memory_id,source_detail_id,source_job_id,source_start_ordinal,source_end_ordinal,active,created_revision,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.from_entity, row.to_entity, row.changes_json, row.reason, row.evidence_json, memoryMap.get(row.source_memory_id) ?? null, detailMap.get(row.source_detail_id) ?? null, `lineage:${row.source_job_id ?? row.id}`, row.source_start_ordinal, row.source_end_ordinal, row.active, row.created_revision, row.created_at);
+      db.prepare("UPDATE relationship_events SET user_edited=?,user_hidden=?,original_text=? WHERE id=?").run(row.user_edited,row.user_hidden,row.original_text,id);
       mapItem(db, child, "relationship_event", id, row.id); counts.relationshipEvents = (counts.relationshipEvents ?? 0) + 1;
     }
     const reusableRelationshipPairs = new Set<string>();
@@ -672,6 +676,7 @@ function cloneLineage(
         // access, so lineage preserves them with the manual assertion.
         if (itemKind === "assertion") { safe.push(access); continue; }
         if (itemKind === "promise" && options.preserveUserCorrections && db.prepare("SELECT 1 FROM promises WHERE id=? AND user_edit_ordinal IS NOT NULL").get(parentId)) { safe.push(access); continue; }
+        if (itemKind === "detail" && options.preserveUserCorrections && db.prepare("SELECT 1 FROM memory_details WHERE id=? AND (user_edited=1 OR user_hidden=1)").get(parentId)) {safe.push(access);continue;}
         if (itemKind === "detail" && db.prepare(`SELECT 1 FROM memory_details d JOIN memories m ON m.id=d.memory_id
           WHERE d.chat_id=? AND d.id=? AND m.user_managed=1`).get(parent,parentId)) { safe.push(access); continue; }
         // Initial recognition is grounded in setup, not a transcript message.
@@ -803,6 +808,24 @@ function cloneLineage(
         id, child, jobId, row.item_ref, row.item_kind, remapJson(row.incoming_json, ledgerIds), remapJson(row.candidates_json, ledgerIds), remapJson(row.model_decision_json ?? "null", ledgerIds), row.model_error, row.source_message_ids_json, row.created_revision, now,
       );
       mapItem(db, child, "reconciliation_review", id, row.id); counts.reviews = (counts.reviews ?? 0) + 1;
+    }
+    // Audit-only candidates follow an inherited prefix without activating atoms.
+    for (const row of db.prepare("SELECT * FROM extraction_audits WHERE chat_id=? AND json_type(draft_json,'$.smallReviews')='array'").all(parent) as any[]) {
+      const sources = json<string[]>(row.source_message_ids_json, []);
+      if (!sources.length || !sources.every(id => (db.prepare("SELECT ordinal FROM messages WHERE chat_id=? AND message_id=?").get(parent, id) as {ordinal: number} | undefined)?.ordinal! <= fork)) continue;
+      const draft = JSON.parse(row.draft_json);
+      draft.smallReviews = draft.smallReviews.flatMap((candidate: any) => {
+        if (candidate.parentMemoryId && !memoryMap.has(candidate.parentMemoryId)) return [];
+        const {retryJobId: _retry, ...copy} = candidate;
+        return [{...copy, parentMemoryId: candidate.parentMemoryId ? memoryMap.get(candidate.parentMemoryId) : undefined}];
+      });
+      if (!draft.smallReviews.length) continue;
+      const jobId = randomUUID(), id = randomUUID();
+      db.prepare("INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'extract','done',?,0,?,?)")
+        .run(jobId, child, JSON.stringify({sourceMessageIds: sources, inheritedReview: true}), now, now);
+      const revision = (db.prepare("SELECT revision FROM chats WHERE id=?").get(child) as {revision: number}).revision;
+      db.prepare("INSERT INTO extraction_audits(id,chat_id,job_id,status,source_message_ids_json,source_fingerprint_json,source_revision,draft_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(id, child, jobId, row.status, row.source_message_ids_json, JSON.stringify(sourceFingerprint(db, child, sources)), revision, JSON.stringify(draft), now, now);
     }
     const futureMessageIds = (db.prepare("SELECT message_id FROM messages WHERE chat_id=? AND ordinal>?").all(parent, fork) as Array<{ message_id: string }>).map((item) => item.message_id);
     for (const row of db.prepare("SELECT * FROM conflicts WHERE chat_id=? AND status='pending'").all(parent) as any[]) {

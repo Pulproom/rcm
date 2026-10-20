@@ -110,7 +110,7 @@ function storyLedgerSource(table: StoryLedgerTable): string {
 function ledgerSupportIsLive(db: RcmDatabase, chatId: string, table: StoryLedgerTable, row: Record<string, any>): boolean {
   if (table === 'beliefs' && (row.status === 'pending_review' || row.status === 'disputed' || row.source?.startsWith('user_deleted:'))) return false;
   if (table === 'promises' && row.status === 'invalidated') return false;
-  if (table === 'relationship_events' && !row.active) return false;
+  if (table === 'relationship_events' && (!row.active || row.user_hidden)) return false;
   if (row.user_edit_ordinal != null || row.auto_locked) return true;
   if (row.source_memory_id && !db.prepare("SELECT 1 FROM memories WHERE chat_id=? AND id=? AND active=1").get(chatId,row.source_memory_id)) return false;
   // Deleted middle sources are frozen provenance, not rollback. Do not use
@@ -128,7 +128,7 @@ function storySupportIsLive(db: RcmDatabase, chatId: string, itemId: string): bo
   const separator=itemId.indexOf(':');
   const kind=itemId.slice(0,separator), id=itemId.slice(separator+1);
   if (kind === 'memory') return !!db.prepare("SELECT 1 FROM memories WHERE chat_id=? AND id=? AND active=1").get(chatId,id);
-  if (kind === 'detail' || kind === 'dialogue') return !!db.prepare(`SELECT 1 FROM ${kind==='detail'?'memory_details':'memory_dialogues'} atom
+  if (kind === 'detail' || kind === 'dialogue') return !!db.prepare(`SELECT 1 FROM ${kind==='detail'?'visible_memory_details':'memory_dialogues'} atom
     JOIN memories memory ON memory.id=atom.memory_id AND memory.active=1
     WHERE atom.chat_id=? AND atom.id=? ${kind==='detail'?'AND atom.active=1':''}`).get(chatId,id);
   if (!ledgerTables.includes(kind as StoryLedgerTable)) return false;
@@ -187,7 +187,7 @@ function atomsForRange(db: RcmDatabase, chatId: string, startOrdinal: number, en
       ) source_end_ordinal
     FROM memories m
     JOIN extraction_batches b ON b.id=m.source_batch_id AND b.status='applied'
-    LEFT JOIN memory_details d ON d.memory_id=m.id AND d.active=1
+    LEFT JOIN visible_memory_details d ON d.memory_id=m.id AND d.active=1
     WHERE m.chat_id=? AND m.active=1
     GROUP BY m.id)
     WHERE MAX(source_end_ordinal,COALESCE(detail_end_ordinal,source_end_ordinal),COALESCE(dialogue_end_ordinal,source_end_ordinal))>=?
@@ -196,7 +196,7 @@ function atomsForRange(db: RcmDatabase, chatId: string, startOrdinal: number, en
   `).all(chatId, startOrdinal, endOrdinal) as Array<Record<string, any>>;
   const memoryIds = memories.map((row) => String(row.id));
   const placeholders = memoryIds.length ? memoryIds.map(() => "?").join(",") : "NULL";
-  const details = db.prepare(`SELECT id,memory_id,kind,role,text,known_by_json,source_start_ordinal,source_end_ordinal FROM memory_details WHERE active=1 AND memory_id IN (${placeholders}) ORDER BY source_start_ordinal,created_at`)
+  const details = db.prepare(`SELECT id,memory_id,kind,role,text,known_by_json,source_start_ordinal,source_end_ordinal FROM visible_memory_details WHERE active=1 AND memory_id IN (${placeholders}) ORDER BY source_start_ordinal,created_at`)
     .all(...memoryIds) as Array<Record<string, any>>;
   const dialogues = db.prepare(`SELECT dialogue.id,dialogue.memory_id,dialogue.speaker,dialogue.text,dialogue.message_id,dialogue.ordinal,
       COALESCE((SELECT MIN(msg.ordinal) FROM json_each(dialogue.evidence_json) evidence
@@ -1019,7 +1019,7 @@ function timelineMemoryIdsForLeaves(db: RcmDatabase, leaves: string[]): string[]
     }
   }
   if (detailIds.length) {
-    const rows = db.prepare(`SELECT memory_id FROM memory_details WHERE id IN (${detailIds.map(() => "?").join(",")})`).all(...detailIds) as Array<{ memory_id: string }>;
+    const rows = db.prepare(`SELECT memory_id FROM visible_memory_details WHERE id IN (${detailIds.map(() => "?").join(",")})`).all(...detailIds) as Array<{ memory_id: string }>;
     rows.forEach((row) => memoryIds.add(row.memory_id));
   }
   if (dialogueIds.length) {
@@ -1215,7 +1215,7 @@ export function expandArcHits(
       } else if (leaf.startsWith("detail:")) {
         const detailId = leaf.slice(7);
         detailScores.set(detailId, Math.max(detailScores.get(detailId) ?? 0, leafScore));
-        const parent = db.prepare("SELECT memory_id FROM memory_details WHERE id=? AND chat_id=? AND active=1").get(detailId, chatId) as { memory_id: string } | undefined;
+        const parent = db.prepare("SELECT memory_id FROM visible_memory_details WHERE id=? AND chat_id=? AND active=1").get(detailId, chatId) as { memory_id: string } | undefined;
         if (parent) memoryScores.set(parent.memory_id, Math.max(memoryScores.get(parent.memory_id) ?? 0, leafScore));
         diagnostics.push({ arcNodeId: arc.id, semanticScore: arc.score, leafId: leaf, outcome: "expanded" });
       } else if (leaf.startsWith("dialogue:")) {
@@ -1313,7 +1313,7 @@ export function createStorySpineCompiler(
     SELECT value item_id FROM json_each(?)
   ), parents AS (
     SELECT item_id,substr(item_id,8) memory_id FROM supports WHERE substr(item_id,1,7)='memory:'
-    UNION ALL SELECT s.item_id,d.memory_id FROM supports s JOIN memory_details d ON d.id=substr(s.item_id,8) WHERE substr(s.item_id,1,7)='detail:' AND d.chat_id=? AND d.active=1
+    UNION ALL SELECT s.item_id,d.memory_id FROM supports s JOIN visible_memory_details d ON d.id=substr(s.item_id,8) WHERE substr(s.item_id,1,7)='detail:' AND d.chat_id=? AND d.active=1
     UNION ALL SELECT s.item_id,d.memory_id FROM supports s JOIN memory_dialogues d ON d.id=substr(s.item_id,10) WHERE substr(s.item_id,1,9)='dialogue:' AND d.chat_id=?
   ) SELECT p.item_id,m.id,m.story_time,m.locations_json FROM parents p JOIN memories m ON m.id=p.memory_id WHERE m.chat_id=? AND m.active=1`)
     .all(JSON.stringify(leaves), chatId, chatId, chatId) as Array<{ item_id: string; id: string; story_time: string | null; locations_json: string }>;

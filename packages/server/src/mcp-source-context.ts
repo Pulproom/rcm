@@ -78,7 +78,7 @@ function substantiallySameRange(left:McpSourceRange,right:McpSourceRange):boolea
 }
 
 function citationMetadata(db:RcmDatabase,chatId:string,source:Source,sourceRange:McpSourceRange):McpSourceMetadata[] {
-  const rows=db.prepare(`SELECT locations_json,evidence_json FROM memory_details
+  const rows=db.prepare(`SELECT locations_json,evidence_json FROM visible_memory_details
     WHERE chat_id=? AND active=1 AND EXISTS(
       SELECT 1 FROM json_each(evidence_json) WHERE json_extract(value,'$.messageId')=?)`)
     .all(chatId,source.message_id) as Array<{locations_json:string;evidence_json:string}>;
@@ -147,7 +147,7 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
     const positions:Located[]=[];
     const detail=item.details.find(candidate=>memoryDetailAtomKey(candidate)===evidence.atomKey);
     if(detail){
-      const row=db.prepare("SELECT evidence_json FROM memory_details WHERE chat_id=? AND id=? AND active=1").get(chatId,detail.id) as {evidence_json:string}|undefined;
+      const row=db.prepare("SELECT evidence_json FROM visible_memory_details WHERE chat_id=? AND id=? AND active=1").get(chatId,detail.id) as {evidence_json:string}|undefined;
       for(const citation of JSON.parse(row?.evidence_json??"[]") as Array<{messageId?:string;quote?:string}>){
         if(!citation.messageId||!citation.quote||promptSources.has(citation.messageId))continue;
         const current=source(citation.messageId);const start=current?.canonical_content.indexOf(citation.quote)??-1;

@@ -6,6 +6,14 @@ import { sourceFingerprint, type SourceFingerprintItem } from "./source-fingerpr
 
 type Evidence = { messageId: string; quote?: string };
 
+/** Quiet job diagnostics, carried through payload rewrites and list projection. */
+export function recordAuditAdditionDrops(db: RcmDatabase, jobId: string, payload: object, audit?: ExtractionAuditSubmission): void {
+  if (!audit?.additionDrops?.length) return;
+  Object.assign(payload, { auditAdditionDrops: audit.additionDrops });
+  db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.auditAdditionDrops',json(?)) WHERE id=?")
+    .run(JSON.stringify(audit.additionDrops), jobId);
+}
+
 function refSetAccess(result: ExtractionDraftResult, itemRef: string, grants: any[]): boolean {
   const relationIndex = /^relation:(\d+)$/.exec(itemRef)?.[1];
   if (relationIndex !== undefined && result.atomRelations?.[Number(relationIndex)]) {

@@ -45,7 +45,7 @@ export function resolveAssertionHolders(db: RcmDatabase, chatId: string, row: an
   const evidence = parse(row.evidence_json);
   if (!evidence.length) return [];
   const evidenceKeys = new Set(evidence.map(evidenceKey));
-  const details = db.prepare(`SELECT d.id,d.evidence_json,d.known_by_json FROM memory_details d
+  const details = db.prepare(`SELECT d.id,d.evidence_json,d.known_by_json FROM visible_memory_details d
     JOIN memories m ON m.id=d.memory_id
     WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND (? IS NULL OR d.memory_id=?)`).all(chatId, row.source_memory_id, row.source_memory_id) as Array<{ id: string; evidence_json: string; known_by_json: string }>;
   const matching = details.filter((detail) => parse(detail.evidence_json).some((item: any) => evidenceKeys.has(evidenceKey(item))));
@@ -136,12 +136,12 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       { subject: `${item.holder} → ${item.knownAs[0] ?? "unnamed person"}`, body: item.cognition.map(detail => detail.text).join(" "), recognitionLevel: item.level });
   }
   for (const row of db.prepare("SELECT * FROM social_knowledge_events WHERE chat_id=? AND active=1 ORDER BY source_end_ordinal DESC,created_revision DESC,id").iterate(chatId) as Iterable<any>) {
-    const details = parse(row.cognition_detail_ids_json).flatMap(id => db.prepare(`SELECT d.text FROM memory_details d JOIN memories m ON m.id=d.memory_id WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1 AND EXISTS(SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`).all(id, chatId, row.holder) as { text: string }[]);
+    const details = parse(row.cognition_detail_ids_json).flatMap(id => db.prepare(`SELECT d.text FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1 AND EXISTS(SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`).all(id, chatId, row.holder) as { text: string }[]);
     if (!details.length) continue;
     add("recognition_history", row, `Recorded recognition change for ${row.holder} about ${parse(row.known_as_json).join(", ") || "an unnamed person"} (${row.action}): ${details.map(detail => detail.text).join(" ")}`, [row.holder], [row.holder, row.subject], false);
   }
   for (const row of listRelationshipProjections(db, chatId)) {
-    const basis = row.basisEventIds.map(id => db.prepare("SELECT evidence_json FROM relationship_events WHERE chat_id=? AND id=? AND active=1").get(chatId,id) as {evidence_json:string} | undefined);
+    const basis = row.basisEventIds.map(id => db.prepare("SELECT evidence_json FROM visible_relationship_events WHERE chat_id=? AND id=? AND active=1").get(chatId,id) as {evidence_json:string} | undefined);
     if (!row.userEdited && !row.locked && basis.some(event => !event)) { rejected("relationship", `${row.from}:${row.to}`, "inactive_basis"); continue; }
     const basisEvidence = JSON.stringify(basis.flatMap(event => event ? parse(event.evidence_json) : []));
     const summary = row.summary || Object.entries(row.axes).filter(([, axis]) => axis.level !== "unknown").map(([axis, value]) => `${axis}: ${value.level}`).join("; ");
@@ -151,7 +151,7 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       add("relationship_axis",{id:`${row.from}:${row.to}:${axis}`,evidence_json:basisEvidence,...row},`${row.from} toward ${row.to} — ${axis}: ${value.level}; trend: ${value.trend}.`,[row.from],[row.from,row.to],true);
     }
   }
-  for (const row of db.prepare("SELECT * FROM relationship_events WHERE chat_id=? AND active=1 ORDER BY source_end_ordinal DESC,created_revision DESC,id").iterate(chatId) as Iterable<any>) {
+  for (const row of db.prepare("SELECT * FROM visible_relationship_events WHERE chat_id=? AND active=1 ORDER BY source_end_ordinal DESC,created_revision DESC,id").iterate(chatId) as Iterable<any>) {
     add("relationship_history", row, `${row.from_entity} → ${row.to_entity}: ${row.reason}. Recorded change: ${parse(row.changes_json).map(change => `${change.axis}: ${change.effect} (${change.impact})`).join("; ")}`, [row.from_entity], [row.from_entity, row.to_entity], false);
   }
   const milestones = db.prepare("SELECT * FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND deleted_by_user=0 ORDER BY source_start_ordinal,id").all(chatId) as any[];

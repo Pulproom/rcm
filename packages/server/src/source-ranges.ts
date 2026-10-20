@@ -109,7 +109,7 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
   const memories = db.prepare(`SELECT m.id,m.source_batch_id,m.evidence_json FROM memories m WHERE m.chat_id=? AND m.active=1
     ${matching ? `AND (m.source_batch_id IN (SELECT value FROM json_each(?)) OR EXISTS (
       SELECT 1 FROM json_each(m.evidence_json) e WHERE json_extract(e.value,'$.messageId') IN (SELECT value FROM json_each(?))) OR EXISTS (
-      SELECT 1 FROM memory_details d,json_each(d.evidence_json) e WHERE d.memory_id=m.id AND d.active=1
+      SELECT 1 FROM visible_memory_details d,json_each(d.evidence_json) e WHERE d.memory_id=m.id AND d.active=1
         AND json_extract(e.value,'$.messageId') IN (SELECT value FROM json_each(?))) OR EXISTS (
       SELECT 1 FROM memory_dialogues d,json_each(d.evidence_json) e WHERE d.memory_id=m.id
         AND json_extract(e.value,'$.messageId') IN (SELECT value FROM json_each(?))))` : ''}`)
@@ -118,7 +118,7 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
   for (const memory of memories) relatedEvidence.set(memory.id, new Set((JSON.parse(memory.evidence_json) as Array<{ messageId: string }>).map((item) => item.messageId)));
   const memoryFilter = matching ? 'AND memory_id IN (SELECT value FROM json_each(?))' : '';
   const memoryParams = matching ? [JSON.stringify(memories.map(memory => memory.id))] : [];
-  for (const row of db.prepare(`SELECT memory_id,evidence_json FROM memory_details WHERE chat_id=? AND active=1 ${memoryFilter}`).all(chatId, ...memoryParams) as Array<{ memory_id: string; evidence_json: string }>) {
+  for (const row of db.prepare(`SELECT memory_id,evidence_json FROM visible_memory_details WHERE chat_id=? AND active=1 ${memoryFilter}`).all(chatId, ...memoryParams) as Array<{ memory_id: string; evidence_json: string }>) {
     for (const item of JSON.parse(row.evidence_json) as Array<{ messageId: string }>) relatedEvidence.get(row.memory_id)?.add(item.messageId);
   }
   for (const row of db.prepare(`SELECT memory_id,evidence_json FROM memory_dialogues WHERE chat_id=? ${memoryFilter}`).all(chatId, ...memoryParams) as Array<{ memory_id: string; evidence_json: string }>) {
@@ -224,14 +224,14 @@ export function currentMemoryPreview(db: RcmDatabase, chatId: string, batchIds: 
     WHERE b.chat_id=? AND b.id IN (SELECT value FROM json_each(?))`).all(chatId, JSON.stringify(batchIds)) as Array<{id:string}>).map(row => row.id));
   const rows = db.prepare("SELECT id,memory_key AS key,title,content,known_by_json,source_batch_id,evidence_json,user_managed AS userManaged FROM memories WHERE chat_id=? AND active=1 ORDER BY created_at,id").all(chatId) as any[];
   return rows.filter(row => {
-    const evidence = [row, ...db.prepare('SELECT evidence_json FROM memory_details WHERE memory_id=? AND active=1').all(row.id),
+    const evidence = [row, ...db.prepare('SELECT evidence_json FROM visible_memory_details WHERE memory_id=? AND active=1').all(row.id),
       ...db.prepare('SELECT evidence_json FROM memory_dialogues WHERE memory_id=?').all(row.id)]
       .flatMap((item: any) => JSON.parse(item.evidence_json) as Array<{messageId:string}>);
     // Replacing only part of a spanning memory would lose its other sources.
     return evidence.length ? evidence.every(item => sourceIds.has(item.messageId)) : batchIds.includes(row.source_batch_id);
   }).map((row) => ({ ...row, evidence_json: undefined,
     known_by_json: JSON.stringify(publicKnowledgeScope(JSON.parse(row.known_by_json)).knownBy), ...publicKnowledgeScope(JSON.parse(row.known_by_json)),
-    details: db.prepare("SELECT id,detail_key AS key,kind,text FROM memory_details WHERE memory_id=? AND active=1 ORDER BY created_at,id").all(row.id),
+    details: db.prepare("SELECT id,detail_key AS key,kind,text FROM visible_memory_details WHERE memory_id=? AND active=1 ORDER BY created_at,id").all(row.id),
     keyDialogues: (db.prepare("SELECT id,speaker,text,message_id AS messageId,evidence_json FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal,id").all(row.id) as any[])
       .map(dialogue => ({...dialogue,evidence:JSON.parse(dialogue.evidence_json),evidence_json:undefined})) }));
 }

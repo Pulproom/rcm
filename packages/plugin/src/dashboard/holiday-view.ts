@@ -36,6 +36,10 @@ export const HOLIDAY_CSS = `
 .daily-memory__top:has(.holiday-pill) > .i { margin-left: auto; }
 .daily-memory__top:has(.holiday-pill) { flex-wrap: wrap; }
 .daily-memory__top > .holiday-pill { flex: 0 0 auto; }
+.daily-memory--phone .daily-memory__top:has(.holiday-pill) { align-items: center; }
+.daily-memory--phone .daily-memory__top:has(.holiday-pill) > .i { margin-top: 0; }
+.daily-memory--phone .daily-memory__top > .holiday-pill { gap: 5px; padding: 6px 12px; border-radius: 14px; font-size: var(--t-cap); line-height: 1.2; }
+.daily-memory--phone .daily-memory__top > .holiday-pill > [aria-hidden] { font-size: 1em; line-height: 1; }
 .daily-memory--phone .daily-memory__reason[data-holiday] { background: var(--holiday-bg); color: var(--holiday-ink); }
 .daily-memory--phone .daily-memory__reason[data-holiday-gradient] { background: linear-gradient(135deg, #237b42, #ba303e); color: #fff; }
 `;

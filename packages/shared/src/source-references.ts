@@ -305,7 +305,7 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
 }
 
 /** Resolves direct episode/audit quote evidence without using authored dialogue text as an anchor. */
-export function resolveDirectDialogueEvidence(value: unknown, units: SourceUnit[]): unknown {
+export function resolveDirectDialogueEvidence(value: unknown, units: SourceUnit[], preserveUnresolved = true): unknown {
   const result=structuredClone(value) as any;
   const runs:SourceUnit[]=[];
   for(const unit of units){const previous=runs.at(-1);if(previous&&unit.messageId===previous.messageId&&unit.canonicalHash===previous.canonicalHash
@@ -314,7 +314,12 @@ export function resolveDirectDialogueEvidence(value: unknown, units: SourceUnit[
   const resolveDialogue=(dialogue:any):void=>{
       if(!dialogue||typeof dialogue!=="object")return;
       const messageId=String(dialogue.messageId??"");
-      if(!Array.isArray(dialogue.evidence)||dialogue.evidence.length===0) dialogue.evidence=[{messageId,canonicalHash:"unresolved",startOffset:0,endOffset:1,quote:"[unresolved source]"}];
+      // Authored extraction dialogue can be held for review; optional audit
+      // additions must instead fail their required evidence schema unchanged.
+      if(!Array.isArray(dialogue.evidence)||dialogue.evidence.length===0) {
+        if (!preserveUnresolved) return;
+        dialogue.evidence=[{messageId,canonicalHash:"unresolved",startOffset:0,endOffset:1,quote:"[unresolved source]"}];
+      }
       dialogue.evidence=dialogue.evidence.map((citation:any)=>{
         if(String(citation?.messageId??"")!==messageId||typeof citation?.quote!=="string")return citation;
         if(typeof citation.canonicalHash==="string"&&runs.some(run=>run.messageId===messageId&&run.canonicalHash!==citation.canonicalHash))return citation;
@@ -336,6 +341,12 @@ export function resolveDirectDialogueEvidence(value: unknown, units: SourceUnit[
 export interface SourceReferenceIssue {
   path: string; blocking: boolean; messageId: string; quote?: string;
   reason: "source_unavailable" | "quote_not_found" | "source_range_unverified" | "access_unverified";
+}
+
+/** Product-owned issue paths identify optional selectors; no prose inference. */
+export function optionalSourceSelectorsOnly(issues: SourceReferenceIssue[]): boolean {
+  return issues.length > 0 && issues.every(issue => !issue.blocking && issue.reason !== "access_unverified"
+    && /^(?:sourcePassages\[\d+\](?:\.|$)|memories\[\d+\]\.keyDialogues\[\d+\](?:\.|$))/.test(issue.path));
 }
 
 /** Access evidence may span the validated processing range; it never expands

@@ -50,9 +50,10 @@ export function setAvatarColors(entities: readonly any[]): void {
   colors = next;
 }
 export const personColor = (name: string): PersonColor => colors.get(keyOf(name)) ?? defaultPersonColor(name);
+/** Initials are always white; a pale chosen colour gets a soft shade under the letter instead of black ink. */
 export function avatarColorStyle(name: string): string {
   const color = personColor(name);
-  return color.custom ? `--av-h:${color.h};--av-base:${color.hex};--av-top:${color.top};--av-ink:var(--avatar-${color.darkInk ? "dark" : "light"}-ink)` : `--av-h:${color.h}`;
+  return color.custom ? `--av-h:${color.h};--av-base:${color.hex};--av-top:${color.top};--av-ink:var(--avatar-light-ink)${color.darkInk ? ";--av-shade:0 1px 2px rgba(0,0,0,.3)" : ""}` : `--av-h:${color.h}`;
 }
 /** Similar chosen colours stay unchanged on avatars; only the second chart line is separated. */
 export function chartPersonColors(a: string, b: string): [{ h: number; s: number; l: number }, { h: number; s: number; l: number }] {

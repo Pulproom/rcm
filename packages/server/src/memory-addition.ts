@@ -1,3 +1,6 @@
+import { recordSmallReviews } from "./small-review.js";
+import { optionalSourceSelectorsOnly } from "@rcm/shared";
+import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import { createHash, randomUUID } from 'node:crypto';
 import { MEMORY_ADDITION_GUIDANCE, memoryAdditionRequestGuidance, validateMemoryAdditionRequestOutcome, memoryAdditionUserNote, memoryAdditionStopsAfterEvents } from '@rcm/shared';
 import type { RecallCandidateSnapshot } from './recall-candidates.js';
@@ -8,7 +11,7 @@ import { buildPrompt, editProtectedMessageIds } from './jobs.js';
 import { rangeMessages, listSourceRanges, memoryTargetFingerprint, sourceAccessFingerprint, type RangeMessage } from './source-ranges.js';
 import { sourceFingerprint, fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from './source-fingerprint.js';
 import { inspectDraftEvidence } from './evidence-review.js';
-import { applyExtractionAuditPatch, recordExtractionAudit } from './extraction-audit.js';
+import { applyExtractionAuditPatch } from './extraction-audit.js';
 import { finishStateExtraction } from './state-extraction.js';
 import { recordSeedResolutionDrops } from './story-seeds.js';
 import { additiveReconciliationResult } from './reconciliation.js';
@@ -28,6 +31,7 @@ interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
   userRequest: string; existingMemories: any[]; memoryIds: string[]; targetFingerprint: string; accessFingerprint: string;
   memoryLanguage: MemoryLanguage; postExtractionReview: boolean; candidateStatus?: string; candidate?: any; ledgerFingerprint: string;
   continuationDraft?: ExtractionDraftResult; auxiliaryBudget?: { maxInputTokens: number };
+  smallReviewDraft?: ExtractionDraftResult;
   requestOutcome?: ExtractionDraftResult['requestOutcome'];
 }
 
@@ -156,6 +160,7 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   const job = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND type='memory_addition' AND status='leased' AND lease_owner=?").get(jobId, workerId) as { chat_id: string; payload_json: string } | undefined;
   if (!job) throw fail('Lease not found', 'LEASE_NOT_FOUND');
   const payload: AdditionPayload = JSON.parse(job.payload_json);
+  recordAuditAdditionDrops(db, jobId, payload, audit);
   if (!validatePendingAddition(db, job.chat_id, jobId, payload)) return { chatId: job.chat_id, warnings: ['원문 변경으로 후보를 중단했어요'], pendingReconciliations: 0 };
   let draft = validateMemoryAdditionRequestOutcome(ExtractionAggregateSchema.parse(value), payload.userRequest);
   Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: draft.memories, sourcePassages: draft.sourcePassages, unfinishedSource: draft.unfinishedSource, requestOutcome: draft.requestOutcome });
@@ -187,7 +192,12 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     payload.auxiliaryBudget?.maxInputTokens ?? 80_000, { userRequest: payload.userRequest, existingMemories: payload.existingMemories });
   draft = completed.draft;
   const issues = inspectDraftEvidence(db, job.chat_id, payload.sourceMessageIds, draft);
-  if (issues.length) throw fail(`기억 근거를 확인할 수 없어요: ${issues.slice(0, 3).map(issue => `${issue.path}: ${issue.reason}`).join('; ')}`);
+  if (issues.length && !optionalSourceSelectorsOnly(issues)) throw fail(`기억 근거를 확인할 수 없어요: ${issues.slice(0, 3).map(issue => `${issue.path}: ${issue.reason}`).join('; ')}`);
+  const smallReviewDraft = issues.length || completed.recognitionReviewDraft ? structuredClone(completed.recognitionReviewDraft ?? draft) : undefined;
+  if (issues.length) draft = {...draft,
+    sourcePassages: draft.sourcePassages?.filter((_, index) => !issues.some(issue => issue.path.startsWith(`sourcePassages[${index}]`))),
+    memories: draft.memories.map((memory, mi) => ({...memory, keyDialogues: memory.keyDialogues?.filter((_, di) => !issues.some(issue => issue.path.startsWith(`memories[${mi}].keyDialogues[${di}]`)))})),
+  };
   const final = canonicalizeExtraction(db, job.chat_id, additiveReconciliationResult(draft, completed.reconciliation), payload.sourceMessageIds);
   // Exact property identities only. Existing current state is never rewritten
   // by a late historical omission; its new memory detail remains available.
@@ -217,11 +227,9 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   const errors = validateExtractionSources(db, job.chat_id, payload.sourceMessageIds, candidate);
   if (errors.length) throw fail(errors.join('; '));
   db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
-    .run(JSON.stringify({ ...payload, candidateStatus: 'ready', candidate, pipelineStage: 'complete' }), Date.now(), jobId);
+    .run(JSON.stringify({ ...payload, candidateStatus: 'ready', candidate, smallReviewDraft, pipelineStage: 'complete' }), Date.now(), jobId);
   recordSeedResolutionDrops(db,jobId,completed.seedResolutionDrops);
-  if (completed.recognitionReviewDraft) recordExtractionAudit(db, job.chat_id, jobId, payload.sourceMessageIds, completed.recognitionReviewDraft,
-    audit, 'pending_review', completed.recognitionIssues.map(issue => `socialKnowledge[${issue.index}]: ${issue.reason}`).join('; '), payload.sourceFingerprint);
-  return { chatId: job.chat_id, warnings: completed.recognitionIssues.length ? ['접근 권한이 없는 인지 연결을 제외하고 원래 후보를 검토 상태로 보존했습니다.'] : [], pendingReconciliations: completed.recognitionIssues.length };
+  return { chatId: job.chat_id, warnings: smallReviewDraft ? ['일부 선택 후보를 보류했어요. 기억 적용 뒤 작은 확인에 표시해요.'] : [], pendingReconciliations: 0 };
 }
 
 export function listMemoryAdditions(db: RcmDatabase, chatId: string) {
@@ -250,6 +258,7 @@ export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string)
     const tables = ['memories','memory_details','memory_dialogues','assertions','beliefs','promise_events','relationship_events'] as const;
     const before = tables.map(table => (db.prepare(`SELECT COALESCE(MAX(rowid),0) last FROM ${table}`).get() as {last:number}).last);
     ingestExtraction(db, chatId, candidate, id, undefined, { sourceMessageIds: payload.sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] }, 'additions');
+    if (payload.smallReviewDraft) recordSmallReviews(db, chatId, id, payload.sourceMessageIds, payload.smallReviewDraft, `addition:${id}`);
     const evidenceIds = tables.flatMap((table,index) => (db.prepare(`SELECT evidence_json FROM ${table} WHERE chat_id=? AND rowid>?`)
       .all(chatId,before[index]) as Array<{evidence_json:string}>).flatMap(row =>
         (JSON.parse(row.evidence_json) as Array<{messageId:string}>).map(item => item.messageId)));

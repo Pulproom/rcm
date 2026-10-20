@@ -63,9 +63,9 @@ function memoryList(memories: any[], translations: OrganizationTranslations = ne
   const copy = (memory: any, field: 'title' | 'content') => displayText(String(memory[field] ?? ''), translations.get(`${memory.id}:${field}`), display);
   if (!memories.length) return '<p class="sub">기억이 없습니다.</p>';
   return `<div class="org-mems">${memories.map((memory) => {
-    const details = memory.details ?? [];
+    const details = (memory.details ?? []).filter((detail:any)=>!detail.hidden);
     const lines = memory.keyDialogues ?? memory.dialogues ?? [];
-    const detailFold = details.length ? fold('세부', details.map((detail: any) => `<p>${displayText(String(detail.text ?? ''), translations.get(`${memory.id}:detail:${detail.id}`), display)}${detail.sourceNumbers?.length ? `<span class="sub"> · 메시지 ${detail.sourceNumbers.join(', ')}</span>` : ''}</p>`).join(''), { count: details.length }) : '';
+    const detailFold = details.length ? fold('세부', details.map((detail: any) => `<p>${displayText(String(detail.text ?? ''), detail.userEdited ? undefined : translations.get(`${memory.id}:detail:${detail.id}`), display)}${detail.sourceNumbers?.length ? `<span class="sub"> · 메시지 ${detail.sourceNumbers.join(', ')}</span>` : ''}</p>`).join(''), { count: details.length }) : '';
     const lineFold = lines.length ? fold('보존된 대사', lines.map((quote: any, index: number) => `<p class="quote"><b>${html(quote.speaker)}</b> ${displayText(String(quote.text ?? ''), translations.get(`${memory.id}:dialogue:${index}`), display)}</p>`).join(''), { count: lines.length }) : '';
     return `<article class="org-mem">${memory.comparison ? `<div class="lab">${html(memory.comparison)}</div>` : ''}<h4>${copy(memory, 'title')}</h4>${memory.sourceNumbers?.length ? `<p class="sub">근거 · 메시지 ${memory.sourceNumbers.join(', ')}</p>` : ''}<p>${copy(memory, 'content')}</p>${detailFold}${lineFold}</article>`;
   }).join('')}</div>`;

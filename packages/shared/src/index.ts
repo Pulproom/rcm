@@ -1,3 +1,4 @@
+export { withKoreanParticle } from "./korean-particle.js";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
 import { STORY_TIME_GUIDANCE } from "./story-time.js";
@@ -26,7 +27,7 @@ export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFail
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 95;
+export const RCM_API_REVISION = 97;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -61,7 +62,7 @@ import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-group
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
 export { auxiliaryInputBudgetMessage, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
-export { buildSourceUnits, findAtomicDisplaySpans, resolveSourceQuote, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
+export { buildSourceUnits, findAtomicDisplaySpans, resolveSourceQuote, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";
 export { applySourceAccessPatch, validateSourceRecoveryPatch } from "./source-access-patch.js";
 export { planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan } from "./source-access-repair.js";
@@ -1188,6 +1189,19 @@ export function mergeExtractionPages(previous: ExtractionDraftResult | undefined
   return ExtractionAggregateSchema.parse(result);
 }
 
+/** Advisory labels only; never infer semantic enums or fill missing kinds. */
+function normalizeAdvisoryDetailKinds(value: Record<string, any>): void {
+  const details = [
+    ...(Array.isArray(value.memories) ? value.memories.flatMap((memory: any) => Array.isArray(memory?.details) ? memory.details : []) : []),
+    ...(Array.isArray(value.detailAdditions) ? value.detailAdditions.map((addition: any) => addition?.detail) : []),
+  ];
+  for (const detail of details) if (detail && typeof detail.kind === "string" && detail.kind.trim().length > 0
+    && detail.kind.length <= 120 && !(MEMORY_DETAIL_KIND_VALUES as readonly string[]).includes(detail.kind)) {
+    detail.originalKind = detail.kind;
+    detail.kind = "other";
+  }
+}
+
 /** Removes optional empty leaves and model-declared absent relationship changes.
  * Exact effect="none" means no change to store, never a guessed direction.
  * Unknown advisory detail kinds become other with their original label retained.
@@ -1195,19 +1209,7 @@ export function mergeExtractionPages(previous: ExtractionDraftResult | undefined
 export function normalizeExtractionDraftInput(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const result = structuredClone(value) as Record<string, unknown>;
-  // Classification is advisory. Preserve an unknown label without inventing
-  // causality, retention, epistemic status, or access. All other fields still
-  // pass the normal strict validation; missing/non-string labels are errors.
-  if (Array.isArray(result.memories)) for (const memory of result.memories) {
-    if (!memory || !Array.isArray(memory.details)) continue;
-    for (const detail of memory.details) {
-      if (detail && typeof detail.kind === "string" && detail.kind.trim().length > 0
-        && detail.kind.length <= 120 && !(MEMORY_DETAIL_KIND_VALUES as readonly string[]).includes(detail.kind)) {
-        detail.originalKind = detail.kind;
-        detail.kind = "other";
-      }
-    }
-  }
+  normalizeAdvisoryDetailKinds(result);
   if (Array.isArray(result.stateObservations)) result.stateObservations = result.stateObservations.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const observation = { ...(item as Record<string, unknown>) };
@@ -1247,7 +1249,7 @@ export type ExtractionResult = z.infer<typeof ExtractionResultSchema>;
 
 const ExtractionAuditRemovableRefSchema = z.string().min(1).regex(/^(memory|detail|dialogue|observation|physical|source|relation):/);
 
-export const ExtractionAuditPatchSchema = z.object({
+const ExtractionAuditPatchObjectSchema = z.object({
   access: z.array(z.object({
     itemRef: z.string().min(1).regex(/^(memory|detail|dialogue|observation|physical|source|relation):/),
     grants: z.array(ItemAccessGrantSchema),
@@ -1306,7 +1308,8 @@ export const ExtractionAuditPatchSchema = z.object({
     relationshipBaselines: z.array(RelationshipBaselineSchema).optional(),
     physicalIntimacy: z.array(PhysicalIntimacyEventSchema).optional(),
   }).default({}),
-}).superRefine((value, context) => {
+}).strict();
+export const ExtractionAuditPatchSchema = ExtractionAuditPatchObjectSchema.superRefine((value, context) => {
   const discarded = new Set(value.discardItemRefs);
   const pending = new Set(value.keepPendingItemRefs);
   value.keepPendingItemRefs.forEach((ref, index) => {
@@ -1327,8 +1330,15 @@ export const ExtractionAuditPatchSchema = z.object({
 });
 export type ExtractionAuditPatch = z.infer<typeof ExtractionAuditPatchSchema>;
 
+export const AuditAdditionDropSchema = z.object({
+  array: z.string(),
+  index: z.number().int().nonnegative(),
+  issues: z.array(z.object({ path: z.array(z.union([z.string(), z.number()])), message: z.string() })),
+});
+
 export const ExtractionAuditSubmissionSchema = z.object({
   patch: ExtractionAuditPatchSchema.optional(),
+  additionDrops: z.array(AuditAdditionDropSchema).optional(),
   error: z.string().max(4_000).optional(),
   usage: z.object({
     inputTokens: z.number().int().nonnegative().optional(),
@@ -1337,6 +1347,42 @@ export const ExtractionAuditSubmissionSchema = z.object({
   }).optional(),
 });
 export type ExtractionAuditSubmission = z.infer<typeof ExtractionAuditSubmissionSchema>;
+
+/** Optional additive items fail independently at the shape boundary. Existing-ref
+ * corrections, array containers, and later cross-reference/evidence checks stay
+ * strict. Never invent evidence, enum meanings, or missing local declarations. */
+export function parseExtractionAuditResponse(value: unknown): ExtractionAuditSubmission {
+  const additionDrops: z.infer<typeof AuditAdditionDropSchema>[] = [];
+  const parsed = value && typeof value === "object" && !Array.isArray(value)
+    ? structuredClone(value) as Record<string, unknown> : value;
+  const filter = (container: Record<string, unknown>, field: string, schema: z.ZodType, array = field) => {
+    const items = container[field];
+    if (!Array.isArray(items)) return;
+    container[field] = items.flatMap((item, index) => {
+      const result = schema.safeParse(item);
+      if (result.success) return [result.data];
+      additionDrops.push({ array, index, issues: result.error.issues.map(issue => ({
+        path: [...array.split("."), index, ...issue.path.map(part => typeof part === "symbol" ? String(part) : part)],
+        message: issue.message,
+      })) });
+      return [];
+    });
+  };
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const object = parsed as Record<string, unknown>;
+    for (const field of ["observationAdditions", "detailAdditions", "dialogueAdditions", "memoryAdditions"] as const) {
+      filter(object, field, ExtractionAuditPatchObjectSchema.shape[field].unwrap().element);
+    }
+    const additions = object.additions;
+    if (additions && typeof additions === "object" && !Array.isArray(additions)) {
+      const shape = ExtractionAuditPatchObjectSchema.shape.additions.unwrap().shape;
+      for (const field of ["sourcePassages", "entities", "relationshipEvents", "socialKnowledge", "relationshipBaselines", "physicalIntimacy"] as const) {
+        filter(additions as Record<string, unknown>, field, shape[field].unwrap().element, `additions.${field}`);
+      }
+    }
+  }
+  return { patch: ExtractionAuditPatchSchema.parse(parsed), ...(additionDrops.length ? { additionDrops } : {}) };
+}
 
 export const SOURCE_PASSAGE_GUIDANCE = `SOURCE PASSAGES
 - A source passage is a sparse verbatim fallback for future retrieval: a self-contained fact, action, clue, object detail, or distinctive wording with independent value that is not already in a memory detail or key dialogue.
@@ -1370,12 +1416,26 @@ Rules:
 2. access items are {"itemRef":"...","grants":[{"holder":"name","basis":"experienced|witnessed|told|heard|inferred|internal","evidence":[{"messageId":"...","quote":"optional exact quote"}],"confidence":0.0}]}. A character_belief holder already defines its access; never make an access patch for that observation.
 3. epistemic items are {"itemRef":"detail:...","value":"observed|stated|inferred|unresolved"}. Use only these four values.
 4. observationPatches may replace or remove a listed state observation. Remove an event misclassified as ongoing state, but keep its useful event memory; if missing, preserve it with memoryAdditions or detailAdditions. observationAdditions may add a directly supported missing world_fact, character_belief, or promise_event. Do not choose canonical IDs or lifecycle actions here; the next stage owns those decisions.
+   observationAdditions items use exactly one of these shapes (key is a short new draft-local key, unique among state observations; evidence has at least one item; quote is optional and must be exact when supplied):
+   world_fact: {"kind":"world_fact","key":"new-fact","subject":"...","predicateHint":"...","value":"...","evidence":[{"messageId":"...","quote":"optional exact quote"}]}. Optional: stateKind (${StateObservationSchema.options[0].shape.stateKind.unwrap().options.join("|")}), confidence (0..1), retention (scene|arc|durable), socialRelation.
+   character_belief: {"kind":"character_belief","key":"new-belief","holder":"...","subject":"...","predicateHint":"...","value":"...","evidence":[{"messageId":"...","quote":"optional exact quote"}]}. Optional: stance (${StateObservationSchema.options[1].shape.stance.unwrap().options.join("|")}), confidence (0..1), source, retention (scene|arc|durable).
+   promise_event: {"kind":"promise_event","key":"new-promise-event","promisor":"...","promisee":"...","promiseKeyHint":"...","content":"...","event":"${StateObservationSchema.options[2].shape.event.options.join("|")}","evidence":[{"messageId":"...","quote":"optional exact quote"}]}. Optional: scheduledFor, statusReason, memoryKey, scope (future|recurring), access (rule 2 grants).
+   observationPatches items are {"itemRef":"observation:...","action":"replace","observation":<one complete shape above>} or {"itemRef":"observation:...","action":"remove"}.
 5. Put a clearly false or unsupported draft item in discardItemRefs. Put a genuinely ambiguous item in keepPendingItemRefs. Do not put the same ref in both.
 6. Read the source messages in chronological order and compare every completed, continuity-relevant scene or event with the draft. Check omissions without filling a quota. Add something only when it has real future continuity or retrieval value and the transcript states it directly. Do not duplicate or merely paraphrase an item already present.
 7. Use detailAdditions to attach an omitted independently retrievable fact to an existing memoryRef. Check especially for a concrete causal, visual, spatial, object, character, clue, attempt-outcome, or open-thread fact that appears only in the parent synopsis.
+   detailAdditions items are {"memoryRef":"memory:...","detail":{"key":"new-detail","kind":"${MEMORY_DETAIL_KIND_VALUES.join("|")}","text":"...","epistemic":"observed|stated|inferred|unresolved","evidence":[{"messageId":"...","quote":"optional exact quote"}]}}. evidence has at least one item. Optional detail fields: participants, knownBy, locations (string arrays), salience (0..1), retention (scene|arc|durable), role (core|supporting), access (rule 2 grants), seed. A new detail key must be unique in its parent memory.
 8. Use dialogueAdditions only for omitted dialogue that passes KEY DIALOGUE SELECTION. Do not add routine scene speech or duplicate information already preserved by the synopsis or structured fields. Write source-language dialogue text that preserves the speaker's voice and meaning; omit intervening narration or join utterances by the same speaker when useful. Cite separate exact evidence and never invent dialogue or require the authored text to be a contiguous source substring.
+   dialogueAdditions items are {"memoryRef":"memory:...","dialogue":{"speaker":"...","text":"...","messageId":"...","kind":"${KEY_DIALOGUE_KIND_VALUES.join("|")}","evidence":[{"messageId":"...","quote":"exact source quote"}]}}. evidence has at least one item from the dialogue's message; canonicalHash and UTF-16 startOffset/endOffset are resolved from that exact source, not guessed. Optional dialogue access uses rule 2 grants.
 9. Preserve independently useful verbatim source in additions.sourcePassages with messageId, quote, epistemic, optional speaker and evidence-backed access grants, including long-tail details not captured in a detail, dialogue, or synopsis. Existing source:N refs address the frozen draft: use access to replace their grants, discardItemRefs to exclude unsupported excerpts, or keepPendingItemRefs for unresolved access. Grant evidence may cite another supplied message when it supports that character's access; every quote must match its own message. Never expand the excerpt to its surrounding message. Discard a source passage that consists only of presentation metadata.
 10. If a whole completed scene or independently recallable event is absent from every draft memory, add one type=episode memory to memoryAdditions. Use 2-4 concise record-style sentences, direct source evidence, and only the details or dialogue needed to preserve that scene. Never use memoryAdditions merely to split or restate an adequate memory. The per-call four-scene limit does not limit a completed continuation batch.
+   memoryAdditions items are {"key":"new-memory","type":"episode","title":"...","content":"...","evidence":[{"messageId":"...","quote":"optional exact quote"}]}. evidence has at least one item. Optional: participants, knownBy, locations, associations (string arrays), perspective, storyTime, salience (0..1), retention (scene|arc|durable), details (rule 7 detail objects), keyDialogues (rule 8 dialogue objects), landmarkKinds. Use a new draft-local key.
+   socialKnowledgePatches items are {"index":0,"action":"replace","record":{"holder":"...","subject":"...","level":"aware_of|interacted","evidence":[{"messageId":"...","quote":"optional exact quote"}],"memoryKey":"...","cognitionDetailKeys":["..."]}} or {"index":0,"action":"remove"}. evidence has at least one item. Optional knownAs/addressTerms are string arrays. additions.socialKnowledge uses the same record shape, with final whole-record accessible memory/detail references.
+   Other additions arrays use these item shapes; omit unused arrays. Every transcript-derived item needs direct source evidence:
+   additions.entities: {"key":"new-entity","name":"..."}; optional type (string), aliases (string array).
+   additions.relationshipEvents: {"from":"...","to":"...","changes":[{"axis":"affection|trust|fear|jealousy|intimacy|hostility","effect":"increase|decrease|reveal|complicate|resolve","impact":"minor|meaningful|major|turning"}],"reason":"...","evidence":[{"messageId":"...","quote":"optional exact quote"}]}; changes has 1..6 items and evidence at least one; optional memoryKey/detailKey.
+   additions.relationshipBaselines: {"from":"...","to":"...","reason":"...","source":"transcript","evidence":[{"messageId":"...","quote":"optional exact quote"}]}; optional affection/trust/intimacy (${SIGNED_RELATIONSHIP_BASELINE_VALUES.join("|")}), fear/jealousy/hostility (${INTENSITY_RELATIONSHIP_BASELINE_VALUES.join("|")}). source=setup instead requires sourceQuote; never fabricate setup evidence.
+   additions.physicalIntimacy: {"participants":["...","..."],"act":"${PHYSICAL_INTIMACY_ACT_VALUES.join("|")}","status":"occurred|reciprocated|completed|occurred_before_chat","evidence":[{"messageId":"...","quote":"optional exact quote"}]}; other requires customLabel; occurred_before_chat requires sourceQuote, all other statuses need nonempty evidence. Optional initiator, interactionContext (mutual|initiated|coerced|nonconsensual|ambiguous), circumstance, memoryKey, access (rule 2 grants).
 10. Also check for a missing unresolved plan, source-grounded promise, promise resolution, or lasting object/character state. EXISTING_OPEN_PROMISES is a bounded reference ledger, not story evidence. Add or replace a state observation rather than a canonical assertion, belief, or promise. Every added item cites a listed source message ID.
 11. predicateHint and promiseKeyHint are short reusable noun-like labels, not sentences or event summaries. They are hints only; the next stage may reuse a different canonical predicate or key.
 12. Physical act taxonomy: sexual_touch is erotic contact not covered by a sex subtype, including breast or nipple stimulation, thigh touching, or over-clothing stimulation. manual_sex is hand stimulation of genitals or anus. oral_sex is mouth or tongue stimulation of genitals or anus; mouth contact with breasts or nipples alone is not oral_sex. vaginal_sex and anal_sex require the corresponding penetration. Kisses, deep kisses, embraces, and hand holding use their own acts. A physically intimate act outside these categories uses other plus customLabel. Never infer one act from another.
@@ -1472,7 +1532,7 @@ function recognitionDetailHasAccess(result: Pick<ExtractionDraftResult, "memorie
   return Boolean(detail?.access?.some(grant => grant.holder.trim().toLocaleLowerCase() === social.holder.trim().toLocaleLowerCase()));
 }
 
-/** Completion is loss-tolerant; the first-pass validator below still requests repair. */
+/** Completion withholds optional recognition links without another model call. */
 export function normalizeRecognitionReferences<T extends Pick<ExtractionDraftResult, "memories" | "socialKnowledge">>(result: T) {
   const rejected: Array<{ index: number; detailKeys: string[]; reasonCode: "holder_access_unverified"; reason: string }> = [];
   const socialKnowledge = result.socialKnowledge?.flatMap((social, index) => {
@@ -1566,44 +1626,12 @@ export function mergeStateExtraction(draft: ExtractionDraftResult, result: Recon
   return { draft: normalized.result, recognitionReviewDraft: normalized.rejected.length ? authored : undefined, recognitionIssues: normalized.rejected };
 }
 export function parseReconciliationResult(input: unknown, sourceUnits?: SourceUnit[]): ReconciliationResult {
-  if (sourceUnits && input && typeof input === "object" && "state" in input) {
-    return ReconciliationResultSchema.parse(resolveModelSourceReferences(input, sourceUnits));
+  const resolved = structuredClone(sourceUnits && input && typeof input === "object" && "state" in input
+    ? resolveModelSourceReferences(input, sourceUnits) : input);
+  if (resolved && typeof resolved === "object" && "state" in resolved && resolved.state && typeof resolved.state === "object") {
+    normalizeAdvisoryDetailKinds(resolved.state as Record<string, unknown>);
   }
-  return ReconciliationResultSchema.parse(input);
-}
-
-/** One state-response repair, charged by the worker's existing repair budget.
- * Completion still validates evidence and withholds any unresolved recognition. */
-export async function repairStateRecognitionReferences(input: {
-  draft: ExtractionDraftResult;
-  result: ReconciliationResult;
-  originalMessages: ReadonlyArray<{ role: string; content: string }>;
-  invalidOutput: string;
-  sourceUnits?: SourceUnit[];
-  repair: (messages: AuxiliaryRepairMessage[]) => Promise<unknown>;
-}): Promise<ReconciliationResult> {
-  let completion: ReturnType<typeof mergeStateExtraction>;
-  try { completion = mergeStateExtraction(input.draft, input.result); }
-  catch { return input.result; } // Other completion errors retain their existing validation path.
-  if (!completion.recognitionIssues.length) return input.result;
-  const messages = buildAuxiliaryRepairMessages({
-    originalMessages: input.originalMessages, invalidOutput: input.invalidOutput,
-    validationError: new Error("Cognition must reference a detail in memoryKey with explicit access for its holder."),
-    request: { kind: "reconciliation" },
-  });
-  messages.at(-1)!.content += `\nRepair only these recognition links and their detail access: ${JSON.stringify(completion.recognitionIssues.map(issue => ({
-    holder: input.result.state!.socialKnowledge[issue.index]!.holder,
-    memoryKey: input.result.state!.socialKnowledge[issue.index]!.memoryKey,
-    cognitionDetailKeys: input.result.state!.socialKnowledge[issue.index]!.cognitionDetailKeys,
-  })))}. Add a missing holder access grant only when the supplied source supports that the holder knows the entire detail, citing supplied source IDs. Otherwise drop or change the unsupported link. Preserve unrelated content and decisions. Existing eventDraft details are immutable; use a source-supported fresh detailAddition and update the link when needed.`;
-  try {
-    const repaired = parseReconciliationResult(await input.repair(messages), input.sourceUnits);
-    mergeStateExtraction(input.draft, repaired);
-    return repaired;
-  } catch {
-    // No regeneration or second attempt: retain authored records for completion review.
-    return input.result;
-  }
+  return ReconciliationResultSchema.parse(resolved);
 }
 
 export const ReconciliationSubmissionSchema = z.object({
@@ -1831,6 +1859,8 @@ export interface LeasedJob {
   risuStageCheckpoints?: Partial<Record<"extraction"|"audit",{inputHash:string;result:unknown}>>;
   continuationDraft?: ExtractionDraftResult;
   sourceRecovery?: boolean;
+  /** Explicit one-candidate source retry; never inferred from recovery work. */
+  smallReviewRetry?: boolean;
   sourceRecoveryMetadata?: import("./source-recovery.js").SourceRecoveryMetadata;
   sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] };
   auditSourceMessages?: Array<{ id: string; role: string; content: string; canonicalHash?: string }>;

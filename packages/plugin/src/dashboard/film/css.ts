@@ -190,6 +190,29 @@ export const FILM_CSS = `
 .fold > summary .chev { margin-left: auto; color: var(--ink-3); transition: transform var(--fast) var(--ease); }
 .fold[open] > summary .chev { transform: rotate(90deg); }
 .fold__body { padding: 12px 0 4px; }
+/* Fold hierarchy (film "shot list"): a top-level fold is a section — one rule above it, a Korean credit title with its
+   count and a small chevron beside it. Folds inside it are shots: no rules, a short tick in place of a number that
+   lengthens on hover and turns tungsten when open; an open shot and its body share one quiet panel. Job rows keep their look. */
+:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule); }
+:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary { min-height: 32px; gap: 10px; border-bottom: 0; font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary:hover, :root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis)[open] > summary { color: var(--ink); }
+:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary .n { font: 500 var(--t-micro)/1 var(--credit); letter-spacing: .04em; font-variant-numeric: tabular-nums; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary .chev { margin-left: 0; width: 12px; height: 12px; }
+:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > .fold__body { padding: 8px 0 0; }
+:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis)) { margin-top: 0; }
+:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis)) > .foldbox__acts { top: 42px; right: 0; }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) { margin: 0; }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary { position: relative; min-height: 40px; padding: 0 10px 0 38px; border-bottom: 0; border-radius: var(--r); font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary::before { content: ""; position: absolute; left: 10px; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary:hover { background: var(--screen-2); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary:hover::before { width: 16px; background: var(--ink-3); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group)[open] > summary { border-radius: var(--r) var(--r) 0 0; background: var(--screen); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group)[open] > summary::before { width: 18px; height: 2px; margin-top: -1px; border-radius: 1px; background: var(--tungsten); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary .chev { opacity: 0; transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary:hover .chev, :root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group)[open] > summary .chev { opacity: 1; }
+:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > .fold__body { margin-bottom: 6px; padding: 4px 10px 14px 38px; border-radius: 0 0 var(--r) var(--r); background: var(--screen); }
+.fold__mark { flex: none; padding: 2px 6px; border-radius: 3px; background: var(--screen-2); font-size: var(--t-micro); font-weight: 500; line-height: 1.3; color: var(--ink-3); }
+.fold__mark--key { color: var(--accent-text); background: var(--tungsten-dim); }
 
 /* frame: a scene still with slugline and subtitle */
 .frame { display: grid; grid-template-rows: auto auto auto; align-content: start; gap: 10px; min-height: 0; padding: 12px 14px 14px; border-radius: var(--r); background: var(--screen); text-align: left; width: 100%; box-shadow: var(--lift); transition: box-shadow var(--fast) var(--ease); }
@@ -248,6 +271,22 @@ export const FILM_CSS = `
 .dialog p { margin: 8px 0 0; color: var(--ink-2); font-size: var(--t-body); line-height: 1.7; }
 .dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 @media (max-width: 760px) { .dialog__actions { flex-direction: column-reverse; } .dialog__actions .btn { width: 100%; height: 40px; } }
+
+/* Inline memory lines keep their controls in the row in both skins. */
+.memory-line-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.memory-line-actions .btn { min-height: 44px; min-width: 44px; }
+.memory-line-actions .btn[data-action^="hide-"] { color: var(--cut); }
+:root:not([data-skin="phone"]) .memory-line-hidden { position: relative; display: flex; align-items: center; gap: 10px; min-height: 40px; padding-left: 28px; }
+:root:not([data-skin="phone"]) .memory-line-hidden::before { content: ""; position: absolute; left: 0; top: 50%; width: 12px; height: 1px; background: var(--rule-2); opacity: .7; }
+:root:not([data-skin="phone"]) .memory-line-hidden p { flex: 1; margin: 0; font-size: var(--t-ui); color: var(--ink-3); opacity: .8; }
+:root:not([data-skin="phone"]) .memory-line-hidden .memory-line-actions { margin: 0; }
+:root:not([data-skin="phone"]) .memory-line-hidden .btn { color: var(--accent-text); }
+.rel-change__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.rel-chip { display: inline-flex; align-items: center; gap: 3px; min-height: 24px; padding: 0 8px 0 6px; border-radius: var(--r); background: var(--screen-2); font-size: var(--t-micro); color: var(--ink-2); }
+.rel-chip .i { width: 12px; height: 12px; stroke-width: 2; color: var(--ink-3); }
+.rel-chip small { margin-left: 3px; font-size: inherit; color: var(--ink-3); }
+.rel-chip.is-big { color: var(--ink); font-weight: 600; }
+.rel-chip.is-big .i { color: var(--ink); }
 
 /* form: stacked fields, one action bar */
 .form { display: grid; gap: 16px; }
@@ -1645,4 +1684,141 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .setup-note dl > div { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: var(--s3); align-items: baseline; }
 .setup-note dt { font-weight: 600; font-size: var(--t-small); color: var(--ink); }
 .setup-note dd { margin: 0; font-size: var(--t-small); line-height: 1.5; color: var(--ink-2); }
+
+
+
+.review-small__quote,.review-small__source,.review-small__text{white-space:pre-wrap;overflow-wrap:anywhere}
+.review-small__context,.review-small__source-empty,.review-small__processing{color:var(--ink-2);overflow-wrap:anywhere}
+.review-small__list>.sec{color:var(--ink-2)}
+
+/* 작은 확인 (film): same structure, film voice — quiet rows, ruled source quote, stacked choices. */
+:root:not([data-skin="phone"]) .row.row--small { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 10px; }
+:root:not([data-skin="phone"]) .row--small > .review-small__mark { grid-row: 1 / span 3; align-self: start; margin-top: 2px; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .row--small > :not(.review-small__mark) { grid-column: 2; }
+:root:not([data-skin="phone"]) .review-small__mark .i { width: 16px; height: 16px; }
+:root:not([data-skin="phone"]) .review-small__bulk { display: flex; justify-content: flex-end; gap: 4px; margin-top: 6px; }
+:root:not([data-skin="phone"]) .review-small__bulk .btn[data-resolution="discard"] { color: var(--cut); }
+:root:not([data-skin="phone"]) .review-small__calm, :root:not([data-skin="phone"]) .review-small__note, :root:not([data-skin="phone"]) .review-small__who { margin: 6px 0 0; font-size: var(--t-micro); color: var(--ink-3); }
+:root:not([data-skin="phone"]) .review-small__kicker { display: flex; gap: 10px; font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .review-small__saved { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
+:root:not([data-skin="phone"]) .review-small__saved .i, :root:not([data-skin="phone"]) .review-small__ok .i { width: 12px; height: 12px; }
+:root:not([data-skin="phone"]) .review-small__why { color: var(--ink-2); }
+:root:not([data-skin="phone"]) .review-small__card { display: block; margin-top: 8px; padding: 12px 14px; border-radius: var(--r); background: var(--screen); }
+:root:not([data-skin="phone"]) .review-small__speaker, :root:not([data-skin="phone"]) .review-small__knows { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+:root:not([data-skin="phone"]) .review-small__knows > :is(.i, .av) { display: none; }
+:root:not([data-skin="phone"]) .review-small__ok { display: flex; align-items: center; gap: 5px; font-size: var(--t-micro); color: var(--ok); }
+:root:not([data-skin="phone"]) .review-small__source { margin: 6px 0 0; padding-left: 10px; border-left: 1px solid var(--rule-2); color: var(--ink-2); }
+:root:not([data-skin="phone"]) .review-small__missing { display: flex; align-items: center; gap: 8px; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .review-small__missing .i { width: 15px; height: 15px; }
+:root:not([data-skin="phone"]) .review-small__acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+:root:not([data-skin="phone"]) .review-small__retry { display: inline-flex; align-items: center; gap: 5px; min-height: 40px; margin-top: 6px; border: 0; background: none; font: inherit; font-size: var(--t-small); color: var(--ink-3); cursor: pointer; }
+:root:not([data-skin="phone"]) .review-small__retry b { color: var(--accent-text); font-weight: 600; }
+:root:not([data-skin="phone"]) .review-small__retry .i { width: 13px; height: 13px; color: var(--accent-text); }
+
+/* ===== Pair sheet (film): the couple-app order in the film voice =====
+   Title credits stay; numbers are a poster billing block; names are screenplay cues; feelings are hairline meters in the
+   two 흐름 colours; promises and keepsakes are shot rows; the next round day is a slate. */
+:root:not([data-skin="phone"]) .pairsheet--app .titles .pair-rels { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 8px; margin-top: 18px; }
+:root:not([data-skin="phone"]) .pairsheet--app .titles .pair-rels > .menu + .menu::before { content: "·"; margin-right: 8px; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pairsheet--app .pair-rel { display: inline-flex; align-items: center; min-height: 32px; list-style: none; font-size: var(--t-small); color: var(--ink-2); cursor: pointer; }
+:root:not([data-skin="phone"]) .pairsheet--app .pair-rel::-webkit-details-marker { display: none; }
+:root:not([data-skin="phone"]) .pairsheet--app .pair-rel .orig-mark { margin-left: 4px; }
+:root:not([data-skin="phone"]) .billing { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 22px 0 4px; }
+:root:not([data-skin="phone"]) .bill { min-width: 0; padding: 0 6px; border: 0; background: none; color: var(--ink); font: inherit; text-align: center; }
+:root:not([data-skin="phone"]) .bill + .bill { border-left: 1px solid var(--rule); }
+:root:not([data-skin="phone"]) .bill b { display: flex; align-items: baseline; justify-content: center; min-height: 31px; font-size: 28px; font-weight: 300; line-height: 1.1; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+:root:not([data-skin="phone"]) .bill b small { margin-left: 1px; font-size: var(--t-small); font-weight: 400; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .bill b .i { width: 22px; height: 22px; align-self: center; color: var(--accent-text); }
+:root:not([data-skin="phone"]) .bill span { display: block; margin-top: 7px; font-size: var(--t-credit); font-weight: 600; letter-spacing: .08em; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .bill--add { cursor: pointer; }
+:root:not([data-skin="phone"]) .bill--add span { color: var(--accent-text); }
+
+:root:not([data-skin="phone"]) .pairsheet--app .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head { margin: 30px 0 12px; padding-top: 16px; border-top: 1px solid var(--rule); }
+:root:not([data-skin="phone"]) .pairsheet--app .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head > .sec { font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head > .sec { margin: 0; padding: 0; border: 0; }
+:root:not([data-skin="phone"]) .pairsheet--app .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec .n, :root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head > .sec .n { font: inherit; letter-spacing: .04em; color: var(--ink-3); }
+
+:root:not([data-skin="phone"]) .says { display: grid; gap: 18px; padding: 6px 0 2px; }
+:root:not([data-skin="phone"]) .say { display: grid; justify-items: center; gap: 2px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: center; }
+:root:not([data-skin="phone"]) button.say { cursor: pointer; }
+:root:not([data-skin="phone"]) .say__cue { font-family: var(--credit); font-stretch: 125%; font-size: var(--t-micro); font-weight: 500; letter-spacing: .24em; text-transform: uppercase; color: var(--flow-other); }
+:root:not([data-skin="phone"]) .say__cue .name { font: inherit; letter-spacing: inherit; color: inherit; }
+:root:not([data-skin="phone"]) .say.is-mine .say__cue { color: var(--flow-warm); }
+:root:not([data-skin="phone"]) .say__paren { font-size: var(--t-small); font-style: italic; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .say__bub { margin-top: 2px; font-size: var(--t-head); font-weight: 300; line-height: 1.45; color: var(--ink); }
+:root:not([data-skin="phone"]) .say__bub b { font-weight: 500; }
+:root:not([data-skin="phone"]) .say__bub.is-empty { font-size: var(--t-small); font-style: italic; font-weight: 400; color: var(--ink-3); }
+:root:not([data-skin="phone"]) button.say:hover .say__bub:not(.is-empty) { color: var(--accent-text); }
+
+:root:not([data-skin="phone"]) .meters__head { display: grid; grid-template-columns: minmax(0, 1fr) 58px minmax(0, 1fr); padding-bottom: 6px; }
+:root:not([data-skin="phone"]) .meters__dir { font-family: var(--credit); font-stretch: 125%; font-size: var(--t-credit); font-weight: 500; letter-spacing: .18em; text-transform: uppercase; }
+:root:not([data-skin="phone"]) .meters__dir:first-child { grid-column: 1; text-align: right; color: var(--flow-warm); }
+:root:not([data-skin="phone"]) .meters__dir:last-child { grid-column: 3; color: var(--flow-other); }
+:root:not([data-skin="phone"]) .feel { display: grid; grid-template-columns: minmax(0, 1fr) 58px minmax(0, 1fr); grid-template-areas: "l axis r"; align-items: center; min-height: 46px; }
+:root:not([data-skin="phone"]) .feel + .feel { border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent); }
+:root:not([data-skin="phone"]) .feel__axis { grid-area: axis; text-align: center; font-size: var(--t-small); color: var(--ink-2); }
+:root:not([data-skin="phone"]) .feel__side { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+:root:not([data-skin="phone"]) .feel__side--l { grid-area: l; align-items: flex-end; }
+:root:not([data-skin="phone"]) .feel__side--r { grid-area: r; align-items: flex-start; }
+:root:not([data-skin="phone"]) .feel__bar { position: relative; width: 100%; height: 2px; background: var(--rule-2); }
+:root:not([data-skin="phone"]) .feel__bar i { position: absolute; top: 0; bottom: 0; min-width: 0; height: auto; }
+:root:not([data-skin="phone"]) .feel__side--l .feel__bar i { right: 0; background: var(--flow-warm); }
+:root:not([data-skin="phone"]) .feel__side--r .feel__bar i { left: 0; background: var(--flow-other); }
+:root:not([data-skin="phone"]) .feel__bar.is-conflicted i { background: repeating-linear-gradient(90deg, var(--ink-3) 0 4px, transparent 4px 7px); }
+:root:not([data-skin="phone"]) .feel__word { display: inline-flex; align-items: center; gap: 3px; font-size: var(--t-micro); color: var(--ink-3); }
+:root:not([data-skin="phone"]) .feel__word.is-strong { font-weight: 600; color: var(--ink); }
+:root:not([data-skin="phone"]) .feel__trend .i { width: 11px; height: 11px; stroke-width: 2; }
+:root:not([data-skin="phone"]) .feel__trend.is-up { color: var(--ok); }
+:root:not([data-skin="phone"]) .feel__trend.is-down { color: var(--cut); }
+:root:not([data-skin="phone"]) .pairsheet--app .meters__basis { margin-top: 8px; padding: 0; border: 0; }
+:root:not([data-skin="phone"]) .pairsheet--app .meters__basis > summary { border: 0; font: 400 var(--t-micro)/1.2 var(--sans); letter-spacing: 0; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .meters__basis > summary { display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 40px; list-style: none; font-size: var(--t-micro); color: var(--ink-3); cursor: pointer; }
+:root:not([data-skin="phone"]) .meters__basis > summary::-webkit-details-marker { display: none; }
+:root:not([data-skin="phone"]) .pairsheet--app .meters__basis > summary > .chev { margin-left: 0; transition: transform var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .meters__basis[open] > summary > .chev { transform: rotate(90deg); }
+:root:not([data-skin="phone"]) .meters__basis ul { margin: 0; padding: 0 0 8px 18px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
+
+:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions { margin: 8px 0 0; padding: 0; list-style: none; }
+:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions li { position: relative; margin-top: 8px; padding-left: 26px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions li::before { content: ""; position: absolute; left: 0; top: .8em; width: 14px; height: 1px; background: var(--rule-2); }
+:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions li .i { display: none; }
+
+:root:not([data-skin="phone"]) .pair-card { background: none; }
+:root:not([data-skin="phone"]) .pair-list { margin: 0; padding: 0; list-style: none; }
+:root:not([data-skin="phone"]) .pair-list > .entry { display: block; border: 0; }
+:root:not([data-skin="phone"]) .pairsheet--app .pair-row { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 0 10px 28px; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
+:root:not([data-skin="phone"]) .pairsheet--app .pair-row::before { content: ""; position: absolute; left: 0; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .pairsheet--app .pair-row:hover::before { width: 16px; background: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-row__ic, :root:not([data-skin="phone"]) .pair-row__who .av, :root:not([data-skin="phone"]) .pair-row__who > .i { display: none; }
+:root:not([data-skin="phone"]) .pair-row__tx { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+:root:not([data-skin="phone"]) .pair-row__t { font-size: var(--t-ui); color: var(--ink); }
+:root:not([data-skin="phone"]) .pair-row__t b { font-weight: 600; }
+:root:not([data-skin="phone"]) .pair-row__clamp { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 1; -webkit-box-orient: vertical; font-size: var(--t-small); color: var(--ink-2); }
+:root:not([data-skin="phone"]) .pair-row__s { order: -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--t-micro); color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-row__s .dot { color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-row > .i { flex: none; width: 14px; height: 14px; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-pill { padding: 1px 6px; border-radius: 2px; background: color-mix(in srgb, var(--tungsten) 16%, transparent); font-size: var(--t-credit); font-weight: 600; color: var(--accent-text); }
+:root:not([data-skin="phone"]) .pair-card > .fold--more { margin-top: 0; }
+
+:root:not([data-skin="phone"]) .pair-next { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "stripes stripes" "dday what"; width: 100%; max-width: 380px; margin-bottom: 10px; overflow: hidden; border: 1px solid var(--rule-2); border-radius: var(--r); }
+:root:not([data-skin="phone"]) .pair-next::before { content: ""; grid-area: stripes; height: 14px; background: repeating-linear-gradient(135deg, var(--ink) 0 10px, var(--house) 10px 20px); opacity: .85; }
+:root:not([data-skin="phone"]) .pair-cal { display: none; }
+:root:not([data-skin="phone"]) .pair-next__dd { grid-area: dday; display: grid; place-items: center; min-width: 108px; padding: 14px 16px; border-right: 1px solid var(--rule-2); font: 600 26px/1 var(--credit); font-stretch: 125%; letter-spacing: .04em; color: var(--accent-text); }
+:root:not([data-skin="phone"]) .pair-next__tx { grid-area: what; display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 14px 16px; }
+:root:not([data-skin="phone"]) .pair-next__k { font-family: var(--credit); font-size: var(--t-credit); font-weight: 600; letter-spacing: .08em; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-next__date { order: 2; font-size: var(--t-small); color: var(--ink-2); }
+:root:not([data-skin="phone"]) .pair-next__t { font-size: var(--t-read); font-weight: 500; }
+
+:root:not([data-skin="phone"]) .pairsheet--app .anni--row { border: 0; background: none; box-shadow: none; }
+:root:not([data-skin="phone"]) .pairsheet--app .anni--row + .anni--row { border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent); }
+:root:not([data-skin="phone"]) .pairsheet--app .anni--row .anni__open { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 10px; padding: 10px 40px 10px 0; border: 0; background: none; text-align: left; }
+:root:not([data-skin="phone"]) .anni__date { display: flex; flex-direction: column; font-size: var(--t-small); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+:root:not([data-skin="phone"]) .anni__date small { font-size: var(--t-credit); font-weight: 400; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .anni__tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+:root:not([data-skin="phone"]) .anni--row .anni__label { font-size: var(--t-ui); color: var(--ink); }
+:root:not([data-skin="phone"]) .anni--row .anni__slug { overflow: hidden; font-size: var(--t-micro); white-space: nowrap; text-overflow: ellipsis; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pairsheet--app .reel { display: block; overflow: visible; margin: 0; padding: 0; }
+:root:not([data-skin="phone"]) .pairsheet--app .anni--row .anni__acts { top: 50%; transform: translateY(-50%); }
+
+:root:not([data-skin="phone"]) .meters__note { margin: 8px 0 0; text-align: center; font-size: var(--t-micro); color: var(--ink-3); }
 `;

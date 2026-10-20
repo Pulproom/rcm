@@ -1,3 +1,4 @@
+import { smallReviewDetail, smallReviewMark } from "./dashboard/small-review.js";
 import { CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { invalidateChatTranslations, retranslateChatRecords } from "./translation.js";
 import { setupPickerNeeded, claimSetupAttention, firstOpenSetupPicker, observeSetupAttention, discardSetupCapture, loadSetupPicker, readSetupHost, setupGroups, selectedSetupProjection, type SetupPicker } from "./setup-sources.js";
@@ -83,7 +84,7 @@ type NavGroupId = "home" | "memory" | "people" | "world" | "manage";
 type NavItem = { tab: Tab; label: string; count?: number };
 type NavGroup = { id: NavGroupId; label: string; icon: string; defaultTab: Tab; items: NavItem[] };
 type ActionState = { kind: "success" | "error"; message: string };
-type AttentionFilter = "all" | "duplicate" | "conflict" | "audit";
+type AttentionFilter = "all" | "duplicate" | "conflict" | "audit" | "small";
 type AttentionViewState = { selectedId: string; query: string; filter: AttentionFilter; mobileDetail: boolean };
 type WorldEditor = { promiseStatus?: string; social?: boolean; kind: "assertion" | "belief" | "promise"; id?: string; mode: "create" | "edit" | "end" | "delete"; stateKind?: string; subject?: string; target?: string; relationKind?: string; lockSubject?: boolean };
 type IntimacyEditor = { id?: string; participantA?: string; participantB?: string };
@@ -131,6 +132,7 @@ export type TimelineViewState = {
   sortOrder?: "ascending" | "descending";
   /** Detail whose 아는 인물 is being edited in place. */
   accessEditing?: string;
+  textEditing?: {id:string; kind:"detail"|"event"};
 };
 
 const relationshipLandmarkKinds = new Set(["first_met", "romantic_relationship_established", "engagement", "marriage", "separation", "romantic_relationship_ended", "reunion", "divorce", "anniversary_basis"]);
@@ -309,7 +311,7 @@ export interface DashboardData {
     mcpSelector?:McpSelectorPublicConfig;
     translationConnection?:TranslationConnectionPublicConfig;
     serverWorker?: ServerWorkerStatus;
-    capabilities?: { recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; sourceLedgerInspection?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
+    capabilities?: { memoryLineEditing?: boolean; recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; sourceLedgerInspection?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
   };
   memories: any[];
   storySpine: any;
@@ -394,7 +396,7 @@ export function availableNavigationSnapshot(snapshot: ViewSnapshot, data: Dashbo
   return next;
 }
 
-export const EDITOR_FORM_SELECTOR = "#memory-form, #manual-memory-form, #story-overview-form, #intimacy-form, #social-form, #world-state-form, #relationship-form, #anniversary-form, #anniversary-new-form, #detail-access-form, .person-editor, .initial-relationship-editor, .reconciliation-edit";
+export const EDITOR_FORM_SELECTOR = "#memory-form, #manual-memory-form, #story-overview-form, #intimacy-form, #social-form, #world-state-form, #relationship-form, #anniversary-form, #anniversary-new-form, #detail-access-form, #memory-line-form, .person-editor, .initial-relationship-editor, .reconciliation-edit";
 const EDITABLE_DASHBOARD_TABS: readonly Tab[] = ["initial", "story", "timeline", "relationships", "world", "reviews"];
 
 type DashboardChatDataset = "memories" | "messages" | "relationships" | "world" | "conflicts" | "jobs" | "recallLogs" | "entities" | "reviews" | "lineage" | "socialKnowledge" | "physicalIntimacy" | "viewPreferences" | "status" | "audits" | "initialCalibration" | "storySpine";
@@ -1290,8 +1292,9 @@ export function initialCalibrationNotice(data: Pick<DashboardData, "initialCalib
   return "";
 }
 
-export function dashboardLiveDataSignature(summary: RuntimeState["statusSummary"]): string {
+export function dashboardLiveDataSignature(summary: RuntimeState["statusSummary"], context?: RuntimeState["current"]): string {
   return JSON.stringify({ progress: summary?.progress, initialCalibration: summary?.initialCalibration?.status,
+    identity: [context?.chatId, context?.identityHints.userPersonaName],
     embeddings: [summary?.pendingEmbeddings, summary?.failedEmbeddings, summary?.embeddingError] });
 }
 
@@ -2000,7 +2003,7 @@ export function detailAccessLine(memoryId: string, detail: any, editing: boolean
   return `<p class="detail-know"><span class="detail-know__k">아는 인물</span><span class="detail-know__v notranslate" translate="no">${label}</span><button type="button" class="linkbtn hit" data-action="edit-detail-access" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}">수정</button></p>`;
 }
 
-function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set()): string {
+function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set(), lineEditingAvailable = false): string {
   if (!memory) return empty("표시할 기억이 없습니다", "검색이나 필터를 바꿔 보세요.");
   const evidence = parseJson<Array<{ messageId?: string; quote?: string }>>(memory.evidence_json, []);
   const displayedDialogues = joinDialogueSpans(Array.isArray(memory.keyDialogues) ? memory.keyDialogues : []);
@@ -2076,21 +2079,27 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
     : fold("장면 구성", sectionRows.join(""), { role: "section", count: sections.length, preserveKey: `memory-sections:${key}` });
   const infoFields = kv([["분류", memoryKindLabel(memory)], ["작중 시간", formatStoryTime(memory.story_time ?? memory.storyTime) || "기록 없음"], ["장소", locations.join(" · ") || "기록 없음"], ["회상 횟수", `${Number(memory.recall_count ?? 0)}회`]]);
   const info = fold("기억 정보", infoFields, { role: "section", preserveKey: `memory-info:${key}` });
-  const structuredDetails = details.map((detail: any) => {
-    const translated = translations.get(`${memory.id}:detail:${detail.id}`);
+  const lineControls = (item:any, kind:"detail"|"event") => {
+    const data = {memoryId:String(memory.id), ...(kind === "detail" ? {detailId:String(item.id)} : {eventId:String(item.id)})};
+    if (view.textEditing?.id === item.id && view.textEditing?.kind === kind && lineEditingAvailable) return `<form id="memory-line-form" class="form" data-memory-id="${escapeHtml(memory.id)}" data-line-id="${escapeHtml(item.id)}" data-kind="${kind}"><label class="field"><span class="sub">원문 · 한국어로 써도 그대로 저장돼요</span><textarea class="textarea" name="text" rows="3" required>${escapeHtml(kind === "detail" ? item.text : item.reason)}</textarea></label><div class="memory-line-actions">${btn("취소",{kind:"quiet",action:"cancel-memory-line",hit:true})}${btn("저장",{kind:"primary",action:"submit-form",data:{formId:"memory-line-form"},hit:true})}</div></form>`;
+    return `<div class="memory-line-actions">${item.hidden ? btn("되돌리기",{kind:"quiet",action:`restore-${kind}`,data,hit:true,disabled:!lineEditingAvailable}) : btn("고치기",{kind:"quiet",icon:"edit",action:kind === "detail" ? "edit-detail-text" : "edit-event-reason",data,hit:true,disabled:!lineEditingAvailable})+btn("빼기",{kind:"quiet",action:`hide-${kind}`,data,hit:true,disabled:!lineEditingAvailable})}</div>`;
+  };
+  const structuredDetails = details.filter((detail:any) => !detail.hidden).map((detail: any) => {
+    // A line the user rewrote is shown as typed: no stale translation and no 원문 mark.
+    const translated = detail.userEdited ? String(detail.text ?? "") : translations.get(`${memory.id}:detail:${detail.id}`);
     const knowing = detailAccessLine(memory.id, detail, view.accessEditing === detail.id);
     const kind = memoryDetailKindLabel(detail.kind);
     const originalKind = detail.original_kind ? ` (원래 분류: ${memoryDetailKindLabel(detail.original_kind)})` : "";
     const body = `${bodyText(detail.text, translated)}${knowing}<p class="sub">${escapeHtml(EPISTEMIC_LABELS[detail.epistemic] ?? detail.epistemic)} · 인물 ${(detail.participants ?? []).map(escapeHtml).join(" · ") || "없음"} · 장소 ${(detail.locations ?? []).map(escapeHtml).join(" · ") || "없음"}${phone && originalKind ? ` · ${escapeHtml(originalKind.trim())}` : ""}</p>`;
     const preserveKey = `memory-detail:${key}:${detail.id}`;
-    return phone ? detailRow(detail.role === "core" ? "핵심 사건" : kind, previewText(detail.text, translated), body + detailQuotes(detail), preserveKey, detail.role === "core")
-      : fold(`${kind}${originalKind}${detail.role === "core" ? " · 핵심 사건" : ""}`, body, { preserveKey });
+    return phone ? detailRow(detail.role === "core" ? "핵심 사건" : kind, `${detail.userEdited ? '<span class="tag">직접 고침</span>' : ""}${previewText(detail.text, translated)}`, body + detailQuotes(detail) + lineControls(detail,"detail"), preserveKey, detail.role === "core")
+      : fold(`${kind}${originalKind}`, body + lineControls(detail,"detail"), { preserveKey, marks: `${detail.role === "core" ? '<span class="fold__mark fold__mark--key">핵심 사건</span>' : ""}${detail.userEdited ? '<span class="fold__mark">직접 고침</span>' : ""}` });
   });
-  const relationshipDetails = relationshipEvents.map((event: any) => {
-    const translated = translations.get(`relationship-event:${event.id}:reason`);
-    const body = `${bodyText(event.reason, translated)}<p class="sub">${phone ? `${escapeHtml(event.from)} → ${escapeHtml(event.to)} · ` : ""}${(event.changes ?? []).map((change: any) => `${escapeHtml(change.axis)} ${escapeHtml(change.effect)} · ${escapeHtml(change.impact)}`).join(" · ")}</p>`;
+  const relationshipDetails = relationshipEvents.filter((event:any) => !event.hidden).map((event: any) => {
+    const translated = event.userEdited ? String(event.reason ?? "") : translations.get(`relationship-event:${event.id}:reason`);
+    const body = `${bodyText(event.reason, translated)}${relationshipChangeChips(event, phone)}`;
     const preserveKey = `memory-event:${key}:${event.id}`;
-    return phone ? detailRow("관계", previewText(event.reason, translated), body + detailQuotes(event), preserveKey) : fold(`${event.from} → ${event.to}`, body, { preserveKey });
+    return phone ? detailRow("관계", `${event.userEdited ? '<span class="tag">직접 고침</span>' : ""}${previewText(event.reason, translated)}`, body + detailQuotes(event) + lineControls(event,"event"), preserveKey) : fold(`${event.from} → ${event.to}`, body + lineControls(event,"event"), { preserveKey, marks: event.userEdited ? '<span class="fold__mark">직접 고침</span>' : "" });
   });
   const intimacyDetails = intimacyMilestones.map((item: any) => {
     const text = item.circumstance || "문맥 미기록";
@@ -2099,6 +2108,9 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
     const preserveKey = `memory-intimacy:${key}:${item.id}`;
     return phone ? detailRow("스킨십", previewText(text, translated), body + detailQuotes(item), preserveKey) : fold(milestoneLabel(item), body, { preserveKey });
   });
+  const hiddenLines = [...details.filter((item:any)=>item.hidden).map((item:any)=>`<div class="memory-line-hidden"><p>${displayText(String(item.text ?? ""),item.userEdited ? String(item.text ?? "") : translations.get(`${memory.id}:detail:${item.id}`),display)}</p>${lineControls(item,"detail")}</div>`),
+    ...relationshipEvents.filter((item:any)=>item.hidden).map((item:any)=>`<div class="memory-line-hidden"><p>${displayText(String(item.reason ?? ""),item.userEdited ? String(item.reason ?? "") : translations.get(`relationship-event:${item.id}:reason`),display)}</p>${lineControls(item,"event")}</div>`)];
+  const hiddenFold = hiddenLines.length ? fold("뺀 세부 기억",hiddenLines.join(""),{count:hiddenLines.length,preserveKey:`hidden-details:${key}`,role:"hidden-lines"}) : "";
   const detailRows = [...structuredDetails, ...relationshipDetails, ...intimacyDetails];
   const moreDetails = phone && detailRows.length > 3 ? fold("더 보기", detailRows.slice(3).join(""), { role: "more", count: detailRows.length - 3, preserveKey: `memory-details:${key}` }) : "";
   const detailsFold = !detailRows.length ? "" : phone
@@ -2124,8 +2136,8 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
   const pager = `<nav class="pager" aria-label="기억 이동">${btn("이전", { kind: "quiet", icon: "back", action: "timeline-adjacent", data: { id: adjacent.previous?.id ?? "" }, disabled: !adjacent.previous, hit: true })}${btn("다음", { kind: "quiet", iconEnd: "chevron", action: "timeline-adjacent", data: { id: adjacent.next?.id ?? "" }, disabled: !adjacent.next, hit: true })}</nav>`;
   const actions = `<div class="reader__acts">${iconBtn("edit", "기억 수정", { action: "edit-memory" })}${memoryActionMenu(memory)}</div>`;
   const content = phone
-    ? `<div data-preserve-scroll="timeline-detail">${record}${lines ? labelledBlock("주요 대사", displayedDialogues.length, lines) : ""}${detailsFold}${structure}${evidenceFold}${info}</div>`
-    : `${lines}<div data-preserve-scroll="timeline-detail">${expandableLongContent("기억 본문", record, Math.max(String(memory.content ?? "").length, String(translatedContent ?? "").length))}${info}${structure}${detailsFold}${evidenceFold}</div>`;
+    ? `<div data-preserve-scroll="timeline-detail">${record}${lines ? labelledBlock("주요 대사", displayedDialogues.length, lines) : ""}${detailsFold}${hiddenFold}${structure}${evidenceFold}${info}</div>`
+    : `${lines}<div data-preserve-scroll="timeline-detail">${expandableLongContent("기억 본문", record, Math.max(String(memory.content ?? "").length, String(translatedContent ?? "").length))}${info}${structure}${detailsFold}${hiddenFold}${evidenceFold}</div>`;
   return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${people}${landmarkMarks}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억입니다.") : ""}${translationState}${content}${pager}</article>`;
 }
 
@@ -2236,7 +2248,7 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
     : filteredListEmpty
       ? empty("선택된 기억이 없습니다", "목록에서 기억을 고르거나 필터를 바꿔 보세요.")
     : selected
-      ? memoryDetail(selected, messages, translations, view, translationEnabled, sourceLanguage, adjacent, numbers, translationError, personaNameSet(data))
+      ? memoryDetail(selected, messages, translations, view, translationEnabled, sourceLanguage, adjacent, numbers, translationError, personaNameSet(data), data.health?.capabilities?.memoryLineEditing === true)
       : empty("아직 기억이 없습니다", "대화가 쌓이면 장면이 여기에 정리됩니다.");
   return `<div class="timeline${view.mobileDetail ? " is-detail" : ""}"><div class="split">${list}<div class="readercol" data-preserve-scroll="reader:timeline:${escapeHtml(view.creating ? "new" : selected?.id ?? "")}"><div data-timeline-reader-empty style="display:none">${empty("선택된 기억이 없습니다", "목록에서 기억을 고르거나 필터를 바꿔 보세요.")}</div>${reader}</div></div></div>`;
 }
@@ -2616,6 +2628,22 @@ export function relationshipEditorPatches(values: Record<string, unknown>, curre
   return patches;
 }
 const relationshipAxisLabels: Record<string, string> = { affection: "애정", trust: "신뢰", intimacy: "친밀감", fear: "두려움", jealousy: "질투", hostility: "적대감" };
+const RELATIONSHIP_EFFECT_LABELS: Record<string, string> = { reveal: "드러남", complicate: "복잡해짐", resolve: "풀림" };
+const RELATIONSHIP_IMPACT_LABELS: Record<string, string> = { minor: "조금", major: "크게", turning: "전환점" };
+/** One relationship event's axis changes as chips (↑ 신뢰 · ↓ 두려움 조금); the phone row also names who felt it, the film fold title already does. */
+function relationshipChangeChips(event: any, phone: boolean): string {
+  const chips = (event.changes ?? []).map((change: any) => {
+    const axis = relationshipAxisLabels[String(change.axis)] ?? String(change.axis ?? "");
+    const effect = String(change.effect ?? "");
+    const lead = effect === "increase" ? icon("rise") : effect === "decrease" ? icon("fall") : "";
+    const verb = RELATIONSHIP_EFFECT_LABELS[effect] ? ` ${RELATIONSHIP_EFFECT_LABELS[effect]}` : "";
+    const impact = RELATIONSHIP_IMPACT_LABELS[String(change.impact)];
+    const big = change.impact === "major" || change.impact === "turning";
+    return `<span class="rel-chip${big ? " is-big" : ""}">${lead}${escapeHtml(axis + verb)}${impact ? `<small>${impact}</small>` : ""}</span>`;
+  }).join("");
+  const who = phone ? `<p class="rel-change__who"><b>${escapeHtml(event.from)}</b>${icon("arrow-right")}<b>${escapeHtml(event.to)}</b></p>` : "";
+  return `<div class="rel-change">${who}${chips ? `<div class="rel-change__chips">${chips}</div>` : ""}</div>`;
+}
 const relationshipAxisOrder = Object.keys(RelationshipProjectionItemSchema.shape.axes.shape);
 const relationshipLevelWeight: Record<string, number> = { unknown: 0, none: 1, faint: 2, low: 2, tentative: 3, fragile: 3, growing: 4, developing: 4, moderate: 4, established: 5, strong: 6, high: 6, deep: 7, extreme: 7, conflicted: 6, distrust: 6, avoidant: 6, aversion: 7 };
 
@@ -2713,7 +2741,7 @@ export function relationshipsV2(state: RuntimeState, data: DashboardData, select
     || compareUiText([(left.knownAs ?? []).join(" "), (right.knownAs ?? []).join(" ")]));
   const socialGroups = new Map<string, any[]>(); social.forEach((item: any) => socialGroups.set(String(item.holder), [...(socialGroups.get(String(item.holder)) ?? []), item]));
   const openSocialGroups = socialGroups.size < 4;
-  const socialRows = [...socialGroups.entries()].map(([holder, items]) => `<details class="fold" data-social-group data-preserve-open="social-group:${escapeHtml(holder)}"${openSocialGroups ? " open" : ""}><summary><span>${nameHtml(holder)}</span><span class="n">${items.length}</span></summary><div class="fold__body">${items.map((item) => `<article class="entry acquaintance" data-social-row><div class="entry__v"><b>${escapeHtml(holder)} → ${escapeHtml(item.subject)}</b> <small>${item.level === "interacted" ? "직접 교류한 기록 있음" : "존재를 알고 있음"}</small><p class="calls">${escapeHtml((item.knownAs ?? []).join(" · ") || "알고 있는 이름 없음")}</p>${(item.cognition ?? []).map((detail: any) => `<p>${displayText(detail.text, translations.get(`social-cognition:${detail.id}`), display)}</p>`).join("")}</div><div class="entry__src">${menu({ label: "지인 관계 더보기", items: [
+  const socialRows = [...socialGroups.entries()].map(([holder, items]) => `<details class="fold" data-social-group data-preserve-open="social-group:${escapeHtml(holder)}"${openSocialGroups ? " open" : ""}><summary><span>${nameHtml(holder)}</span><span class="n">${items.length}</span></summary><div class="fold__body">${items.map((item) => `<article class="entry acquaintance" data-social-row><div class="entry__v"><b>${escapeHtml(holder)} → ${escapeHtml(item.subject)}</b> <small>${item.level === "interacted" ? "직접 교류한 기록 있음" : "존재를 알고 있음"}</small><p class="calls">${escapeHtml((item.knownAs ?? []).join(" · ") || "알고 있는 이름 없음")}</p>${(item.cognition ?? []).map((detail: any) => `<p>${displayText(detail.text, detail.userEdited ? undefined : translations.get(`social-cognition:${detail.id}`), display)}</p>`).join("")}</div><div class="entry__src">${menu({ label: "지인 관계 더보기", items: [
     { label: "지인 관계 수정", icon: "edit", action: "edit-social", data: { holder: String(item.holder), subject: String(item.subject), level: String(item.level), knownAs: (item.knownAs ?? []).join(", ") } },
     { label: "지인 관계 삭제", icon: "delete", action: "delete-social", data: { holder: String(item.holder), subject: String(item.subject) }, danger: true },
   ] })}</div></article>`).join("")}</div></details>`).join("");
@@ -3015,19 +3043,30 @@ export function attentionPage(data: DashboardData, translations: TranslationView
     const presentation = describeConflict(item);
     return { id: `conflict:${item.id}`, type: "conflict", title: presentation.title, summary: presentation.explanation, time: item.created_at, value: item, category: conflictCategory(item.kind) };
   });
-  const all = [...audits, ...duplicates, ...conflictsPending].sort((left, right) => Number(right.time ?? 0) - Number(left.time ?? 0));
+  const small: AttentionItem[] = data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending").map((item: any) => ({
+    id: `small:${audit.id}:${item.id}`, type: "small" as const, title: item.kind === "recognition" ? `${item.holder} → ${item.subject}` : item.text,
+    summary: item.kind === "recognition" ? item.text : item.canKeep ? "확인된 원문이 있어요" : "원문 확인 보류", time: audit.updatedAt,
+    category: item.kind === "recognition" ? "인식 연결" : item.kind === "dialogue" ? "대사" : "발췌", value: {...item, auditId: audit.id},
+  })));
+  const all = [...audits, ...duplicates, ...conflictsPending, ...small].sort((left, right) => Number(right.time ?? 0) - Number(left.time ?? 0));
   if (!all.length) return `<div class="attention">${pageHeader("상태 확인", "RCM이 자동으로 바꾸지 않은 상태와 충돌만 모았습니다.")}${empty("확인할 기록이 없습니다", "새로 확인이 필요한 기록이 생기면 여기에 모입니다.")}</div>`;
   const visible = view.filter === "all" ? all : all.filter((item) => item.type === view.filter);
   const selected = visible.find((item) => item.id === view.selectedId) ?? visible[0];
-  const labels: Record<AttentionItem["type"], string> = { audit: "재검수", duplicate: "상태 확인", conflict: "충돌" };
+  const labels: Record<AttentionItem["type"], string> = { audit: "재검수", duplicate: "상태 확인", conflict: "충돌", small: "작은 확인" };
   const count = (type: AttentionFilter) => type === "all" ? all.length : all.filter((item) => item.type === type).length;
-  const filterBar = filters(([["all", "전체"], ["duplicate", "상태 확인"], ["conflict", "충돌"], ["audit", "재검수"]] as Array<[AttentionFilter, string]>)
+  const filterBar = filters(([["all", "전체"], ["duplicate", "상태 확인"], ["conflict", "충돌"], ["audit", "재검수"], ["small", "작은 확인"]] as Array<[AttentionFilter, string]>)
     .map(([key, label]) => ({ label, pressed: view.filter === key, count: count(key), action: "attention-filter", data: { filter: key } })), "확인 항목 필터");
-  const rows = visible.map((item) => `<button type="button" class="row" data-action="select-attention" data-id="${escapeHtml(item.id)}" data-attention-row${item.id === selected?.id ? ' aria-current="true"' : ""}><div class="row__slug"><b>${escapeHtml(item.category ?? labels[item.type])}</b><span>${escapeHtml(formatRelativeTime(item.time))}</span></div><div class="row__title">${escapeHtml(item.title)}</div><div class="row__sub">${escapeHtml(item.summary)}</div></button>`).join("");
+  const renderAttentionRows = (items: AttentionItem[]) => items.map((item) => `<button type="button" class="row${item.type === "small" ? " row--small" : ""}" data-action="select-attention" data-id="${escapeHtml(item.id)}" data-attention-row${item.id === selected?.id ? ' aria-current="true"' : ""}>${item.type === "small" ? smallReviewMark(item.value) : ""}<div class="row__slug"><b>${escapeHtml(item.category ?? labels[item.type])}</b><span>${escapeHtml(formatRelativeTime(item.time))}</span></div><div class="row__title">${escapeHtml(item.title)}</div><div class="row__sub">${escapeHtml(item.summary)}</div></button>`).join("");
+  const urgent = visible.filter(item => item.type !== "small"), optional = visible.filter(item => item.type === "small");
+  const rows = `${urgent.length ? `<section aria-label="먼저 봐 주세요"><h3 class="sec">먼저 봐 주세요</h3>${renderAttentionRows(urgent)}</section>` : ""}
+    ${optional.length ? `<section class="review-small__list" aria-label="작은 확인"><h3 class="sec">작은 확인 · 기억은 이미 저장됐어요</h3>${renderAttentionRows(optional)}
+    <div class="review-small__bulk">${btn("모두 보류 유지", {kind: "quiet", action: "resolve-small-review-bulk", data: {resolution: "hold"}})}${btn("모두 빼기", {kind: "quiet", action: "resolve-small-review-bulk", data: {resolution: "discard"}})}</div><p class="review-small__calm">작은 확인은 그대로 두어도 괜찮아요. 고르기 전까지는 기억 검색과 메인 모델 전달에서 빠져 있어요.</p></section>` : ""}`;
   const back = `<div class="reader__bar"><button type="button" class="back hit" data-action="attention-back">${icon("back")}<span>목록</span></button></div>`;
   const technical = (key: string, body: string) => fold("기술 세부정보", `<pre class="packet">${body}</pre>`, { role: "section", preserveKey: `attention-technical:${key}` });
   let detail = empty("확인이 필요한 항목이 없습니다", "RCM이 스스로 판단하지 못한 기록이 생기면 여기에 모입니다.");
-  if (selected?.type === "audit") {
+  if (selected?.type === "small") {
+    detail = smallReviewDetail(selected.value, back);
+  } else if (selected?.type === "audit") {
     const item = selected.value, draft = item.draft ?? {};
     const counts = `기억 ${(draft.memories ?? []).length}개 · 상태 후보 ${(draft.stateObservations ?? []).length}개`;
     const ordinals = (item.evidenceReview?.sourceMessages ?? []).map((source: any) => Number(source.ordinal) + 1);
@@ -3202,6 +3241,9 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const metadata = [triggerLabel, target].filter(Boolean).join(' · ');
     const groupDetail = (metadata ? `<p class="sub">${escapeHtml(metadata)}</p>` : '')
       + (storyLevel && typeof payload.targetGroupId === 'string' ? `<p class="sub">대상 그룹 · ${escapeHtml(payload.targetGroupId)}</p>` : '');
+    const auditDrops = Array.isArray(payload.auditAdditionDrops) ? payload.auditAdditionDrops as import("@rcm/shared").ExtractionAuditSubmission["additionDrops"] : undefined;
+    const auditDropNote = auditDrops?.length ? `<details class="fold"><summary>재검수 추가 항목 ${auditDrops.length}개 제외</summary><ul>${auditDrops.map(drop =>
+      `<li>${escapeHtml(`${drop.array}[${drop.index}]`)}<ul>${drop.issues.map(issue => `<li>${escapeHtml(issue.path.join("."))}: ${escapeHtml(issue.message)}</li>`).join("")}</ul></li>`).join("")}</ul></details>` : "";
     const withheldRecognitions = Array.isArray(payload.withheldRecognitions) ? payload.withheldRecognitions.filter((item): item is { holder?: unknown; what?: unknown } => Boolean(item && typeof item === "object")) : [];
     const sourceRange = payload.sourceRange && typeof payload.sourceRange === "object" ? payload.sourceRange as { id?: unknown } : undefined;
     // Withheld recognition is a note on a finished job, not an error: the row names it, the body lists it once.
@@ -3216,7 +3258,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     // Inside a same-kind burst the kind is already the parent's title; a child names only what differs.
     const childName = child ? target || triggerLabel || title : title;
     const childDetail = [held ? CHAT_WORK_HELD_MESSAGE : child ? (job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : "") : rowDetail, withheldNote].filter(Boolean).join(" · ");
-    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}${withheldFold}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
+    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}${Number(payload.smallReviewCount) > 0 ? `<p class="review-small__processing">후보 보류 · 추가 호출 없음</p>` : ""}${withheldFold}${auditDropNote}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
   };
   const isUnresolvedJob = (job: any): boolean => ["queued", "leased", "failed"].includes(job.status);
   const currentRunId = data.coldStartProgress?.acknowledged ? undefined : data.coldStartProgress?.backfillRunId;
@@ -3838,8 +3880,8 @@ export function memoryTranslationRecords(memory: any, data: Pick<DashboardData, 
     return [
       { kind: "memory-title", itemId: `${memory.id}:title`, text: String(memory.title) },
       { kind: "memory-content", itemId: `${memory.id}:content`, text: String(memory.content) },
-      ...(memory.details ?? []).map((item: any) => ({ kind: "memory-detail", itemId: `${memory.id}:detail:${item.id}`, text: String(item.text ?? "") })),
-      ...relationshipEvents.map((item: any) => ({ kind: "relationship-event", itemId: `relationship-event:${item.id}:reason`, text: String(item.reason ?? "") })),
+      ...(memory.details ?? []).filter((item:any)=>!item.userEdited && !item.hidden).map((item: any) => ({ kind: "memory-detail", itemId: `${memory.id}:detail:${item.id}`, text: String(item.text ?? "") })),
+      ...relationshipEvents.filter((item:any)=>!item.userEdited && !item.hidden).map((item: any) => ({ kind: "relationship-event", itemId: `relationship-event:${item.id}:reason`, text: String(item.reason ?? "") })),
       ...intimacyMilestones.map((item: any) => ({ kind: "physical-intimacy", itemId: `intimacy:${item.id}:circumstance`, text: String(item.circumstance ?? "") })),
       ...(memory.keyDialogues ?? []).map((item: any, index: number) => ({ kind: "dialogue", itemId: `${memory.id}:dialogue:${index}`, text: String(item.text) })),
       ...evidence.map((item, index) => ({ kind: "evidence", itemId: `${memory.id}:evidence:${index}`, text: String(item.quote ?? messages.get(item.messageId ?? "")?.content ?? "") })).filter((item) => item.text),
@@ -3873,8 +3915,8 @@ export function structuredTranslationRecords(state: RuntimeState, data: Dashboar
           { kind: "relationship", itemId: `relationship:${relationshipFrom(item)}|${relationshipTo(item)}:summary`, text: String(item.summary ?? "") },
           ...(item.activeTensions ?? []).map((text: string, index: number) => ({ kind: "relationship-tension", itemId: `relationship:${relationshipFrom(item)}|${relationshipTo(item)}:tension:${index}`, text })),
         ]),
-        ...(data.socialKnowledge ?? []).flatMap((item: any) => (item.cognition ?? []).map((detail: any) => ({ kind: "social-cognition", itemId: `social-cognition:${detail.id}`, text: String(detail.text ?? "") }))),
-        ...data.relationshipEvents.map((item) => ({ kind: "relationship-event", itemId: `relationship-event:${item.id}:reason`, text: String(item.reason ?? "") })),
+        ...(data.socialKnowledge ?? []).flatMap((item: any) => (item.cognition ?? []).filter((detail:any)=>!detail.userEdited).map((detail: any) => ({ kind: "social-cognition", itemId: `social-cognition:${detail.id}`, text: String(detail.text ?? "") }))),
+        ...data.relationshipEvents.filter(item=>!item.userEdited && !item.hidden).map((item) => ({ kind: "relationship-event", itemId: `relationship-event:${item.id}:reason`, text: String(item.reason ?? "") })),
         ...data.physicalIntimacy.map((item) => ({ kind: "physical-intimacy", itemId: `intimacy:${item.id}:circumstance`, text: String(item.circumstance ?? "") })),
         ...(activeTab === "relationships" ? relationshipSceneTranslationRecords(data, selectedRelationship) : []),
         ...(activeTab === "initial" ? data.memories.flatMap((memory: any) => (memory?.landmarkKinds ?? []).flatMap((landmark: any, index: number) => landmark?.kind === "anniversary_basis" && String(landmark?.label ?? "").trim()
@@ -4072,12 +4114,14 @@ export async function loadDashboardData(
   const relationshipState = value("relationships", { items: previous.relationships, events: previous.relationshipEvents });
   const viewPreferences = value("viewPreferences", previous.viewPreferences);
   const entities = value("entities", { items: previous.entities }).items;
-  const personaResolutionReady = Boolean(context)
-    && chatCalls.get("viewPreferences")?.status === "fulfilled"
-    && chatCalls.get("entities")?.status === "fulfilled";
+  // Identity can arrive after the datasets (or during their requests). Resolve
+  // from this chat's loaded cache too, and retain the last result on failure.
+  const identityContext = state.current?.chatId === context?.chatId ? state.current : context;
+  const personaResolutionReady = Boolean(identityContext?.identityHints.userPersonaName || viewPreferences?.personaEntity)
+    && loadedDatasets.has("viewPreferences") && loadedDatasets.has("entities");
   const personaEntity = personaResolutionReady
-    ? resolveDashboardPersonaEntity(context, entities, viewPreferences)
-    : requested.has("viewPreferences") ? null : previous.personaEntity;
+    ? resolveDashboardPersonaEntity(identityContext, entities, viewPreferences)
+    : previous.personaEntity;
   const jobsState = value("jobs", {
     items: previous.jobs, cancelledMessages: previous.cancelledMessages, waitingForAssistant: previous.waitingForAssistant,
     bufferedMessages: previous.bufferedMessages, excludedMessages: previous.excludedMessages, backfillMessages: previous.backfillMessages, bufferedTurns: previous.bufferedTurns, protectedTurns: previous.protectedTurns, bufferedSourceTokens: previous.bufferedSourceTokens,
@@ -4434,6 +4478,21 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       form.dataset.initialSignature = editorSignature(form);
     });
     scope.querySelectorAll<HTMLElement>("[data-dirty-only]").forEach((control) => { control.hidden = true; });
+  };
+
+  const saveMemoryLine = async (memoryId:string,id:string,kind:"detail"|"event",patch:{text?:string;hidden?:boolean}) => {
+    if (!state.current || !data.health?.capabilities?.memoryLineEditing) throw new Error("서버 업데이트가 필요해요.");
+    const result=await client.request<{id:string;text:string;userEdited:boolean;hidden:boolean}>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/memories/${encodeURIComponent(memoryId)}/${kind === "detail" ? "details" : "events"}/${encodeURIComponent(id)}`,{method:"PATCH",body:JSON.stringify(patch)});
+    const item=kind === "detail" ? data.memories.find(m=>m.id===memoryId)?.details?.find((d:any)=>d.id===id) : data.relationshipEvents.find(e=>e.id===id);
+    if (item) Object.assign(item,{[kind === "detail" ? "text" : "reason"]:result.text,userEdited:result.userEdited,hidden:result.hidden});
+    if (kind === "detail") {
+      const memory=data.memories.find(m=>m.id===memoryId);
+      if (memory) memory.detailCount=(memory.details ?? []).filter((detail:any)=>!detail.hidden).length;
+    }
+    const itemId=kind === "detail" ? `${memoryId}:detail:${id}` : `relationship-event:${id}:reason`;
+    translations.delete(itemId);
+    if (kind === "detail") translations.delete(`social-cognition:${id}`);
+    await invalidateTranslationCache(state,{serverInstanceId:data.health?.instanceId,chatId:state.current.chatId,itemId});
   };
 
   const editorHasChanges = (): boolean => {
@@ -5253,7 +5312,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (generation !== refreshGeneration || !dashboardOpen) return;
     const failed = (data.failedDatasets ?? []).filter((dataset) => dashboardDatasetsForTab(activeTab).includes(dataset));
-    if (!failed.length) {
+    const identityPending = isServerConfigured(state.settings)
+      && !state.current?.identityHints.userPersonaName && !data.viewPreferences.personaEntity;
+    if (!failed.length && !identityPending) {
       dashboardRetryCancel?.();
       dashboardRetryCancel = undefined;
       dashboardRetryAttemptKey = "";
@@ -5767,7 +5828,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         settingsSectionOpen = true;
       } else if (nextTab === "settings") settingsSectionOpen = false;
       const requestedAttentionFilter = target.dataset.attentionFilter as AttentionFilter | undefined;
-      if (nextTab === "reviews" && requestedAttentionFilter && ["all", "duplicate", "conflict", "audit"].includes(requestedAttentionFilter)) {
+      if (nextTab === "reviews" && requestedAttentionFilter && ["all", "duplicate", "conflict", "audit", "small"].includes(requestedAttentionFilter)) {
         attentionView.filter = requestedAttentionFilter;
         attentionView.selectedId = "";
         attentionView.query = "";
@@ -5855,7 +5916,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (action === "attention-filter") {
       const next = target.dataset.filter as AttentionFilter;
-      if (!["all", "duplicate", "conflict", "audit"].includes(next)) return;
+      if (!["all", "duplicate", "conflict", "audit", "small"].includes(next)) return;
       attentionView.filter = next;
       attentionView.selectedId = "";
       attentionView.mobileDetail = false;
@@ -6116,6 +6177,26 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       root.querySelector<HTMLButtonElement>('[data-action="add-access-holder"]')?.focus();
       return;
     }
+    if (["edit-detail-text","edit-event-reason","hide-detail","hide-event","restore-detail","restore-event","cancel-memory-line"].includes(action ?? "")) {
+      if (!data.health?.capabilities?.memoryLineEditing || !state.current) return;
+      if (editorHasChanges() && !await confirmDashboard("저장하지 않은 변경을 버릴까요?")) return;
+      const kind = action?.includes("event") ? "event" : "detail";
+      const id = kind === "event" ? target.dataset.eventId : target.dataset.detailId;
+      if (action === "cancel-memory-line") { timelineView.textEditing=undefined; formDirty=false; render(); return; }
+      if (action?.startsWith("edit-")) {
+        timelineView.textEditing={id:id ?? "",kind}; timelineView.accessEditing=undefined; formDirty=false; render();
+        const input=root.querySelector<HTMLTextAreaElement>('#memory-line-form textarea');
+        if (input) { input.style.height=`${input.scrollHeight}px`; input.focus(); }
+        return;
+      }
+      const hidden=action?.startsWith("hide-") === true;
+      if (hidden && !await confirmDashboard(kind === "detail" ? "이 세부 기억을 기억 검색과 전달에서 뺄까요? 나중에 되돌릴 수 있어요." : "이 관계 사건을 기억 검색과 전달에서 뺄까요? 나중에 되돌릴 수 있어요. 이미 반영된 관계 수치는 그대로예요.")) return;
+      try {
+        await saveMemoryLine(target.dataset.memoryId ?? "",id ?? "",kind,{hidden});
+        timelineView.textEditing=undefined; formDirty=false; render();
+      } catch(error) { showActionSaveState({kind:"error",message:error instanceof Error ? error.message : String(error)}); }
+      return;
+    }
     if (action === "edit-detail-access") {
       // Selecting a quote for copying must not open its editor on pointer release.
       const selection = root.ownerDocument.getSelection();
@@ -6123,6 +6204,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         && (target.contains(selection.anchorNode) || target.contains(selection.focusNode))) return;
       if (editorHasChanges() && !await confirmDashboard("저장하지 않은 변경을 버릴까요?")) return;
       formDirty = false;
+      timelineView.textEditing=undefined;
       timelineView.accessEditing = timelineView.accessEditing === target.dataset.detailId
         ? undefined : target.dataset.detailId ?? "";
       render();
@@ -6327,6 +6409,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       formDirty = false;
       navigation.supersede();
       selectedMemory = target.dataset.id ?? "";
+      timelineView.textEditing=undefined;
       const memory = data.memories.find((item) => item.id === selectedMemory);
       timelineView.editing = false;
       timelineView.creating = false;
@@ -7064,6 +7147,16 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await invalidateTranslationCache(state, { chatId: state.current.chatId, itemIdPrefix: `reconciliation:${reviewId}:` });
         formDirty = false;
         addLog(state.logs, "info", `Duplicate review resolved: ${resolution}`);
+      } else if (action === "resolve-small-review" || action === "resolve-small-review-bulk") {
+        const visibleIds = new Set([...root.querySelectorAll<HTMLElement>("[data-attention-row]")].filter(row => !row.hidden).map(row => row.dataset.id));
+        const items = action === "resolve-small-review-bulk"
+          ? data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending" && visibleIds.has(`small:${audit.id}:${item.id}`)).map((item: any) => ({auditId: audit.id, candidateId: item.id})))
+          : [{auditId: target.dataset.auditId, candidateId: target.dataset.id}];
+        if (!items.length) return;
+        const response = await client.request<{items: Array<{message: string}>}>(`/v1/chats/${chat}/small-reviews/resolve`, {method: "POST", body: JSON.stringify({items, action: target.dataset.resolution})});
+        showActionSaveState({kind: "success", message: response.items[0]?.message ?? "후보를 처리했어요."});
+        attentionView.mobileDetail = false;
+        attentionView.selectedId = "";
       } else if (action === "retry-extraction-audit") {
         const auditId = target.dataset.id ?? "";
         await client.request(`/v1/chats/${chat}/extraction-audits/${encodeURIComponent(auditId)}/retry`, { method: "POST" });
@@ -7354,7 +7447,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     } catch (error) {
       const message = String(error).replace(/^Error:\s*/, "");
       addLog(state.logs, "error", `Dashboard action failed: [오류 원문 제외]`, supportFailure("dashboard_action", error));
-      showActionSaveState({ kind: "error", message: "작업 실패 · 관리 → 처리 상태에서 확인" });
+      showActionSaveState({ kind: "error", message: action?.startsWith("resolve-small-review") ? message : "작업 실패 · 관리 → 처리 상태에서 확인" });
     }
   });
 
@@ -7425,7 +7518,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       }
       return;
     }
-    const mutationForm = ["memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form"].includes(form.id);
+    const mutationForm = ["memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form", "memory-line-form"].includes(form.id);
     const submitButton = form.querySelector<HTMLButtonElement>('button[type="submit"], button[data-action="submit-form"]')
       ?? root.querySelector<HTMLButtonElement>(`button[data-action="submit-form"][data-form-id="${form.id}"]`);
     if (mutationForm) { form.setAttribute("aria-busy", "true"); if (submitButton) submitButton.disabled = true; }
@@ -7466,6 +7559,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         storyView.overviewDraft = undefined;
         formDirty = false;
         successMessage = "지금까지의 이야기 저장됨";
+      } else if (form.id === "memory-line-form") {
+        await saveMemoryLine(form.dataset.memoryId ?? "",form.dataset.lineId ?? "",form.dataset.kind === "event" ? "event" : "detail",{text:String(values.text ?? "")});
+        timelineView.textEditing=undefined; formDirty=false; successMessage="세부 기억을 저장했어요";
       } else if (form.id === "detail-access-form") {
         const memoryId = form.dataset.memoryId ?? "", detailId = form.dataset.detailId ?? "";
         const grants = Array.from(form.querySelectorAll<HTMLElement>(".access-holder-row")).map(row => ({
@@ -7782,9 +7878,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       additionEstimateTimer = setTimeout(() => void updateAdditionEstimate(), 400);
       return;
     }
+    if (input.matches('#memory-line-form textarea')) { input.style.height="auto"; input.style.height=`${input.scrollHeight}px`; }
     if (input.closest('#organization-search-form')) { organizationView.search = input.value; return; }
     if (input.closest('#organization-jump-form')) { organizationView.jump = input.value; return; }
-    if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
+    if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
     if (input.dataset.action === "people-search") {
       peopleView.query = input.value;
       applyPeopleSearch();
@@ -7860,7 +7957,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const title = input.closest(".reader")?.querySelector<HTMLElement>(".reader__title[data-title-verb]");
       if (title) title.textContent = `${worldRecordLabel("assertion", { stateKind: value })} ${title.dataset.titleVerb}`;
     }
-    if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
+    if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
     if (input.name === "customRuleEnabled") updateRegexRuleSummary();
     if (input.dataset.action === "set-profile-select") {
       try {
@@ -8017,7 +8114,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   await themeReady;
   await showCompletedProductReleaseNotice(state);
   lastServerActivitySignature = serverActivitySignature();
-  lastLiveDataSignature = dashboardLiveDataSignature(state.statusSummary);
+  lastLiveDataSignature = dashboardLiveDataSignature(state.statusSummary, state.current);
   const toolRegistrationSignature = () => JSON.stringify([state.memoryToolRegistration?.status, state.memoryToolRegistration?.failures]);
   let lastToolRegistrationSignature = toolRegistrationSignature();
   const refreshFromActivity = async () => {
@@ -8037,7 +8134,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const busy = !!state.currentJob || (state.serverWorker?.activeCalls ?? 0) > 0 || (summary?.queuedJobs ?? 0) > 0 || (summary?.pendingEmbeddings ?? 0) > 0 || ["queued", "processing"].includes(state.episodeActivity?.status ?? "");
     const nextServerSignature = serverActivitySignature();
     const serverActivityChanged = nextServerSignature !== lastServerActivitySignature;
-    const nextLiveDataSignature = dashboardLiveDataSignature(summary);
+    const nextLiveDataSignature = dashboardLiveDataSignature(summary, state.current);
     const liveDataChanged = nextLiveDataSignature !== lastLiveDataSignature;
     lastServerActivitySignature = nextServerSignature;
     lastLiveDataSignature = nextLiveDataSignature;

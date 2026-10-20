@@ -1,3 +1,5 @@
+import { recordSmallReviews, ingestReviewedDialogue, finishSmallReviewRetry, readSmallReviews } from "./small-review.js";
+import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import type { JobTrigger } from "@rcm/shared";
 import { maybeEnqueueQuiz } from "./quiz.js";
 import { completeMemoryAddition } from './memory-addition.js';
@@ -55,7 +57,8 @@ export function completeExtractionJob(
     | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
   if (job.type === 'memory_addition') return completeMemoryAddition(db, jobId, workerId, result, reconciliation, audit);
-  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; resolvedSetup?: { messages?: Array<{ content: string }> }; postExtractionReview?: boolean; sourceRecovery?: boolean; dialogueRecovery?: DialogueRecoveryCandidate[]; retryOfAuditId?: string; retryOfJobId?: string; continuationDraft?: ExtractionDraftResult; continuationHistory?: string[]; batchId?: string; regenerationRunId?: string; backfillRunId?: string; trigger?: JobTrigger; recallCandidates?: Array<{ memoryId: string; accessibleTo: string[] }>; recallAtomRefs?: RecallAtomReference[] };
+  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; resolvedSetup?: { messages?: Array<{ content: string }> }; postExtractionReview?: boolean; sourceRecovery?: boolean; smallReviewRetry?: {auditId: string; candidateId: string}; dialogueRecovery?: DialogueRecoveryCandidate[]; retryOfAuditId?: string; retryOfJobId?: string; continuationDraft?: ExtractionDraftResult; continuationHistory?: string[]; batchId?: string; regenerationRunId?: string; backfillRunId?: string; trigger?: JobTrigger; recallCandidates?: Array<{ memoryId: string; accessibleTo: string[] }>; recallAtomRefs?: RecallAtomReference[] };
+  recordAuditAdditionDrops(db, jobId, payload, audit);
   if (payload.regenerationRunId) {
     const run = db.prepare("SELECT status FROM regeneration_runs WHERE id=? AND chat_id=?").get(payload.regenerationRunId, job.chat_id) as { status: string } | undefined;
     if (!run || !['queued', 'processing'].includes(run.status)) throw new Error("Regeneration candidate is no longer accepting results");
@@ -196,6 +199,11 @@ export function completeExtractionJob(
     let audited: { result: ExtractionDraftResult; pendingRefs: string[] };
     audited = { result: input, pendingRefs: reviewed.pendingRefs };
     if (payload.sourceRecovery) {
+      if (payload.smallReviewRetry) {
+        const origin = db.prepare("SELECT draft_json FROM extraction_audits WHERE id=? AND chat_id=?").get(payload.smallReviewRetry.auditId, job.chat_id) as {draft_json: string} | undefined;
+        const candidate = origin && readSmallReviews(JSON.parse(origin.draft_json)).find(item => item.id === payload.smallReviewRetry!.candidateId);
+        if (!candidate || candidate.status !== "pending") { markJobComplete(db, jobId, workerId); return; }
+      }
       const passages = audited.result.sourcePassages ?? [];
       if (passages.some((item) => !sourceMessageIds.includes(item.messageId))) throw new Error("Recovery passage cites a source outside this job");
       const passagesAdded = storeSourcePassages(db, job.chat_id, passages, payload.batchId, sourceMessageIds);
@@ -214,28 +222,13 @@ export function completeExtractionJob(
           pendingDialogues.push(recovery);
           continue;
         }
-        // Match frozen identity before the same entity canonicalization used at ingestion.
-        const canonical = canonicalizeExtraction(db, job.chat_id, ExtractionResultSchema.parse({language: input.language, memories: [memory]}))
-          .memories[0]!.keyDialogues![0]!;
-        const evidenceJson = JSON.stringify(canonical.evidence);
-        const existing = db.prepare("SELECT id FROM memory_dialogues WHERE memory_id=? AND speaker=? AND text=? AND kind=? AND evidence_json=?")
-          .get(parent.id, canonical.speaker, canonical.text, canonical.kind, evidenceJson) as {id: string} | undefined;
-        const dialogueId = existing?.id ?? randomUUID();
-        if (!existing) {
-          const ordinal = (db.prepare("SELECT COALESCE(MAX(ordinal),-1)+1 AS value FROM memory_dialogues WHERE memory_id=?").get(parent.id) as {value: number}).value;
-          db.prepare("INSERT INTO memory_dialogues(id,chat_id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-            .run(dialogueId, job.chat_id, parent.id, canonical.speaker, canonical.text, canonical.messageId, evidenceJson, canonical.kind, ordinal, Date.now());
-        }
-        const grants = canonical.access ?? (JSON.parse(parent.known_by_json) as string[])
-          .map(holder => ({holder, basis: "witnessed", evidence: canonical.evidence, confidence: 1}));
-        replaceItemAccess(db, job.chat_id, "dialogue", dialogueId, grants, parent.revision, Date.now());
-        refreshMemoryFts(db, parent.id);
+        ingestReviewedDialogue(db, job.chat_id, sourceMessageIds, memory!, parent.id);
       }
       const explicitlyDiscarded = Boolean(audit?.patch?.discardItemRefs.some(ref => ref.startsWith("source:")));
       const noExcerptSelected = passages.length === 0 && (original.sourcePassages ?? []).length === 0
         && payload.postExtractionReview === true && Boolean(audit?.patch);
       const verified = unresolvedDialogues === 0 && !reviewed.pendingRefs.length && !rejectedExcerpts
-        && (passages.length > 0 || explicitlyDiscarded || noExcerptSelected)
+        && (passages.length > 0 || explicitlyDiscarded || noExcerptSelected || Boolean(payload.dialogueRecovery?.length))
         && passages.every(passage => Boolean(db.prepare(`SELECT 1 FROM source_passages p JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash
           WHERE p.chat_id=? AND p.message_id=? AND p.quote=? AND p.active=1 AND json_array_length(p.access_json)>0 LIMIT 1`).get(job.chat_id, passage.messageId, passage.quote)));
       // Keep the pre-audit candidates for another attempt, with each stable parent mapping.
@@ -246,13 +239,17 @@ export function completeExtractionJob(
         retained.memories = retained.memories.filter(memory => retainedKeys.has(memory.key));
         db.prepare("UPDATE jobs SET payload_json=? WHERE id=?").run(JSON.stringify({...payload, dialogueRecovery: pendingDialogues}), jobId);
       }
-      recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, retained, audit, verified ? "applied" : "pending_review",
+      if (!payload.smallReviewRetry) recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, retained, audit, verified ? "applied" : "pending_review",
         verified ? undefined : "Source or dialogue evidence remains unverified", payload.sourceFingerprint);
-      pendingReconciliations = verified ? 0 : Math.max(1, unresolvedDialogues + rejectedExcerpts + reviewed.pendingRefs.length);
+      const held = !verified && !payload.smallReviewRetry ? recordSmallReviews(db, job.chat_id, jobId, sourceMessageIds, retained,
+        payload.batchId ?? payload.retryOfJobId ?? jobId, reviewed.pendingRefs,
+        new Map((payload.dialogueRecovery ?? []).flatMap(item => item.parentMemoryId ? [[item.ref, item.parentMemoryId]] : []))) : 0;
+      pendingReconciliations = verified || held ? 0 : Math.max(1, unresolvedDialogues + rejectedExcerpts + reviewed.pendingRefs.length);
       recordSourceRecoveryOutcome(db, jobId, verified
         ? { outcome: passagesAdded ? "added" : "no_excerpt", passagesAdded }
         : { outcome: "failed", failureCode: "SOURCE_RECOVERY_EVIDENCE_UNVERIFIED" });
-      if (verified) markJobComplete(db, jobId, workerId);
+      if (payload.smallReviewRetry) { finishSmallReviewRetry(db, job.chat_id, payload.smallReviewRetry, verified); pendingReconciliations = 0; }
+      if (verified || held) markJobComplete(db, jobId, workerId);
       else db.prepare("UPDATE jobs SET status='failed',lease_owner=NULL,leased_until=NULL,last_error='Source or dialogue evidence remains unverified; review required',updated_at=? WHERE id=?")
         .run(Date.now(), jobId);
       return;
@@ -302,6 +299,9 @@ export function completeExtractionJob(
     if (recognitionReviewDraft) recordExtractionAudit(db, job.chat_id, jobId, sourceMessageIds, recognitionReviewDraft, audit, "pending_review",
       [recognitionIssues.map(issue => `socialKnowledge[${issue.index}]: ${issue.reason}`).join("; "),
         rejectedExcerpts ? `${sourceReviewSummary} could not be verified` : "", ...relationWarnings].filter(Boolean).join("; "), payload.sourceFingerprint);
+    const held = recordSmallReviews(db, job.chat_id, jobId, sourceMessageIds, recognitionReviewDraft ?? submitted,
+      payload.batchId ?? payload.retryOfJobId ?? jobId, reviewed.pendingRefs);
+    pendingReconciliations = Math.max(0, pendingReconciliations - held);
     applyMemoryRecallObservations(db, job.chat_id, normalized.result.memoryRecallObservations, payload.recallCandidates ?? [], sourceMessageIds, payload.batchId);
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status=?,draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(reconciled.pending ? "pending_review" : "applied", JSON.stringify(recognitionReviewDraft ?? submitted), JSON.stringify(storedResult), audit?.patch ? JSON.stringify(audit.patch) : null, Date.now(), payload.batchId);
     if (job.type !== "social_backfill") lockInitialCalibration(db, job.chat_id);

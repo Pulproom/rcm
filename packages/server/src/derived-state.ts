@@ -1,3 +1,4 @@
+import { refreshDetailFts, memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import type { RcmDatabase } from "./db.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
@@ -12,12 +13,13 @@ export function deleteDerivedRows(db: RcmDatabase, chatId: string, options: { pr
   const setupMemory = "SELECT id FROM memories WHERE chat_id=? AND is_initial_calibration_memory(memory_key)";
   const setup = options.preserveInitialCalibration
     ? db.prepare(setupMemory).all(chatId) as Array<{id:string}> : [];
-  const retained = [...setup];
+  const retained = [...setup, ...db.prepare(`SELECT id FROM memories WHERE chat_id=? AND (${memoryHasLineCorrectionSql()})`).all(chatId) as Array<{id:string}>];
   if(options.preserveUserCorrections) retained.push(...db.prepare(`SELECT id FROM memories WHERE chat_id=?
     AND user_managed=1`).all(chatId) as Array<{id:string}>);
   const retainedIds = JSON.stringify(retained.map(row => row.id));
   const memoryIds = "SELECT value FROM json_each(?)";
   const exclusions: Record<string,string> = {
+    relationship_events: `source_memory_id IN (SELECT value FROM json_each(?)) OR user_edited=1 OR user_hidden=1`,
     memories: `id IN (${memoryIds})`,
     memory_details: `memory_id IN (SELECT value FROM json_each(?))`,
     social_knowledge_events: `source_memory_id IN (SELECT value FROM json_each(?))`,
@@ -48,7 +50,9 @@ export function deleteDerivedRows(db: RcmDatabase, chatId: string, options: { pr
   }
   syncManualCognition(db,chatId);
   pruneDetailAccessEdits(db,chatId);
-  retained.forEach(row => refreshMemoryFts(db, row.id));
+  retained.forEach(row => { refreshMemoryFts(db, row.id);
+    for (const detail of db.prepare('SELECT id FROM memory_details WHERE memory_id=?').all(row.id) as Array<{id:string}>) refreshDetailFts(db,detail.id);
+  });
   if (options.preserveInitialCalibration) {
     db.prepare("DELETE FROM relationship_baselines WHERE chat_id=? AND source<>'setup'").run(chatId);
     db.prepare("DELETE FROM entities WHERE chat_id=? AND origin NOT IN ('setup','manual') AND user_managed=0").run(chatId);

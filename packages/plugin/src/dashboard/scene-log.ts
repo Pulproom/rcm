@@ -215,7 +215,7 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
       const axis = AXIS_LABELS[String(change?.axis ?? "")] ?? String(change?.axis ?? "관계");
       const falling = ["decrease", "complicate"].includes(String(change?.effect ?? ""));
       if (change?.impact === "minor") {
-        addChip(scene, { kind: "minor", label: `${axis} 소폭`, trend: falling ? "down" : "up" });
+        addChip(scene, { kind: "minor", label: `${axis} 조금`, trend: falling ? "down" : "up" });
         continue;
       }
       if (!["meaningful", "major", "turning"].includes(String(change?.impact ?? ""))) continue;

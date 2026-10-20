@@ -1,3 +1,4 @@
+import { refreshDetailFts } from './memory-detail-edits.js';
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
 import { applySeedResolutions, recordSeedResolutionDrops } from "./story-seeds.js";
 import { activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope } from "./social-relations.js";
@@ -66,10 +67,10 @@ export function hasRelationshipEvent(db: RcmDatabase, chatId: string, event: Non
     evidence: evidence.map(item => JSON.stringify([item.messageId, item.quote ?? null])).sort(),
   });
   const fingerprint = identity(event.changes, event.reason, event.evidence);
-  return (db.prepare(`SELECT changes_json,reason,evidence_json FROM relationship_events
-    WHERE chat_id=? AND from_entity=? AND to_entity=? AND active=1 ${sourceJobId === undefined ? '' : 'AND source_job_id=?'}`)
-    .all(chatId, event.from, event.to, ...(sourceJobId === undefined ? [] : [sourceJobId])) as Array<{ changes_json: string; reason: string; evidence_json: string }>)
-    .some(row => identity(JSON.parse(row.changes_json), row.reason, JSON.parse(row.evidence_json)) === fingerprint);
+  return (db.prepare(`SELECT changes_json,reason,original_text,user_edited,user_hidden,evidence_json FROM relationship_events
+    WHERE chat_id=? AND from_entity=? AND to_entity=? AND (active=1 OR user_edited=1 OR user_hidden=1) ${sourceJobId === undefined ? '' : 'AND (source_job_id=? OR user_edited=1 OR user_hidden=1)'}`)
+    .all(chatId, event.from, event.to, ...(sourceJobId === undefined ? [] : [sourceJobId])) as Array<{ changes_json: string; reason: string; original_text:string|null; user_edited:number; user_hidden:number; evidence_json: string }>)
+    .some(row => identity(JSON.parse(row.changes_json), (row.user_edited || row.user_hidden) ? event.reason : row.reason, JSON.parse(row.evidence_json)) === fingerprint);
 }
 
 function resolvePhysicalSourceMemoryId(
@@ -519,7 +520,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
       for (const [savedId, item] of dialogueIdentities) if (item.memoryId === id) dialogueIdentities.delete(savedId);
       const incomingDetailKeys = new Set((memory.details ?? []).map((detail) => detail.key));
-      const previousDetails = db.prepare("SELECT id,detail_key FROM memory_details WHERE memory_id=?").all(id) as Array<{ id: string; detail_key: string }>;
+      const previousDetails = db.prepare("SELECT id,detail_key,user_edited,user_hidden FROM memory_details WHERE memory_id=?").all(id) as Array<{ id: string; detail_key: string; user_edited:number; user_hidden:number }>;
       // An upsert keeps detail IDs, but its old semantic relationships were
       // extracted against the previous detail generation. Re-extraction must
       // provide fresh relations; do not let stable IDs preserve stale meaning.
@@ -530,13 +531,21 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           (source_detail_id IN (SELECT value FROM json_each(?)) OR target_detail_id IN (SELECT value FROM json_each(?)))`)
           .run(chatId, detailIds, detailIds);
       }
-      for (const previous of previousDetails) if (!incomingDetailKeys.has(previous.detail_key)) {
+      for (const previous of previousDetails) if (!incomingDetailKeys.has(previous.detail_key) && !previous.user_edited && !previous.user_hidden) {
         revokedStorySupports.add(`detail:${previous.id}`);
         db.prepare("DELETE FROM item_access WHERE chat_id=? AND item_kind='detail' AND item_id=?").run(chatId, previous.id);
         db.prepare("DELETE FROM memory_detail_fts WHERE detail_id=?").run(previous.id);
         db.prepare("DELETE FROM memory_details WHERE id=?").run(previous.id);
       }
+      for (const previous of previousDetails) if (previous.user_edited || previous.user_hidden) refreshDetailFts(db,previous.id);
       for (const detail of memory.details ?? []) {
+        // Stable keys or exact source-backed content identify a correction; no prose inference.
+        const corrected = db.prepare(`SELECT id FROM memory_details WHERE chat_id=? AND (user_edited=1 OR user_hidden=1)
+          AND ((memory_id=? AND (detail_key=? OR text=? OR original_text=?)) OR ((text=? OR original_text=?)
+            AND NOT EXISTS(SELECT value ->> '$.messageId' FROM json_each(evidence_json) EXCEPT SELECT value ->> '$.messageId' FROM json_each(?))
+            AND NOT EXISTS(SELECT value ->> '$.messageId' FROM json_each(?) EXCEPT SELECT value ->> '$.messageId' FROM json_each(evidence_json)))) LIMIT 1`)
+          .get(chatId,id,detail.key,detail.text,detail.text,detail.text,detail.text,JSON.stringify(detail.evidence),JSON.stringify(detail.evidence)) as {id:string}|undefined;
+        if (corrected) { refreshDetailFts(db,corrected.id); detailByKey.set(JSON.stringify([memory.key,detail.key]),corrected.id); continue; }
         const existingDetail = db.prepare("SELECT id FROM memory_details WHERE chat_id=? AND memory_id=? AND detail_key=?").get(chatId, id, detail.key) as { id: string } | undefined;
         const detailId = existingDetail?.id ?? randomUUID();
         const ordinals = detail.evidence.map((entry) => evidenceOrdinal(db, chatId, [entry])).filter((value): value is number => value !== null);
@@ -869,9 +878,9 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     if (additionsOnly) for (const item of result.socialKnowledge ?? []) {
-      ingestSocialKnowledge(db, chatId, [item], memoryByKey, batchFor(item.evidence), true);
+      ingestSocialKnowledge(db, chatId, [item], memoryByKey, batchFor(item.evidence), true, detailByKey);
     }
-    else ingestSocialKnowledge(db, chatId, result.socialKnowledge ?? [], memoryByKey, sourceBatchId);
+    else ingestSocialKnowledge(db, chatId, result.socialKnowledge ?? [], memoryByKey, sourceBatchId, false, detailByKey);
 
     const sceneNames = new Set([
       ...result.entities.map((entity) => entity.name),

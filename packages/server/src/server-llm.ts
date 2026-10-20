@@ -1,7 +1,9 @@
+import { optionalSourceSelectorsOnly } from "@rcm/shared";
+import { parseExtractionAuditResponse } from "@rcm/shared";
 import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { sanitizeDiagnosticText, assertProviderOutputAllowed } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
-import { parseReconciliationResult, repairStateRecognitionReferences } from "@rcm/shared";
+import { parseReconciliationResult } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch, type MemoryGroupingResult } from "@rcm/shared";
 import { createHash, randomUUID, sign } from "node:crypto";
@@ -853,7 +855,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
 
 export async function repairSourceEvidenceWithServerLlm(store: ServerLlmStore, job: LeasedJob, draft: ExtractionDraftResult, signal: AbortSignal): Promise<ExtractionDraftResult> {
   const issues = inspectSourceReferences(draft, job.auditSourceMessages ?? []).filter((issue) => issue.reason !== "access_unverified");
-  if (!issues.length || !job.sourceUnits) return draft;
+  if (!issues.length || !job.sourceUnits || (!job.smallReviewRetry && optionalSourceSelectorsOnly(issues))) return draft;
   const messages = sourceRepairMessages(draft, issues, job.sourceUnits);
   if (!messages) return draft;
   const raw = await callProvider(store, job.id, messages, signal, "extraction_repair");
@@ -911,8 +913,14 @@ export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: L
     sourceRecoveryContext: job.sourceRecoveryContext,
   });
   const first = await callProvider(store, job.id, messages, signal, "audit");
-  const validatePatch = (value: unknown) => { const patch = ExtractionAuditPatchSchema.parse(resolveDirectDialogueEvidence(value,job.sourceUnits??[])); return job.sourceRecovery ? validateSourceRecoveryPatch(patch,draft) : patch; };
-  try { return { patch: validatePatch(parseServerJson(first, "audit")) }; }
+  const validatePatch = (value: unknown): ExtractionAuditSubmission => {
+    const resolved = resolveDirectDialogueEvidence(value, job.sourceUnits ?? [], Boolean(job.sourceRecovery));
+    // Recovery is a restricted correction protocol, not a general additive audit.
+    return job.sourceRecovery
+      ? { patch: validateSourceRecoveryPatch(ExtractionAuditPatchSchema.parse(resolved), draft) }
+      : parseExtractionAuditResponse(resolved);
+  };
+  try { return validatePatch(parseServerJson(first, "audit")); }
   catch (firstError) {
     onRepair?.();
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
@@ -922,7 +930,7 @@ export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: L
       original: first, repaired, purpose: "audit",
       regenerate: () => callProvider(store, job.id, messages, signal, "audit"),
       validate: (output, phase) => {
-        return { patch: validatePatch(parseServerJson(output, phase === "repair" ? "audit_repair" : "audit")) };
+        return validatePatch(parseServerJson(output, phase === "repair" ? "audit_repair" : "audit"));
       },
     });
   }
@@ -1016,13 +1024,11 @@ export async function reconcileWithServerLlm(
     { role: "user" as const, content: accessRepair ? JSON.stringify({ ledger: JSON.parse(prompts.userPrompt), sourceAccess: JSON.parse(accessRepair.plan.userPrompt) }) : prompts.userPrompt }];
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
   const first = await callProvider(store, jobId, sourceMessages, signal, purpose);
-  let validatedOutput = first;
   const validate = (output: string, label: ServerLlmPurpose): ReconciliationResult => {
     const raw = parseServerJson(output, label);
     const result = parseReconciliationResult(raw, prompts.sourceUnits);
     if (prompts.stateExtraction && !result.state) throw new Error("State extraction response is missing state");
     accessRepair?.onResponse(raw);
-    validatedOutput = output;
     return result;
   };
   let result: ReconciliationResult;
@@ -1041,13 +1047,6 @@ export async function reconcileWithServerLlm(
       regenerate: () => callProvider(store, jobId, sourceMessages, signal, "reconciliation"),
       validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
-  }
-  if (prompts.stateExtraction && prompts.groundingDraft && store.canRepair(jobId, "state_response")) {
-    result = await repairStateRecognitionReferences({ draft: prompts.groundingDraft, result,
-      originalMessages: sourceMessages, invalidOutput: validatedOutput, sourceUnits: prompts.sourceUnits,
-      repair: async messages => parseServerJson(await callProvider(store, jobId, messages, signal, "state_response_repair"), "state_response_repair"),
-    });
-    signal.throwIfAborted();
   }
   return result;
 }

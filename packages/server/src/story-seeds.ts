@@ -17,7 +17,7 @@ export function accessibleStorySeed(value: unknown, knownBy: string[]): SeedMark
 }
 
 export function openStorySeeds(db: RcmDatabase, chatId: string) {
-  return db.prepare(`SELECT d.id,d.text,d.seed_json,d.evidence_json,d.source_end_ordinal FROM memory_details d
+  return db.prepare(`SELECT d.id,d.text,d.seed_json,d.evidence_json,d.source_end_ordinal FROM visible_memory_details d
     JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
     WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND json_extract(d.seed_json,'$.status')='open'
     ORDER BY d.source_start_ordinal,d.id`).all(chatId) as Array<{id:string;text:string;seed_json:string;evidence_json:string;source_end_ordinal:number}>;
@@ -33,7 +33,7 @@ export function validateSeedResolutions(db: RcmDatabase, chatId: string, resolut
     const reject = (reason: string) => dropped.push({detailId:patch.detailId,reason});
     if (suppliedSeeds && !suppliedSeeds.has(patch.detailId)) { reject("Seed target was not supplied to the model"); continue; }
     if (seen.has(patch.detailId)) { reject("Duplicate seed resolution target"); continue; }
-    const row = db.prepare(`SELECT d.seed_json,d.source_end_ordinal FROM memory_details d JOIN memories m ON m.id=d.memory_id
+    const row = db.prepare(`SELECT d.seed_json,d.source_end_ordinal FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1`).get(patch.detailId, chatId) as {seed_json:string;source_end_ordinal:number}|undefined;
     const seed=row && readStorySeed(row.seed_json);
     if (!seed || seed.status !== "open" && (seed.status !== patch.status || JSON.stringify(seed.closureEvidence) !== JSON.stringify(patch.evidence))) { reject("Seed resolution target is not open"); continue; }
@@ -60,7 +60,7 @@ export function recordSeedResolutionDrops(db: RcmDatabase, jobId: string, droppe
 export function applySeedResolutions(db: RcmDatabase, chatId: string, resolutions: SeedResolution[] = []) {
   const validated=validateSeedResolutions(db, chatId, resolutions);
   for (const patch of validated.accepted) {
-    const row = db.prepare("SELECT seed_json FROM memory_details WHERE id=? AND chat_id=?").get(patch.detailId,chatId) as {seed_json:string};
+    const row = db.prepare("SELECT seed_json FROM visible_memory_details WHERE id=? AND chat_id=?").get(patch.detailId,chatId) as {seed_json:string};
     db.prepare("UPDATE memory_details SET seed_json=?,updated_at=? WHERE id=? AND chat_id=?")
       .run(JSON.stringify({...readStorySeed(row.seed_json),status:patch.status,closureEvidence:patch.evidence}),Date.now(),patch.detailId,chatId);
   }
@@ -75,7 +75,7 @@ export function reopenSeedsBySource(db: RcmDatabase, chatId: string, messageId: 
 
 export function storySeedCounts(db: RcmDatabase, chatId: string) {
   const counts = {open:0,fulfilled:0,abandoned:0};
-  for (const row of db.prepare(`SELECT json_extract(d.seed_json,'$.status') status,count(*) count FROM memory_details d JOIN memories m ON m.id=d.memory_id
+  for (const row of db.prepare(`SELECT json_extract(d.seed_json,'$.status') status,count(*) count FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
     WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND d.seed_json IS NOT NULL GROUP BY status`).all(chatId) as Array<{status:keyof typeof counts;count:number}>) counts[row.status]=row.count;
   return counts;
 }

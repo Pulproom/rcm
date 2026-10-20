@@ -870,7 +870,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     `).get(timestamp,timestamp, options.storyOnly ? 1 : 0,JSON.stringify(options.excludeJobIds ?? [])) as { id: string; chat_id: string; type: string; payload_json: string; attempts: number; profile: RpProfile; memory_language: MemoryLanguage } | undefined;
     if (!row) return null;
     planningJobId = row.id;
-    const payload = JSON.parse(row.payload_json) as Partial<RecallCandidateSnapshot> & { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[] | string; includeUserMessages?: boolean; episodeId?: string; resolvedSetup?: ResolvedSetupProjection; identityHints?: Record<string, unknown>; pairs?: Array<{ from: string; to: string; mode?: "incremental" | "replay" }>; memoryLanguage?: MemoryLanguage; postExtractionReview?: boolean; auditDraft?: ExtractionDraftResult; continuationDraft?: ExtractionDraftResult; sourceRecovery?: boolean; sourceRecoveryMetadata?: SourceRecoveryMetadata; sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] }; batchId?: string; regenerationRunId?: string; backfillRunId?: string; groups?: any[]; level?: "segment" | "arc" | "overview"; generationId?: string; startOrdinal?: number; endOrdinal?: number; sourceNodeIds?: string[]; sourceBatchIds?: string[]; sourceTokens?: number; llmCallStats?: OperationLlmCallStats; repairBudgetUsed?: boolean; stateRepairBudgetUsed?: boolean; operationStage?: string; operationStageOrdinal?: number; operationStageTotal?: number };
+    const payload = JSON.parse(row.payload_json) as Partial<RecallCandidateSnapshot> & { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[] | string; includeUserMessages?: boolean; episodeId?: string; resolvedSetup?: ResolvedSetupProjection; identityHints?: Record<string, unknown>; pairs?: Array<{ from: string; to: string; mode?: "incremental" | "replay" }>; memoryLanguage?: MemoryLanguage; postExtractionReview?: boolean; auditDraft?: ExtractionDraftResult; smallReviewRetry?: {auditId: string; candidateId: string}; continuationDraft?: ExtractionDraftResult; sourceRecovery?: boolean; sourceRecoveryMetadata?: SourceRecoveryMetadata; sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] }; batchId?: string; regenerationRunId?: string; backfillRunId?: string; groups?: any[]; level?: "segment" | "arc" | "overview"; generationId?: string; startOrdinal?: number; endOrdinal?: number; sourceNodeIds?: string[]; sourceBatchIds?: string[]; sourceTokens?: number; llmCallStats?: OperationLlmCallStats; repairBudgetUsed?: boolean; stateRepairBudgetUsed?: boolean; operationStage?: string; operationStageOrdinal?: number; operationStageTotal?: number };
     const memoryLanguage = payload.memoryLanguage ?? row.memory_language;
     const operationMeta = { llmCallStats: normalizeLlmCallStats(payload.llmCallStats), repairBudgetUsed: payload.repairBudgetUsed, stateRepairBudgetUsed: payload.stateRepairBudgetUsed, operationStage: payload.operationStage,
       operationStageOrdinal: payload.operationStageOrdinal, operationStageTotal: payload.operationStageTotal };
@@ -1042,7 +1042,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       id: row.id, chatId: row.chat_id, kind: "audit_retry", profile: row.profile, memoryLanguage,
       ...prompts!, sourceMessageIds, sourceTurnCount, attempt: row.attempts + 1, recallCandidates: prompts!.recallCandidates,
       sourceRecovery: payload.sourceRecovery, sourceRecoveryMetadata: payload.sourceRecoveryMetadata, sourceRecoveryContext: payload.sourceRecoveryContext,
-      postExtractionReview: true, auditDraft: ExtractionAggregateSchema.parse(payload.auditDraft), ...auditLedger, ...operationMeta,
+      smallReviewRetry: Boolean(payload.smallReviewRetry), postExtractionReview: !payload.smallReviewRetry, auditDraft: ExtractionAggregateSchema.parse(payload.auditDraft), ...auditLedger, ...operationMeta,
     } satisfies LeasedJob;
     if (row.type === "social_backfill") {
       const built = buildPrompt(db, row.chat_id, row.profile, memoryLanguage, messages);
@@ -1364,7 +1364,7 @@ export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string
 export function projectJobListPayload(payload: Record<string, unknown>, kind?: string): Record<string, unknown> {
   const projected = Object.fromEntries([
     "sourceRecovery", "sourceRecoveryMetadata", "pipelineStage", "pipelineManualRetry", "pipelineRetryAttempt", "llmCallStats", "llmUsage", "llmCallDiagnostics",
-    "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops",
+    "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops", "auditAdditionDrops", "smallReviewCount",
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
   if (JOB_TRIGGER_VALUES.includes(payload.trigger as JobTrigger)) projected.trigger = payload.trigger;
   if (kind === 'story_consolidation' && ['segment','arc','overview'].includes(payload.level as string)

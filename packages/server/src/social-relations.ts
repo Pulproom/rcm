@@ -17,7 +17,7 @@ export function socialRelationKnowledge(db: RcmDatabase, chatId: string, relatio
   if (!relation.detailIds.length) return undefined;
   let common: string[] | undefined;
   for (const id of relation.detailIds) {
-    if (!db.prepare(`SELECT 1 FROM memory_details d JOIN memories m ON m.id=d.memory_id
+    if (!db.prepare(`SELECT 1 FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1`).get(id, chatId)) return undefined;
     const holders = (db.prepare("SELECT holder FROM item_access WHERE chat_id=? AND item_kind='detail' AND item_id=? AND active=1").all(chatId, id) as { holder: string }[]).map(row => row.holder);
     common = common === undefined ? holders : intersectAccessKnowledge(common, holders);
@@ -27,7 +27,7 @@ export function socialRelationKnowledge(db: RcmDatabase, chatId: string, relatio
 export function resolveSocialRelation(db: RcmDatabase, chatId: string, relation: SocialRelation & { memoryKey: string; detailKeys: string[] }, memoryByKey: Map<string, string>): StoredSocialRelation {
   const memoryId = memoryByKey.get(relation.memoryKey) ?? (db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1").get(chatId, relation.memoryKey) as { id: string } | undefined)?.id;
   const detailIds = relation.detailKeys.map(key => {
-    const row = db.prepare("SELECT id FROM memory_details WHERE chat_id=? AND memory_id=? AND detail_key=? AND active=1").get(chatId, memoryId ?? null, key) as { id: string } | undefined;
+    const row = db.prepare("SELECT id FROM visible_memory_details WHERE chat_id=? AND memory_id=? AND detail_key=? AND active=1").get(chatId, memoryId ?? null, key) as { id: string } | undefined;
     if (!row) throw new Error("Social relation requires active supporting details in its memory");
     return row.id;
   });

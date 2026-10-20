@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 54 as const;
+export const DATABASE_SCHEMA_VERSION = 55 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -250,6 +250,9 @@ CREATE TABLE IF NOT EXISTS memory_details (
   seed_json TEXT,
   kind TEXT NOT NULL,
   text TEXT NOT NULL,
+  user_edited INTEGER NOT NULL DEFAULT 0 CHECK(user_edited IN (0,1)),
+  user_hidden INTEGER NOT NULL DEFAULT 0 CHECK(user_hidden IN (0,1)),
+  original_text TEXT,
   participants_json TEXT NOT NULL DEFAULT '[]',
   known_by_json TEXT NOT NULL DEFAULT '[]',
   locations_json TEXT NOT NULL DEFAULT '[]',
@@ -727,6 +730,9 @@ CREATE TABLE IF NOT EXISTS relationship_events (
   to_entity TEXT NOT NULL,
   changes_json TEXT NOT NULL,
   reason TEXT NOT NULL,
+  user_edited INTEGER NOT NULL DEFAULT 0 CHECK(user_edited IN (0,1)),
+  user_hidden INTEGER NOT NULL DEFAULT 0 CHECK(user_hidden IN (0,1)),
+  original_text TEXT,
   evidence_json TEXT NOT NULL DEFAULT '[]',
   source_memory_id TEXT,
   source_detail_id TEXT,
@@ -990,12 +996,19 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
   }
   db.transaction(() => {
+    if (hasSchemaLedger && version < 55) {
+      for (const table of ['memory_details', 'relationship_events']) {
+        const columns = new Set((db.pragma(`table_info(${table})`) as Array<{name:string}>).map(row => row.name));
+        for (const name of ['user_edited', 'user_hidden']) if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0 CHECK(${name} IN (0,1))`);
+        if (!columns.has('original_text')) db.exec(`ALTER TABLE ${table} ADD COLUMN original_text TEXT`);
+      }
+    }
     if (hasSchemaLedger && version < 52 && !(db.pragma("table_info(entities)") as Array<{ name: string }>).some(column => column.name === "color")) {
       db.exec(`ALTER TABLE entities ADD COLUMN ${entityColorColumn}`);
     }
@@ -1013,6 +1026,9 @@ export function openDatabase(path: string): DatabaseHandle {
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update; DROP TRIGGER IF EXISTS source_fts_delete");
     }
     db.exec(schema);
+    // Delivery views keep user omission separate from source lifecycle and axis calculation.
+    db.exec(`CREATE VIEW IF NOT EXISTS visible_memory_details AS SELECT rowid AS rowid,* FROM memory_details WHERE user_hidden=0;
+      CREATE VIEW IF NOT EXISTS visible_relationship_events AS SELECT * FROM relationship_events WHERE user_hidden=0;`);
     installSetupStorageGuards(db);
     if (hasSchemaLedger && version < 53) migrateSetupStorage(db);
     if (hasSchemaLedger && version < 50) {

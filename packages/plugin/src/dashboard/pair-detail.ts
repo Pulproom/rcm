@@ -3,7 +3,8 @@ import type { SocialKnowledgeApiItem } from "../api-client.js";
 import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
 import type { TranslationDisplay } from "../types.js";
-import { anniversaryDayOffset, buildAnniversaries, daysSinceFirstMet, earliestFirstMetStoryTime } from "./diary.js";
+import { anniversaryDayOffset, buildAnniversaries, daysSinceFirstMet, daysSinceStoryTime, earliestFirstMetStoryTime, type MilestoneStage, upcomingMilestone } from "./diary.js";
+import { chartPersonColors } from "./person-colors.js";
 import { buildSceneLog, type SceneCard, type SceneChip, type SceneDay } from "./scene-log.js";
 import { milestoneLabel, normalizeName, type PairSummary, pairKey, relationshipLabelTranslationKey } from "./pairs.js";
 import { buildCast } from "./film/cast.js";
@@ -63,7 +64,9 @@ const MARK_TONE: Partial<Record<SceneChip["kind"], string>> = { landmark: " is-k
 type LabelKeys = ReadonlyMap<string, string>;
 
 const renderMark = (chip: SceneChip, options: PairDetailRenderOptions, memoryId: string, labelKeys: LabelKeys): string => {
-  const name = chip.kind === "minor" ? (chip.trend === "down" ? "down" : "up") : MARK_ICON[chip.kind];
+  const plain = chip.kind === "minor" ? (chip.trend === "down" ? "down" : "up") : MARK_ICON[chip.kind];
+  // The phone reads rises and falls as arrows; film keeps its carets.
+  const name = lex().skin === "phone" && plain ? ({ up: "rise", down: "fall" } as Record<string, string>)[plain] ?? plain : plain;
   const label = chip.kind === "landmark" && labelKeys.has(`${memoryId}|${chip.label}`) ? options.copy(chip.label, labelKeys.get(`${memoryId}|${chip.label}`)!) : escapeHtml(chip.label);
   return `<span class="mark${MARK_TONE[chip.kind] ?? ""}">${name ? icon(name) : ""}${label}</span>`;
 };
@@ -150,40 +153,78 @@ const renderView = (item: any | undefined, from: string, to: string, options: Pa
   ];
   // Projection pending is the server-owned placeholder, not a prose classification.
   const summary = ["Projection pending", "아직 계산 전"].includes(String(item?.summary).trim()) ? "" : String(item?.summary ?? "");
-  const tensions = (item?.activeTensions ?? []).map((text: string, index: number) => `<li>${options.copy(text, `relationship:${directionKey}:tension:${index}`)}</li>`).join("");
-  const face = `<div class="pov__head"><h3>${nameHtml(from)}<span class="pov__to">→ ${escapeHtml(to)}</span></h3></div><div class="pov__card">${summary ? `<p class="pov__text">${options.copy(summary, `relationship:${directionKey}:summary`)}</p>` : ""}${tensions ? `<ul class="beats tensions">${tensions}</ul>` : ""}${summary || tensions ? "" : '<p class="pov__none">아직 관측되지 않음</p>'}</div>`;
+  const phone = lex().skin === "phone";
+  const tensions = (item?.activeTensions ?? []).map((text: string, index: number) => `<li>${phone ? icon("cloud") : ""}${options.copy(text, `relationship:${directionKey}:tension:${index}`)}</li>`).join("");
+  const face = `<div class="pov__head"><h3>${phone ? avatar(from, "sm") : ""}${nameHtml(from)}<span class="pov__to">→ ${escapeHtml(to)}</span></h3></div><div class="pov__card">${summary ? `<p class="pov__text">${options.copy(summary, `relationship:${directionKey}:summary`)}</p>` : ""}${tensions ? `<ul class="beats tensions">${tensions}</ul>` : ""}${summary || tensions ? "" : '<p class="pov__none">아직 관측되지 않음</p>'}</div>`;
   return `<div class="pov">${menu({ label: `${from}의 시선`, items, face: { html: face, className: "pov__face" } })}</div>`;
 };
 
 const canonicalAxes = Object.keys(RelationshipProjectionItemSchema.shape.axes.shape);
-type Direction = readonly [string, string, any];
 
-/** One table for both directions' feelings; the current projection and the setup baseline read the same way. */
-const emotionTable = (directions: readonly Direction[], axes: string[], valueOf: (item: any, axis: string) => RelationshipAxisValue | undefined, options: PairDetailRenderOptions, label: string): string => {
+/** How far a level fills its meter on the phone; conflicted reads as a half bar with its own pattern. */
+const LEVEL_FILL: Record<string, number> = {
+  none: 0, faint: 16, low: 20, tentative: 26, fragile: 26, aversion: 30, distrust: 30, avoidant: 30,
+  growing: 42, moderate: 50, developing: 55, conflicted: 55, established: 72, high: 72, strong: 86, deep: 100, extreme: 100,
+};
+const STRONG_LEVELS = ["strong", "deep", "high", "extreme"];
+
+/**
+ * Both directions' feelings as mirrored meters: the first direction grows left from the axis name, the second right,
+ * each in its person's chart colour (the same pair of colours as 흐름).
+ */
+const emotionMeters = (directions: readonly Direction[], axes: string[], valueOf: (item: any, axis: string) => RelationshipAxisValue | undefined, options: PairDetailRenderOptions, label: string, footer = ""): string => {
   let unobserved = false;
-  const rows = axes.map((axis) => `<tr><th scope="row">${escapeHtml(options.axisLabels[axis] ?? axis)}</th>${directions.map(([, , item]) => {
+  const [first, second] = chartPersonColors(directions[0]?.[0] ?? "", directions[1]?.[0] ?? "");
+  const tone = (color: { h: number; s: number; l: number }) => `--pc:hsl(${color.h} ${color.s}% ${color.l}%)`;
+  const side = (item: any, axis: string, end: "l" | "r") => {
     const value = item ? valueOf(item, axis) : undefined;
-    if (!value || value.level === "unknown") {
-      unobserved = true;
-      return '<td class="emotion-table__empty">—</td>';
-    }
-    const strong = ["strong", "deep", "high", "extreme"].includes(value.level);
-    const level = options.levelLabels[value.level] ?? value.level;
-    const trend = value.trend ? options.trendLabels[value.trend] ?? value.trend : "";
-    return `<td${strong ? ' class="emotion-table__strong"' : ""}${trend ? ` title="${escapeHtml(`${level} · ${trend}`)}"` : ""}>${escapeHtml(level)}</td>`;
-  }).join("")}</tr>`).join("");
-  return `<table class="emotion-table" aria-label="${escapeHtml(label)}"><thead><tr><th scope="col"><span class="sr-only">감정</span></th>${directions.map(([from, to]) => `<th scope="col">${escapeHtml(from)} → ${escapeHtml(to)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>${unobserved ? '<p class="emotion-note">— 아직 관측되지 않음</p>' : ""}`;
+    const known = value && value.level !== "unknown";
+    if (!known) unobserved = true;
+    const level = known ? options.levelLabels[value.level] ?? value.level : "—";
+    const trend = known && value.trend ? options.trendLabels[value.trend] ?? value.trend : "";
+    const arrow = known && value.trend === "rising" ? `<span class="feel__trend is-up">${icon("rise")}</span>` : known && value.trend === "falling" ? `<span class="feel__trend is-down">${icon("fall")}</span>` : "";
+    const fill = known ? LEVEL_FILL[value.level] ?? 50 : 0;
+    const cls = known && value.level === "conflicted" ? " is-conflicted" : "";
+    const word = `<span class="feel__word${known && STRONG_LEVELS.includes(value.level) ? " is-strong" : ""}"${trend ? ` title="${escapeHtml(`${level} · ${trend}`)}"` : ""}>${end === "l" ? `${arrow}${escapeHtml(level)}` : `${escapeHtml(level)}${arrow}`}</span>`;
+    return `<div class="feel__side feel__side--${end}"><span class="feel__bar${cls}"><i style="width:${fill}%"></i></span>${word}</div>`;
+  };
+  const dir = ([from, to]: Direction) => lex().skin === "phone"
+    ? `<span class="meters__dir">${avatar(from, "sm")}${icon("arrow-right")}${avatar(to, "sm")}<span class="sr-only">${escapeHtml(from)} → ${escapeHtml(to)}</span></span>`
+    : `<span class="meters__dir">${escapeHtml(from)} → ${escapeHtml(to)}</span>`;
+  const rows = axes.map((axis) => `<div class="feel"><span class="feel__axis">${escapeHtml(options.axisLabels[axis] ?? axis)}</span>${side(directions[0]?.[2], axis, "l")}${side(directions[1]?.[2], axis, "r")}</div>`).join("");
+  return `<div class="meters" role="group" aria-label="${escapeHtml(label)}" style="${tone(first)};--pc2:hsl(${second.h} ${second.s}% ${second.l}%)"><div class="meters__head">${directions[0] ? dir(directions[0]) : ""}${directions[1] ? dir(directions[1]) : ""}</div>${rows}${unobserved ? '<p class="meters__note">— 아직 관측되지 않음</p>' : ""}${footer}</div>`;
 };
 
-const renderEmotions = (data: DashboardData, directions: readonly Direction[], options: PairDetailRenderOptions, meta: RelationshipFlowMeta): string => {
+type Direction = readonly [string, string, any];
+
+const renderEmotions = (data: DashboardData, directions: readonly Direction[], options: PairDetailRenderOptions, meta: RelationshipFlowMeta, footer = ""): string => {
   const others = [...new Set(directions.flatMap(([, , item]) => Object.keys(item?.axes ?? {})))].filter((axis) => !canonicalAxes.includes(axis)).sort();
   const axes = [...canonicalAxes, ...others];
   const switcher = seg("감정 보기", [
     { value: "now", label: "지금", pressed: options.flowView?.mode !== "flow", action: "pair-emotion-view" },
     { value: "flow", label: "흐름", pressed: options.flowView?.mode === "flow", action: "pair-emotion-view" },
   ]);
-  return `<section class="psec"><div class="sec-head"><h2 class="sec">감정 <span class="n">${axes.length}</span></h2>${switcher}</div>${options.flowView?.mode === "flow" ? renderRelationshipFlow(data, directions, options, meta) : emotionTable(directions, axes, options.axisValue, options, "서로의 감정")}</section>`;
+  return `<section class="psec"><div class="sec-head"><h2 class="sec">감정 <span class="n">${axes.length}</span></h2>${switcher}</div>${options.flowView?.mode === "flow" ? renderRelationshipFlow(data, directions, options, meta) : emotionMeters(directions, axes, options.axisValue, options, "서로의 감정", footer)}</section>`;
 };
+
+/**
+ * Which start the pair's round days count from: marriage, else becoming a couple, else the first meeting.
+ * A later divorce or break-up recorded for the same pair undoes that stage.
+ */
+function milestoneBasis(data: DashboardData, pair: PairSummary, anniversaries: ReturnType<typeof buildAnniversaries>, firstMet: string | null): { stage: MilestoneStage; storyTime: string | null } {
+  const after = (left: string, right: string) => (compareParsedStoryTimes(parseStoryTime(left), parseStoryTime(right)) ?? 0) > 0;
+  const endings = (data.memories ?? []).filter((memory: any) => memory?.active !== false).flatMap((memory: any) => (memory?.landmarkKinds ?? [])
+    .filter((landmark: any) => Array.isArray(landmark?.pair) && pairKey(String(landmark.pair[0]), String(landmark.pair[1])) === pair.key)
+    .map((landmark: any) => ({ kind: String(landmark?.kind ?? ""), storyTime: String(landmark?.storyTime ?? memory?.story_time_normalized ?? memory?.story_time ?? "") })));
+  const latest = (kind: string) => anniversaries.filter((item) => item.kind === kind && item.storyTime)
+    .reduce<string | null>((found, item) => found === null || after(item.storyTime!, found) ? item.storyTime! : found, null);
+  const undone = (start: string, endKind: string) => endings.some((item) => item.kind === endKind && item.storyTime && after(item.storyTime, start));
+  const married = latest("marriage");
+  if (married && !undone(married, "divorce")) return { stage: "married", storyTime: married };
+  const dating = latest("romantic_relationship_established");
+  if (dating && !undone(dating, "romantic_relationship_ended")) return { stage: "dating", storyTime: dating };
+  return { stage: "met", storyTime: firstMet };
+}
 
 const creditName = (name: string): string => `<span class="nm${isLatinName(name) ? "" : " is-cjk"}">${escapeHtml(name)}</span>`;
 
@@ -215,17 +256,6 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   const allScenes = pairSceneCount(data, pair);
   const role = [pair.label ? options.copy(pair.label, relationshipLabelTranslationKey(pair)) : "", `${allScenes}장면 함께함`].filter(Boolean).join(" · ");
   const socialKnowledge = (data.socialKnowledge ?? []) as SocialKnowledgeApiItem[];
-  const calls = (holder: string, subject: string) => {
-    const item = socialKnowledge.find((candidate) => normalizeName(candidate.holder) === normalizeName(holder) && normalizeName(candidate.subject) === normalizeName(subject));
-    const met = socialKnowledge.some(candidate => pairKey(candidate.holder, candidate.subject) === pair.key && candidate.level === "interacted");
-    const known = item?.knownAs ?? [], terms = item?.addressTerms ?? [];
-    if (!met && !known.length && !terms.length && !options.canEditCalls) return "";
-    const names = (label: string, values: string[]) => `<span class="entry__who">${label}</span><span class="entry__body notranslate${values.length ? "" : " is-empty"}" translate="no">${values.length ? values.map(escapeHtml).join(" · ") : "아직 없음"}</span>`;
-    const inner = `<span class="entry__who">${escapeHtml(holder)} → ${escapeHtml(subject)}</span>${names("알고 있는 이름", known)}${names("부르는 이름", terms)}`;
-    return `<li class="entry entry--promise entry--calls">${options.canEditCalls
-      ? `<button type="button" class="entry__face entry__tap" data-action="edit-address" data-holder="${escapeHtml(holder)}" data-subject="${escapeHtml(subject)}" aria-label="${escapeHtml(holder)} → ${escapeHtml(subject)} 이름·호칭 ${known.length || terms.length ? "수정" : "추가"}">${inner}${icon("chevron")}</button>`
-      : inner}</li>`;
-  };
   const isPersonaPair = Boolean(persona) && normalizeName(lead) === persona;
   const leads = isPersonaPair && Array.isArray(data.entities) ? buildCast(data, data.personaEntity).leads : [];
   const picker = leads.length > 1
@@ -246,27 +276,14 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
 
   const sceneDays = buildSceneLog(data, pair, options.diaryFilter, options.diarySort);
   const sceneCount = sceneDays.reduce((sum, day) => sum + day.scenes.length, 0);
-  const facts = `<dl class="facts">${days === null ? "" : `<div><dd>${days}일</dd><dt>함께한 시간</dt></div>`}${firstMet ? `<div><dd>${escapeHtml(shortDate(firstMet))}</dd><dt>첫 만남</dt></div>` : `<div class="facts__empty"><span>첫 만남이 아직 없어요</span>${btn("첫 만남 추가", { kind: "quiet", action: "new-first-met", data: { key: pair.key }, hit: true })}</div>`}</dl>`;
-  const views = `<section class="psec"><h2 class="sec">지금 <span class="n">${directions.filter(([, , item]) => item).length}</span></h2><div class="povs">${directions.map(([from, to, item]) => renderView(item, from, to, options)).join("")}</div>${facts}</section>`;
   const numbers = sceneNumbers(data.memories ?? []);
   const memoryById = new Map((data.memories ?? []).map((memory: any) => [String(memory?.id ?? ""), memory]));
-  const anniversaryCards = anniversaries.map((item) => {
-    const memory: any = memoryById.get(item.memoryId);
-    const offset = anniversaryDayOffset(item, firstMet);
-    const label = item.userDefined ? options.copy(item.label, `landmark:${item.hideKey}:label`) : escapeHtml(item.label);
-    const lines: any[] = Array.isArray(memory?.keyDialogues) ? memory.keyDialogues : [];
-    const lineIndex = lines.findIndex((line) => String(line?.text ?? "").trim());
-    const line = lineIndex < 0 ? "" : `<span class="subtitle"><span>${options.copy(String(lines[lineIndex].text), `${item.memoryId}:dialogue:${lineIndex}`)}</span><small>${escapeHtml(String(lines[lineIndex].speaker ?? ""))}</small></span>`;
-    const scene = [`S#${numbers.get(item.memoryId) ?? "?"}`, item.place ?? ""].filter(Boolean).map(escapeHtml).join(" · ");
-    const actions = menu({ label: `${item.label} 더보기`, items: [
-      { label: `항상 전달 · ${item.alwaysInject ? "켜짐" : "꺼짐"}`, icon: "pin", action: "toggle-anniversary-always", data: { memoryId: item.memoryId, landmarkIndex: String(item.index), value: String(!item.alwaysInject) } },
-      item.userDefined
-        ? { label: "기념일 삭제", icon: "delete", action: "delete-anniversary", data: { memoryId: item.memoryId, landmarkIndex: String(item.index) }, danger: true }
-        : { label: "숨기기", icon: "inactive", action: "hide-anniversary", data: { hideKey: item.hideKey } },
+  const anniversaryActions = (item: (typeof anniversaries)[number]): string => menu({ label: `${item.label} 더보기`, items: [
+    { label: `항상 전달 · ${item.alwaysInject ? "켜짐" : "꺼짐"}`, icon: "pin", action: "toggle-anniversary-always", data: { memoryId: item.memoryId, landmarkIndex: String(item.index), value: String(!item.alwaysInject) } },
+    item.userDefined
+      ? { label: "기념일 삭제", icon: "delete", action: "delete-anniversary", data: { memoryId: item.memoryId, landmarkIndex: String(item.index) }, danger: true }
+      : { label: "숨기기", icon: "inactive", action: "hide-anniversary", data: { hideKey: item.hideKey } },
     ] });
-    const when = [escapeHtml(shortDate(item.storyTime)), offset === null ? "" : `D+${offset}`].filter(Boolean).join(" · ");
-    return `<article class="anni"><button type="button" class="anni__open" data-action="open-timeline-memory" data-memory-id="${escapeHtml(item.memoryId)}"><span class="anni__label">${label}</span><span class="anni__when">${when}${item.alwaysInject ? `<span class="anni__pin" title="항상 전달">${icon("pin")}</span>` : ""}</span><span class="anni__scene"><span class="anni__slug">${scene}</span>${memory ? `<span class="anni__title">${options.copy(String(memory.title ?? ""), `${item.memoryId}:title`)}</span>` : ""}</span>${line}</button><div class="anni__acts">${actions}</div></article>`;
-  }).join("");
   // A date the story never showed becomes a short 설정상 과거 scene of the two, so it lives on the timeline and can be recalled.
   const creatingFirstMet = options.anniversaryEditorEntryId === `new:first-met:${pair.key}`;
   const creatingMark = creatingFirstMet || options.anniversaryEditorEntryId === `new:${pair.key}`;
@@ -275,17 +292,7 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
     { label: "날짜로 만들기", icon: "clock", action: "new-anniversary", data: { key: pair.key } },
     { label: "장면에서 고르기", icon: "film", action: "anniversary-pick", data: { key: pair.key } },
   ], face: { html: `${icon("add")}추가`, className: "btn btn--quiet hit" } });
-  const marks = `<section class="psec"><div class="sec-head"><h2 class="sec">기념일 <span class="n">${anniversaries.length}</span></h2>${addMark}</div>${newMark}${anniversaryCards ? `<div class="reel" data-drag-scroll data-preserve-scroll="marks:${escapeHtml(pair.key)}">${anniversaryCards}</div>` : creatingMark ? "" : empty("아직 기념일이 없습니다", "추가에서 날짜로 만들거나 기록의 장면에서 고를 수 있습니다.")}</section>`;
-
   const intimacyItems = (data.physicalIntimacy ?? []).filter((item: any) => pairKey(String(item?.participantA), String(item?.participantB)) === pair.key);
-  // The milestone is the row's small first line, like a promise's direction; the circumstance reads full width.
-  const intimacyEntry = (item: any) => `<li class="entry entry--promise">${menu({ label: `${milestoneLabel(item)} 스킨십 기록`, items: [
-    { label: "수정", icon: "edit", action: "edit-intimacy", data: { id: String(item.id) } },
-    { label: "삭제", icon: "delete", action: "delete-intimacy", data: { id: String(item.id) }, danger: true },
-  ], face: { className: "entry__face", html: `<span class="entry__who">${escapeHtml(milestoneLabel(item))}</span><span class="entry__body">${options.copy(String(item?.circumstance ?? ""), `intimacy:${item.id}:circumstance`)}</span>` } })}</li>`;
-  // Adding a record lives in the sheet's ··· menu only; this fold just reads the records.
-  const intimacy = intimacyItems.length ? `<section class="psec">${fold("스킨십 기록", `<ul class="entries">${intimacyItems.map(intimacyEntry).join("")}</ul>`, { role: "section", count: intimacyItems.length, preserveKey: `intimacy:${pair.key}` })}</section>` : "";
-
   const labelKeys: LabelKeys = new Map((data.memories ?? []).flatMap((memory: any) => (memory?.landmarkKinds ?? []).flatMap((landmark: any, index: number) => landmark?.kind === "anniversary_basis" && String(landmark?.label ?? "").trim()
     ? [[`${memory.id}|${String(landmark.label)}`, `landmark:${memory.id}#${index}:label`] as [string, string]] : [])));
   const sortControl = `<label class="sortpick"><span class="sr-only">씬 로그 정렬</span><select class="select" data-action="pair-diary-sort"><option value="newest" ${options.diarySort === "newest" ? "selected" : ""}>최신순</option><option value="oldest" ${options.diarySort === "oldest" ? "selected" : ""}>오래된순</option></select></label>`;
@@ -293,39 +300,112 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   // 처음 설정된 관계: the setup's feelings in the same table as 감정, then each direction's own words.
   const initialItems = (data.initialCalibration?.relationships ?? []).filter((item: any) => pairKey(String(item?.from), String(item?.to)) === pair.key);
   const initialDirections: Direction[] = directions.map(([from, to]) => [from, to, initialItems.find((item: any) => String(item?.from) === from && String(item?.to) === to)] as const);
-  const initialSummaries = initialDirections.filter(([, , item]) => item).map(([from, to, item]) => `<li class="entry entry--promise"><div class="entry__head"><span class="entry__who">${escapeHtml(from)} → ${escapeHtml(to)}</span></div><span class="entry__body">${options.copy(String(item?.summary ?? "요약 없음"), `initial-relationship:${item?.id ?? `${from}|${to}`}:summary`)}</span></li>`).join("");
   const initialAxis = (item: any, axis: string): RelationshipAxisValue | undefined => typeof item?.axes?.[axis] === "string" ? { level: item.axes[axis], trend: "" } : undefined;
   const initialFelt = initialItems.some((item: any) => canonicalAxes.some((axis) => (initialAxis(item, axis)?.level ?? "unknown") !== "unknown"));
-  const initial = initialItems.length ? `<section class="psec">${fold("처음 설정된 관계", `${initialFelt ? `<h4 class="subhead">처음 감정</h4>${emotionTable(initialDirections, canonicalAxes, initialAxis, options, "처음 설정된 감정")}` : ""}<h4 class="subhead">처음 관계</h4><ul class="entries">${initialSummaries}</ul>`, { role: "section", preserveKey: `pair-initial:${pair.key}` })}</section>` : "";
   const basisIds = new Set(directions.flatMap(([, , item]) => item?.basisEventIds ?? []));
   const basisItems = (data.relationshipEvents ?? []).filter((item: any) => basisIds.has(item.id));
-  const basis = basisItems.length ? `<section class="psec">${fold("판단 근거", `<ul class="entries">${basisItems.map((item: any) => `<li class="entry entry--promise"><span class="entry__body">${options.copy(String(item?.reason ?? ""), `relationship-event:${item.id}:reason`)}</span></li>`).join("")}</ul>`, { role: "section", count: basisItems.length, preserveKey: `pair-basis:${pair.key}` })}</section>` : "";
   const picking = options.anniversaryEditorEntryId === `pick:${pair.key}`;
   const pickBar = picking ? `<div class="pickbar" role="status"><span>기념일로 만들 장면을 고르세요</span>${btn("취소", { kind: "quiet", action: "cancel-anniversary", hit: true })}</div>` : "";
   const log = `<section class="psec" data-pair-section="diary"><h2 class="sec">기록 <span class="n">${sceneCount}</span></h2>${pickBar}<div class="logbar">${filterBar}${sortControl}</div>${renderSceneLog(sceneDays, { ...options, picking }, labelKeys, `scenelog:${pair.key}:${options.diaryFilter}:${options.diarySort}`)}</section>`;
   const promises = pairOpenPromises(data, pair);
   const sceneAt = sceneLocator(data.memories ?? [], (time) => formatStoryTime(time, true));
-  const promiseRows = promises.map((item: any) => {
-    const scene = sceneAt(item.source_memory_id ?? item.sourceMemoryId ?? item.lastMention?.ordinal);
-    // The promise opens as its record in 현재, where it can be edited, kept or broken.
-    const who = [`${item.promisor ?? ""} → ${item.promisee ?? ""}`, item.scheduled_for ? `예정 · ${formatStoryTime(item.scheduled_for)}` : ""].filter(Boolean).join(" · ");
-    return `<li class="entry entry--promise"><button type="button" class="entry__face entry__tap" data-action="open-now-record" data-key="${escapeHtml(promiseChainKey(item))}"><span class="entry__who">${escapeHtml(who)}</span><span class="entry__body">${options.copy(String(item.content ?? ""), `promise:${item.id ?? item.promise_key ?? ""}`)}</span>${scene ? `<span class="entry__src">${escapeHtml(scene.label)}</span>` : ""}${icon("chevron")}</button></li>`;
-  });
-  // Several 기본 관계 can hold at once; each is one row that reads as a sentence and carries its own verbs.
-  const relationRows = basicRelations.map((item: any) => {
-    const relation = item.socialRelation;
+  function relationMenuItems(item: any): Array<MenuItem | "sep"> {
     const data = { kind: "assertion", id: String(item.id), social: "true" };
-    const direction = `${escapeHtml(String(item.subject ?? ""))} ${relation?.direction === "mutual" ? "↔" : "→"} ${escapeHtml(String(relation?.target ?? ""))}`;
-    return `<li class="entry entry--promise entry--relation">${menu({ label: String(relation?.label ?? "기본 관계"), items: [
+    return [
       { label: "수정", icon: "edit", action: "edit-world", data },
       { label: "종료", icon: "inactive", action: "end-world", data },
       "sep",
       { label: "삭제", icon: "delete", action: "delete-world", data, danger: true },
-    ], face: { className: "entry__face", html: `<span class="entry__who">${direction}</span><span class="entry__body">${options.copy(String(relation?.label ?? ""), `relation-label:${item.id}`)}</span>` } })}</li>`;
-  }).join("");
-  const relationSection = relationRows ? `<section class="psec"><h2 class="sec">기본 관계 <span class="n">${basicRelations.length}</span></h2><ul class="entries">${relationRows}</ul></section>` : "";
-  const promiseSection = promises.length ? `<section class="psec"><h2 class="sec">약속 <span class="n">${promises.length}</span></h2><ul class="entries">${promiseRows.slice(0, 3).join("")}</ul>${promiseRows.length > 3 ? fold("더 보기", `<ul class="entries">${promiseRows.slice(3).join("")}</ul>`, { role: "more", count: promiseRows.length - 3, preserveKey: `pair-promises:${pair.key}` }) : ""}</section>` : "";
-  const callRows = `${calls(lead, other)}${calls(other, lead)}`;
-  const callSection = callRows ? `<section class="psec pair-calls"><h2 class="sec">이름·호칭</h2><ul class="entries">${callRows}</ul></section>` : "";
-  return `<article class="reader pairsheet">${bar}${picker}${titles}${relationSection}${callSection}${views}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes })}${promiseSection}${marks}${log}${intimacy}${initial}${basis}</article>`;
+    ];
+  }
+  return renderAppPairSheet(lex().skin !== "phone");
+
+  /**
+   * The sheet reads like a couple app: who they are to each other, a few numbers, then each part as its own card.
+   * Film keeps its title credits, shows the numbers as a poster billing block and the names as screenplay cues.
+   */
+  function renderAppPairSheet(film: boolean): string {
+    const [firstTone, secondTone] = chartPersonColors(lead, other);
+    const tones = `--pc:hsl(${firstTone.h} ${firstTone.s}% ${firstTone.l}%);--pc2:hsl(${secondTone.h} ${secondTone.s}% ${secondTone.l}%)`;
+    const relationPills = basicRelations.map((item: any) => {
+      const label = String(item?.socialRelation?.label ?? "기본 관계");
+      // The pair's own label shares the list row's translation, so the hero and the row read the same.
+      const text = pair.label && normalizeName(label) === normalizeName(pair.label) ? options.copy(label, relationshipLabelTranslationKey(pair)) : options.copy(label, `relation-label:${item.id}`);
+      // A one-way relation (스승, 보호자…) also names its direction; a mutual one reads by its name alone.
+      const way = item?.socialRelation?.direction === "mutual" ? "" : `<small class="pair-rel__way">${escapeHtml(String(item?.subject ?? ""))} → ${escapeHtml(String(item?.socialRelation?.target ?? ""))}</small>`;
+      return menu({ label, items: relationMenuItems(item), face: { className: "pair-rel", html: `<span>${text}</span>${way}` } });
+    }).join("");
+    const names = [lead, other].map((name) => `<button type="button" class="pair-name__who" data-action="open-relationship-person" data-person-name="${escapeHtml(name)}">${nameHtml(name)}</button>`).join('<span class="pair-name__amp">&amp;</span>');
+    const hero = film
+      ? titles.replace(/<div class="tie">[\s\S]*?<\/div>/, relationPills ? `<div class="tie pair-rels">${relationPills}</div>` : "")
+      : `<section class="titles titles--plain pair-hero"><div class="pair-avs">${avatar(lead, "xl")}${avatar(other, "xl")}</div><h2 class="pair-name">${names}</h2>${relationPills ? `<div class="pair-rels">${relationPills}</div>` : ""}</section>`;
+
+    const tile = (tone: string, iconName: string, label: string, value: string) => `<div class="pair-tile pair-tile--${tone}"><span class="pair-tile__k">${icon(iconName)}${label}</span><span class="pair-tile__v">${value}</span></div>`;
+    const metTile = firstMet
+      ? tile("met", "calendar", "첫 만남", escapeHtml(shortDate(firstMet)))
+      : `<button type="button" class="pair-tile pair-tile--met pair-tile--add" data-action="new-first-met" data-key="${escapeHtml(pair.key)}"><span class="pair-tile__k">${icon("calendar")}첫 만남</span><span class="pair-tile__add">${icon("add")}추가</span></button>`;
+    const bill = (label: string, value: string) => `<div class="bill"><b>${value}</b><span>${label}</span></div>`;
+    const tiles = film
+      ? `<div class="billing">${bill("함께한 시간", days === null ? "—" : `${days}<small>일</small>`)}${firstMet ? bill("첫 만남", escapeHtml(shortDate(firstMet))) : `<button type="button" class="bill bill--add" data-action="new-first-met" data-key="${escapeHtml(pair.key)}"><b>${icon("add")}</b><span>첫 만남 추가</span></button>`}${bill("함께한 장면", String(allScenes))}</div>`
+      : `<div class="pair-tiles">${tile("days", "heart", "함께한 시간", days === null ? "—" : `${days}<small>일</small>`)}${metTile}${tile("scenes", "film", "함께한 장면", String(allScenes))}</div>`;
+
+    const say = (holder: string, subject: string, end: "l" | "r", mine = false) => {
+      const item = socialKnowledge.find((candidate) => normalizeName(candidate.holder) === normalizeName(holder) && normalizeName(candidate.subject) === normalizeName(subject));
+      const met = socialKnowledge.some((candidate) => pairKey(candidate.holder, candidate.subject) === pair.key && candidate.level === "interacted");
+      const known = item?.knownAs ?? [], terms = item?.addressTerms ?? [];
+      if (!met && !known.length && !terms.length && !options.canEditCalls) return "";
+      const others = known.filter((name) => !terms.some((term) => normalizeName(term) === normalizeName(name)));
+      const words = [...terms.map((term) => `<b>${escapeHtml(term)}</b>`), ...others.map(escapeHtml)].join(" · ");
+      const line = `<span class="say__bub notranslate${words ? "" : " is-empty"}" translate="no">${words || "아직 부르는 이름이 없어요"}</span>`;
+      const inner = film
+        ? `<span class="say__cue">${nameHtml(holder)}</span><span class="say__paren">(${escapeHtml(subject)}에게)</span>${line}`
+        : `${mine ? "" : avatar(holder, "sm")}${line}`;
+      return options.canEditCalls
+        ? `<button type="button" class="say say--${end}${mine ? " is-mine" : ""}" data-action="edit-address" data-holder="${escapeHtml(holder)}" data-subject="${escapeHtml(subject)}" aria-label="${escapeHtml(holder)} → ${escapeHtml(subject)} 이름·호칭 ${known.length || terms.length ? "수정" : "추가"}">${inner}</button>`
+        : `<div class="say say--${end}${mine ? " is-mine" : ""}">${inner}</div>`;
+    };
+    const says = isPersonaPair ? `${say(other, lead, "l")}${say(lead, other, "r", true)}` : `${say(lead, other, "l")}${say(other, lead, "r")}`;
+    const callCard = says ? `<section class="psec pair-calls"><h2 class="sec">서로를 부르는 말</h2><div class="says" style="${tones}">${says}</div></section>` : "";
+
+    const basisFooter = basisItems.length ? `<details class="meters__basis" data-preserve-open="pair-basis:${escapeHtml(pair.key)}"><summary>이 감정의 판단 근거 ${basisItems.length}</summary><ul>${basisItems.map((item: any) => `<li>${options.copy(String(item?.reason ?? ""), `relationship-event:${item.id}:reason`)}</li>`).join("")}</ul></details>` : "";
+    const hearts = `<section class="psec"><h2 class="sec">서로의 마음</h2><div class="povs">${directions.map(([from, to, item]) => renderView(item, from, to, options)).join("")}</div></section>`;
+
+    const promiseRow = (item: any) => {
+      const scene = sceneAt(item.source_memory_id ?? item.sourceMemoryId ?? item.lastMention?.ordinal);
+      const meta = [item.scheduled_for ? `<span class="pair-pill">예정</span>${escapeHtml(formatStoryTime(item.scheduled_for))}` : "", scene ? escapeHtml(scene.label) : ""].filter(Boolean).join('<span class="dot">·</span>');
+      return `<li class="entry"><button type="button" class="entry__face entry__tap pair-row" data-action="open-now-record" data-key="${escapeHtml(promiseChainKey(item))}"><span class="pair-row__ic is-blue">${icon("check")}</span><span class="pair-row__tx"><span class="pair-row__t">${options.copy(String(item.content ?? ""), `promise:${item.id ?? item.promise_key ?? ""}`)}</span><span class="pair-row__s"><span class="pair-row__who">${avatar(String(item.promisor ?? ""), "sm")}${icon("arrow-right")}${avatar(String(item.promisee ?? ""), "sm")}<span class="pair-row__names">${escapeHtml(String(item.promisor ?? ""))} → ${escapeHtml(String(item.promisee ?? ""))}</span></span>${meta}</span></span>${icon("chevron")}</button></li>`;
+    };
+    const promiseList = promises.map(promiseRow);
+    const listCard = (rows: string[], key: string) => `<div class="pair-card"><ul class="entries pair-list">${rows.slice(0, 3).join("")}</ul>${rows.length > 3 ? fold("더 보기", `<ul class="entries pair-list">${rows.slice(3).join("")}</ul>`, { role: "more", count: rows.length - 3, preserveKey: key }) : ""}</div>`;
+    const promiseCard = promises.length ? `<section class="psec"><h2 class="sec">약속 <span class="n">${promises.length}</span></h2>${listCard(promiseList, `pair-promises:${pair.key}`)}</section>` : "";
+
+    const basis = milestoneBasis(data, pair, anniversaries, firstMet);
+    const next = upcomingMilestone(basis.storyTime, basis.stage === "met" ? days : daysSinceStoryTime(basis.storyTime, latestStoryTime(data)), basis.stage);
+    const nextCard = next ? `<div class="pair-next"><span class="pair-cal">${next.month !== undefined ? `<span class="pair-cal__m">${next.month}월</span><span class="pair-cal__d">${next.day}</span>` : `<span class="pair-cal__icon">${icon("heart")}</span>`}</span><span class="pair-next__tx"><span class="pair-next__k">다가오는 기념일</span>${next.month !== undefined ? `<span class="pair-next__date">${next.month}월 ${next.day}일</span>` : ""}<span class="pair-next__t">${escapeHtml(next.label)}</span></span><span class="pair-next__dd">D-${next.remaining}</span></div>` : "";
+    const anniversaryRows = anniversaries.map((item) => {
+      const memory: any = memoryById.get(item.memoryId);
+      const offset = anniversaryDayOffset(item, firstMet);
+      const label = item.userDefined ? options.copy(item.label, `landmark:${item.hideKey}:label`) : escapeHtml(item.label);
+      const scene = [`S#${numbers.get(item.memoryId) ?? "?"}`, item.place ?? ""].filter(Boolean).map(escapeHtml).join(" · ");
+      return `<article class="anni anni--row"><button type="button" class="anni__open" data-action="open-timeline-memory" data-memory-id="${escapeHtml(item.memoryId)}"><span class="anni__date">${escapeHtml(shortDate(item.storyTime))}${offset === null ? "" : `<small>D+${offset}</small>`}</span><span class="anni__tx"><span class="anni__label">${label}${item.alwaysInject ? `<span class="anni__pin" title="항상 전달">${icon("pin")}</span>` : ""}</span><span class="anni__slug">${scene}${memory ? ` · ${options.copy(String(memory.title ?? ""), `${item.memoryId}:title`)}` : ""}</span></span></button><div class="anni__acts">${anniversaryActions(item)}</div></article>`;
+    }).join("");
+    const markCard = `<section class="psec"><div class="sec-head"><h2 class="sec">기념일 <span class="n">${anniversaries.length}</span></h2>${addMark}</div>${newMark}${nextCard}${anniversaryRows ? `<div class="reel">${anniversaryRows}</div>` : creatingMark ? "" : empty("아직 기념일이 없습니다", "추가에서 날짜로 만들거나 기록의 장면에서 고를 수 있습니다.")}</section>`;
+
+    const keepsake = (item: any) => {
+      const scene = sceneAt(item.source_memory_id ?? item.sourceMemoryId);
+      const circumstance = String(item?.circumstance ?? "").trim();
+      return `<li class="entry">${menu({ label: `${milestoneLabel(item)} 스킨십 기록`, items: [
+        { label: "수정", icon: "edit", action: "edit-intimacy", data: { id: String(item.id) } },
+        { label: "삭제", icon: "delete", action: "delete-intimacy", data: { id: String(item.id) }, danger: true },
+      ], face: { className: "entry__face pair-row", html: `<span class="pair-row__tx"><span class="pair-row__t"><b>${escapeHtml(milestoneLabel(item))}</b></span>${circumstance ? `<span class="pair-row__clamp">${options.copy(circumstance, `intimacy:${item.id}:circumstance`)}</span>` : ""}${scene ? `<span class="pair-row__s">${escapeHtml(scene.label)}</span>` : ""}</span>` } })}</li>`;
+    };
+    const keepsakes = intimacyItems.map(keepsake);
+    const intimacyCard = keepsakes.length ? `<section class="psec"><h2 class="sec">스킨십 기록 <span class="n">${keepsakes.length}</span></h2>${listCard(keepsakes, `intimacy:${pair.key}`)}</section>` : "";
+
+    const initialViews = initialDirections.filter(([, , item]) => item).map(([from, to, item]) => `<div class="pov"><div class="pov__head"><h3>${avatar(from, "sm")}${nameHtml(from)}<span class="pov__to">→ ${escapeHtml(to)}</span></h3></div><p class="pov__text">${options.copy(String(item?.summary ?? "요약 없음"), `initial-relationship:${item?.id ?? `${from}|${to}`}:summary`)}</p></div>`).join("");
+    const initialCard = initialItems.length ? `<section class="psec">${film ? "" : '<h2 class="sec">처음 설정된 관계</h2>'}${fold(film ? "처음 설정된 관계" : "캐릭터 카드에서 읽은 처음 모습", `${initialFelt ? emotionMeters(initialDirections, canonicalAxes, initialAxis, options, "처음 설정된 감정") : ""}<div class="povs povs--initial">${initialViews}</div>`, { role: "section", preserveKey: `pair-initial:${pair.key}` })}</section>` : "";
+
+    const chronicle = log.replace('<h2 class="sec">기록 ', '<h2 class="sec">함께한 장면 ');
+    return `<article class="reader pairsheet pairsheet--app">${bar}${picker}${hero}${tiles}${callCard}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes }, basisFooter)}${hearts}${promiseCard}${markCard}${chronicle}${intimacyCard}${initialCard}</article>`;
+  }
 }

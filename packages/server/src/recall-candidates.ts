@@ -15,7 +15,7 @@ export function buildRecallCandidateSnapshot(db: RcmDatabase, chatId: string, se
   const memories = selected.filter(memory => memory.knownBy.length || memory.details.some(detail => detail.knownBy.length)
     || memory.keyDialogues.some(dialogue => dialogue.knownBy.length)).slice(0, 16);
   const ids = memories.flatMap(memory => memory.details.slice(0, 3).map(detail => detail.id)).slice(0, 32);
-  const rows = ids.length ? db.prepare(`SELECT id,memory_id,kind,text,epistemic,evidence_json FROM memory_details
+  const rows = ids.length ? db.prepare(`SELECT id,memory_id,kind,text,epistemic,evidence_json FROM visible_memory_details
     WHERE chat_id=? AND active=1 AND id IN (SELECT value FROM json_each(?))`).all(chatId, JSON.stringify(ids)) as Array<{
       id: string; memory_id: string; kind: string; text: string; epistemic: string; evidence_json: string;
     }> : [];

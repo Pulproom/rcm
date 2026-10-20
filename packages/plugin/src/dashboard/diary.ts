@@ -164,6 +164,7 @@ export function buildDiary(data: DashboardData, pair: PairSummary): DiaryEntry[]
   }
 
   for (const item of data.relationshipEvents ?? []) {
+    if (item.hidden) continue;
     if (!itemMatchesPair(item, pair)) continue;
     const memory = sourceMemory(item);
     const changes = Array.isArray(item?.changes) ? item.changes : [];
@@ -342,4 +343,34 @@ export function daysSinceFirstMet(anniversaries: Anniversary[], currentStoryTime
   if (!firstMet || !currentStoryTime) return null;
   const offset = numericDayOffset(currentStoryTime, firstMet);
   return offset !== null && offset >= 0 ? offset : null;
+}
+
+export type UpcomingMilestone = { days: number; label: string; remaining: number; month?: number; day?: number };
+
+/**
+ * The next round day for a pair (every 100 days, or a yearly anniversary), counted like D+ from the stage's start
+ * (first meeting, becoming a couple, or marriage).
+ * Its calendar day is given only when the first meeting has a month and day.
+ */
+export type MilestoneStage = "met" | "dating" | "married";
+const MILESTONE_WORDS: Record<MilestoneStage, { days: string; years: (n: number) => string }> = {
+  met: { days: "만난 지", years: (n) => `만난 지 ${n}년` },
+  dating: { days: "사귄 지", years: (n) => `연애 ${n}주년` },
+  married: { days: "결혼한 지", years: (n) => `결혼 ${n}주년` },
+};
+
+/** Days from one story date to another, counted like D+ (null when either has no comparable calendar day). */
+export function daysSinceStoryTime(fromStoryTime: string | null, currentStoryTime: string | null): number | null {
+  return numericDayOffset(currentStoryTime, fromStoryTime);
+}
+
+export function upcomingMilestone(firstMetStoryTime: string | null, daysTogether: number | null, stage: MilestoneStage = "met"): UpcomingMilestone | null {
+  if (daysTogether === null) return null;
+  const marks = [...Array.from({ length: 60 }, (_, index) => (index + 1) * 100), ...Array.from({ length: 20 }, (_, index) => (index + 1) * 365)];
+  const days = Math.min(...marks.filter((mark) => mark > daysTogether));
+  const label = days % 365 === 0 ? MILESTONE_WORDS[stage].years(days / 365) : `${MILESTONE_WORDS[stage].days} ${days}일`;
+  const start = firstMetStoryTime ? parseStoryTime(firstMetStoryTime) : undefined;
+  if (start?.month === undefined || start.day === undefined || (start.calendar !== "numeric" && start.calendar !== "partial")) return { days, label, remaining: days - daysTogether };
+  const date = new Date(Date.UTC(start.calendar === "numeric" ? start.year! : 2000, start.month - 1, start.day + days));
+  return { days, label, remaining: days - daysTogether, month: date.getUTCMonth() + 1, day: date.getUTCDate() };
 }

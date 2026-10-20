@@ -176,7 +176,7 @@ export function searchStoredAtomPaths(db: RcmDatabase, options: StoredAtomPathSe
       // can prefer the chat/active index and scan every detail in the chat.
       detailQuery ??= db.prepare(`SELECT d.id,d.memory_id,d.text,d.evidence_json,m.memory_key,m.participants_json,
         m.evidence_json AS memory_evidence_json,m.story_time FROM json_each(?) requested
-        CROSS JOIN memory_details d ON d.id=requested.value
+        CROSS JOIN visible_memory_details d ON d.id=requested.value
         JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
         WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND ${searchableMemoryParentSql("m")} AND NOT ${recognitionDetailSql('d')}`);
       const rows = detailQuery.all([JSON.stringify(batch), options.chatId]) as DetailSnapshotRow[];
@@ -229,10 +229,10 @@ export function searchStoredAtomPaths(db: RcmDatabase, options: StoredAtomPathSe
     // evidence/content fields once per detail, rather than once per incident.
     const relationSql = (column: "source_detail_id" | "target_detail_id") => `SELECT r.id,r.source_detail_id,r.target_detail_id,r.kind,r.confidence,r.evidence_json
       FROM atom_relations r
-      JOIN memory_details sd ON sd.id=r.source_detail_id AND sd.chat_id=r.chat_id AND sd.active=1
+      JOIN visible_memory_details sd ON sd.id=r.source_detail_id AND sd.chat_id=r.chat_id AND sd.active=1
       JOIN memories sm ON sm.id=sd.memory_id AND sm.chat_id=r.chat_id AND sm.active=1 AND
         (sm.capsule_parent_id IS NULL OR sm.capsule_parent_id IN (SELECT memory_id FROM episodes WHERE resolution='group' AND status='capsuled'))
-      JOIN memory_details td ON td.id=r.target_detail_id AND td.chat_id=r.chat_id AND td.active=1
+      JOIN visible_memory_details td ON td.id=r.target_detail_id AND td.chat_id=r.chat_id AND td.active=1
       JOIN memories tm ON tm.id=td.memory_id AND tm.chat_id=r.chat_id AND tm.active=1 AND
         (tm.capsule_parent_id IS NULL OR tm.capsule_parent_id IN (SELECT memory_id FROM episodes WHERE resolution='group' AND status='capsuled'))
       WHERE r.chat_id=? AND r.active=1 AND r.${column}=?

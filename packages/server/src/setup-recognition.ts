@@ -1,3 +1,4 @@
+import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { randomUUID } from "node:crypto";
 import { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, type InitialCalibrationResult } from "@rcm/shared";
@@ -49,7 +50,7 @@ export function updateSetupRecognition(db: RcmDatabase, chatId: string, action: 
   const rows = (db.prepare(`SELECT id,user_managed FROM memories WHERE chat_id=? AND is_initial_calibration_memory(memory_key)
     AND (? IS NULL OR EXISTS (SELECT 1 FROM social_knowledge_events s WHERE s.source_memory_id=memories.id AND (s.holder=? OR s.subject=?)))`)
     .all(chatId,entity ?? null,entity ?? null,entity ?? null) as Array<{id:string;user_managed:number}>).filter(row => {
-      if (row.user_managed) return false;
+      if (row.user_managed || db.prepare(`SELECT 1 FROM memories WHERE id=? AND (${memoryHasLineCorrectionSql()})`).get(row.id)) return false;
       const events = db.prepare("SELECT * FROM social_knowledge_events WHERE chat_id=? AND source_memory_id=?")
         .all(chatId,row.id) as Array<UserCorrection & {holder:string;subject:string;manual:number}>;
       // Check before removing evidence or Story supports. Public edits/deletions

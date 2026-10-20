@@ -4,6 +4,7 @@ export type FlowAxis = typeof FLOW_AXES[number];
 type Effect = "increase" | "decrease" | "reveal" | "complicate" | "resolve";
 type Impact = "minor" | "meaningful" | "major" | "turning";
 export type FlowEvent = {
+  hidden?: boolean;
   id: string; from: string; to: string; reason: string; sourceMemoryId?: string; sourceOrdinal: number;
   changes: { axis: string; effect: Effect; impact: Impact }[];
 };
@@ -47,7 +48,7 @@ export function buildAxisFlow(
       point.delta += delta;
       point.turning ||= change.impact === "turning";
       if (weights[change.impact] > weights[point.impact]) point.impact = change.impact;
-      if (!point.reasons.some(reason => reason.eventId === event.id)) point.reasons.push({ eventId: event.id, reason: event.reason });
+      if (!event.hidden && !point.reasons.some(reason => reason.eventId === event.id)) point.reasons.push({ eventId: event.id, reason: event.reason });
       point.reason = point.reasons.map(reason => reason.reason).join(" · ");
       point.effect = point.delta > 0 ? "increase" : point.delta < 0 ? "decrease" : change.effect;
     }

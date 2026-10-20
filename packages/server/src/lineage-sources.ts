@@ -43,6 +43,7 @@ export function remapInheritedSources(db: RcmDatabase, chatId: string, allIds: M
     memory_recall_events:['evidence_json'], source_passages:['access_json'],
     episode_sections:['source_message_ids_json','evidence_json','key_dialogues_json'],
     extraction_batches:['source_message_ids_json','source_fingerprint_json','final_json'],
+    extraction_audits:['source_message_ids_json','source_fingerprint_json','draft_json'],
     reconciliation_items:['source_message_ids_json','incoming_json','candidates_json','model_decision_json'],
     conflicts:['existing_json','incoming_json'], jobs:['payload_json'],
     embedding_blocks:['message_ids_json'], embedding_items:['source_json'],
@@ -57,6 +58,9 @@ export function remapInheritedSources(db: RcmDatabase, chatId: string, allIds: M
   }
   for (const row of db.prepare('SELECT id,source_message_ids_json FROM extraction_batches WHERE chat_id=?').all(chatId) as Array<{id:string;source_message_ids_json:string}>) {
     db.prepare('UPDATE extraction_batches SET source_fingerprint_json=? WHERE id=?').run(JSON.stringify(sourceFingerprint(db,chatId,JSON.parse(row.source_message_ids_json))),row.id);
+  }
+  for (const row of db.prepare('SELECT id,source_message_ids_json FROM extraction_audits WHERE chat_id=?').all(chatId) as Array<{id:string;source_message_ids_json:string}>) {
+    db.prepare('UPDATE extraction_audits SET source_fingerprint_json=? WHERE id=?').run(JSON.stringify(sourceFingerprint(db,chatId,JSON.parse(row.source_message_ids_json))),row.id);
   }
   for (const row of db.prepare('SELECT id,message_ids_json FROM embedding_blocks WHERE chat_id=?').all(chatId) as Array<{id:string;message_ids_json:string}>) {
     const fingerprint = sourceFingerprint(db,chatId,JSON.parse(row.message_ids_json));

@@ -10,6 +10,7 @@ export interface QuizSceneRow {
   id: string; memory_key: string; type: string; title: string; content: string;
   story_time: string | null; locations_json: string; participants_json: string;
   landmark: number; capsule_parent_id: string | null; created_revision: number; source_ordinal: number | null;
+  lineCorrections?: string;
   sourceOnly?: boolean;
   sourceMessageIds?: string[];
   context?: string;
@@ -30,6 +31,8 @@ const RICH_CAP = 3_200;
 
 export function quizSceneRows(db: RcmDatabase, chatId: string): QuizSceneRow[] {
   const rows = db.prepare(`SELECT m.id,m.memory_key,m.type,m.title,m.content,m.story_time,m.locations_json,m.participants_json,m.landmark,m.capsule_parent_id,m.created_revision,m.created_at,
+      (SELECT json_group_array(json_object('id',id,'text',text,'hidden',user_hidden)) FROM
+        (SELECT id,text,user_hidden FROM memory_details WHERE memory_id=m.id AND (user_edited=1 OR user_hidden=1) ORDER BY id)) AS lineCorrections,
       (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal
     FROM memories m WHERE m.chat_id=? AND m.active=1`).all(chatId) as QuizSceneRow[];
   return rows.filter(isScene).sort(compareStoryMemories);
@@ -45,8 +48,8 @@ interface QuizItemRow {
   retry_after: number | null;
 }
 
-function sceneFingerprint(scene: Pick<QuizSceneRow, "title" | "content">): string {
-  return createHash("sha256").update(JSON.stringify([scene.title, scene.content])).digest("hex");
+function sceneFingerprint(scene: Pick<QuizSceneRow, "title" | "content" | "lineCorrections">): string {
+  return createHash("sha256").update(JSON.stringify([scene.title, scene.content,...(scene.lineCorrections && scene.lineCorrections !== "[]" ? [scene.lineCorrections] : [])])).digest("hex");
 }
 
 /** Capture before a source-guarded episode regeneration, never during an ordinary edit. */
@@ -148,7 +151,7 @@ export function quizUnits(db: RcmDatabase, chatId: string): QuizUnit[] {
     FROM quiz_items q LEFT JOIN jobs j ON j.id=q.batch_id AND j.chat_id=q.chat_id
     WHERE q.chat_id=? AND (q.retired_at IS NULL OR q.answered_at IS NOT NULL) ORDER BY q.created_at,q.rowid`).all(chatId) as Array<{memory_id:string;batch_id:string;created_at:number;source_turns:number|null}>;
   const previousBatch = history.at(-1)?.batch_id;
-  const details = db.prepare("SELECT memory_id,COUNT(*) n FROM memory_details WHERE chat_id=? AND active=1 GROUP BY memory_id")
+  const details = db.prepare("SELECT memory_id,COUNT(*) n FROM visible_memory_details WHERE chat_id=? AND active=1 GROUP BY memory_id")
     .all(chatId) as Array<{memory_id:string;n:number}>;
   const sizes = db.prepare(`SELECT memory_id,SUM(chars) n FROM (
     SELECT DISTINCT e.memory_id,msg.message_id,length(msg.content) chars FROM evidence_spans e
@@ -428,7 +431,7 @@ function takeCharacters(text: string, length: number): string {
 function quizMemorySourceIds(db: RcmDatabase, chatId: string, memoryId: string): string[] {
   return (db.prepare(`SELECT message_id id FROM evidence_spans WHERE chat_id=? AND memory_id=?
     UNION SELECT json_extract(e.value,'$.messageId') FROM memories m,json_each(m.evidence_json) e WHERE m.chat_id=? AND m.id=?
-    UNION SELECT json_extract(e.value,'$.messageId') FROM memory_details d,json_each(d.evidence_json) e WHERE d.chat_id=? AND d.memory_id=? AND d.active=1
+    UNION SELECT json_extract(e.value,'$.messageId') FROM visible_memory_details d,json_each(d.evidence_json) e WHERE d.chat_id=? AND d.memory_id=? AND d.active=1
     UNION SELECT message_id FROM memory_dialogues WHERE chat_id=? AND memory_id=?
     UNION SELECT json_extract(e.value,'$.messageId') FROM memory_dialogues d,json_each(d.evidence_json) e WHERE d.chat_id=? AND d.memory_id=?`)
     .all(...Array.from({length:5},()=>[chatId,memoryId]).flat()) as Array<{id:string|null}>).flatMap(row=>row.id?[row.id]:[]);
@@ -453,7 +456,7 @@ function sourceExcerpt(db: RcmDatabase, chatId: string, memoryId: string, random
 }
 
 function richText(db: RcmDatabase, chatId: string, memoryId: string, plain: string): string {
-  const details = db.prepare(`SELECT text FROM memory_details WHERE chat_id=? AND memory_id=? AND active=1
+  const details = db.prepare(`SELECT text FROM visible_memory_details WHERE chat_id=? AND memory_id=? AND active=1
     ORDER BY CASE role WHEN 'core' THEN 0 ELSE 1 END, rowid LIMIT 8`).all(chatId, memoryId) as Array<{ text: string }>;
   const dialogues = db.prepare(`SELECT speaker,text FROM memory_dialogues WHERE chat_id=? AND memory_id=? ORDER BY ordinal LIMIT 6`)
     .all(chatId, memoryId) as Array<{ speaker: string; text: string }>;

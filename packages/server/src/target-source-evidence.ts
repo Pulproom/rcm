@@ -17,7 +17,7 @@ export function targetDetailSourceEvidence(db: RcmDatabase, chatId: string, deta
   const access = loadItemAccess(db, chatId, ids.map((id) => ({ kind: "detail" as const, id })));
   const viewers = perspectives.length ? perspectives : ["narrator"];
   const isArchive = (viewer: string) => ["narrator", "omniscient", "omniscient narrator"].includes(viewer.normalize("NFKC").trim().toLocaleLowerCase());
-  const detailRows = db.prepare(`SELECT d.id,d.memory_id,d.evidence_json,d.epistemic FROM memory_details d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
+  const detailRows = db.prepare(`SELECT d.id,d.memory_id,d.evidence_json,d.epistemic FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
     WHERE d.chat_id=? AND d.id IN (${ids.map(() => "?").join(",")}) AND d.active=1 AND m.active=1`)
     .all(chatId, ...ids) as Array<{ id: string; memory_id: string; evidence_json: string; epistemic: string }>;
   const message = db.prepare(`SELECT ordinal,canonical_content FROM messages WHERE chat_id=? AND message_id=?

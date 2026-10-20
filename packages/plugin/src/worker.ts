@@ -1,3 +1,5 @@
+import { optionalSourceSelectorsOnly } from "@rcm/shared";
+import { parseExtractionAuditResponse } from "@rcm/shared";
 import { sha256 } from './context.js';
 import { operationLabel, providerFailureMetadata, assertProviderOutputAllowed } from "@rcm/shared";
 import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming } from "@rcm/shared";
@@ -5,7 +7,7 @@ import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { isChatMemoryEnabled } from "./settings.js";
-import { parseReconciliationResult, mergeStateExtraction, repairStateRecognitionReferences, type SourceUnit } from "@rcm/shared";
+import { parseReconciliationResult, mergeStateExtraction, type SourceUnit } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
 import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch } from "@rcm/shared";
@@ -609,8 +611,14 @@ async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unkn
     sourceRecoveryContext: job.sourceRecoveryContext,
   });
   const first = await runModel(state, messages, "audit");
-  const validatePatch = (value: unknown) => { const patch = ExtractionAuditPatchSchema.parse(resolveDirectDialogueEvidence(value,job.sourceUnits??[])); return job.sourceRecovery ? validateSourceRecoveryPatch(patch,draft) : patch; };
-  try { return { patch: validatePatch(parseWorkerJson(state, first, "audit")) }; }
+  const validatePatch = (value: unknown): ExtractionAuditSubmission => {
+    const resolved = resolveDirectDialogueEvidence(value, job.sourceUnits ?? [], Boolean(job.sourceRecovery));
+    // Recovery is a restricted correction protocol, not a general additive audit.
+    return job.sourceRecovery
+      ? { patch: validateSourceRecoveryPatch(ExtractionAuditPatchSchema.parse(resolved), draft) }
+      : parseExtractionAuditResponse(resolved);
+  };
+  try { return validatePatch(parseWorkerJson(state, first, "audit")); }
   catch (firstError) {
     onRepair?.();
     const repaired = await runModel(state, buildAuxiliaryRepairMessages({
@@ -620,7 +628,7 @@ async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unkn
       original: first, repaired, purpose: "audit",
       regenerate: () => runModel(state, messages, "audit"),
       validate: (output, phase) => {
-        return { patch: validatePatch(parseWorkerJson(state, output, phase === "repair" ? "audit_repair" : "audit")) };
+        return validatePatch(parseWorkerJson(state, output, phase === "repair" ? "audit_repair" : "audit"));
       },
     });
   }
@@ -654,13 +662,11 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
   }
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
   const first = await runModel(state, messages, purpose);
-  let validatedOutput = first;
   const validate = (output: string, label: WorkerJsonPurpose): ReconciliationSubmission => {
     const raw = parseWorkerJson(state, output, label);
     const result = parseReconciliationResult(raw, prepared.sourceUnits);
     if (prepared.stateExtraction && !result.state) throw new Error("State extraction response is missing state");
     accessRepair?.apply(raw);
-    validatedOutput = output;
     return { candidateSetHash: prepared.candidateSetHash, result };
   };
   let submission: ReconciliationSubmission;
@@ -679,12 +685,6 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
       original: first, repaired, purpose: "reconciliation",
       regenerate: () => runModel(state, messages, "reconciliation"),
       validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
-    });
-  }
-  if (prepared.stateExtraction && prepared.groundingDraft && submission.result && prepared.canRepairStateResponse?.() !== false) {
-    submission.result = await repairStateRecognitionReferences({ draft: prepared.groundingDraft, result: submission.result,
-      originalMessages: messages, invalidOutput: validatedOutput, sourceUnits: prepared.sourceUnits,
-      repair: async repairMessages => parseWorkerJson(state, await runModel(state, repairMessages, "state_response_repair"), "state_response_repair"),
     });
   }
   return submission;
@@ -835,7 +835,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         if (recoveringDialogues && job.sourceUnits) {
           const issues = inspectSourceReferences(result, job.auditSourceMessages ?? [])
             .filter(issue => issue.reason !== "access_unverified");
-          const messages = issues.length ? sourceRepairMessages(result, issues, job.sourceUnits) : null;
+          const messages = issues.length && (job.smallReviewRetry || !optionalSourceSelectorsOnly(issues)) ? sourceRepairMessages(result, issues, job.sourceUnits) : null;
           if (messages) {
             try {
               const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
@@ -860,7 +860,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           const reconciliationDraft = job.kind === "episode" ? extractionAuditDraftForJob(job, result) : result;
           let prepared = await client.prepareReconciliation(job.id, state.workerId, reconciliationDraft, audit);
           const repairIssues = prepared.evidenceIssues?.filter((issue) => issue.reason !== "access_unverified") ?? [];
-          if (job.sourceUnits && prepared.groundingDraft && repairIssues.length) {
+          if (job.sourceUnits && prepared.groundingDraft && repairIssues.length && (job.smallReviewRetry || !optionalSourceSelectorsOnly(repairIssues))) {
             result = prepared.groundingDraft;
             if (audit?.patch) audit = { ...audit, patch: ExtractionAuditPatchSchema.parse({ keepPendingItemRefs: audit.patch.keepPendingItemRefs }) };
             try {
