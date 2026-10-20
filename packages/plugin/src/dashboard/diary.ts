@@ -1,9 +1,8 @@
+import { landmarkLabel } from "@rcm/shared";
+export { buildAnniversaries, anniversaryDayOffset, earliestFirstMetStoryTime, daysSinceFirstMet, landmarkLabel, LANDMARK_LABELS, type Anniversary } from "@rcm/shared";
 import {
-  ANNIVERSARY_KINDS,
   compareParsedStoryTimes,
-  landmarkAlwaysInjected,
   parseStoryTime,
-  type LandmarkKind,
 } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { isRecognitionMemory } from "@rcm/shared";
@@ -18,39 +17,6 @@ export type DiaryEntry = {
   title: string;
   text: string;
   memoryId: string | null;
-};
-
-export type Anniversary = {
-  hideKey: string;
-  memoryId: string;
-  index: number;
-  kind: string;
-  label: string;
-  storyTime: string | null;
-  place: string | null;
-  alwaysInject: boolean;
-  userDefined: boolean;
-};
-
-export const LANDMARK_LABELS: Record<string, string> = {
-  confession: "고백한 날",
-  relationship_change: "관계 변화",
-  first_met: "처음 만난 날",
-  romantic_relationship_established: "연인이 된 날",
-  engagement: "약혼한 날",
-  marriage: "결혼한 날",
-  separation: "별거한 날",
-  romantic_relationship_ended: "헤어진 날",
-  reunion: "재결합한 날",
-  divorce: "이혼한 날",
-  anniversary_basis: "기념일",
-  betrayal: "배신",
-  death: "죽음",
-  identity_reveal: "정체 공개",
-  status_change: "상태 변화",
-  boundary_change: "경계 변화",
-  intimacy_milestone: "스킨십 이정표",
-  other: "이정표",
 };
 
 const PROMISE_LABELS: Record<string, string> = {
@@ -86,13 +52,6 @@ const itemMatchesPair = (item: any, pair: PairSummary): boolean =>
 const memoryMatchesPair = (memory: any, pair: PairSummary): boolean =>
   arrayMatchesPair(memory?.participants, pair)
   || (memory?.landmarkKinds ?? []).some((landmark: any) => arrayMatchesPair(landmark?.pair, pair));
-
-/** A typed landmark reads by its kind ("고백한 날"); only user-named ones (기념일, 이정표) use their own label. */
-export const landmarkLabel = (landmark: any): string => {
-  const kind = String(landmark?.kind ?? "");
-  const label = String(landmark?.label ?? "").trim();
-  return ["anniversary_basis", "other"].includes(kind) ? label || LANDMARK_LABELS[kind] || "이정표" : LANDMARK_LABELS[kind] || label || kind || "이정표";
-};
 
 const diarySort = (left: DiaryEntry, right: DiaryEntry): number => {
   if (left.storyTime && right.storyTime) {
@@ -241,136 +200,4 @@ export function remapHiddenAnniversariesAfterDelete(hidden: string[], memoryId: 
     if (index === deletedIndex) return [];
     return [index > deletedIndex ? `${prefix}${index - 1}` : key];
   }))];
-}
-
-export function buildAnniversaries(data: DashboardData, pair: PairSummary, hidden: string[]): Anniversary[] {
-  const anniversaryKinds = new Set<string>(ANNIVERSARY_KINDS);
-  const hiddenKeys = new Set(hidden);
-  const candidates = (data.memories ?? []).filter((memory: any) => memory?.active !== false && !isRecognitionMemory(memory)).flatMap((memory: any, memoryIndex: number) => (memory?.landmarkKinds ?? []).flatMap((landmark: LandmarkKind, index: number) => {
-    const hideKey = `${String(memory?.id ?? "")}#${index}`;
-    if (!anniversaryKinds.has(landmark.kind) || !arrayMatchesPair(landmark.pair, pair)) return [];
-    return [{
-      hideKey,
-      memoryId: String(memory?.id ?? ""),
-      index,
-      kind: landmark.kind,
-      label: landmarkLabel(landmark),
-      storyTime: String(landmark.storyTime ?? "").trim() || memoryStoryTime(memory),
-      place: Array.isArray(memory?.locations) ? String(memory.locations[0] ?? "").trim() || null : null,
-      alwaysInject: landmarkAlwaysInjected(landmark),
-      userDefined: landmark.kind === "anniversary_basis",
-      pair: landmark.pair!,
-      sourceOrdinal: ordinalOf(memory),
-      memoryIndex,
-      explicitlyInjected: landmark.alwaysInject === true,
-    }];
-  }));
-  const compareOldest = (left: typeof candidates[number], right: typeof candidates[number]): number => {
-    if (left.storyTime && right.storyTime) {
-      const compared = compareParsedStoryTimes(parseStoryTime(left.storyTime), parseStoryTime(right.storyTime));
-      if (compared !== null && compared !== 0) return compared;
-    } else if (left.storyTime !== right.storyTime) return left.storyTime === null ? 1 : -1;
-    if (left.sourceOrdinal !== right.sourceOrdinal) {
-      if (left.sourceOrdinal === null) return 1;
-      if (right.sourceOrdinal === null) return -1;
-      return left.sourceOrdinal - right.sourceOrdinal;
-    }
-    return left.memoryIndex - right.memoryIndex || left.index - right.index;
-  };
-  const sameLandmarkDate = (left: typeof candidates[number], right: typeof candidates[number]): boolean => {
-    if (left.storyTime === right.storyTime) return true;
-    if (!left.storyTime || !right.storyTime) return false;
-    return compareParsedStoryTimes(parseStoryTime(left.storyTime), parseStoryTime(right.storyTime)) === 0;
-  };
-  const merged = candidates.filter((item) => {
-    if (item.kind !== "anniversary_basis") return true;
-    const firstMet = candidates.find((candidate) => candidate.kind === "first_met"
-      && candidate.memoryId === item.memoryId
-      && candidate.pair.map(normalizeName).sort().join("|") === item.pair.map(normalizeName).sort().join("|")
-      && sameLandmarkDate(candidate, item));
-    return !firstMet;
-  }).map((item) => {
-    if (item.kind !== "first_met") return item;
-    const basis = candidates.find((candidate) => candidate.kind === "anniversary_basis"
-      && candidate.memoryId === item.memoryId
-      && candidate.pair.map(normalizeName).sort().join("|") === item.pair.map(normalizeName).sort().join("|")
-      && sameLandmarkDate(candidate, item));
-    if (!basis || !sameLandmarkDate(item, basis)) return item;
-    return { ...item, hideKey: basis.hideKey, index: basis.index, label: basis.label, alwaysInject: basis.alwaysInject, userDefined: true };
-  });
-  const earliestConfession = merged.filter((item) => item.kind === "confession").sort(compareOldest)[0]?.hideKey;
-  return merged
-    .filter((item) => !hiddenKeys.has(item.hideKey))
-    .filter((item) => item.kind !== "confession" || item.hideKey === earliestConfession || item.explicitlyInjected)
-    .sort(compareOldest)
-    .map(({ sourceOrdinal: _sourceOrdinal, memoryIndex: _memoryIndex, explicitlyInjected: _explicitlyInjected, pair: _pair, ...item }) => item);
-}
-
-const numericDayOffset = (storyTime: string | null, firstMetStoryTime: string | null): number | null => {
-  if (!storyTime || !firstMetStoryTime) return null;
-  const start = parseStoryTime(firstMetStoryTime);
-  const current = parseStoryTime(storyTime);
-  const partialDates = start.calendar === "partial" && current.calendar === "partial"
-    && start.month !== undefined && start.day !== undefined && current.month !== undefined && current.day !== undefined;
-  const numericDates = start.calendar === "numeric" && current.calendar === "numeric"
-    && start.year !== undefined && start.month !== undefined && start.day !== undefined
-    && current.year !== undefined && current.month !== undefined && current.day !== undefined;
-  if (!partialDates && !numericDates) return null;
-  const startDay = Date.UTC(partialDates ? 2000 : start.year!, start.month! - 1, start.day!);
-  const currentDay = Date.UTC(partialDates ? 2000 : current.year!, current.month! - 1, current.day!);
-  const offset = Math.floor((currentDay - startDay) / 86_400_000);
-  return offset >= 0 ? offset : null;
-};
-
-export function anniversaryDayOffset(anniversary: Anniversary, firstMetStoryTime: string | null): number | null {
-  if (anniversary.kind === "first_met") return 0;
-  return numericDayOffset(anniversary.storyTime, firstMetStoryTime);
-}
-
-export function earliestFirstMetStoryTime(anniversaries: Anniversary[]): string | null {
-  let earliest: string | null = null;
-  for (const item of anniversaries) {
-    if (item.kind !== "first_met" || !item.storyTime) continue;
-    if (earliest === null) { earliest = item.storyTime; continue; }
-    const compared = compareParsedStoryTimes(parseStoryTime(item.storyTime), parseStoryTime(earliest));
-    if (compared !== null && compared < 0) earliest = item.storyTime;
-  }
-  return earliest;
-}
-
-export function daysSinceFirstMet(anniversaries: Anniversary[], currentStoryTime: string | null): number | null {
-  const firstMet = earliestFirstMetStoryTime(anniversaries);
-  if (!firstMet || !currentStoryTime) return null;
-  const offset = numericDayOffset(currentStoryTime, firstMet);
-  return offset !== null && offset >= 0 ? offset : null;
-}
-
-export type UpcomingMilestone = { days: number; label: string; remaining: number; month?: number; day?: number };
-
-/**
- * The next round day for a pair (every 100 days, or a yearly anniversary), counted like D+ from the stage's start
- * (first meeting, becoming a couple, or marriage).
- * Its calendar day is given only when the first meeting has a month and day.
- */
-export type MilestoneStage = "met" | "dating" | "married";
-const MILESTONE_WORDS: Record<MilestoneStage, { days: string; years: (n: number) => string }> = {
-  met: { days: "만난 지", years: (n) => `만난 지 ${n}년` },
-  dating: { days: "사귄 지", years: (n) => `연애 ${n}주년` },
-  married: { days: "결혼한 지", years: (n) => `결혼 ${n}주년` },
-};
-
-/** Days from one story date to another, counted like D+ (null when either has no comparable calendar day). */
-export function daysSinceStoryTime(fromStoryTime: string | null, currentStoryTime: string | null): number | null {
-  return numericDayOffset(currentStoryTime, fromStoryTime);
-}
-
-export function upcomingMilestone(firstMetStoryTime: string | null, daysTogether: number | null, stage: MilestoneStage = "met"): UpcomingMilestone | null {
-  if (daysTogether === null) return null;
-  const marks = [...Array.from({ length: 60 }, (_, index) => (index + 1) * 100), ...Array.from({ length: 20 }, (_, index) => (index + 1) * 365)];
-  const days = Math.min(...marks.filter((mark) => mark > daysTogether));
-  const label = days % 365 === 0 ? MILESTONE_WORDS[stage].years(days / 365) : `${MILESTONE_WORDS[stage].days} ${days}일`;
-  const start = firstMetStoryTime ? parseStoryTime(firstMetStoryTime) : undefined;
-  if (start?.month === undefined || start.day === undefined || (start.calendar !== "numeric" && start.calendar !== "partial")) return { days, label, remaining: days - daysTogether };
-  const date = new Date(Date.UTC(start.calendar === "numeric" ? start.year! : 2000, start.month - 1, start.day + days));
-  return { days, label, remaining: days - daysTogether, month: date.getUTCMonth() + 1, day: date.getUTCDate() };
 }

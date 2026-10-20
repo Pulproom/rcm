@@ -4,17 +4,21 @@ import type { DashboardData } from "../dashboard.js";
 import { buildAnniversaries, daysSinceFirstMet } from "./diary.js";
 import { buildPairs } from "./pairs.js";
 import { sceneLocator, storyScenes } from "./scenes.js";
+import { birthdayPeople, birthdaysForStoryDate, type BirthdayPerson } from "./birthdays.js";
+import { normalizeName } from "./pairs.js";
 
 export type MessagePlayTime = { id: string; ordinal: number; time: number };
 export type DailyMemory = {
   memory: any;
-  reason: "year" | "month" | "week" | "story-day" | "anniversary" | "holiday" | "archive";
+  reason: "birthday" | "year" | "month" | "week" | "story-day" | "anniversary" | "holiday" | "archive";
   label: string;
   credit: string;
   playedAt?: number;
   anniversary?: { label: string; key: string };
   /** Story days since the pair's first meeting at this scene (story clock, not real play time). */
   storyDay?: number | null;
+  birthdays?: BirthdayPerson[];
+  birthday?: { person: BirthdayPerson; sceneMatches: boolean };
 };
 export type DailyMemoryView = { key: string; offset: number };
 const DAY = 86_400_000;
@@ -73,6 +77,8 @@ export function dailyMemoryCandidates(data: DashboardData, times: readonly Messa
   const ranked = [...eligible].sort((a, b) => score(b) - score(a)
     || hash(`${chatId}:${a.id}`) - hash(`${chatId}:${b.id}`) || String(a.id).localeCompare(String(b.id)));
   const result: DailyMemory[] = [];
+  const people = birthdayPeople(data);
+  const sceneBirthdays = (memory: any) => birthdaysForStoryDate(parseStoryTime(memory.story_time_normalized ?? memory.story_time ?? memory.storyTime), people);
   // The story clock for a scene: days since the first meeting of the pair that appears in it (else the first pair that has one).
   const pairItems = buildPairs(data, data.personaEntity).map(pair => ({ pair, items: buildAnniversaries(data, pair, data.viewPreferences?.hiddenAnniversaries ?? []) }))
     .filter(entry => entry.items.some(item => item.kind === "first_met"));
@@ -81,10 +87,18 @@ export function dailyMemoryCandidates(data: DashboardData, times: readonly Messa
     const entry = pairItems.find(({ pair }) => names.has(pair.a.toLocaleLowerCase()) && names.has(pair.b.toLocaleLowerCase())) ?? pairItems[0];
     return entry ? daysSinceFirstMet(entry.items, memory.story_time_normalized ?? memory.story_time ?? memory.storyTime ?? null) : null;
   };
-  const append = (memory: any, reason: DailyMemory["reason"], label: string, credit: string, playedAt?: number, anniversary?: DailyMemory["anniversary"]) => {
+  const append = (memory: any, reason: DailyMemory["reason"], label: string, credit: string, playedAt?: number, anniversary?: DailyMemory["anniversary"], birthday?: DailyMemory["birthday"]) => {
     if (result.some(item => item.memory.id === memory.id)) return;
-    result.push({ memory, reason, label, credit, playedAt: playedAt ?? playTimes.get(String(memory.id))?.[0], storyDay: storyDayOf(memory), ...(anniversary ? { anniversary } : {}) });
+    result.push({ memory, reason, label, credit, playedAt: playedAt ?? playTimes.get(String(memory.id))?.[0], storyDay: storyDayOf(memory), birthdays: sceneBirthdays(memory), ...(anniversary ? { anniversary } : {}), ...(birthday ? { birthday } : {}) });
   };
+  const celebrating = birthdaysForStoryDate({ month: now.getMonth() + 1, day: now.getDate() }, people);
+  // Real local birthday leads; story dates only choose/tag a scene, never define "today".
+  for (const sceneMatches of [true, false]) for (const memory of ranked) {
+    const person = celebrating.find(person => sceneMatches
+      ? sceneBirthdays(memory).some(match => match === person)
+      : (memory.participants ?? []).some((name: unknown) => person.names.includes(normalizeName(name))));
+    if (person) append(memory, "birthday", "Happy Birthday!", "HAPPY BIRTHDAY", undefined, undefined, { person, sceneMatches });
+  }
   const targets = [
     { day: priorDate(now, 1, 0), reason: "year", label: "1년 전 오늘", credit: "A YEAR AGO TODAY" },
     { day: priorDate(now, 0, 1), reason: "month", label: "한 달 전 오늘", credit: "A MONTH AGO TODAY" },

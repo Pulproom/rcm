@@ -1,5 +1,14 @@
 import { escapeHtml } from "./film/ui.js";
 import type { StoryHoliday } from "./holidays.js";
+import type { BirthdayPerson } from "./birthdays.js";
+
+export function birthdayMark(people: readonly BirthdayPerson[], skin: "phone" | "film", namesOnly = false): string {
+  if (!people.length) return "";
+  const names = people.map(person => person.name).join(" · ");
+  return skin === "phone"
+    ? `<span class="holiday-pill" data-holiday="birthday"><span aria-hidden="true">🎂</span>${escapeHtml(names)}${namesOnly ? "" : " 생일"}</span>`
+    : `<span class="holiday-credit credit" data-holiday="birthday">— BIRTHDAY · ${escapeHtml(names.toLocaleUpperCase())}</span>`;
+}
 
 export function holidayMark(holiday: StoryHoliday | undefined, skin: "phone" | "film", prefix = ""): string {
   if (!holiday) return "";
@@ -8,12 +17,22 @@ export function holidayMark(holiday: StoryHoliday | undefined, skin: "phone" | "
     : `<span class="holiday-credit credit" data-holiday="${holiday.tone}">${prefix}${escapeHtml(holiday.credit)}</span>`;
 }
 
-export function holidayDateCredit(holiday: StoryHoliday): string {
+export function holidayDateCredit(holiday: { month: number; day: number }): string {
   return `${["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"][holiday.month - 1]} ${holiday.day}`;
 }
 
 /** Shared occasion tokens, with opaque pill fills so contrast holds on glass as well as lists. */
 export const HOLIDAY_CSS = `
+[data-holiday="birthday"] { --holiday-bg: #4a2619; --holiday-ink: #ff9f80; --holiday-film: #e59c84; }
+:root[data-theme^="day"] [data-holiday="birthday"] { --holiday-bg: #ffe8df; --holiday-ink: #b23f17; --holiday-film: #9a4a2e; }
+.person__chips { display: flex; justify-content: center; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.person__chips .person__role { margin: 0; }
+.birthday-fields { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 8px; }
+.birthday-fields > * { min-width: 0; width: 100%; }
+.daily-memory__credit[data-holiday="birthday"] { color: var(--holiday-film); }
+.daily-memory__occasions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.holiday-pill { max-width: 100%; overflow-wrap: anywhere; }
+[data-holiday="birthday"].holiday-pill { white-space: normal; }
 [data-holiday="xmas"] { --holiday-bg: #153d25; --holiday-ink: #6ee08f; --holiday-film: #8fbf9a; }
 [data-holiday="halloween"] { --holiday-bg: #48320d; --holiday-ink: #ffb547; --holiday-film: #e0924a; }
 [data-holiday="valentine"] { --holiday-bg: #4a1d2b; --holiday-ink: #ff7a97; --holiday-film: #e07a90; }

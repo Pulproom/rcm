@@ -8,6 +8,7 @@ export const ChatBackupSettingsSchema = z.object({
   perspectives: z.array(z.string()).optional(),
   detectedPerspectives: z.array(z.string()).optional(),
   includeUserMessages: z.boolean().optional(),
+  upcomingOccasions: z.boolean().optional(),
   memoryOnlyInjection: z.boolean().optional(),
   extractionGroupTurns: z.number().int().positive().optional(),
   memoryLanguage: z.enum(["en", "ko", "ja", "zh"]).optional(),

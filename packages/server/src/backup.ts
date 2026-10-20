@@ -44,7 +44,7 @@ type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
   version: 31 | 32 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | typeof DATABASE_SCHEMA_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -171,9 +171,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, 50, 51, 52, 53, 54, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54 or ${DATABASE_SCHEMA_VERSION})`);
+    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or ${DATABASE_SCHEMA_VERSION})`);
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -217,6 +217,7 @@ function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): voi
         && !(manifest.schemaVersion < 51 && ["promises", "promise_events"].includes(table) && ["ended_at_turn", "recency_until_turn"].includes(column))
         && !(manifest.schemaVersion < 51 && table === "promises" && column === "pinned")
         && !(manifest.schemaVersion < 55 && ["memory_details", "relationship_events"].includes(table) && ["user_edited", "user_hidden", "original_text"].includes(column))
+        && !(manifest.schemaVersion < 56 && table === "entities" && column === "birthday_json")
         && !(manifest.schemaVersion < 52 && table === "entities" && column === "color"));
     // Rows are inserted by column name. Physical column order is not a backup contract.
     const archived = manifest.tables[table];

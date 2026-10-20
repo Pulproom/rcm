@@ -340,8 +340,8 @@ function cloneLineage(
     const entityMap = new Map<string, string>();
     for (const row of db.prepare("SELECT * FROM entities WHERE chat_id=?").all(parent) as any[]) {
       const id = randomUUID(); entityMap.set(row.id, id);
-      db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,color,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.entity_key, row.name, row.display_name ?? row.name, row.type, row.origin ?? "transcript", row.setup_prominence ?? "supporting", row.source_json ?? "[]", row.user_managed ?? 0, row.color ?? null, now);
+      db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,color,birthday_json,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.entity_key, row.name, row.display_name ?? row.name, row.type, row.origin ?? "transcript", row.setup_prominence ?? "supporting", row.source_json ?? "[]", row.user_managed ?? 0, row.color ?? null, row.birthday_json ?? null, now);
       for (const alias of db.prepare("SELECT alias,normalized FROM aliases WHERE entity_id=?").all(row.id) as any[]) db.prepare("INSERT INTO aliases(entity_id,alias,normalized) VALUES(?,?,?)").run(id, alias.alias, alias.normalized);
       mapItem(db, child, "entity", id, row.id);
     }

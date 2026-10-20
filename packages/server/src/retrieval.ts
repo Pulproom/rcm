@@ -594,7 +594,7 @@ function tierAllowsRecall(item: Ranked, seedMemoryId?: string): boolean {
   return direct >= 0.28 || connectedSupport >= 0.2;
 }
 
-function allowedByPerspective(row: MemoryRow, profile: RpProfile, perspective: string): boolean {
+export function allowedByPerspective(row: Pick<MemoryRow, "known_by_json" | "type">, profile: RpProfile, perspective: string): boolean {
   const knownBy = parseList(row.known_by_json);
   if (perspective === "narrator") return profile === "simulation" || knownBy.length === 0;
   if (knownBy.length === 0) return row.type !== "secret";

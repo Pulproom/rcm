@@ -27,6 +27,7 @@ export interface PluginSettings {
   detectedPerspectives: Record<string, string[]>;
   includeUserMessages: Record<string, boolean>;
   memoryOnlyInjection: Record<string, boolean>;
+  upcomingOccasions: Record<string, boolean>;
   sourceProtectionTurns: number;
   editProtectionTurns: number;
   canonicalizationPolicy: CanonicalizationPolicy;
@@ -102,6 +103,7 @@ export interface CurrentContext {
   profile: RpProfile;
   includeUserMessages: boolean;
   memoryOnlyInjection?: boolean;
+  upcomingOccasions?: boolean;
   sourceProtectionTurns?: number;
   editProtectionTurns?: number;
   canonicalizationPolicy?: CanonicalizationPolicy;
@@ -149,6 +151,7 @@ export interface RuntimeState {
     turnKey: string;
     chatId: string;
     memoryOnlyInjection?: boolean;
+  upcomingOccasions?: boolean;
     requestedBudget: number;
     promptSourceMessageIds: string[];
     latestMessageId?: string;

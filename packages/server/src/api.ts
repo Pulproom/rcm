@@ -1,7 +1,8 @@
+import { prepareOccasions, renderOccasions } from "./occasions.js";
 import { readSmallReviews, smallReviewView, resolveSmallReviews } from "./small-review.js";
 import { patchMemoryLine } from './memory-detail-edits.js';
 import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
-import { EntityColorSchema } from "@rcm/shared";
+import { EntityColorSchema, hasSocialTermSeparator } from "@rcm/shared";
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
 import { Api38ExtractionDraftResultSchema, ExtractionAuditSubmissionSchema } from "@rcm/shared";
 import { withAuxiliaryStoryFraming } from "@rcm/shared";
@@ -58,7 +59,7 @@ import {
   StorySpineConsolidationResultSchema,
   InitialCalibrationResultSchema,
   LedgerConsistencyResultSchema,
-  LandmarkKindSchema,
+  StoredLandmarkKindSchema,
   PickerSetupProjectionSchema,
   ManualLineageApplyRequestSchema,
   ManualLineagePreviewRequestSchema,
@@ -628,10 +629,15 @@ export function createApp(dependencies: Dependencies): Hono {
     const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(parsed.tokenBudget);
     const selectedState = selectAutomaticState(stateCandidates, stateBudget);
     const ceilingDroppedState = new Set<string>();
+    const occasions = parsed.upcomingOccasions === false ? { asOf: null, items: [] } : prepareOccasions(db, parsed.chatId, parsed.profile, retrievalPerspectives, parsed.identityHints?.userPersonaName);
+    // Core portfolio selection sees the full budget. Calendar context yields first at the final ceiling.
+    let includeOccasions = false;
     const rebuildPacket = () => {
       const state = renderAutomaticState(selectedState);
       emittedManifest = mergePacketManifests([...structuredManifests, state.manifest]);
-      const body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
+      let body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
+      const calendar = includeOccasions ? renderOccasions(occasions.asOf, occasions.items) : "";
+      if (calendar) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${calendar}\n</rp_memory_context>`);
       const deliveredDetails = selectedItems.flatMap(item => item.details
         .filter(detail => emittedManifest.atomKeys.includes(memoryDetailAtomKey(detail))).map(detail => detail.text));
       const deliveredDialogueEvidence = selectedItems.flatMap(item => item.keyDialogues
@@ -674,6 +680,7 @@ export function createApp(dependencies: Dependencies): Hono {
       if (!selectedItems.some(item => item.id === decision.memoryId && (item.details.some(detail => memoryDetailAtomKey(detail) === decision.atomKey)
         || item.keyDialogues.some(dialogue => memoryDialogueAtomKey(item.id, dialogue) === decision.atomKey)))) decision.outcome = "target_budget";
     }
+    includeOccasions = true;
     finalStory = compileStoryForSelection(); packet = rebuildPacket();
     const removeAt = (index: number): void => {
       const removed = selectedItems.splice(index, 1)[0];
@@ -691,6 +698,7 @@ export function createApp(dependencies: Dependencies): Hono {
       ceilingDroppedState.add(selectedState.splice(index, 1)[0]!.item.id); packet = rebuildPacket();
     };
     while (estimateTokens(packet) > hardTokenCeiling) {
+      if (occasions.items.length) { occasions.items.pop(); packet = rebuildPacket(); continue; }
       const supplemental = lastMatchingIndex(selectedState, row => !!row.promiseSlot);
       if (supplemental >= 0) { dropState(supplemental); continue; }
       // 1. Peripheral memories yield before any current-state row.
@@ -821,7 +829,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const toolOpportunity = buildMemoryToolOpportunity([...eligibleAtoms.values()], selectedItems, finalManifest, promptCoveredAtoms, selectedCandidateClasses);
     toolOpportunity.archiveSearchAvailable = accessibleArchiveExists(db, parsed.chatId, activeTurnPerspectives)
       || memoryToolReadiness(db, parsed.chatId).processedStates > 0;
-    const sectionTokens = Object.fromEntries(["story_continuity", "current_state"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
+    const sectionTokens = Object.fromEntries(["story_continuity", "current_state", "occasions"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
     const sceneDelivery = selectedItems.map(item => ({memoryId:item.id,ref:requestRefs.get(item.id),details:item.details.length,dialogues:item.keyDialogues.length}));
     const stateKinds = Object.fromEntries([...new Set(finalManifest.stateEvidenceIds.map(id=>id.split(":")[0]!))].map(kind=>[kind,finalManifest.stateEvidenceIds.filter(id=>id.startsWith(kind+":")).length]));
     const stateInventory = Object.fromEntries([...new Set(stateCorpus.map(item => item.kind))].map(kind => [kind, stateCorpus.filter(item => item.kind === kind).length]));
@@ -1044,15 +1052,15 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/chats/:id/initial-calibration/entities", async (context) => {
     try {
-      const body = await context.req.json() as { displayName?: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference" };
-      const id = upsertInitialEntity(db, context.req.param("id"), { displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence });
+      const body = await context.req.json() as { displayName?: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference"; birthday?: import("@rcm/shared").EntityBirthday | null };
+      const id = upsertInitialEntity(db, context.req.param("id"), { displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence, birthday: body.birthday });
       return context.json({ ok: true, id, calibration: initialCalibrationLedger(db, context.req.param("id")) });
     } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
   });
   app.patch("/v1/chats/:id/initial-calibration/entities/:entityId", async (context) => {
     try {
-      const body = await context.req.json() as { displayName?: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference" };
-      upsertInitialEntity(db, context.req.param("id"), { id: context.req.param("entityId"), displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence });
+      const body = await context.req.json() as { displayName?: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference"; birthday?: import("@rcm/shared").EntityBirthday | null };
+      upsertInitialEntity(db, context.req.param("id"), { id: context.req.param("entityId"), displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence, birthday: body.birthday });
       return context.json({ ok: true, calibration: initialCalibrationLedger(db, context.req.param("id")) });
     } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
   });
@@ -1832,6 +1840,12 @@ export function createApp(dependencies: Dependencies): Hono {
       const subject = typeof body.subject === "string" ? body.subject.trim() : "";
       if (!holder || !subject || !["aware_of", "interacted"].includes(String(body.level))) return context.json({ error: "holder, subject, and a valid level are required" }, 400);
       const knownAs = Array.isArray(body.knownAs) ? body.knownAs.filter((value): value is string => typeof value === "string") : [];
+      for (const field of ["knownAs", "addressTerms"] as const) {
+        const terms = body[field];
+        if (Array.isArray(terms) && terms.some(value => typeof value === "string" && hasSocialTermSeparator(value))) {
+          return context.json({ error: `${field} items must not contain commas (, ， 、); send each term as a separate array item` }, 400);
+        }
+      }
       let addressTerms: string[] | undefined;
       if (body.addressTerms !== undefined) {
         if (!Array.isArray(body.addressTerms) || body.addressTerms.some(value => typeof value !== "string" || value.trim().length > 120)) return context.json({ error: "addressTerms must contain strings up to 120 characters" }, 400);
@@ -2279,7 +2293,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (storyTime.length > 240) return context.json({ error: "storyTime must be a string up to 240 characters" }, 400);
     if (!parsedParticipants.success) return context.json({ error: "participants must contain up to 16 non-empty unique names" }, 400);
     const participants = parsedParticipants.data;
-    const parsedLandmarks = LandmarkKindSchema.array().max(12).safeParse(landmarks);
+    const parsedLandmarks = StoredLandmarkKindSchema.array().max(12).safeParse(landmarks);
     if (!parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
     if (!chat) return context.json({ error: "Chat not found" }, 404);
@@ -2376,7 +2390,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ error: "participants must contain up to 16 non-empty unique names" }, 400);
     }
     const participants = parsedParticipants?.data;
-    const parsedLandmarks = body.landmarkKinds === undefined ? undefined : LandmarkKindSchema.array().max(12).safeParse(body.landmarkKinds);
+    const parsedLandmarks = body.landmarkKinds === undefined ? undefined : StoredLandmarkKindSchema.array().max(12).safeParse(body.landmarkKinds);
     if (parsedLandmarks && !parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
     const columns: Record<(typeof allowed)[number], string> = { title: "title", content: "content", salience: "salience", strength: "strength", pinned: "pinned", active: "active", storyTime: "story_time", locations: "locations_json", landmark: "landmark", landmarkKinds: "landmark_kinds_json", participants: "participants_json" };
     let values = updates.map((key) => key === "pinned" || key === "active" || key === "landmark"

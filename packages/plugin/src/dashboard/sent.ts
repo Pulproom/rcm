@@ -1,7 +1,30 @@
 // "이번 턴에 전달한 기억": the home widget and its full view. Counts follow the tabs (기억/인물/현재),
 // never the atoms inside a scene, so 24 scenes with 61 details reads as 24, not 85.
 import type { TurnSearch } from "../turn-delivery.js";
+import { occasionOffsetLabel, parseStoryTime } from "@rcm/shared";
 import { escapeHtml, icon, btn } from "./film/ui.js";
+
+/** Parse only the product-owned block from the actual injected packet, never current records. */
+export function sentOccasions(packet: string): { asOf: string; items: Array<{ date: string; label: string; offset: number }> } | null {
+  const block = (packet ?? "").match(/<occasions as_of="([^"]*)">([\s\S]*?)<\/occasions>/);
+  if (!block) return null;
+  const decode = (value: string) => value.replace(/&(amp|lt|gt|quot|apos|#10|#13);/g, (_, entity: string) =>
+    ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#10": "\n", "#13": "\r" })[entity]!);
+  const items = [...block[2]!.matchAll(/<occasion date="(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})" offset="(-?\d+)" scope="[^"]*">([^<]*)<\/occasion>/g)]
+    .map(match => ({ date: match[1]!, offset: Number(match[2]), label: decode(match[3]!) }));
+  return items.length ? { asOf: decode(block[1]!), items } : null;
+}
+
+function occasionsSection(packet: string): string {
+  const occasions = sentOccasions(packet);
+  if (!occasions) return "";
+  const date = parseStoryTime(occasions.asOf);
+  const asOf = date.month !== undefined && date.day !== undefined
+    ? `${String(date.month).padStart(2, "0")}/${String(date.day).padStart(2, "0")}` : occasions.asOf;
+  return `<section class="sent-occasion-section"><h2 class="sent__h">다가오는 날 <span class="n">${occasions.items.length}</span></h2>
+    <ul class="sent-list sent-occasions">${occasions.items.map(item => `<li><div class="sent-row"><span class="sent-row__k">${escapeHtml(item.date.slice(-5).replace("-", "/"))}</span><span class="sent-row__t">${escapeHtml(item.label)}</span><span class="sent-row__m">${occasionOffsetLabel(item.offset)}</span></div></li>`).join("")}</ul>
+    <p class="sent__note">마지막 기록 장면 ${escapeHtml(asOf)} 기준</p></section>`;
+}
 
 export type SentScene = {
   memoryId: string;
@@ -152,6 +175,6 @@ export function sentPage(data: SentData, view: SentView): string {
       </div>
       ${data.fallback ? "" : mix(data)}
     </div>
-    ${data.fallback ? searchSection + raw : `<div class="sent__cols"><div>${memorySection}</div><div>${peopleSection}${nowSection}${searchSection}${raw}</div></div>`}
+    ${data.fallback ? occasionsSection(data.packet) + searchSection + raw : `<div class="sent__cols"><div>${memorySection}</div><div>${occasionsSection(data.packet)}${peopleSection}${nowSection}${searchSection}${raw}</div></div>`}
   </div>`;
 }

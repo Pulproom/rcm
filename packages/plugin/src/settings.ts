@@ -25,6 +25,7 @@ export const defaults: PluginSettings = {
   detectedPerspectives: {},
   includeUserMessages: {},
   memoryOnlyInjection: {},
+  upcomingOccasions: {},
   sourceProtectionTurns: 10,
   editProtectionTurns: 2,
   canonicalizationPolicy: defaultCanonicalizationPolicy(),
@@ -119,6 +120,7 @@ export async function loadSettings(): Promise<PluginSettings> {
     detectedPerspectives: stored?.detectedPerspectives ?? {},
     includeUserMessages: stored?.includeUserMessages ?? {},
     memoryOnlyInjection: normalizeMemoryOnlyInjection(stored?.memoryOnlyInjection),
+    upcomingOccasions: normalizeMemoryOnlyInjection(stored?.upcomingOccasions),
     sourceProtectionTurns: Math.min(20, Math.max(1, Math.round(Number(stored?.sourceProtectionTurns ?? defaults.sourceProtectionTurns)))),
     editProtectionTurns: Math.min(5, Math.max(1, Math.round(Number(stored?.editProtectionTurns ?? defaults.editProtectionTurns)))),
     canonicalizationPolicy,
@@ -203,6 +205,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && JSON.stringify(left.perspectives) === JSON.stringify(right.perspectives)
     && JSON.stringify(left.detectedPerspectives) === JSON.stringify(right.detectedPerspectives)
     && JSON.stringify(left.includeUserMessages) === JSON.stringify(right.includeUserMessages)
+    && JSON.stringify(left.upcomingOccasions) === JSON.stringify(right.upcomingOccasions)
     && JSON.stringify(left.memoryOnlyInjection) === JSON.stringify(right.memoryOnlyInjection)
     && left.sourceProtectionTurns === right.sourceProtectionTurns
     && left.editProtectionTurns === right.editProtectionTurns

@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 55 as const;
+export const DATABASE_SCHEMA_VERSION = 56 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS entities (
   source_json TEXT NOT NULL DEFAULT '[]',
   user_managed INTEGER NOT NULL DEFAULT 0,
   ${entityColorColumn},
+  birthday_json TEXT,
   created_at INTEGER NOT NULL,
   UNIQUE(chat_id, entity_key),
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
@@ -996,12 +997,15 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
   }
   db.transaction(() => {
+    if (hasSchemaLedger && version < 56 && !(db.pragma("table_info(entities)") as Array<{ name: string }>).some(column => column.name === "birthday_json")) {
+      db.exec("ALTER TABLE entities ADD COLUMN birthday_json TEXT");
+    }
     if (hasSchemaLedger && version < 55) {
       for (const table of ['memory_details', 'relationship_events']) {
         const columns = new Set((db.pragma(`table_info(${table})`) as Array<{name:string}>).map(row => row.name));

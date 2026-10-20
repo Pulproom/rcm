@@ -3,6 +3,8 @@ import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
 import { STORY_TIME_GUIDANCE } from "./story-time.js";
 import { z } from "zod";
+import { EntityBirthdaySchema } from "./birthday.js";
+export { EntityBirthdaySchema, birthdayMonthDays, type EntityBirthday } from "./birthday.js";
 import { resolveModelSourceReferences } from "./source-references.js";
 import { buildAuxiliaryRepairMessages, type AuxiliaryRepairMessage } from "./structured-repair.js";
 export { composeQuerySignals, RISU_CONTINUATION_MARKER } from "./query-signals.js";
@@ -27,7 +29,7 @@ export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFail
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 97;
+export const RCM_API_REVISION = 98;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -313,6 +315,11 @@ export const InitialCalibrationEntitySchema = z.object({
   aliases: z.array(z.string().trim().min(1)).default([]),
   role: z.enum(["character", "persona", "npc"]).default("npc"),
   prominence: z.enum(["primary", "supporting", "reference"]).default("supporting"),
+  // A malformed/partial/inferred birthday drops only this optional field.
+  birthday: EntityBirthdaySchema.and(z.object({
+    basis: z.literal("explicit"),
+    evidence: SetupEvidenceSchema,
+  })).optional().catch(undefined),
   evidence: z.array(SetupEvidenceSchema).default([]),
 });
 
@@ -331,13 +338,23 @@ export const InitialCalibrationRelationshipSchema = z.object({
   evidence: z.array(SetupEvidenceSchema).min(1),
 });
 
+/** Product-owned comma-separated field format, never a natural-language classification. */
+export function hasSocialTermSeparator(term: string): boolean {
+  return /[,，、]/u.test(term);
+}
+
+const SocialTermsSchema = z.preprocess(
+  value => Array.isArray(value) ? value.filter(term => typeof term !== "string" || !hasSocialTermSeparator(term)) : value,
+  z.array(z.string().trim().min(1)),
+);
+
 export const InitialCalibrationResultSchema = z.object({
   entities: z.array(InitialCalibrationEntitySchema).optional(),
   relationships: z.array(InitialCalibrationRelationshipSchema).optional(),
   socialKnowledge: z.array(z.object({
     holderKey: z.string().trim().min(1), subjectKey: z.string().trim().min(1),
     level: z.enum(["aware_of", "interacted"]),
-    knownAs: z.array(z.string().trim().min(1)).default([]),
+    knownAs: SocialTermsSchema.default([]),
     description: z.string().trim().min(1),
     evidence: z.array(SetupEvidenceSchema).min(1),
   })).optional(),
@@ -355,6 +372,7 @@ export function mergeInitialCalibrationResults(results: InitialCalibrationResult
   for (const item of results.flatMap((result) => result.entities)) {
     const prior = entities.get(item.key);
     entities.set(item.key, prior ? { ...prior, ...item,
+      birthday: item.birthday ?? prior.birthday,
       aliases: [...new Set([...prior.aliases, ...item.aliases])],
       evidence: [...prior.evidence, ...item.evidence],
     } : item);
@@ -431,6 +449,7 @@ export const TurnPrepareRequestSchema = z.object({
   snapshotScope: z.enum(["full", "tail"]).optional(),
   includeUserMessages: z.boolean().optional(),
   memoryOnlyInjection: z.boolean().optional(),
+  upcomingOccasions: z.boolean().optional(),
   extractionGroupTurns: z.number().int().min(1).max(50).optional(),
   editProtectionTurns: z.number().int().min(1).max(5).optional(),
   canonicalizationPolicy: CanonicalizationPolicySchema.optional(),
@@ -668,6 +687,9 @@ export const LandmarkKindSchema = z.object({
   }
 });
 export type LandmarkKind = z.infer<typeof LandmarkKindSchema>;
+/** User authority is accepted only by storage/edit APIs, never by extraction output schemas. */
+export const StoredLandmarkKindSchema = LandmarkKindSchema.safeExtend({ userDefined: z.boolean().optional() });
+export type StoredLandmarkKind = z.infer<typeof StoredLandmarkKindSchema>;
 
 export const PhysicalIntimacyActSchema = z.enum(PHYSICAL_INTIMACY_ACT_VALUES);
 export type PhysicalIntimacyAct = z.infer<typeof PhysicalIntimacyActSchema>;
@@ -906,8 +928,8 @@ export const SocialKnowledgeSchema = z.object({
   holder: z.string().trim().min(1),
   subject: z.string().trim().min(1),
   level: z.enum(["aware_of", "interacted"]),
-  knownAs: z.array(z.string().trim().min(1)).default([]),
-  addressTerms: z.array(z.string().trim().min(1)).default([]),
+  knownAs: SocialTermsSchema.default([]),
+  addressTerms: SocialTermsSchema.default([]),
   evidence: z.array(EvidenceSchema).min(1),
   memoryKey: z.string().optional(),
   cognitionDetailKeys: z.array(z.string().trim().min(1)).max(8).optional(),
@@ -2081,3 +2103,5 @@ export * from "./reference-translation.js";
 export { sourceRecoverySummary, type SourceRecoveryMetadata } from "./source-recovery.js";
 
 export { JOB_KIND_VALUES, JOB_PIPELINE_STAGE_VALUES, WORKER_PHASE_VALUES, AUXILIARY_PURPOSE_VALUES, JOB_TRIGGER_VALUES, JOB_TRIGGER_LABELS, OPERATION_LABELS, operationLabel, type JobKind, type JobPipelineStage, type WorkerPhase, type AuxiliaryPurpose, type JobTrigger } from "./operation-labels.js";
+
+export * from "./occasions.js";

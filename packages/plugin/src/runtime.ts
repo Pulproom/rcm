@@ -239,6 +239,7 @@ function isPreparedContextRetry(state: RuntimeState, chatId: string, contexts: s
   const prepared = state.automaticTurnPacket;
   const injection = state.lastInjection;
   if (!prepared || prepared.chatId !== chatId || !injection || injection.chatId !== chatId
+    || (prepared.upcomingOccasions ?? true) !== (state.settings.upcomingOccasions[chatId] ?? true)
     || (prepared.memoryOnlyInjection ?? false) !== (state.settings.memoryOnlyInjection[chatId] ?? false)
     || injection.turnKey !== prepared.turnKey || injection.omitted || contexts.length !== 1) return false;
   return contexts[0]!.trim() === injection.packet.trim();
@@ -429,6 +430,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           && !existing.hasMarker
           && state.lastInjection?.turnKey === state.automaticTurnPacket?.turnKey
           && state.lastInjection?.omitted === true
+          && (state.automaticTurnPacket?.upcomingOccasions ?? true) === (state.settings.upcomingOccasions[knownRetryChatId] ?? true)
           && (state.automaticTurnPacket?.memoryOnlyInjection ?? false) === (state.settings.memoryOnlyInjection[knownRetryChatId] ?? false)
           && isIntentionalEmptyPrepare(state.automaticTurnPacket?.response);
         if (preparedEmptyRetry) {
@@ -466,7 +468,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         }
         const selectedMemoryBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
         const totalMemoryBudget = selectedMemoryBudget;
-        const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}`);
+        const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}\0${context.upcomingOccasions ?? true}`);
         const referenceTurnKey = crypto.randomUUID();
         state.memoryReferenceSnapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
         const referenceTurnChanged = state.mcpTurnKey !== referenceTurnKey;
@@ -595,6 +597,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 const inheritedBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
                 context.profile = state.settings.profiles[context.chatId] ?? state.settings.defaultProfile;
                 context.includeUserMessages = state.settings.includeUserMessages[context.chatId] ?? true;
+                context.upcomingOccasions = state.settings.upcomingOccasions[context.chatId] ?? true;
                 context.memoryOnlyInjection = state.settings.memoryOnlyInjection[context.chatId] ?? false;
                 context.extractionGroupTurns = Math.min(50, Math.max(1, Math.round(state.settings.extractionGroupTurns[context.chatId] ?? 6)));
                 context.memoryLanguage = state.settings.memoryLanguages[context.chatId] ?? response.memoryLanguage;
@@ -605,6 +608,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 const inheritedEnabled = isChatMemoryEnabled(state.settings, context.chatId);
                 const requestChanged = prepareRequest.profile !== context.profile
                   || prepareRequest.includeUserMessages !== context.includeUserMessages
+                  || prepareRequest.upcomingOccasions !== context.upcomingOccasions
                   || prepareRequest.memoryOnlyInjection !== context.memoryOnlyInjection
                   || prepareRequest.extractionGroupTurns !== context.extractionGroupTurns
                   || prepareRequest.memoryLanguage !== context.memoryLanguage
@@ -674,6 +678,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 turnKey,
                 chatId: context.chatId,
                 memoryOnlyInjection: context.memoryOnlyInjection ?? false,
+                upcomingOccasions: context.upcomingOccasions ?? true,
                 requestedBudget: effectiveAutoBudget,
                 promptSourceMessageIds,
                 latestMessageId: context.snapshot.at(-1)?.id,

@@ -1,3 +1,4 @@
+import { latestStoryTime } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import type { RuntimeState, TranslationDisplay } from "../types.js";
 import { displayText } from "../translation.js";
@@ -5,7 +6,7 @@ import { buildAnniversaries, daysSinceFirstMet } from "./diary.js";
 import { recentScenes, storyScenes } from "./scenes.js";
 import { buildNowPage, overduePromiseEntries } from "./now.js";
 import { buildPairs, pairKey, normalizeName, type PairSummary } from "./pairs.js";
-import { formatStoryTime, compareParsedStoryTimes, parseStoryTime, type TurnPrepareResponse } from "@rcm/shared";
+import { formatStoryTime, type TurnPrepareResponse } from "@rcm/shared";
 
 export type InjectionManifest = NonNullable<RuntimeState["cache"][string]["lastInjectionManifest"]>;
 export type HomeTranslationRecord = { kind: string; itemId: string; text: string };
@@ -99,8 +100,6 @@ export function homeTranslationRecords(
         ...(index < 0 ? [] : [{ kind: "dialogue", itemId: `${memory.id}:dialogue:${index}`, text: text(lines[index].text) }]),
       ];
     }),
-    ...(dailyMemory?.landmarkKinds ?? []).flatMap((landmark: any, index: number) => landmark.kind === "anniversary_basis" && text(landmark.label)
-      ? [{ kind: "landmark-label", itemId: `landmark:${dailyMemory.id}#${index}:label`, text: text(landmark.label) }] : []),
     ...(manifest && sentOpen ? [
       ...manifest.assertionIds.flatMap((id) => { const item: any = byId(data.assertions as any[], id); return item ? [{ kind: "assertion", itemId: `assertion:${item.id}`, text: text(item.value) }] : []; }),
       ...(manifest.beliefIds ?? []).flatMap((id) => { const item: any = byId(data.beliefs as any[], id); return item ? [{ kind: "belief", itemId: `belief:${item.id}`, text: text(item.value) }] : []; }),
@@ -112,17 +111,6 @@ export function homeTranslationRecords(
   ];
   return [...new Map(visible.filter((record) => record.text).map((record) => [record.itemId, record])).values()];
 }
-
-const latestStoryTime = (data: DashboardData): string | null => {
-  let current: string | null = null;
-  for (const memory of data.memories ?? []) {
-    if (memory?.active === false) continue;
-    const candidate = text(memory?.story_time_normalized);
-    if (!candidate || parseStoryTime(candidate).calendar === "unknown") continue;
-    if (current === null || (compareParsedStoryTimes(parseStoryTime(current), parseStoryTime(candidate)) ?? 0) < 0) current = candidate;
-  }
-  return current;
-};
 
 const involves = (memory: any, pair: PairSummary): boolean => {
   const names = (Array.isArray(memory?.participants) ? memory.participants : []).map(text);

@@ -1,5 +1,5 @@
 import { smallReviewDetail, smallReviewMark } from "./dashboard/small-review.js";
-import { CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
+import { birthdayMonthDays, EntityBirthdaySchema, CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { invalidateChatTranslations, retranslateChatRecords } from "./translation.js";
 import { setupPickerNeeded, claimSetupAttention, firstOpenSetupPicker, observeSetupAttention, discardSetupCapture, loadSetupPicker, readSetupHost, setupGroups, selectedSetupProjection, type SetupPicker } from "./setup-sources.js";
 import { setupEntryLoading, REREAD_NOTICE_HTML, setupSourcesPage } from "./dashboard/setup-sources.js";
@@ -19,7 +19,7 @@ import { providerCapability, updateProviderFields } from "./provider-settings.js
 import { mcpSelectorSettings, readMcpSelectorSettings, updateMcpSelectorControls } from "./mcp-selector-settings.js";
 import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
 declare const __RCM_DISTRIBUTION__: boolean;
-import { LANDMARK_KIND_VALUES, LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, compareStoryTimes, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type ManualLineagePreview, type ManualLineagePreviewRequest, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
+import { ANNIVERSARY_KINDS, LANDMARK_KIND_VALUES, StoredLandmarkKindSchema as LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, compareStoryTimes, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type StoredLandmarkKind as LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type ManualLineagePreview, type ManualLineagePreviewRequest, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
 import { SERVER_STATUS_TIMEOUT_MS, type ChatViewPreferences, type MemoryDetailAccessPatch, type MemoryDetailAccessResponse, ServerClient } from "./api-client.js";
 import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest, readHostSourceTranslations } from "./context.js";
 import { addLog, rememberDiagnosticSecrets, defaults, isChatMemoryEnabled, normalizeMemoryOnlyInjection, supportedSettingsRevision, saveSettings, serverScopeKey, CACHE_KEY, loadStoredJson, saveStoredJson } from "./settings.js";
@@ -44,13 +44,14 @@ import { pairOpenPromises, pairSceneCount, renderRelationshipRow, renderPairDeta
 import { buildSceneLog, storyWeekday } from "./dashboard/scene-log.js";
 import { landmarkLabel, remapHiddenAnniversariesAfterDelete } from "./dashboard/diary.js";
 import { isRecognitionMemory } from "@rcm/shared";
-import { addressEditorForm, buildPersonDetail, renderPersonDetail, renderPersonColorPicker } from "./dashboard/person.js";
+import { addressEditorForm, affiliationLabel, buildPersonDetail, renderPersonDetail, renderPersonColorPicker } from "./dashboard/person.js";
 import { buildNowPage, overduePromiseEntries, pendingAttentionCount, renderNowPage, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
 import { POLARITY_LABELS, predicateLabel, PROMISE_STATUS_LABELS, STATE_KIND_LABELS } from "./dashboard/record-history.js";
 import { renderLockHome } from "./dashboard/phone/home.js";
 import { dailyMemoryKey, selectDailyMemory, type DailyMemoryView } from "./dashboard/daily-memory.js";
 import { holidayForStoryDate } from "./dashboard/holidays.js";
-import { holidayMark, holidayDateCredit, HOLIDAY_CSS } from "./dashboard/holiday-view.js";
+import { birthdayPeople, birthdaysForStoryDate } from "./dashboard/birthdays.js";
+import { birthdayMark, holidayMark, holidayDateCredit, HOLIDAY_CSS } from "./dashboard/holiday-view.js";
 import { createHomeSnow, SNOW_CSS } from "./dashboard/snow.js";
 import { renderDailyMemory } from "./dashboard/daily-memory-view.js";
 import { MemoryLandmarkPatchQueue } from "./dashboard/landmark-mutations.js";
@@ -72,6 +73,7 @@ export type Tab = "overview" | "initial" | "story" | "timeline" | "relationships
 export function mergeCompleteBackupSettings(current: PluginSettings, restored: unknown): PluginSettings {
   if (!restored || typeof restored !== "object" || !supportedSettingsRevision((restored as { settingsRevision?: unknown }).settingsRevision)) return current;
   return { ...(restored as PluginSettings), settingsRevision: defaults.settingsRevision,
+    upcomingOccasions: normalizeMemoryOnlyInjection((restored as Partial<PluginSettings>).upcomingOccasions),
     memoryOnlyInjection: normalizeMemoryOnlyInjection((restored as Partial<PluginSettings>).memoryOnlyInjection),
     serverUrl: current.serverUrl, serverToken: current.serverToken };
 }
@@ -137,10 +139,9 @@ export type TimelineViewState = {
 
 const relationshipLandmarkKinds = new Set(["first_met", "romantic_relationship_established", "engagement", "marriage", "separation", "romantic_relationship_ended", "reunion", "divorce", "anniversary_basis"]);
 
-export function dateAnniversaryLandmarks(label: string, pair: [string, string], storyTime: string, firstMet: boolean): LandmarkKind[] {
-  const landmarks: LandmarkKind[] = [{ kind: "anniversary_basis", label, pair, storyTime }];
-  if (firstMet) landmarks.push({ kind: "first_met", pair, storyTime });
-  return landmarks;
+export function dateAnniversaryLandmarks(label: string, pair: [string, string], storyTime: string, kind: string = "anniversary_basis"): LandmarkKind[] {
+  if (!["first_met", "romantic_relationship_established", "marriage", "anniversary_basis"].includes(kind)) throw new Error("기념일 종류를 골라 주세요.");
+  return LandmarkKindSchema.array().parse([{ kind, label, pair, ...(storyTime ? { storyTime } : {}), userDefined: true, alwaysInject: false }]);
 }
 
 export function editableLandmarkKinds(text: string, existing: LandmarkKind[], participants: string[], storyTime: string): LandmarkKind[] {
@@ -1770,8 +1771,14 @@ export function initialCalibrationPage(data: DashboardData, view: PeopleViewStat
     const names = namesFor(person);
     const count = relationCount(person);
     const scenes = storyScenes(data.memories ?? []).filter((memory: any) => memory.active !== false && (memory.participants ?? []).some((name: string) => names.has(normalize(name)))).length;
+    // The grey line says who they are: their label with the persona, then aliases and 소속. The scene count sits at the end.
+    const withMe = me && person !== me ? personPairs.find((pair) => names.has(normalize(pair.a)) !== names.has(normalize(pair.b)) && [pair.a, pair.b].some((name) => normalize(name) === personaKey)) : undefined;
+    const label = withMe?.label ? displayText(withMe.label, translations.get(relationshipLabelTranslationKey(withMe)), display) : "";
+    const affiliations = (data.assertions ?? []).filter((item: any) => item?.socialRelation?.kind === "affiliation" && names.has(normalize(item?.subject)))
+      .map(affiliationLabel).filter(Boolean);
+    const about = [label, ...[...(person.aliases ?? []), ...affiliations].map((text: string) => `<span class="notranslate" translate="no">${escapeHtml(text)}</span>`)].filter(Boolean);
     return contactRow({ names: [String(person.displayName ?? "")], titleHtml: nameHtml(String(person.displayName ?? "")),
-      secondary: `관계 ${count} · ${scenes}장면`, action: "select-person", kind: "person",
+      secondary: `관계 ${count}`, secondaryHtml: about.length ? about.join(" · ") : undefined, count: String(scenes), action: "select-person", kind: "person",
       data: { id: String(person.id), search: [...names].join(" ") }, current: String(person.id) === String(selected?.id ?? "") });
   };
   const myCard = me ? `<section class="contact-group mecard" data-people-group><h3 class="sec">내 카드</h3><div class="list">${personRow(me)}</div></section>` : "";
@@ -1783,8 +1790,11 @@ export function initialCalibrationPage(data: DashboardData, view: PeopleViewStat
   }).join("");
   const editor = selected && view.editing ? (() => {
     const isNew = selected.id === "__new__";
+    const birthday = selected.birthday;
+    const birthdaySelect = (part: "month" | "day", count: number, label: string) => `<select id="person-birthday-${part}" class="select" name="birthday${part === "month" ? "Month" : "Day"}" aria-label="생일 ${label}"><option value="">${label} 없음</option>${Array.from({ length: count }, (_, i) => `<option value="${i + 1}"${birthday?.[part] === i + 1 ? " selected" : ""}>${i + 1}${label}</option>`).join("")}</select>`;
+    const birthdayField = field({ id: "person-birthday-month", label: "생일", control: `<div class="birthday-fields">${birthdaySelect("month", 12, "월")}${birthdaySelect("day", birthday?.month ? birthdayMonthDays(birthday.month) : 31, "일")}<input class="input" type="number" step="1" name="birthdayYear" aria-label="생일 연도 (선택)" placeholder="연도 (선택)" value="${escapeHtml(birthday?.year ?? "")}"></div>`, hint: "처음 설정에 적혀 있으면 자동으로 채워져요. 주요 인물만 기념일과 오늘의 추억에 표시돼요." });
     const prominenceSeg = `<div class="seg" role="radiogroup" aria-label="중요도">${PERSON_PROMINENCE_OPTIONS.map(({ value, label }, order) => `<label><input type="radio" name="prominence" value="${value}"${entityProminence(selected) === order ? " checked" : ""}><span>${label}</span></label>`).join("")}</div>`;
-    return `<article class="reader is-editing"><div class="reader__bar"><button type="button" class="back hit" data-action="close-person-editor">${icon("back")}<span>인물</span></button></div><h2 class="reader__title">${isNew ? "인물 추가" : escapeHtml(selected.displayName || "인물 수정")}</h2><form class="form person-editor" data-entity-id="${escapeHtml(selected.id)}">${field({ id: "person-displayName", label: "표시 이름", control: `<input id="person-displayName" class="input" name="displayName" value="${escapeHtml(selected.displayName)}" required>` })}${field({ id: "person-aliases", label: "별칭", control: `<input id="person-aliases" class="input notranslate" translate="no" name="aliases" value="${escapeHtml((selected.aliases ?? []).join(", "))}" placeholder="쉼표로 구분">` })}<div class="field"><span class="label">중요도</span>${prominenceSeg}</div><div class="form__bar">${isNew || calibration.locked ? "" : btn("목록에서 삭제", { kind: "danger", icon: "delete", action: "delete-initial-entity", data: { id: String(selected.id), name: String(selected.displayName ?? "") } })}<span class="sp"></span>${btn("취소", { kind: "quiet", action: "close-person-editor" })}${btn("저장", { kind: "primary", icon: "save", action: isNew ? "add-initial-entity" : "save-initial-entity", data: { id: String(selected.id) } })}</div></form></article>`;
+    return `<article class="reader is-editing"><div class="reader__bar"><button type="button" class="back hit" data-action="close-person-editor">${icon("back")}<span>인물</span></button></div><h2 class="reader__title">${isNew ? "인물 추가" : "프로필 수정"}</h2><form class="form person-editor" data-entity-id="${escapeHtml(selected.id)}">${field({ id: "person-displayName", label: "표시 이름", control: `<input id="person-displayName" class="input" name="displayName" value="${escapeHtml(selected.displayName)}" required>` })}${field({ id: "person-aliases", label: "별칭", control: `<input id="person-aliases" class="input notranslate" translate="no" name="aliases" value="${escapeHtml((selected.aliases ?? []).join(", "))}" placeholder="쉼표로 구분">` })}${birthdayField}<div class="field"><span class="label">중요도</span>${prominenceSeg}</div><div class="form__bar">${isNew || calibration.locked ? "" : btn("목록에서 삭제", { kind: "danger", icon: "delete", action: "delete-initial-entity", data: { id: String(selected.id), name: String(selected.displayName ?? "") } })}<span class="sp"></span>${btn("취소", { kind: "quiet", action: "close-person-editor" })}${btn("저장", { kind: "primary", icon: "save", action: isNew ? "add-initial-entity" : "save-initial-entity", data: { id: String(selected.id) } })}</div></form></article>`;
   })() : "";
   const reader = selected && !view.editing ? renderPersonDetail(
     buildPersonDetail({ ...data, entities: people }, String(selected.displayName || selected.internalName || selected.name || ""), data.personaEntity ?? null),
@@ -1824,15 +1834,9 @@ export function relationshipSceneTranslationRecords(data: DashboardData, selecte
     { kind: "memory-title", itemId: `${memory.id}:title`, text: String(memory.title ?? "") },
     { kind: "memory-content", itemId: `${memory.id}:content`, text: String(memory.content ?? "") },
   ]);
-  const anniversaryRecords = data.memories.flatMap((memory: any) => (memory?.landmarkKinds ?? []).flatMap((landmark: any, index: number) => {
-    const participants = Array.isArray(landmark?.pair) ? landmark.pair : [];
-    const label = String(landmark?.label ?? "").trim();
-    if (landmark?.kind !== "anniversary_basis" || participants.length !== 2 || pairKey(String(participants[0]), String(participants[1])) !== pair.key || !label) return [];
-    return [{ kind: "landmark-label", itemId: `landmark:${memory.id}#${index}:label`, text: label }];
-  }));
   const promiseRecords = pairOpenPromises(data, pair)
     .map((item: any) => ({ kind: "promise", itemId: `promise:${item.id ?? item.promise_key ?? ""}`, text: String(item.content ?? "") }));
-  return [...sceneRecords, ...anniversaryRecords, ...promiseRecords];
+  return [...sceneRecords, ...promiseRecords];
 }
 
 export function applyStructuredTranslationCompletion(
@@ -2155,13 +2159,13 @@ const LANDMARK_PICK_LABELS: Record<string, string> = {
  */
 function landmarkKindsField(id: string, existing: any[] = [], isLandmark = false): string {
   const picked = new Set(existing.map((entry: any) => String(entry?.kind ?? "")));
-  const chip = (name: string, value: string, label: string, checked: boolean) => `<label class="kindpick__chip"><input type="checkbox" name="${name}" value="${escapeHtml(value)}"${checked ? " checked" : ""}><span>${escapeHtml(label)}</span></label>`;
+  const chip = (name: string, value: string, label: string, checked: boolean) => `<label class="kindpick__chip"><input type="checkbox" name="${name}" value="${escapeHtml(value)}"${checked ? " checked" : ""}><span>${escapeHtml(label)}${name === "landmarkKind" && ANNIVERSARY_KINDS.some(kind => kind !== "anniversary_basis" && kind === value) ? icon("calendar") : ""}</span></label>`;
   const builtIn = Object.entries(LANDMARK_PICK_LABELS).filter(([kind]) => kind !== "other").map(([kind, label]) => chip("landmarkKind", kind, label, picked.has(kind))).join("");
   const custom = existing.map((entry: any, index: number) => entry?.kind === "other" && entry?.label ? chip("landmarkKeep", String(index), String(entry.label), true) : "").join("");
   const plain = isLandmark && !existing.some((entry: any) => entry?.kind !== "anniversary_basis") ? chip("landmarkPlain", "1", "전환점", true) : "";
   const addOther = chip("landmarkKind", "other", "기타 추가", false);
   const other = `<div class="kindpick__other" data-landmark-other hidden>${field({ id: `${id}-other`, label: "기타 이름", control: `<input id="${id}-other" class="input" name="landmarkOther" maxlength="120" placeholder="예: 첫 키스">` })}</div>`;
-  return `<fieldset class="kindpick" id="${id}"><legend class="label">랜드마크</legend><p class="hint">이 장면이 이야기의 전환점이면 골라 주세요. 고르지 않으면 일반 장면입니다.</p><div class="kindpick__chips">${plain}${builtIn}${custom}${addOther}</div>${other}</fieldset>`;
+  return `<fieldset class="kindpick" id="${id}"><legend class="label">랜드마크</legend><p class="hint">이 장면이 이야기의 전환점이면 골라 주세요. 고르지 않으면 일반 장면입니다.</p><div class="kindpick__chips">${plain}${builtIn}${custom}${addOther}</div>${other}<p class="kindpick__legend">${icon("calendar")}표시가 있는 종류는 관계 시트의 기념일에도 올라가요.</p></fieldset>`;
 }
 
 /**
@@ -2217,11 +2221,15 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
   const selectedIndex = storyOrdered.findIndex((memory) => memory.id === selectedBase?.id);
   const adjacent = { previous: selectedIndex > 0 ? storyOrdered[selectedIndex - 1] : undefined, next: selectedIndex >= 0 ? storyOrdered[selectedIndex + 1] : undefined };
   let lastDay = "";
+  const birthdayList = birthdayPeople(data);
   const rows = topLevel.map((memory) => {
     const day = memoryDay(memory);
-    const holiday = holidayForStoryDate(parseStoryTime(memory.story_time_normalized ?? memory.story_time ?? memory.storyTime));
-    const dateLabel = holiday && lex().skin === "film" ? holidayDateCredit(holiday) : day.label;
-    const header = day.key === lastDay ? "" : `<div class="day" data-day-header="${escapeHtml(day.key)}"><b>${escapeHtml(dateLabel)}</b>${holidayMark(holiday, lex().skin, "— ")}</div>`;
+    const date = parseStoryTime(memory.story_time_normalized ?? memory.story_time ?? memory.storyTime);
+    const holiday = holidayForStoryDate(date);
+    const birthdays = birthdaysForStoryDate(date, birthdayList);
+    const occasionDate = holiday ?? birthdays[0]?.birthday;
+    const dateLabel = occasionDate && lex().skin === "film" ? holidayDateCredit(occasionDate) : day.label;
+    const header = day.key === lastDay ? "" : `<div class="day" data-day-header="${escapeHtml(day.key)}"><b>${escapeHtml(dateLabel)}</b>${holidayMark(holiday, lex().skin, "— ")}${birthdayMark(birthdays, lex().skin)}</div>`;
     lastDay = day.key;
     const children = matching.filter((candidate) => candidate.capsule_parent_id === memory.id);
     const capsule = children.length ? `<details class="capsule-children fold"${children.some((child) => child.id === selected?.id) ? " open" : ""}><summary><span>원래 기억</span><span class="n">${children.length}</span></summary><div class="fold__body">${children.map((child) => memoryRow(child, selected?.id ?? "", translations, translationEnabled, numbers)).join("")}</div></details>` : "";
@@ -3726,6 +3734,7 @@ export function settingsV2(
   const quizGenerating = quizManagementBusy(state, data);
   const currentChatEnabled = state.current ? isChatMemoryEnabled(settings, state.current.chatId) : settings.defaultChatEnabled;
   const includeUserMessages = state.current ? (settings.includeUserMessages[state.current.chatId] ?? true) : true;
+  const upcomingOccasions = state.current ? (settings.upcomingOccasions[state.current.chatId] ?? true) : true;
   const memoryOnlyInjection = state.current ? (settings.memoryOnlyInjection[state.current.chatId] ?? false) : false;
   const extractionGroupTurns = state.current ? (settings.extractionGroupTurns[state.current.chatId] ?? 6) : 6;
   const desiredMemoryLanguage = state.current ? (settings.memoryLanguages[state.current.chatId] ?? "en") : "en";
@@ -3766,7 +3775,8 @@ export function settingsV2(
       <label class="field"><span>한 번에 정리할 턴</span><input name="extractionGroupTurns" type="number" min="1" max="50" step="1" value="${extractionGroupTurns}" ${chatOff}>${hint("보호가 끝난 턴을 몇 개씩 모아 기억으로 만듭니다.")}</label>
       <label class="field"><span>기억 정본 언어</span><select name="memoryLanguage" ${chatOff}><option value="en" ${desiredMemoryLanguage === "en" ? "selected" : ""}>English</option><option value="ko" ${desiredMemoryLanguage === "ko" ? "selected" : ""}>한국어</option><option value="ja" ${desiredMemoryLanguage === "ja" ? "selected" : ""}>日本語</option><option value="zh" ${desiredMemoryLanguage === "zh" ? "selected" : ""}>中文</option></select>${hint(pendingMemoryLanguage ? `다음 재생성부터 ${escapeHtml(pendingMemoryLanguage.toUpperCase())}` : activeMemoryLanguage !== desiredMemoryLanguage ? `지금은 ${escapeHtml(activeMemoryLanguage.toUpperCase())}` : "")}</label>
       <label class="field"><span>기억 주입량</span><select name="chatMemoryBudget" ${chatOff}><option value="inherit" ${currentMemoryBudget === undefined ? "selected" : ""}>공통값 · ${settings.defaultMemoryBudget.toLocaleString()}</option>${[4_000, 6_000, 8_000, 12_000].map((value) => `<option value="${value}" ${currentMemoryBudget === value ? "selected" : ""}>${value.toLocaleString()} tokens</option>`).join("")}</select></label>
-      ${check("memoryOnlyInjection", "기억만 보내기", memoryOnlyInjection, "인물·현재 탭은 계속 기록하지만 메인 모델에게는 보내지 않습니다.", !hasCurrentChat)}
+      ${check("memoryOnlyInjection", "기억만 보내기", memoryOnlyInjection, "인물·현재 탭은 계속 기록하지만 상태 장부는 보내지 않습니다. 다가오는 날은 아래 설정을 따릅니다.", !hasCurrentChat)}
+      ${check("upcomingOccasions", "다가오는 날 알리기", upcomingOccasions, "생일·기념일이 2주 안으로 다가오면 메인 모델에게 한 줄로 알려 줍니다. 날짜를 자주 건너뛰는 이야기라면 꺼 두세요.", !hasCurrentChat)}
     </div>`)}
     ${group("관점", `<div class="form__row">
       <label class="field"><span>관점 인물</span><input name="perspectives" value="${escapeHtml(perspectives)}" ${chatOff} placeholder="${escapeHtml(perspectivePlaceholder)}">${hint("여러 인물은 쉼표로 구분합니다.")}</label>
@@ -4538,6 +4548,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     const perChat = { ...state.settings.includeUserMessages };
     if (state.current) perChat[state.current.chatId] = includeUserMessages;
+    const occasionsByChat = { ...state.settings.upcomingOccasions };
+    if (state.current) occasionsByChat[state.current.chatId] = formData.has("upcomingOccasions");
     const memoryOnlyByChat = { ...state.settings.memoryOnlyInjection };
     if (state.current) memoryOnlyByChat[state.current.chatId] = formData.has("memoryOnlyInjection");
     const extractionGroupTurns = Math.min(50, Math.max(1, Math.round(Number(values.extractionGroupTurns ?? 6))));
@@ -4614,9 +4626,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (chatWasEnabled !== chatEnabled) { invalidateChatTranslations(state.current.chatId); translations.clear(); translationRequested.clear(); }
     }
     if (reviewChanged) await applyQueuedExtractionReview(new ServerClient(() => ({ ...state.settings, ...nextServerConnection })), formData.has("postExtractionReview"));
-    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", christmasSnow: formData.has("christmasSnow"), defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
+    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", christmasSnow: formData.has("christmasSnow"), defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, upcomingOccasions: occasionsByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
     if (state.current) {
       state.current.includeUserMessages = includeUserMessages;
+      state.current.upcomingOccasions = occasionsByChat[state.current.chatId] ?? true;
       state.current.memoryOnlyInjection = memoryOnlyByChat[state.current.chatId] ?? false;
       state.current.sourceProtectionTurns = sourceProtectionTurns;
       state.current.editProtectionTurns = editProtectionTurns;
@@ -7034,7 +7047,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const deleting = action === "delete-anniversary";
         let appliedIndex = index;
         if (deleting) {
-          if (landmark.kind !== "anniversary_basis") throw new Error("사용자가 지정한 기념일만 삭제할 수 있습니다.");
+          if (landmark.kind !== "anniversary_basis" && !landmark.userDefined) throw new Error("사용자가 지정한 기념일만 삭제할 수 있습니다.");
           if (!await confirmDashboard(`기념일 '${String(landmark.label ?? "")}'을 삭제할까요?`, false, { confirm: "기념일 삭제", danger: true })) return;
         }
         await landmarkPatchQueue.enqueue(memoryId,
@@ -7080,7 +7093,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const form = target.closest<HTMLFormElement>("form");
         if (!form?.reportValidity()) return;
         const values = new FormData(form);
-        const payload = { displayName: String(values.get("displayName") ?? "").trim(), aliases: String(values.get("aliases") ?? "").split(",").map((item) => item.trim()).filter(Boolean), prominence: String(values.get("prominence") ?? "supporting") };
+        const month = Number(values.get("birthdayMonth")), day = Number(values.get("birthdayDay"));
+        const year = String(values.get("birthdayYear") ?? "").trim();
+        const birthday = month && day ? EntityBirthdaySchema.parse({ month, day, ...(year ? { year: Number(year) } : {}) }) : null;
+        const payload = { birthday, displayName: String(values.get("displayName") ?? "").trim(), aliases: String(values.get("aliases") ?? "").split(",").map((item) => item.trim()).filter(Boolean), prominence: String(values.get("prominence") ?? "supporting") };
         const id = action === "save-initial-entity" ? encodeURIComponent(target.dataset.id ?? "") : "";
         await client.request(`/v1/chats/${chat}/initial-calibration/entities${id ? `/${id}` : ""}`, { method: id ? "PATCH" : "POST", body: JSON.stringify(payload) });
         formDirty = false;
@@ -7586,11 +7602,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (!storyTime) throw new Error("작중 날짜를 입력해 주세요.");
         if (!a || !b) throw new Error("기념일을 붙일 두 사람을 찾지 못했습니다.");
         const note = String(values.note ?? "").trim();
-        const firstMet = Boolean(values.firstMet);
+        const kind = String(values.anniversaryKind ?? "anniversary_basis");
         const chat = encodeURIComponent(state.current.chatId);
         const result = await client.request<{ ok: boolean; id: string }>(`/v1/chats/${chat}/memories`, { method: "POST", body: JSON.stringify({
           title: label, content: note || `${label} — ${a} · ${b} (설정상 과거)`, storyTime, participants: [a, b],
-          landmarkKinds: dateAnniversaryLandmarks(label, [a, b], storyTime, firstMet),
+          landmarkKinds: dateAnniversaryLandmarks(label, [a, b], storyTime, kind),
         }) });
         if (!result.ok || !result.id) throw new Error("기념일을 저장하지 못했습니다.");
         anniversaryEditorEntryId = "";
@@ -7606,7 +7622,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (!memory || !pair) throw new Error("기념일로 지정할 관계 기록을 찾지 못했습니다.");
         await landmarkPatchQueue.enqueue(memoryId,
           () => currentMemoryLandmarks(memoryId),
-          (latest) => [...latest, { kind: "anniversary_basis", label, pair: [pair.a, pair.b] }],
+          (latest) => [...latest, ...dateAnniversaryLandmarks(label, [pair.a, pair.b], "", String(values.anniversaryKind ?? "anniversary_basis"))],
           async (landmarkKinds) => {
             const result = await client.patchMemory(state.current!.chatId, memoryId, { landmarkKinds });
             if (!result.ok) throw new Error("기념일을 저장하지 못했습니다.");
@@ -7867,6 +7883,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
 
     // The colour sheet's preview face follows the picker live; saving still goes through submit-form.
+    if (input.name === "birthdayMonth" && input.closest(".person-editor")) {
+      const day = input.closest("form")?.querySelector<HTMLSelectElement>('[name="birthdayDay"]');
+      if (day) {
+        const previous = Number(day.value), limit = birthdayMonthDays(Number(input.value)) || 31;
+        day.innerHTML = `<option value="">일 없음</option>${Array.from({ length: limit }, (_, i) => `<option value="${i + 1}"${previous === i + 1 ? " selected" : ""}>${i + 1}일</option>`).join("")}`;
+      }
+    }
     if (input.name === "color" && input.closest("#person-color-form")) input.closest("#person-color-form")?.querySelector<HTMLElement>(".person-color-preview")?.style.setProperty("--pick", input.value);
     if (input.closest('#organization-addition-form') && organizationView.addition) {
       organizationView.addition.request = input.value;

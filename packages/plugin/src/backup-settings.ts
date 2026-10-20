@@ -9,6 +9,7 @@ export function exportChatSettings(settings:PluginSettings,id:string):ChatBackup
     profile:settings.profiles[id]??settings.defaultProfile,
     perspectives:settings.perspectives[id],detectedPerspectives:scope?settings.detectedPerspectives[scope]:undefined,
     includeUserMessages:settings.includeUserMessages[id],extractionGroupTurns:settings.extractionGroupTurns[id],
+    upcomingOccasions:settings.upcomingOccasions[id]??true,
     memoryOnlyInjection:settings.memoryOnlyInjection[id]??false,
     memoryLanguage:settings.memoryLanguages[id],backfillApproved:scope?settings.backfillApproved[scope]:undefined,
     memoryBudget:settings.memoryBudgets[id]??settings.defaultMemoryBudget,storyOverviewBackup:settings.storyOverviewBackups[id],
@@ -27,6 +28,7 @@ export function restoreChatSettings(settings:PluginSettings,id:string,input:unkn
     if(value.backfillApproved===undefined)delete settings.backfillApproved[scope];else settings.backfillApproved[scope]=value.backfillApproved;
   }
   put(settings.includeUserMessages,value.includeUserMessages);put(settings.extractionGroupTurns,value.extractionGroupTurns);
+  put(settings.upcomingOccasions,value.upcomingOccasions);
   put(settings.memoryOnlyInjection,value.memoryOnlyInjection);
   put(settings.memoryLanguages,value.memoryLanguage);
   put(settings.memoryBudgets,value.memoryBudget);put(settings.storyOverviewBackups,value.storyOverviewBackup);

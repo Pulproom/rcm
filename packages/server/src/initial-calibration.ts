@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { canAutomaticallyChange } from "./user-corrections.js";
 import {
+  EntityBirthdaySchema, type EntityBirthday,
   INITIAL_AFFECTION_LEVELS, INITIAL_INTENSITY_LEVELS, INITIAL_INTIMACY_LEVELS, INITIAL_TRUST_LEVELS,
   type InitialCalibrationOrigin, type InitialCalibrationResult, type InitialCalibrationStatus, type ResolvedSetupProjection,
 } from "@rcm/shared";
@@ -41,11 +42,11 @@ export function initialCalibrationView(db: RcmDatabase, chatId: string): Initial
 }
 
 export function initialCalibrationLedger(db: RcmDatabase, chatId: string): InitialCalibrationView & { entities: Array<Record<string, unknown>>; relationships: Array<Record<string, unknown>>; socialKnowledge: Array<Record<string, unknown>> } {
-  const entities = (db.prepare(`SELECT id,entity_key AS key,name AS internalName,display_name AS displayName,type,color,origin,
+  const entities = (db.prepare(`SELECT id,entity_key AS key,name AS internalName,display_name AS displayName,type,color,birthday_json AS birthday,origin,
     setup_prominence AS prominence,source_json AS evidence,user_managed AS userManaged
     FROM entities WHERE chat_id=? AND (origin IN ('setup','manual') OR user_managed=1)
     ORDER BY CASE setup_prominence WHEN 'primary' THEN 0 WHEN 'supporting' THEN 1 ELSE 2 END,display_name`).all(chatId) as Array<Record<string, any>>)
-    .map((row) => ({ ...row, aliases: (db.prepare("SELECT alias FROM aliases WHERE entity_id=? ORDER BY alias").all(row.id) as Array<{ alias: string }>).map((item) => item.alias), evidence: JSON.parse(row.evidence || "[]"), userManaged: row.userManaged === 1 }));
+    .map((row) => ({ ...row, birthday: row.birthday ? JSON.parse(row.birthday) : undefined, aliases: (db.prepare("SELECT alias FROM aliases WHERE entity_id=? ORDER BY alias").all(row.id) as Array<{ alias: string }>).map((item) => item.alias), evidence: JSON.parse(row.evidence || "[]"), userManaged: row.userManaged === 1 }));
   const displayNames = new Map(entities.map((entity) => [String((entity as Record<string, unknown>).internalName), String((entity as Record<string, unknown>).displayName)]));
   const relationships = (db.prepare(`SELECT id,from_entity AS "from",to_entity AS "to",projection_axes_json AS axes,
     initial_summary AS summary,source_quote AS sourceQuote,evidence_json AS evidence,active,user_managed AS userManaged
@@ -61,10 +62,11 @@ export function initialCalibrationLedger(db: RcmDatabase, chatId: string): Initi
 export function upsertInitialEntity(
   db: RcmDatabase,
   chatId: string,
-  input: { id?: string; displayName: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference" },
+  input: { id?: string; displayName: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference"; birthday?: EntityBirthday | null },
 ): string {
   const displayName = input.displayName.trim();
   if (!displayName) throw new Error("Display name is required");
+  const birthday = input.birthday == null ? input.birthday : EntityBirthdaySchema.parse(input.birthday);
   return db.transaction(() => {
     const timestamp = now();
     const existing = input.id ? db.prepare("SELECT id,name,display_name FROM entities WHERE id=? AND chat_id=?").get(input.id, chatId) as { id: string; name: string; display_name: string } | undefined : undefined;
@@ -75,6 +77,8 @@ export function upsertInitialEntity(
       .run(displayName, input.prominence ?? "supporting", id, chatId);
     else db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,created_at)
       VALUES(?,?,?,?,?,'person','manual',?,'[]',1,?)`).run(id, chatId, `manual_${id}`, internalName, displayName, input.prominence ?? "supporting", timestamp);
+    if (birthday !== undefined) db.prepare("UPDATE entities SET birthday_json=? WHERE id=? AND chat_id=?")
+      .run(birthday === null ? null : JSON.stringify(birthday), id, chatId);
     const removed = aliasRemovalGuard(db, chatId);
     const previousDisplay = existing?.display_name && existing.display_name !== displayName && !removed(id, existing.display_name) ? [existing.display_name] : [];
     const aliases = [...new Set([...(input.aliases ?? []), ...previousDisplay].map(value => value.trim()).filter(Boolean))];
@@ -291,6 +295,11 @@ export function normalizeAndValidateSetupEvidence(
     return undefined;
   };
   for (const entity of normalized.entities) {
+    if (entity.birthday) {
+      const evidence = relocateExactQuote(entity.birthday.evidence);
+      if (evidence) entity.birthday = { ...entity.birthday, evidence };
+      else delete entity.birthday;
+    }
     if (keys.has(entity.key)) issues.push(`duplicate entity key ${entity.key}`);
     keys.add(entity.key);
     const names = [entity.displayName, ...entity.aliases].map(normalizeEntityName);
@@ -368,15 +377,16 @@ export function completeInitialCalibrationJob(
         { id: string; name: string; entity_key: string; user_managed: number } | undefined;
       const id = existing?.id ?? randomUUID();
       const canonicalName = existing?.name ?? entity.displayName;
-      db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,created_at)
-        VALUES(?,?,?,?,?,?, 'setup',?,?,0,?) ON CONFLICT(chat_id,entity_key) DO UPDATE SET
+      db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,birthday_json,user_managed,created_at)
+        VALUES(?,?,?,?,?,?, 'setup',?,?,?,0,?) ON CONFLICT(chat_id,entity_key) DO UPDATE SET
         display_name=CASE WHEN entities.user_managed=1 OR entities.origin<>'setup' THEN entities.display_name ELSE excluded.display_name END,
         type=CASE WHEN entities.user_managed=1 THEN entities.type ELSE excluded.type END,
         origin=entities.origin,
         setup_prominence=CASE WHEN entities.user_managed=1 THEN entities.setup_prominence ELSE excluded.setup_prominence END,
+        birthday_json=CASE WHEN entities.user_managed=1 THEN entities.birthday_json ELSE COALESCE(excluded.birthday_json,entities.birthday_json) END,
         source_json=CASE WHEN entities.user_managed=1 THEN entities.source_json ELSE excluded.source_json END`).run(
         id, job.chat_id, existing?.entity_key ?? entity.key, canonicalName, entity.displayName, entity.role === "npc" ? "person" : "character",
-        entity.prominence, JSON.stringify(entity.evidence), timestamp,
+        entity.prominence, JSON.stringify(entity.evidence), entity.birthday ? JSON.stringify(EntityBirthdaySchema.parse(entity.birthday)) : null, timestamp,
       );
       const stored = { id, name: canonicalName };
       byKey.set(entity.key, stored);

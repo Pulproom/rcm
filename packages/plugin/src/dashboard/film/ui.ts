@@ -186,8 +186,8 @@ export function fold(summary: string, body: string, opts: { count?: number; open
 }
 
 /** Shared contact cell; `secondaryHtml` accepts escaped translation markup from `displayText`. */
-export function contactRow(opts: { names: string[]; titleHtml: string; secondary: string; secondaryHtml?: string; action: string; data?: Data; current?: boolean; kind: "person" | "relationship" }): string {
-  return `<button type="button" class="row contact-row ${opts.kind}-row"${actionAttrs(opts.action, opts.data)} data-${opts.kind === "person" ? "person" : "relationship"}-row${opts.current ? ' aria-current="true"' : ""}><span class="contact-row__avs">${opts.names.map((name) => avatar(name)).join("")}</span><span class="contact-row__body"><span class="row__title">${opts.titleHtml}</span><span class="row__sub">${opts.secondaryHtml ?? escapeHtml(opts.secondary)}</span></span><span class="row__end">${icon("chevron")}</span></button>`;
+export function contactRow(opts: { names: string[]; titleHtml: string; secondary: string; secondaryHtml?: string; action: string; data?: Data; current?: boolean; kind: "person" | "relationship"; count?: string }): string {
+  return `<button type="button" class="row contact-row ${opts.kind}-row"${actionAttrs(opts.action, opts.data)} data-${opts.kind === "person" ? "person" : "relationship"}-row${opts.current ? ' aria-current="true"' : ""}><span class="contact-row__avs">${opts.names.map((name) => avatar(name)).join("")}</span><span class="contact-row__body"><span class="row__title">${opts.titleHtml}</span><span class="row__sub">${opts.secondaryHtml ?? escapeHtml(opts.secondary)}</span></span><span class="row__end">${opts.count ? `<span class="row__count">${escapeHtml(opts.count)}</span>` : ""}${icon("chevron")}</span></button>`;
 }
 
 /** `titleHtml` / `subHtml` take caller-built HTML (translated text from `displayText`) in place of `title` / `sub`. */

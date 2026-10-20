@@ -13,6 +13,7 @@ export async function inheritLineageSettings(state: RuntimeState, target: string
   copy(state.settings.chatEnabled, state.settings.defaultChatEnabled);
   copy(state.settings.profiles, state.settings.defaultProfile);
   copy(state.settings.includeUserMessages, true);
+  copy(state.settings.upcomingOccasions, true);
   copy(state.settings.memoryOnlyInjection, false);
   copy(state.settings.extractionGroupTurns, 6);
   copy(state.settings.memoryLanguages, inheritedMemoryLanguage ?? "en");

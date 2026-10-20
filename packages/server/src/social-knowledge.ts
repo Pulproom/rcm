@@ -133,7 +133,7 @@ export function addressTermAliasGuard(db: RcmDatabase, chatId: string, incoming:
   };
 }
 
-function listRecordedSocialKnowledge(db: RcmDatabase, chatId: string): SocialKnowledgeItem[] {
+export function listRecordedSocialKnowledge(db: RcmDatabase, chatId: string): SocialKnowledgeItem[] {
   return socialKnowledgeView(db, chatId).map(({detailIds,...item}) => ({...item, cognition: detailIds.flatMap(id => {
     const detail = db.prepare(`SELECT d.id,d.text,d.user_edited FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1 AND EXISTS

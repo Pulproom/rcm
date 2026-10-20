@@ -193,24 +193,33 @@ export const FILM_CSS = `
 /* Fold hierarchy (film "shot list"): a top-level fold is a section — one rule above it, a Korean credit title with its
    count and a small chevron beside it. Folds inside it are shots: no rules, a short tick in place of a number that
    lengthens on hover and turns tungsten when open; an open shot and its body share one quiet panel. Job rows keep their look. */
-:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary { min-height: 32px; gap: 10px; border-bottom: 0; font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary:hover, :root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis)[open] > summary { color: var(--ink); }
-:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary .n { font: 500 var(--t-micro)/1 var(--credit); letter-spacing: .04em; font-variant-numeric: tabular-nums; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > summary .chev { margin-left: 0; width: 12px; height: 12px; }
-:root:not([data-skin="phone"]) .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis) > .fold__body { padding: 8px 0 0; }
-:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis)) { margin-top: 0; }
-:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(.fold__body .fold):not(.job):not(.job-group):not(.meters__basis)) > .foldbox__acts { top: 42px; right: 0; }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) { margin: 0; }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary { position: relative; min-height: 40px; padding: 0 10px 0 38px; border-bottom: 0; border-radius: var(--r); font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary::before { content: ""; position: absolute; left: 10px; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary:hover { background: var(--screen-2); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary:hover::before { width: 16px; background: var(--ink-3); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group)[open] > summary { border-radius: var(--r) var(--r) 0 0; background: var(--screen); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group)[open] > summary::before { width: 18px; height: 2px; margin-top: -1px; border-radius: 1px; background: var(--tungsten); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary .chev { opacity: 0; transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > summary:hover .chev, :root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group)[open] > summary .chev { opacity: 1; }
-:root:not([data-skin="phone"]) .fold__body .fold:not(.job):not(.job-group) > .fold__body { margin-bottom: 6px; padding: 4px 10px 14px 38px; border-radius: 0 0 var(--r) var(--r); background: var(--screen); }
+:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis) { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule); }
+:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis) > summary { min-height: 32px; gap: 10px; border-bottom: 0; font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis) > summary:hover, :root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis)[open] > summary { color: var(--ink); }
+:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis) > summary .n { font: 500 var(--t-micro)/1 var(--credit); letter-spacing: .04em; font-variant-numeric: tabular-nums; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis) > summary .chev { margin-left: 0; width: 12px; height: 12px; }
+:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis) > .fold__body { padding: 8px 0 0; }
+:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis)) { margin-top: 0; }
+:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(:is(.fold__body, .stack) .fold):not(.job):not(.job-group):not(.meters__basis)) > .foldbox__acts { top: 42px; right: 0; }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) { margin: 0; }
+/* 더 보기 inside a fold continues the same list: no tick, no indent, a quiet line before the rest */
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more { margin: 0; }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more > summary { min-height: 40px; padding: 0; border-bottom: 0; font-size: var(--t-small); font-weight: 400; color: var(--ink-3); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more > summary:hover { color: var(--ink); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more > .fold__body { padding: 0; }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > summary { position: relative; min-height: 40px; padding: 0 10px 0 38px; border-bottom: 0; border-radius: var(--r); font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > summary::before { content: ""; position: absolute; left: 10px; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > summary:hover { background: var(--screen-2); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > summary:hover::before { width: 16px; background: var(--ink-3); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more)[open] > summary { border-radius: var(--r) var(--r) 0 0; background: var(--screen); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more)[open] > summary::before { width: 18px; height: 2px; margin-top: -1px; border-radius: 1px; background: var(--tungsten); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > summary .chev { opacity: 0; transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > summary:hover .chev, :root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more)[open] > summary .chev { opacity: 1; }
+:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.job):not(.job-group):not(.fold--more) > .fold__body { margin-bottom: 6px; padding: 4px 10px 14px 38px; border-radius: 0 0 var(--r) var(--r); background: var(--screen); }
+/* an ended fold under a section's rows hangs from the same tick column as those rows */
+:root:not([data-skin="phone"]) .stack > .fold.fold:not(.fold--more):not(.job):not(.job-group) > summary { padding-left: 28px; }
+:root:not([data-skin="phone"]) .stack > .fold.fold:not(.fold--more):not(.job):not(.job-group) > summary::before { left: 0; }
+:root:not([data-skin="phone"]) .stack > .fold.fold:not(.fold--more):not(.job):not(.job-group) > .fold__body { padding-left: 28px; }
 .fold__mark { flex: none; padding: 2px 6px; border-radius: 3px; background: var(--screen-2); font-size: var(--t-micro); font-weight: 500; line-height: 1.3; color: var(--ink-3); }
 .fold__mark--key { color: var(--accent-text); background: var(--tungsten-dim); }
 
@@ -573,11 +582,32 @@ html, body { margin: 0; min-height: 100%; }
 :is(.contact-row, .contact-group, .people-group)[hidden] { display: none; }
 .contact-row .row__title { font-size: var(--t-ui); font-weight: 600; }
 .contact-row .row__sub { font-size: var(--t-small); font-weight: 400; color: var(--ink-3); }
+.person-row .row__sub { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .contact-group > h3.sec { font-size: var(--t-small); font-weight: 400; color: var(--ink-3); margin: 18px 0 8px; }
 .contact-group > h3.sec .n { font-size: inherit; color: inherit; }
 .person__name { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin: 8px 0 12px; font-size: var(--t-title); font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 .person__name .name.is-cjk { font-size: 24px; }
-.person__facts { margin: 0 0 8px; }
+:root:not([data-skin="phone"]) .person__name { margin-bottom: 0; }
+:root:not([data-skin="phone"]) .person__aka { margin: 4px 0 0; font-size: var(--t-small); color: var(--ink-2); }
+:root:not([data-skin="phone"]) .person__role { margin: 6px 0 0; font: 500 var(--t-micro)/1.3 var(--credit); letter-spacing: .08em; color: var(--ink-3); }
+/* 나와의 관계 reads as one billed line: the pair's names in credits, its label and scenes after */
+:root:not([data-skin="phone"]) .person__mine { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; margin-top: 20px; padding: 12px 0; border: 0; border-top: 1px solid var(--rule); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+:root:not([data-skin="phone"]) .person__mine-avs { display: none; }
+:root:not([data-skin="phone"]) .person__mine-tx { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+:root:not([data-skin="phone"]) .person__mine-k { font: 500 var(--t-micro)/1.3 var(--credit); letter-spacing: .08em; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .person__mine-t { font-size: var(--t-ui); font-weight: 600; }
+:root:not([data-skin="phone"]) .person__mine-label { margin-left: 8px; font-size: var(--t-small); font-weight: 400; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .person__mine-n { flex: none; font-size: var(--t-micro); color: var(--ink-3); }
+:root:not([data-skin="phone"]) .person__mine > .i { flex: none; width: 14px; height: 14px; color: var(--ink-3); transition: transform var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .person__mine:hover > .i { transform: translateX(2px); color: var(--tungsten); }
+:root:not([data-skin="phone"]) .pfield { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 12px; padding: 10px 0; }
+:root:not([data-skin="phone"]) .pfield + .pfield { border-top: 1px solid var(--rule); }
+:root:not([data-skin="phone"]) .pfield__v { min-width: 0; font-size: var(--t-body); overflow-wrap: anywhere; }
+:root:not([data-skin="phone"]) .entry__lead { display: inline-flex; align-items: center; gap: 4px; }
+:root:not([data-skin="phone"]) .entry__lead .av { display: none; }
+:root:not([data-skin="phone"]) .entry__lead > .i { width: 10px; height: 10px; }
+:root:not([data-skin="phone"]) .beliefs > .sec-head { flex-wrap: wrap; gap: 8px; }
+.beliefs:has(input[value="about"]:checked) .beliefs__pane--held, .beliefs:has(input[value="held"]:checked) .beliefs__pane--about { display: none; }
 .psec h3.sec { margin: 30px 0 8px; }
 .subhead { margin: 16px 0 4px; font-size: var(--t-ui); font-weight: 600; color: var(--ink-3); }
 .entries { list-style: none; margin: 0; padding: 0; }
@@ -632,7 +662,6 @@ html, body { margin: 0; min-height: 100%; }
   .relation-swap { justify-self: center; height: 32px; transform: rotate(90deg); }
 }
 /* 인물 profile, 아는 사이 names and the 기념일 header: labels read small, values read plain */
-.person__profile { margin-top: 4px; }
 .detail-know { display: grid; grid-template-columns: max-content minmax(0, 1fr) auto; align-items: baseline; gap: 10px; margin: 8px 0 0; font-size: var(--t-small); }
 .detail-know__k { color: var(--ink-3); }
 .detail-know__v { color: var(--ink); overflow-wrap: anywhere; }
@@ -1716,27 +1745,18 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 :root:not([data-skin="phone"]) .review-small__retry .i { width: 13px; height: 13px; color: var(--accent-text); }
 
 /* ===== Pair sheet (film): the couple-app order in the film voice =====
-   Title credits stay; numbers are a poster billing block; names are screenplay cues; feelings are hairline meters in the
+   Title credits stay; numbers are the credit card's fine print; names are screenplay cues; feelings are hairline meters in the
    two 흐름 colours; promises and keepsakes are shot rows; the next round day is a slate. */
-:root:not([data-skin="phone"]) .pairsheet--app .titles .pair-rels { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 8px; margin-top: 18px; }
-:root:not([data-skin="phone"]) .pairsheet--app .titles .pair-rels > .menu + .menu::before { content: "·"; margin-right: 8px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pairsheet--app .pair-rel { display: inline-flex; align-items: center; min-height: 32px; list-style: none; font-size: var(--t-small); color: var(--ink-2); cursor: pointer; }
-:root:not([data-skin="phone"]) .pairsheet--app .pair-rel::-webkit-details-marker { display: none; }
-:root:not([data-skin="phone"]) .pairsheet--app .pair-rel .orig-mark { margin-left: 4px; }
-:root:not([data-skin="phone"]) .billing { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 22px 0 4px; }
-:root:not([data-skin="phone"]) .bill { min-width: 0; padding: 0 6px; border: 0; background: none; color: var(--ink); font: inherit; text-align: center; }
-:root:not([data-skin="phone"]) .bill + .bill { border-left: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .bill b { display: flex; align-items: baseline; justify-content: center; min-height: 31px; font-size: 28px; font-weight: 300; line-height: 1.1; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
-:root:not([data-skin="phone"]) .bill b small { margin-left: 1px; font-size: var(--t-small); font-weight: 400; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .bill b .i { width: 22px; height: 22px; align-self: center; color: var(--accent-text); }
-:root:not([data-skin="phone"]) .bill span { display: block; margin-top: 7px; font-size: var(--t-credit); font-weight: 600; letter-spacing: .08em; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .bill--add { cursor: pointer; }
-:root:not([data-skin="phone"]) .bill--add span { color: var(--accent-text); }
+:root:not([data-skin="phone"]) .appsheet .titles .pair-rels { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 8px; margin-top: 18px; }
+:root:not([data-skin="phone"]) .appsheet .titles .pair-rels > .menu + .menu::before { content: "·"; margin-right: 8px; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .appsheet .pair-rel { display: inline-flex; align-items: center; min-height: 32px; list-style: none; font-size: var(--t-small); color: var(--ink-2); cursor: pointer; }
+:root:not([data-skin="phone"]) .appsheet .pair-rel::-webkit-details-marker { display: none; }
+:root:not([data-skin="phone"]) .appsheet .pair-rel .orig-mark { margin-left: 4px; }
 
-:root:not([data-skin="phone"]) .pairsheet--app .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head { margin: 30px 0 12px; padding-top: 16px; border-top: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .pairsheet--app .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head > .sec { font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head > .sec { margin: 0; padding: 0; border: 0; }
-:root:not([data-skin="phone"]) .pairsheet--app .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec .n, :root:not([data-skin="phone"]) .pairsheet--app .psec > .sec-head > .sec .n { font: inherit; letter-spacing: .04em; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .appsheet .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .appsheet .psec > .sec-head { margin: 30px 0 12px; padding-top: 16px; border-top: 1px solid var(--rule); }
+:root:not([data-skin="phone"]) .appsheet .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .appsheet .psec > .sec-head > .sec { font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .appsheet .psec > .sec-head > .sec { margin: 0; padding: 0; border: 0; }
+:root:not([data-skin="phone"]) .appsheet .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec .n, :root:not([data-skin="phone"]) .appsheet .psec > .sec-head > .sec .n { font: inherit; letter-spacing: .04em; color: var(--ink-3); }
 
 :root:not([data-skin="phone"]) .says { display: grid; gap: 18px; padding: 6px 0 2px; }
 :root:not([data-skin="phone"]) .say { display: grid; justify-items: center; gap: 2px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: center; }
@@ -1745,6 +1765,21 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 :root:not([data-skin="phone"]) .say__cue .name { font: inherit; letter-spacing: inherit; color: inherit; }
 :root:not([data-skin="phone"]) .say.is-mine .say__cue { color: var(--flow-warm); }
 :root:not([data-skin="phone"]) .say__paren { font-size: var(--t-small); font-style: italic; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pairsheet .titles { padding: 40px 16px 34px; }
+:root:not([data-skin="phone"]) .pairsheet .titles .cast { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: baseline; gap: 0 16px; max-width: 440px; margin: 14px auto 0; }
+:root:not([data-skin="phone"]) .pairsheet .titles .cast > .titles__name:first-child { text-align: right; }
+:root:not([data-skin="phone"]) .pairsheet .titles .cast > .titles__name:last-child { text-align: left; }
+:root:not([data-skin="phone"]) .pairsheet .titles .nm { margin-top: 0; font-size: 20px; letter-spacing: .2em; padding-left: 0; }
+:root:not([data-skin="phone"]) .pairsheet .titles .nm.is-cjk { font-size: 19px; letter-spacing: .12em; }
+:root:not([data-skin="phone"]) .pairsheet .titles .and { margin: 0; }
+:root:not([data-skin="phone"]) .pairsheet .titles .tie { margin-top: 12px; }
+:root:not([data-skin="phone"]) .appsheet > .titles + .psec > h2.sec.sec { margin-top: 22px; padding-top: 0; border-top: 0; }
+/* the credit card's fine print: the pair's numbers in one line under a hairline */
+:root:not([data-skin="phone"]) .pair-facts { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; margin: 14px 8px 0; padding-top: 12px; border-top: 1px solid var(--rule); font-size: var(--t-micro); letter-spacing: .04em; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-facts > * + *::before { content: "·"; margin: 0 9px; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .pair-facts b { font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+:root:not([data-skin="phone"]) .pair-facts__add { display: inline-flex; align-items: center; gap: 3px; padding: 0; border: 0; background: none; font: inherit; color: var(--accent-text); cursor: pointer; }
+:root:not([data-skin="phone"]) .pair-facts__add .i { width: 12px; height: 12px; }
 :root:not([data-skin="phone"]) .say__bub { margin-top: 2px; font-size: var(--t-head); font-weight: 300; line-height: 1.45; color: var(--ink); }
 :root:not([data-skin="phone"]) .say__bub b { font-weight: 500; }
 :root:not([data-skin="phone"]) .say__bub.is-empty { font-size: var(--t-small); font-style: italic; font-weight: 400; color: var(--ink-3); }
@@ -1770,25 +1805,25 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 :root:not([data-skin="phone"]) .feel__trend .i { width: 11px; height: 11px; stroke-width: 2; }
 :root:not([data-skin="phone"]) .feel__trend.is-up { color: var(--ok); }
 :root:not([data-skin="phone"]) .feel__trend.is-down { color: var(--cut); }
-:root:not([data-skin="phone"]) .pairsheet--app .meters__basis { margin-top: 8px; padding: 0; border: 0; }
-:root:not([data-skin="phone"]) .pairsheet--app .meters__basis > summary { border: 0; font: 400 var(--t-micro)/1.2 var(--sans); letter-spacing: 0; color: var(--ink-3); }
+:root:not([data-skin="phone"]) .appsheet .meters__basis { margin-top: 8px; padding: 0; border: 0; }
+:root:not([data-skin="phone"]) .appsheet .meters__basis > summary { border: 0; font: 400 var(--t-micro)/1.2 var(--sans); letter-spacing: 0; color: var(--ink-3); }
 :root:not([data-skin="phone"]) .meters__basis > summary { display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 40px; list-style: none; font-size: var(--t-micro); color: var(--ink-3); cursor: pointer; }
 :root:not([data-skin="phone"]) .meters__basis > summary::-webkit-details-marker { display: none; }
-:root:not([data-skin="phone"]) .pairsheet--app .meters__basis > summary > .chev { margin-left: 0; transition: transform var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .appsheet .meters__basis > summary > .chev { margin-left: 0; transition: transform var(--fast) var(--ease); }
 :root:not([data-skin="phone"]) .meters__basis[open] > summary > .chev { transform: rotate(90deg); }
 :root:not([data-skin="phone"]) .meters__basis ul { margin: 0; padding: 0 0 8px 18px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
 
-:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions { margin: 8px 0 0; padding: 0; list-style: none; }
-:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions li { position: relative; margin-top: 8px; padding-left: 26px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions li::before { content: ""; position: absolute; left: 0; top: .8em; width: 14px; height: 1px; background: var(--rule-2); }
-:root:not([data-skin="phone"]) .pairsheet--app .pov .tensions li .i { display: none; }
+:root:not([data-skin="phone"]) .appsheet .pov .tensions { margin: 8px 0 0; padding: 0; list-style: none; }
+:root:not([data-skin="phone"]) .appsheet .pov .tensions li { position: relative; margin-top: 8px; padding-left: 26px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
+:root:not([data-skin="phone"]) .appsheet .pov .tensions li::before { content: ""; position: absolute; left: 0; top: .8em; width: 14px; height: 1px; background: var(--rule-2); }
+:root:not([data-skin="phone"]) .appsheet .pov .tensions li .i { display: none; }
 
 :root:not([data-skin="phone"]) .pair-card { background: none; }
 :root:not([data-skin="phone"]) .pair-list { margin: 0; padding: 0; list-style: none; }
 :root:not([data-skin="phone"]) .pair-list > .entry { display: block; border: 0; }
-:root:not([data-skin="phone"]) .pairsheet--app .pair-row { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 0 10px 28px; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
-:root:not([data-skin="phone"]) .pairsheet--app .pair-row::before { content: ""; position: absolute; left: 0; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .pairsheet--app .pair-row:hover::before { width: 16px; background: var(--ink-3); }
+:root:not([data-skin="phone"]) .appsheet .pair-row { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 0 10px 28px; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
+:root:not([data-skin="phone"]) .appsheet .pair-row::before { content: ""; position: absolute; left: 0; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
+:root:not([data-skin="phone"]) .appsheet .pair-row:hover::before { width: 16px; background: var(--ink-3); }
 :root:not([data-skin="phone"]) .pair-row__ic, :root:not([data-skin="phone"]) .pair-row__who .av, :root:not([data-skin="phone"]) .pair-row__who > .i { display: none; }
 :root:not([data-skin="phone"]) .pair-row__tx { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 :root:not([data-skin="phone"]) .pair-row__t { font-size: var(--t-ui); color: var(--ink); }
@@ -1809,16 +1844,35 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 :root:not([data-skin="phone"]) .pair-next__date { order: 2; font-size: var(--t-small); color: var(--ink-2); }
 :root:not([data-skin="phone"]) .pair-next__t { font-size: var(--t-read); font-weight: 500; }
 
-:root:not([data-skin="phone"]) .pairsheet--app .anni--row { border: 0; background: none; box-shadow: none; }
-:root:not([data-skin="phone"]) .pairsheet--app .anni--row + .anni--row { border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent); }
-:root:not([data-skin="phone"]) .pairsheet--app .anni--row .anni__open { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 10px; padding: 10px 40px 10px 0; border: 0; background: none; text-align: left; }
+:root:not([data-skin="phone"]) .appsheet .anni--row { border: 0; background: none; box-shadow: none; }
+:root:not([data-skin="phone"]) .appsheet .anni--row + .anni--row { border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent); }
+:root:not([data-skin="phone"]) .appsheet .anni--row .anni__open { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 10px; padding: 10px 40px 10px 0; border: 0; background: none; text-align: left; }
 :root:not([data-skin="phone"]) .anni__date { display: flex; flex-direction: column; font-size: var(--t-small); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
 :root:not([data-skin="phone"]) .anni__date small { font-size: var(--t-credit); font-weight: 400; color: var(--ink-3); }
 :root:not([data-skin="phone"]) .anni__tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 :root:not([data-skin="phone"]) .anni--row .anni__label { font-size: var(--t-ui); color: var(--ink); }
 :root:not([data-skin="phone"]) .anni--row .anni__slug { overflow: hidden; font-size: var(--t-micro); white-space: nowrap; text-overflow: ellipsis; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pairsheet--app .reel { display: block; overflow: visible; margin: 0; padding: 0; }
-:root:not([data-skin="phone"]) .pairsheet--app .anni--row .anni__acts { top: 50%; transform: translateY(-50%); }
+:root:not([data-skin="phone"]) .appsheet .reel { display: block; overflow: visible; margin: 0; padding: 0; }
+:root:not([data-skin="phone"]) .appsheet .anni--row .anni__acts { top: 50%; transform: translateY(-50%); }
 
 :root:not([data-skin="phone"]) .meters__note { margin: 8px 0 0; text-align: center; font-size: var(--t-micro); color: var(--ink-3); }
+
+/* Occasion controls share film/phone tokens and native keyboard radio behavior. */
+.anniversary-kind{border:0;padding:0;margin:0;min-width:0}
+.anniversary-kind .hint{font-size:var(--t-small);color:var(--ink-3);font-weight:400}
+.anniversary-kind .seg{display:flex;width:100%}
+.anniversary-kind .seg label{flex:1;position:relative;text-align:center;cursor:pointer}
+.anniversary-kind input{position:absolute;opacity:0;width:1px;height:1px}
+.anniversary-kind label>span{display:block;padding:6px 8px;border-radius:var(--r-control,3px);color:var(--ink-3)}
+.anniversary-kind input:checked+span{background:var(--screen-3);color:var(--ink)}
+.anniversary-kind input:focus-visible+span{outline:2px solid var(--focus);outline-offset:2px}
+.kindpick__chip>span{display:inline-flex;align-items:center;gap:4px}
+.kindpick__chip .i{width:12px;height:12px}
+.kindpick__legend,.anniversary-note{display:flex;gap:6px;align-items:flex-start;font-size:var(--t-micro);color:var(--ink-3)}
+.kindpick__legend .i,.anniversary-note .i{flex:none;width:13px;height:13px;margin-top:3px}
+.sent-occasion-section{scroll-margin-top:64px}
+.sent-occasions{list-style:none;padding:0;margin:0}
+.sent-occasions .sent-row{cursor:default}
+
+.anniversary-kind > legend.label { padding: 0; }
 `;

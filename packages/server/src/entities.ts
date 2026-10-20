@@ -1,5 +1,5 @@
 import { addressTermAliasGuard, syncManualCognition } from "./social-knowledge.js";
-import type { ExtractionResult } from "@rcm/shared";
+import type { EntityBirthday, ExtractionResult } from "@rcm/shared";
 import { createHash } from "node:crypto";
 import type { RcmDatabase } from "./db.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
@@ -16,6 +16,7 @@ function parseJson<T>(value: string, fallback: T): T {
 }
 
 export interface EntityItem {
+  birthday?: EntityBirthday;
   color: string | null;
   id: string;
   key: string;
@@ -45,10 +46,10 @@ function entityIdentityTerms(entity: EntityItem, removed: (entityId: string, ali
 
 export function listEntities(db: RcmDatabase, chatId: string): EntityItem[] {
   const rows = db.prepare(`SELECT id,entity_key AS key,name,CASE WHEN display_name='' THEN name ELSE display_name END AS displayName,
-    type,color,origin,setup_prominence AS setupProminence,source_json AS source,user_managed AS userManaged
-    FROM entities WHERE chat_id=? ORDER BY displayName COLLATE NOCASE`).all(chatId) as Array<Omit<EntityItem, "aliases" | "source" | "userManaged"> & { source: string; userManaged: number }>;
+    type,color,birthday_json AS birthday,origin,setup_prominence AS setupProminence,source_json AS source,user_managed AS userManaged
+    FROM entities WHERE chat_id=? ORDER BY displayName COLLATE NOCASE`).all(chatId) as Array<Omit<EntityItem, "aliases" | "source" | "userManaged" | "birthday"> & { source: string; userManaged: number; birthday: string | null }>;
   const aliases = db.prepare("SELECT alias FROM aliases WHERE entity_id=? ORDER BY alias COLLATE NOCASE");
-  return rows.map((row) => ({ ...row, source: parseJson(row.source, []), userManaged: row.userManaged === 1,
+  return rows.map((row) => ({ ...row, birthday: row.birthday ? parseJson<EntityBirthday | undefined>(row.birthday, undefined) : undefined, source: parseJson(row.source, []), userManaged: row.userManaged === 1,
     aliases: (aliases.all(row.id) as Array<{ alias: string }>).map((item) => item.alias) }));
 }
 

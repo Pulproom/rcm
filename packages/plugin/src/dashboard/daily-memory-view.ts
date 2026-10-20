@@ -1,5 +1,5 @@
 import { holidayForStoryDate } from "./holidays.js";
-import { holidayMark } from "./holiday-view.js";
+import { birthdayMark, holidayDateCredit, holidayMark } from "./holiday-view.js";
 import { parseStoryTime, formatStoryTime } from "@rcm/shared";
 import { escapeHtml, btn, icon } from "./film/ui.js";
 import { slugline } from "./film/scene.js";
@@ -22,23 +22,28 @@ export function renderDailyMemory(pick: DailyMemory | null, skin: "film" | "phon
   const relative = realDate ? relativePlayTime(pick.playedAt, now) : undefined;
   const storyClock = typeof pick.storyDay === "number" ? (pick.storyDay > 0 ? `처음 만난 지 D+${pick.storyDay}` : pick.storyDay === 0 ? "처음 만난 날" : "")
     : (storyTime ? `이야기 속 ${formatStoryTime(storyTime)}` : "");
-  const time = relative ?? storyClock;
+  const birthdayCaption = pick.birthday ? `${pick.birthday.person.name}${pick.birthday.sceneMatches ? " 생일에 있었던 장면" : "와 함께한 장면"}` : "";
+  const time = birthdayCaption || relative || storyClock;
   const primary = speaker || memory.participants?.[0] || "";
   // A curated card tone per scene (stable for that scene), not the people's colours: those vary too much to always sit well on the home.
   let toneHash = 2166136261;
   for (const char of String(memory.id ?? "")) toneHash = Math.imul(toneHash ^ char.codePointAt(0)!, 16777619) >>> 0;
   const style = skin === "phone" ? ` data-tone="${toneHash % 6}"` : "";
   const holiday = holidayForStoryDate(parseStoryTime(storyTime));
-  const holidayTone = pick.reason === "holiday" && holiday ? ` data-holiday="${holiday.tone}"${holiday.id === "christmas" ? " data-holiday-gradient" : ""}` : "";
-  const reason = pick.anniversary ? `${copy(pick.anniversary.label, pick.anniversary.key)} 그날` : escapeHtml(pick.label);
+  const holidayTone = pick.reason === "birthday" ? ' data-holiday="birthday"' : pick.reason === "holiday" && holiday ? ` data-holiday="${holiday.tone}"${holiday.id === "christmas" ? " data-holiday-gradient" : ""}` : "";
+  const reason = pick.anniversary ? `${escapeHtml(pick.anniversary.label)} 그날` : escapeHtml(pick.label);
+  const birthdayTag = birthdayMark(pick.birthday ? [pick.birthday.person] : pick.birthdays ?? [], skin, Boolean(pick.birthday));
+  const slateRight = pick.birthday
+    ? `<span class="holiday-credit credit" data-holiday="birthday">${holidayDateCredit(pick.birthday.person.birthday)}</span>${holidayMark(holiday, skin)}`
+    : `${holidayMark(holiday, skin)}${birthdayTag}` || `<span>${escapeHtml(time)}</span>`;
   // The whole card opens the scene: one stretched button keeps it a single keyboard stop with a real name.
   const open = `<button type="button" class="daily-memory__hit" data-action="open-timeline-memory" data-memory-id="${escapeHtml(String(memory.id))}" aria-label="${escapeHtml(`장면 열기 · S#${sceneNo}`)}"></button>`;
   return `<section class="daily-memory daily-memory--${skin}" aria-label="오늘의 추억">
     <div class="daily-memory__heading"><h2>오늘의 추억</h2>${btn("다른 추억 ›", { kind: "quiet", action: "next-daily-memory", hit: true })}</div>
     <article class="daily-memory__card"${style}>
-      ${skin === "phone" ? `<div class="daily-memory__top"><div class="daily-memory__reason"${holidayTone}>${reason}</div>${holidayMark(holiday, skin)}${icon("chevron")}</div>` : `<div class="daily-memory__slate"><span>${escapeHtml(slugline(sceneNo, place || null, storyTime))}</span>${holiday ? holidayMark(holiday, skin) : `<span>${escapeHtml(time)}</span>`}</div>`}
+      ${skin === "phone" ? `<div class="daily-memory__top"><div class="daily-memory__reason"${holidayTone}>${reason}</div>${birthdayTag}${holidayMark(holiday, skin)}${icon("chevron")}</div>` : `<div class="daily-memory__slate"><span>${escapeHtml(slugline(sceneNo, place || null, storyTime))}</span><span class="daily-memory__occasions">${slateRight}</span></div>`}
       <div class="daily-memory__body"><blockquote>${dialogue ? `“${line}”` : line}</blockquote>${speaker ? `<p class="daily-memory__speaker">— ${escapeHtml(speaker)}</p>` : ""}</div>
-      ${skin === "phone" ? `<div class="daily-memory__foot"><span class="daily-memory__meta">${escapeHtml([`S#${sceneNo}`, place].filter(Boolean).join(" · "))}</span><span>${escapeHtml(time)}</span></div>` : `<div class="daily-memory__credit credit">${escapeHtml(pick.credit)}</div><p class="daily-memory__caption">${reason}</p>`}
+      ${skin === "phone" ? `<div class="daily-memory__foot"><span class="daily-memory__meta">${escapeHtml([`S#${sceneNo}`, place].filter(Boolean).join(" · "))}</span><span>${escapeHtml(time)}</span></div>` : `<div class="daily-memory__credit credit"${pick.birthday ? ' data-holiday="birthday"' : ""}>${escapeHtml(pick.credit)}</div><p class="daily-memory__caption">${birthdayCaption ? escapeHtml(birthdayCaption) : reason}</p>`}
       ${open}
     </article>
   </section>`;
