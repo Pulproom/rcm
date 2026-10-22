@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "./structured-repair.js";
 import type { ExtractionDraftResult } from './index.js';
 
 /** Addition changes selection, never the regular extraction/evidence contract. */
@@ -15,7 +16,7 @@ export const memoryAdditionRequestGuidance = (request: string): string => (reque
 /** Contextual output contract shared by server/Risu parsing and final submission. */
 export function validateMemoryAdditionRequestOutcome(draft: ExtractionDraftResult, request?: string): ExtractionDraftResult {
   if (request?.trim() && draft.requestOutcome?.status === 'already_recorded') {
-    throw new Error('A user-requested moment must produce a new evidence-backed memory even if already recorded; only not_in_source is allowed when the source does not establish it.');
+    throw new ModelContentValidationError('A user-requested moment must produce a new evidence-backed memory even if already recorded; only not_in_source is allowed when the source does not establish it.');
   }
   return draft;
 }

@@ -1,4 +1,6 @@
-import { auxiliaryInputBudgetMessage, ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
+import { ModelContentValidationError } from "@rcm/shared";
+import { prepareProgress, validateProgressPatches, type ProgressDrop } from "./pair-progress.js";
+import { PAIR_PROGRESS_GUIDANCE, auxiliaryInputBudgetMessage, ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
 import { canAutomaticallyChange, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, mergeStateExtraction,
@@ -57,21 +59,25 @@ ${PHYSICAL_CONTACT_GUIDANCE}
 ${STATE_CLASSIFICATION_GUIDANCE}
 ${ACCESS_BASIS_GUIDANCE}
 ${USER_CORRECTION_GUIDANCE}
+${PAIR_PROGRESS_GUIDANCE}
 Use eventDraft memory/detail keys for links when they fully establish a state. To add a recognition or other state detail to an existing event, use detailAdditions:[{memoryKey,detail}] with a NEW detail key. NEVER copy an existing event into state.memories or replace its details. state.memories is ONLY for a source-supported state lacking any suitable event parent; use fresh keys prefixed state_. Do not re-emit existing entities. An absent event detail is not permission to omit a source-established state. Never infer a role from shared affiliation, romance from intimacy, or knowledge from narrator access. Historical introductions stay events; recognition describes current source-supported understanding. Existing ledger entries are context, never new source evidence.
 Every NEW state.memories entry must contain at least one source-backed detail with role:"core" that states its essential claim, with explicit evidence and access. A title, summary, relationship reason, or supporting-only details cannot replace that core claim. detailAdditions may use role:"supporting" when adding context to an existing memory; do not relabel supporting information as core just to pass validation. Do not return keyDialogues in state memories; dialogue extraction and its source selectors belong exclusively to the event archivist.
-Return strict JSON {state:{entities:[],memories:[],detailAdditions:[],stateObservations:[],relationshipEvents:[],socialKnowledge:[],relationshipBaselines:[],physicalIntimacy:[]},decisions:[]}.
+Return strict JSON {state:{entities:[],memories:[],detailAdditions:[],stateObservations:[],relationshipEvents:[],socialKnowledge:[],relationshipBaselines:[],physicalIntimacy:[]},decisions:[],pairProgress:[]}.
 Also return seedResolutions:[{detailId,status:"fulfilled"|"abandoned",evidence:[{sourceRef}]}] for supplied priorSeeds only when CURRENT SOURCE explicitly fulfils or abandons that particular wish, plan, noticed interest, promise or curiosity. Cite later source, never prior evidence. Making, repeating or reaffirming a promise or wish is not fulfilment; cite a later passage where it is actually carried out or abandoned. Silence, a deadline, a similar object, an attempt or uncertainty cannot close a seed. Omit ambiguous decisions and leave it open.
 Every stateObservation needs a unique key. Return exactly one decision {itemRef:"observation:<key>",action:"create|reinforce|supersede|end|coexist|dispute|ignore",targetIds:[],reason} per observation. Existing IDs must come from priorLedger and refer to the same subject/property/directional relation. Never change immutable records. create/coexist/ignore have no targets; other actions require targets. If an existing target is not supplied, do not guess its ID. Do not end a record from silence or a passed deadline. Empty arrays are valid; never invent changes to fill them.
 All NEW evidence and access use {sourceRef:"s1"} or {sourceRef:["s1","s2"]}, selecting supplied units from the same message. Omit quote so the server copies exact text. Add an exact partial quote only when necessary to narrow a mixed public/private unit. Never invent message IDs or copy old event citations as new selectors. Access is [{holder,basis:"experienced|witnessed|heard|told|inferred|internal",evidence:[{sourceRef}],confidence:0..1}]. Only grant what each holder knows in full.
 State record JSON schema: ${JSON.stringify(stateShape())}
 Write state descriptions in ${draft.language}; keep proper names as in source. Emit one complete JSON object without markdown.`;
   if (addition) systemPrompt += `\n${MEMORY_ADDITION_GUIDANCE}`;
-  const userPrompt = JSON.stringify({priorSeeds,sources:sources.map(s=>({role:s.role,number:s.ordinal+1,units:sourceUnits.filter(u=>u.messageId===s.id).map(u=>({ref:u.ref,text:u.text}))})),eventDraft:{language:draft.language,entities:draft.entities,memories:draft.memories.map(m=>({key:m.key,title:m.title,details:m.details?.map(d=>({key:d.key,kind:d.kind,text:d.text,holders:d.access?.map(a=>a.holder)}))}))},priorLedger:ledger,recognition,relationships,
+  const progress = prepareProgress(db,chatId,draft);
+  const userPrompt = JSON.stringify({pairProgress:progress.cells,priorSeeds,sources:sources.map(s=>({role:s.role,number:s.ordinal+1,units:sourceUnits.filter(u=>u.messageId===s.id).map(u=>({ref:u.ref,text:u.text}))})),eventDraft:{language:draft.language,entities:draft.entities,memories:draft.memories.map(m=>({key:m.key,title:m.title,details:m.details?.map(d=>({key:d.key,kind:d.kind,text:d.text,holders:d.access?.map(a=>a.holder)}))}))},priorLedger:ledger,recognition,relationships,
     ...(addition ? { existingMemories: addition.existingMemories, userNote: memoryAdditionUserNote(addition.userRequest) } : {})});
   const measurement = measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0});
   if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(maxInputTokens)} 상태 추출 원문과 관련 장부: 예상 ${measurement.estimatedInputTokens.toLocaleString("ko-KR")}토큰. 부분 상태는 저장하지 않았어요.`);
-  const candidateSetHash=createHash("sha256").update(userPrompt).digest("hex");
-  return {required:true,stateExtraction:true,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
+  // Progress edits can arrive while the model runs; completion rechecks each cell's lock.
+  const {pairProgress:_advisory,...boundContext}=JSON.parse(userPrompt);
+  const candidateSetHash=createHash("sha256").update(JSON.stringify(boundContext)).digest("hex");
+  return {required:true,stateExtraction:true,progressSent:progress.progressSent,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
 }
 
 function stateShape() {
@@ -90,7 +96,7 @@ function stateShape() {
   return shape;
 }
 
-export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:string[],draft:ExtractionDraftResult,submission:ReconciliationSubmission|undefined,maxInputTokens=80_000,addition?: { userRequest: string; existingMemories: unknown[] }) {
+export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:string[],draft:ExtractionDraftResult,submission:ReconciliationSubmission|undefined,maxInputTokens=80_000,addition?: { userRequest: string; existingMemories: unknown[] }, jobId?: string) {
   const prepared=prepareStateExtraction(db,chatId,sourceIds,draft,maxInputTokens,addition);
   if(submission?.error)throw new Error(submission.error);
   if(submission?.candidateSetHash!==prepared.candidateSetHash||!submission.result?.state)throw new Error("Missing or stale state extraction result");
@@ -98,21 +104,44 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   const suppliedSeeds=new Set<string>(JSON.parse(prepared.userPrompt).priorSeeds.map((seed:{detailId:string})=>seed.detailId));
   const validated=addition ? {accepted:[],dropped:seedResolutions.map(patch=>({detailId:patch.detailId,reason:"Memory additions cannot resolve existing seeds"}))}
     : validateSeedResolutions(db,chatId,seedResolutions,sourceIds,suppliedSeeds);
-  const normalized=mergeStateExtraction(draft,{...submission.result,seedResolutions:validated.accepted});
+  const progressDrops: ProgressDrop[] = [];
+  const patches = submission.result.pairProgress ?? [];
+  const pairProgress = validateProgressPatches(db,chatId,draft,patches,sourceIds,progressDrops);
+  const progressDiagnostics = {progressReturned:patches.length,progressApplied:0,progressDrops};
+  if (jobId) db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.progressReturned',?,'$.progressApplied',0,'$.progressDrops',json(?)) WHERE id=?")
+    .run(patches.length,JSON.stringify(progressDrops),jobId);
+  const normalized=mergeStateExtraction(draft,{...submission.result,pairProgress:submission.result.pairProgress ? pairProgress : undefined,seedResolutions:validated.accepted});
   const merged=normalized.draft;
   const issues=inspectDraftEvidence(db,chatId,sourceIds,merged);
-  if(issues.some(i=>i.blocking))throw new Error(`State extraction has unverified source evidence: ${issues.filter(i=>i.blocking).slice(0,3).map(i=>i.reason).join(", ")}`);
+  if(issues.some(i=>i.blocking))throw new ModelContentValidationError(`State extraction has unverified source evidence: ${issues.filter(i=>i.blocking).slice(0,3).map(i=>i.reason).join(", ")}`);
   const narrow=prepareReconciliation(db,chatId,merged,maxInputTokens);
   if(narrow.deferred.length)throw new Error("State target context exceeds input budget");
   const decisions=submission.result.decisions;
   const expected=new Set(merged.stateObservations.map(o=>`observation:${o.key}`));
-  if(decisions.length!==expected.size||new Set(decisions.map(d=>d.itemRef)).size!==expected.size||decisions.some(d=>!expected.has(d.itemRef)))throw new Error("State decisions must cover each observation exactly once");
+  if(decisions.length!==expected.size||new Set(decisions.map(d=>d.itemRef)).size!==expected.size||decisions.some(d=>!expected.has(d.itemRef)))throw new ModelContentValidationError("State decisions must cover each observation exactly once");
   const observedLedger=JSON.parse(prepared.userPrompt).priorLedger as Array<{id:string}>;
-  if(decisions.some(d=>d.targetIds.some(id=>!observedLedger.some(t=>t.id===id))))throw new Error("State decision targets a record not supplied to the model");
+  if(decisions.some(d=>d.targetIds.some(id=>!observedLedger.some(t=>t.id===id))))throw new ModelContentValidationError("State decision targets a record not supplied to the model");
   const local=new Set(narrow.local.map(o=>`observation:${o.key}`));
-  for(const d of decisions.filter(d=>local.has(d.itemRef)))if(!["create","coexist","ignore"].includes(d.action)||d.targetIds.length)throw new Error("New state cannot target a missing record");
+  const stateObservationDrops=decisions.filter(d=>local.has(d.itemRef)&&(!["create","coexist","ignore"].includes(d.action)||d.targetIds.length))
+    .map(d=>({itemRef:d.itemRef,reason:"State decision requires a target outside the observation's candidates"}));
+  const held=new Set(stateObservationDrops.map(d=>d.itemRef));
   // New observations are created locally by the existing writer; honor explicit ignores first.
   const ignored=new Set(decisions.filter(d=>local.has(d.itemRef)&&d.action==="ignore").map(d=>d.itemRef));
-  merged.stateObservations=merged.stateObservations.filter(o=>!ignored.has(`observation:${o.key}`));
-  return {...normalized,draft:merged,seedResolutionDrops:validated.dropped,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
+  // A candidate mismatch must neither block independent state nor create a conflicting new record.
+  merged.stateObservations=merged.stateObservations.filter(o=>!ignored.has(`observation:${o.key}`)&&!held.has(`observation:${o.key}`));
+  return {...normalized,draft:merged,progressDiagnostics,seedResolutionDrops:validated.dropped,stateObservationDrops,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
+}
+
+export type StateObservationDrop = { itemRef: string; reason: string };
+
+/** Informational job diagnostics, alongside seed resolution drops; no new review or warning. */
+export function recordStateObservationDrops(db:RcmDatabase,jobId:string,dropped:StateObservationDrop[]) {
+  if(dropped.length)db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateObservationDrops',json(?)) WHERE id=?")
+    .run(JSON.stringify(dropped),jobId);
+}
+
+/** Record the offered cells before dispatch/cache reuse, never from completion's recheck. */
+export function recordProgressSent(db:RcmDatabase,jobId:string,progressSent:ReturnType<typeof prepareProgress>["progressSent"]) {
+  db.prepare("UPDATE jobs SET payload_json=json_set(json_remove(payload_json,'$.progressReturned','$.progressApplied','$.progressDrops'),'$.progressSent',json(?)) WHERE id=?")
+    .run(JSON.stringify(progressSent),jobId);
 }

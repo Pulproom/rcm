@@ -1,3 +1,5 @@
+import { ModelContentValidationError } from "@rcm/shared";
+import { applyProgressDone, ensurePairProgress } from "./pair-progress.js";
 import { refreshDetailFts } from './memory-detail-edits.js';
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
 import { applySeedResolutions, recordSeedResolutionDrops } from "./story-seeds.js";
@@ -229,7 +231,7 @@ export function validateDialogueEvidence(
         || evidence.startOffset < 0 || evidence.endOffset <= evidence.startOffset || evidence.endOffset > (message.canonical_content ?? "").length
         || excluded.some(range => range.start < evidence.endOffset && range.end > evidence.startOffset)
         || (message.canonical_content ?? "").slice(evidence.startOffset, evidence.endOffset) !== evidence.quote)) {
-        throw new Error(`Key dialogue evidence is not an exact canonical source range: ${dialogue.messageId}`);
+        throw new ModelContentValidationError(`Key dialogue evidence is not an exact canonical source range: ${dialogue.messageId}`);
       }
     }
   }
@@ -402,6 +404,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
   for (const assertion of result.assertions) assertion.predicate = normalizeLedgerPredicate(assertion.predicate);
   for (const belief of result.beliefs) belief.predicate = normalizeLedgerPredicate(belief.predicate);
   db.transaction(() => {
+    ensurePairProgress(db, chatId);
     const revokedStorySupports=new Set<string>();
     const detailAccessEdits = readDetailAccessEdits(db, chatId);
     const dialogueIdentities = readDialogueAccessIdentities(db, chatId);
@@ -909,6 +912,20 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const memoryId of new Set(memoryByKey.values())) refreshMemoryFts(db, memoryId);
+    let progressApplied = 0;
+    const progressDrops: Array<{itemId:string;side:string;reason:string}> = [];
+    for (const patch of result.pairProgress ?? []) {
+      const memoryId = memoryByKey.get(patch.memoryKey);
+      const memory = result.memories.find(m => m.key === patch.memoryKey);
+      if (!additionsOnly && memoryId && memory && applyProgressDone(db,chatId,patch,"scene",memoryId,[...new Set(memory.evidence.map(e=>e.messageId))])) progressApplied++;
+      else progressDrops.push({itemId:patch.itemId,side:patch.side,reason:additionsOnly ? "additions_only" : !memoryId || !memory ? "memory_not_stored" : "cell_changed_before_apply"});
+    }
+    const progressJob = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND json_type(payload_json,'$.progressReturned') IS NOT NULL").get(sourceJobId) as {payload_json:string}|undefined;
+    if (progressJob) {
+      const payload = JSON.parse(progressJob.payload_json);
+      db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.progressApplied',?,'$.progressDrops',json(?)) WHERE id=?")
+        .run(progressApplied,JSON.stringify([...(payload.progressDrops ?? []),...progressDrops]),sourceJobId);
+    }
     if (!additionsOnly) recordSeedResolutionDrops(db,sourceJobId,applySeedResolutions(db, chatId, result.seedResolutions));
     writeDialogueAccessIdentities(db, chatId, dialogueIdentities);
     pruneDetailAccessEdits(db, chatId);

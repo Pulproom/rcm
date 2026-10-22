@@ -1,7 +1,7 @@
 declare const __RCM_DISTRIBUTION__: boolean;
 import { INVALID_MEMORY_REF_MESSAGE, MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, memoryGuidanceBlock } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
-import { readCurrentChatId, readCurrentContext, sha256 } from "./context.js";
+import { readCurrentChatScope, readCurrentContext, sha256 } from "./context.js";
 import { isChatMemoryEnabled } from "./settings.js";
 import mcpContract from "./mcp-contract.json" with { type: "json" };
 import type { RuntimeState } from "./types.js";
@@ -85,8 +85,9 @@ export function renderMemoryReferences(
 
 export async function currentMemoryToolsAvailable(state: RuntimeState, client: ServerClient, chatId?: string, refresh = false): Promise<boolean> {
   if (!state.settings.memoryToolsEnabled) return false;
-  const currentChatId = chatId ?? await readCurrentChatId();
-  if (!isChatMemoryEnabled(state.settings, currentChatId)) return false;
+  const scope = await readCurrentChatScope();
+  const currentChatId = chatId ?? scope.chatId;
+  if (currentChatId !== scope.chatId || !isChatMemoryEnabled(state.settings, currentChatId, scope.characterId)) return false;
   const cached = state.memoryToolAvailability?.[currentChatId];
   if (!refresh && typeof cached === "boolean") return cached;
   try {
@@ -163,9 +164,10 @@ export async function executeMemoryTool(
     // Native/bridge tools carry no originating model request identity. A
     // concurrent RCM call is not evidence that this main-model tool is internal.
     if (!state.settings.memoryToolsEnabled) return reject("tools_disabled", "RCM memory tools are disabled in the dashboard.");
-    chatId = await readCurrentChatId();
+    const scope = await readCurrentChatScope();
+    chatId = scope.chatId;
     turnCalls.chatId = chatId;
-    if (!isChatMemoryEnabled(state.settings, chatId)) return reject("chat_disabled", "RCM is disabled for the current chat. Continue without RCM memory tools.");
+    if (!isChatMemoryEnabled(state.settings, chatId, scope.characterId)) return reject("chat_disabled", "RCM is disabled for the current chat. Continue without RCM memory tools.");
     if (expanding ? !ref : !query) return reject(expanding ? "empty_ref" : "empty_query", "Provide a non-empty query for recall or a previously supplied ref for expansion.");
     if (!await currentMemoryToolsAvailable(state, client, chatId)) return reject("no_memory", "No processed long-term memory is available for this chat yet. Continue without calling RCM memory tools.");
     const context = await readCurrentContext(state);
@@ -291,8 +293,8 @@ export async function registerMemoryMcp(state: RuntimeState, client: ServerClien
     async () => {
       if (!state.settings.memoryToolsEnabled) return [];
       try {
-        const chatId = await readCurrentChatId();
-        if (!isChatMemoryEnabled(state.settings, chatId)) return [];
+        const { chatId, characterId } = await readCurrentChatScope();
+        if (!isChatMemoryEnabled(state.settings, chatId, characterId)) return [];
         const names = currentTurnMemoryToolNames(state, chatId);
         traceMemoryToolExposure(state, client, "native", names, names, names.length ? "offered" : "empty");
         return toolDefinitions(state, chatId, names);

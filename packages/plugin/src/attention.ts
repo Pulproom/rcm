@@ -1,4 +1,5 @@
 import { setupPickerNeeded } from "./setup-sources.js";
+import { currentLineageOperation } from "./lineage-settings.js";
 import { sourceRecoverySummary, operationLabel } from "@rcm/shared";
 import { modelResponseFailureDetail } from "./support-diagnostics.js";
 import { RISU_AUXILIARY_AUTH_FAILURE_MESSAGE } from "@rcm/shared";
@@ -9,6 +10,8 @@ import { describeServerConnectionIssue, isServerConnectionReady, noteServerConne
 import { latestVisibleCompletedTiming, TIMING_COMPLETION_VISIBLE_MS, timingsForChat, type TimingEvent } from "./timing.js";
 import { pluginUpdateNeeded } from "./updates.js";
 import { quizEntryButton, quizReloadRow, quizViewHtml } from "./quiz-chip.js";
+import type { QuizNextResponse } from "@rcm/shared";
+import type { QuizView } from "./quiz-chip.js";
 import { QuizSession } from "./quiz-session.js";
 
 const BUTTON_ID = "risu-cognitive-memory-open";
@@ -69,10 +72,10 @@ export function completedTimingSeconds(elapsedMs = 0): string {
 
 export function shouldShowStatusWidget(state: RuntimeState, dashboardHidden = false): boolean {
   if (state.pendingPrepare?.visible) return true;
-  return state.settings.statusWidgetVisible !== false && !dashboardHidden && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId);
+  return state.settings.statusWidgetVisible !== false && !dashboardHidden && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId);
 }
 
-interface FloatingWidgetState { kind: string; label: string; detail: string; startedAt?: number; expiresAt?: number }
+export interface FloatingWidgetState { kind: string; label: string; detail: string; startedAt?: number; expiresAt?: number }
 
 export function manualRetryState(state: RuntimeState, pending = state.statusSummary?.progress?.manualRetry === true, running?: boolean): FloatingWidgetState | undefined {
   if (!pending) return undefined;
@@ -212,7 +215,11 @@ function activeStartedAt(state: RuntimeState): number | undefined {
 export function widgetState(state: RuntimeState): FloatingWidgetState {
   if (state.pendingPrepare?.visible) return { kind: "prepare-choice", label: "기억 준비 중", detail: "기다리면 기억을 담아 보내요. 3분이 지나도 끝나지 않으면 보내지 않아요.", startedAt: state.pendingPrepare.startedAt };
   const summary = state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 };
-  if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId)) return { kind: "disabled", label: "꺼짐", detail: "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않습니다." };
+  if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) return { kind: "disabled", label: "꺼짐", detail: state.settings.characterEnabled[state.current.characterId] === false ? "이 캐릭터에서는 RCM을 쓰지 않아요." : "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않습니다." };
+  const lineageOperation = currentLineageOperation(state);
+  if (lineageOperation) return lineageOperation.status === "running"
+    ? { kind: "running", label: "기억 이어받는 중", detail: "원본을 확인하고 기억을 가져오고 있어요. 대화가 길면 조금 걸려요." }
+    : { kind: "review", label: "기억 이어받기 확인 필요", detail: "완료됐는지 확인하지 못했어요. 기억 홈에서 다시 시도해 주세요." };
   const connectionIssue = state.serverConnectionIssue ?? describeServerConnectionIssue(state.settings);
   if (connectionIssue) return {
     kind: ["unconfigured", "incompatible"].includes(connectionIssue.kind) ? "setup" : "connection",
@@ -271,19 +278,20 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     detail: "현재 채팅의 기억을 정리하고 있습니다.",
     startedAt: activeServerTiming.startedAt,
   };
-  if (!state.activityReady) return { kind: "checking", label: "확인 중", detail: "현재 채팅의 대기열과 오류 상태를 확인하고 있습니다." };
-  if (state.lastPrepare?.lineage?.status === "choice_required" || state.lastPrepare?.lineage?.status === "ambiguous") return {
+  if (!state.activityReady || (state.current && (state.current.sourceMessageCount ?? 0) > 2 && !summary.lineage)) return { kind: "checking", label: "확인 중", detail: "현재 채팅의 대기열과 오류 상태를 확인하고 있습니다." };
+  const lineage = summary.lineage;
+  if (lineage?.status === "choice_required" || lineage?.status === "ambiguous") return {
     kind: "review",
     label: "기억 이어받기 선택",
-    detail: (state.lastPrepare.lineage.ambiguousCandidates?.length ?? 0) > 1
-      ? "복사된 채팅과 일치하는 원본이 여러 개입니다. 대시보드에서 선택해 주세요."
-      : "복사된 채팅에서 기억을 이어받거나 새로 시작할 수 있습니다.",
+    detail: (lineage.ambiguousCandidates?.length ?? 0) > 1
+      ? "메시지가 똑같은 채팅이 여러 개 있어요. 대시보드에서 원본을 골라 주세요."
+      : "복사된 채팅이에요. 대시보드에서 기억을 이어받을지 골라 주세요.",
   };
   const blockingFailures = summary.blockingFailedJobs ?? summary.failedJobs;
   const calibration = summary.initialCalibration;
   const setupCaptured = Boolean(state.current && state.lastResolvedSetup?.chatId === state.current.chatId);
   const historicalBackfillPending = summary.ingestionState === "historical_pending" || Number(summary.historicalBackfillMessages ?? 0) > 0;
-  if (setupPickerNeeded(calibration?.status)) return { kind: "review", label: "설정 재료를 골라 주세요", detail: "기억 홈에서 읽을 설정 재료를 골라 주세요. 채팅은 계속할 수 있어요." };
+  if (setupPickerNeeded(calibration?.status, lineage)) return { kind: "review", label: "설정 재료를 골라 주세요", detail: "기억 홈에서 읽을 설정 재료를 골라 주세요. 채팅은 계속할 수 있어요." };
   if (calibration?.status === "awaiting_confirmation") return { kind: "review", label: "초기 장부 확인 필요", detail: "분석된 인물과 초기 관계를 확인하면 과거 기억 생성을 이어서 시작합니다." };
   if (calibration?.status === "queued") {
     const startedAt = activeStartedAt(state);
@@ -357,12 +365,13 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     kind: "review", label: `부가 정리 확인 ${summary.advisoryFailedJobs}`,
     detail: "기억 추출은 계속 완료됐습니다. 관계·줄거리·최종 대조 실패는 처리 상태에서 확인할 수 있습니다.",
   };
-  if (state.lastPrepare?.lineage?.status === "inherited" && !state.lastPrepare.lineage.acknowledgedAt) return {
-    kind: "review",
-    label: state.lastPrepare.lineage.kind === "branch" ? "분기 기억 이어받음" : "복사 기억 이어받음",
-    detail: state.lastPrepare.lineage.kind === "branch"
-      ? "분기 이전의 기억을 이어받았습니다."
-      : "선택한 원본 채팅의 기억을 이어받았습니다.",
+  // Inheritance finished: a done notice (ok tone), not a warning.
+  if (lineage?.status === "inherited" && !lineage.acknowledgedAt) return {
+    kind: "inherited",
+    label: lineage.kind === "branch" ? "분기 기억 이어받음" : "복사 기억 이어받음",
+    detail: lineage.kind === "branch"
+      ? "분기한 지점까지의 기억을 이어받았어요."
+      : "고른 원본 채팅의 기억을 이어받았어요.",
   };
   if (state.perspectiveStatus?.unresolved && state.perspectiveStatus.omissionReason !== "no_memories") return {
     kind: "review",
@@ -387,6 +396,78 @@ export function auxiliaryModelMissing(state: RuntimeState): boolean {
       || (state.settings.auxiliaryMode === "static" && !state.settings.staticModel.trim());
 }
 
+const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+
+function statusWidgetVisual(current: FloatingWidgetState, skin: ChipSkin) {
+  const tone: keyof typeof STATUS_ICON_PATHS = current.kind === "disabled" ? "off"
+    : current.kind === "model-setup" ? "wait"
+    : current.kind === "error" || ["paused", "review", "queued", "holding", "checking", "setup", "connection"].includes(current.kind) ? "bad"
+      : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz", "prepare-choice"].includes(current.kind) ? "wait" : "ok";
+  const color = current.kind === "quiz" ? skin.ink3 : tone === "bad" ? skin.cut : tone === "wait" ? skin.wait : tone === "off" ? skin.ink3 : skin.ok;
+  return { color, tone };
+}
+
+export const statusWidgetStyleText = (skin: ChipSkin) => `
+[x-rcm-status-widget] button:focus-visible{outline:1.5px solid ${skin.accent};outline-offset:-3px}
+[x-rcm-status-widget] button:not([aria-disabled="true"]):not([data-rcm-quiz-scene]):hover{background:${skin.hover}!important}
+[x-rcm-status-widget] button:is([data-rcm-open]:not([data-quiet]),[data-rcm-quiz-start],[data-rcm-quiz-next]):hover{background:${skin.accentHover}!important;color:${skin.accentInk}!important}
+@media(pointer:coarse){
+[x-rcm-status-widget] [data-rcm-drag]{height:44px!important}
+[x-rcm-status-widget] button{min-height:36px!important}
+[x-rcm-status-widget] [data-rcm-toggle]{width:44px!important;height:44px!important}
+[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-drag]{height:34px!important}
+[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-toggle]{height:34px!important;min-height:34px!important}
+}
+`;
+
+export const statusWidgetSurface = (skin: ChipSkin): Record<string, string> => ({
+  border: skin.border, borderRadius: skin.radius, backgroundColor: skin.screen, color: skin.ink, boxShadow: skin.shadow,
+  fontFamily: skin.sans, backdropFilter: skin.backdrop, webkitBackdropFilter: skin.backdrop,
+});
+
+/** HTML only: the host bridge, timers, quiz requests and gestures stay in installStatusWidget. */
+export function renderStatusWidget(state: RuntimeState, options: {
+  current: FloatingWidgetState;
+  expanded: boolean;
+  connectionReady: boolean;
+  quizEnabled: boolean;
+  quizNext?: QuizNextResponse;
+  quizLoadFailed?: boolean;
+  quizView?: QuizView;
+  actionError?: string;
+  observedAt?: number;
+}): string {
+  const { current, expanded, connectionReady, quizEnabled, quizNext, quizLoadFailed, quizView, actionError = "", observedAt = Date.now() } = options;
+  const skin = chipSkin(state.settings);
+  const { color, tone } = statusWidgetVisual(current, skin);
+  const pendingPrepare = state.pendingPrepare;
+  const compactButtonStyle = `min-width:0;min-height:32px;border:0;border-radius:${skin.buttonRadius};background:${skin.button};color:${skin.ink};cursor:pointer;text-align:${skin.buttonAlign};font-family:inherit;font-size:12px;font-weight:600;line-height:1.5;white-space:normal;word-break:keep-all;overflow-wrap:anywhere;padding:6px 10px`;
+  const activeRows = activeStatusTimingRows(state);
+  const showDetail = !activeRows.some(event => event.label === current.detail);
+  let body = showDetail ? `<div data-rcm-status-detail="true" style="color:${skin.ink2}">${escapeHtml(current.detail)}</div>` : "";
+  const recovery = !state.currentJob && !state.serverWorker?.activeJob ? sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery) : "";
+  if (recovery) body += `<div style="color:${skin.ink2}">${escapeHtml(recovery)}</div>`;
+  body += modelResponseFailureDetail(state.statusSummary?.modelResponseDiagnostic, escapeHtml);
+  if (current.kind === "prepare-choice" && pendingPrepare) body += `<div style="display:flex;gap:6px;margin-top:8px"><button data-rcm-prepare-omit="${escapeHtml(pendingPrepare.requestId)}" style="${compactButtonStyle};flex:1 1 0">기억 없이 보내기</button><button data-rcm-prepare-block="${escapeHtml(pendingPrepare.requestId)}" style="${compactButtonStyle};flex:1 1 0">보내지 않기</button></div>`;
+  if (current.kind === "model-setup") body += `<button data-rcm-model-settings="true" style="${compactButtonStyle};width:100%;margin-top:6px">모델 설정 열기</button>`;
+  if (connectionReady && state.serverWorker?.embeddingConfigured === false) body += `<p style="margin:8px 0 0;color:${skin.ink3};overflow-wrap:anywhere">${EMBEDDING_SETUP_DETAIL}</p><button data-rcm-embedding-settings="true" style="${compactButtonStyle};width:100%;margin-top:6px">검색 임베딩 설정 열기</button>`;
+  const timingRows = activeRows.map((event, index) => {
+    return `<div style="display:flex;gap:6px;justify-content:space-between;padding-top:4px;font-variant-numeric:tabular-nums"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(event.label)}</span><span style="color:${skin.ink3};white-space:nowrap">진행 중 · <span ${STATUS_ROW_TIMED_ATTRIBUTE}="${index}">${statusElapsedLabel(event.startedAt, observedAt)}</span></span></div>`;
+  }).join("");
+  if (timingRows) body += `<div${showDetail ? ` style="border-top:1px solid ${skin.rule};margin-top:8px;padding-top:4px"` : ""}><div style="font-size:11px;color:${skin.ink3}">진행 중인 작업</div>${timingRows}</div>`;
+  const dashboardLabel = state.statusSummary?.initialCalibration?.status === "awaiting_confirmation" ? "초기 장부 확인" : "대시보드";
+  const waitingSince = state.activeModelRequest?.chatId === state.current?.chatId ? state.activeModelRequest?.startedAt : undefined;
+  const quizStart = quizEntryButton(quizEnabled ? quizNext : undefined, skin, Boolean(waitingSince));
+  const quizEntry = quizStart || (quizEnabled && quizLoadFailed ? quizReloadRow(skin) : "");
+  const quizReady = quizEnabled && quizNext?.available && quizNext.question;
+  const dashboardTone = quizReady ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
+  // While the user decides how to send, the decision is the only action; the dashboard can wait.
+  if (current.kind !== "prepare-choice") body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
+  if (current.kind !== "prepare-choice" && quizEnabled && quizView) body = quizViewHtml(quizView, skin);
+  if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
+  return `<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);max-height:calc(100dvh - 60px);overflow:auto;overscroll-behavior:contain;box-sizing:border-box">${body}</div>` : ""}`;
+}
+
 export async function installStatusWidget(state: RuntimeState, client: ServerClient): Promise<void> {
   let installedRoot: SafeRootDocument | undefined;
   let installedWidget: SafeRootElement | undefined;
@@ -405,19 +486,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const widgetStyle = await root.createElement("style");
     installedWidgetStyle = widgetStyle;
     await widgetStyle.setAttribute("x-rcm-status-style", "true");
-    const widgetStyleText = (skin: ChipSkin) => `
-[x-rcm-status-widget] button:focus-visible{outline:1.5px solid ${skin.accent};outline-offset:-3px}
-[x-rcm-status-widget] button:not([aria-disabled="true"]):not([data-rcm-quiz-scene]):hover{background:${skin.hover}!important}
-[x-rcm-status-widget] button:is([data-rcm-open]:not([data-quiet]),[data-rcm-quiz-start],[data-rcm-quiz-next]):hover{background:${skin.accentHover}!important;color:${skin.accentInk}!important}
-@media(pointer:coarse){
-[x-rcm-status-widget] [data-rcm-drag]{height:44px!important}
-[x-rcm-status-widget] button{min-height:36px!important}
-[x-rcm-status-widget] [data-rcm-toggle]{width:44px!important;height:44px!important}
-[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-drag]{height:34px!important}
-[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-toggle]{height:34px!important;min-height:34px!important}
-}
-`;
-    await widgetStyle.setTextContent(widgetStyleText(chipSkin(state.settings)));
+    await widgetStyle.setTextContent(statusWidgetStyleText(chipSkin(state.settings)));
     const styleHost = await root.querySelector("head") ?? bodyHost;
     await styleHost.appendChild(widgetStyle);
     const widget = await root.createElement("div");
@@ -441,12 +510,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const key = chipSkinKey(state.settings);
       if (key === appliedSkinKey) return skin;
       appliedSkinKey = key;
-      const surface: Record<string, string> = {
-        border: skin.border, borderRadius: skin.radius, backgroundColor: skin.screen, color: skin.ink, boxShadow: skin.shadow,
-        fontFamily: skin.sans, backdropFilter: skin.backdrop, webkitBackdropFilter: skin.backdrop,
-      };
+      const surface = statusWidgetSurface(skin);
       for (const [name, value] of Object.entries(surface)) await widget.setStyle(name, value);
-      await widgetStyle.setTextContent(widgetStyleText(skin));
+      await widgetStyle.setTextContent(statusWidgetStyleText(skin));
       return skin;
     };
     await applySkin();
@@ -463,8 +529,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const quizOn = (): boolean => {
       const setup = state.statusSummary?.initialCalibration?.status;
       return quizConnectionReady() && state.settings.statusWidgetVisible !== false
+        && !currentLineageOperation(state)
         && state.settings.quizEnabled === true && state.quizSupported !== false
-        && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId)
+        && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)
         && setup !== "awaiting_setup" && setup !== "unseeded";
     };
     const quiz = new QuizSession({
@@ -478,7 +545,6 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     let elapsedLabelElement: SafeRootElement | undefined;
     let elapsedRowElements: SafeRootElement[] = [];
     let elapsedMarkerErrorReported = false;
-    const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
     const eventInsideWidget = async (event: any): Promise<{ inside: boolean; x: number; y: number; width: number; height: number }> => {
       const x = Number(event.clientX) - widgetLeft;
       const y = Number(event.clientY) - widgetTop;
@@ -493,13 +559,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         else if (!callObservedAt) callObservedAt = Date.now();
         current.startedAt = callObservedAt;
       } else callObservedAt = 0;
-      const tone: keyof typeof STATUS_ICON_PATHS = current.kind === "disabled" ? "off"
-        : current.kind === "model-setup" ? "wait"
-        : current.kind === "error" || ["paused", "review", "queued", "holding", "checking", "setup", "connection"].includes(current.kind) ? "bad"
-          : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz", "prepare-choice"].includes(current.kind) ? "wait" : "ok";
-      const skin = chipSkin(state.settings);
-      const color = current.kind === "quiz" ? skin.ink3 : tone === "bad" ? skin.cut : tone === "wait" ? skin.wait : tone === "off" ? skin.ink3 : skin.ok;
-      return { current, color, tone };
+      return { current, ...statusWidgetVisual(current, chipSkin(state.settings)) };
     };
     const cacheElapsedClockElements = async (rowCount: number): Promise<void> => {
       elapsedLabelElement = await widget.querySelector(STATUS_ELAPSED_SELECTOR) ?? undefined;
@@ -542,6 +602,8 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     };
     let dashboardHidden = false;
     let widgetChatId = state.current?.chatId;
+    const lineageQuizKey = () => JSON.stringify([state.current?.chatId, state.statusSummary?.lineage?.status, state.statusSummary?.lineage?.parentChatId, state.statusSummary?.lineage?.forkOrdinal, state.statusSummary?.lineage?.appliedAt]);
+    let widgetLineageQuizKey = lineageQuizKey();
     const syncVisibility = async () => {
       if (widgetChatId !== state.current?.chatId) {
         widgetChatId = state.current?.chatId;
@@ -630,39 +692,17 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const render = async () => {
       await syncVisibility();
       await keepInViewport();
-      const { current, color, tone } = currentVisual();
-      const pendingPrepare = state.pendingPrepare;
+      const { current } = currentVisual();
       if (current.kind === "prepare-choice") expanded = true;
-      const skin = await applySkin();
+      await applySkin();
       renderedStatusKey = `${statusVisualKey(current)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
-      const compactButtonStyle = `min-width:0;min-height:32px;border:0;border-radius:${skin.buttonRadius};background:${skin.button};color:${skin.ink};cursor:pointer;text-align:${skin.buttonAlign};font-family:inherit;font-size:12px;font-weight:600;line-height:1.5;white-space:normal;word-break:keep-all;overflow-wrap:anywhere;padding:6px 10px`;
-      const activeRows = activeStatusTimingRows(state);
-      const showDetail = !activeRows.some(event => event.label === current.detail);
-      let body = showDetail ? `<div data-rcm-status-detail="true" style="color:${skin.ink2}">${escapeHtml(current.detail)}</div>` : "";
-      const recovery = !state.currentJob && !state.serverWorker?.activeJob ? sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery) : "";
-      if (recovery) body += `<div style="color:${skin.ink2}">${escapeHtml(recovery)}</div>`;
-      body += modelResponseFailureDetail(state.statusSummary?.modelResponseDiagnostic, escapeHtml);
-      if (current.kind === "prepare-choice" && pendingPrepare) body += `<div style="display:flex;gap:6px;margin-top:8px"><button data-rcm-prepare-omit="${escapeHtml(pendingPrepare.requestId)}" style="${compactButtonStyle};flex:1 1 0">기억 없이 보내기</button><button data-rcm-prepare-block="${escapeHtml(pendingPrepare.requestId)}" style="${compactButtonStyle};flex:1 1 0">보내지 않기</button></div>`;
-      if (current.kind === "model-setup") body += `<button data-rcm-model-settings="true" style="${compactButtonStyle};width:100%;margin-top:6px">모델 설정 열기</button>`;
-      if (quizConnectionReady() && state.serverWorker?.embeddingConfigured === false) body += `<p style="margin:8px 0 0;color:${skin.ink3};overflow-wrap:anywhere">${EMBEDDING_SETUP_DETAIL}</p><button data-rcm-embedding-settings="true" style="${compactButtonStyle};width:100%;margin-top:6px">검색 임베딩 설정 열기</button>`;
-      const observedAt = Date.now();
-      const timingRows = activeRows.map((event, index) => {
-        return `<div style="display:flex;gap:6px;justify-content:space-between;padding-top:4px;font-variant-numeric:tabular-nums"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(event.label)}</span><span style="color:${skin.ink3};white-space:nowrap">진행 중 · <span ${STATUS_ROW_TIMED_ATTRIBUTE}="${index}">${statusElapsedLabel(event.startedAt, observedAt)}</span></span></div>`;
-      }).join("");
-      if (timingRows) body += `<div${showDetail ? ` style="border-top:1px solid ${skin.rule};margin-top:8px;padding-top:4px"` : ""}><div style="font-size:11px;color:${skin.ink3}">진행 중인 작업</div>${timingRows}</div>`;
-      const dashboardLabel = state.statusSummary?.initialCalibration?.status === "awaiting_confirmation" ? "초기 장부 확인" : "대시보드";
-      const waitingSince = state.activeModelRequest?.chatId === state.current?.chatId ? state.activeModelRequest?.startedAt : undefined;
-      const quizStart = quizEntryButton(quizOn() ? quiz.next : undefined, skin, Boolean(waitingSince));
-      const quizEntry = quizStart || (quizOn() && quiz.loadFailed ? quizReloadRow(skin) : "");
-      const quizReady = quizOn() && quiz.next?.available && quiz.next.question;
-      const dashboardTone = quizReady ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
-      // While the user decides how to send, the decision is the only action; the dashboard can wait.
-      if (current.kind !== "prepare-choice") body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
-      if (current.kind !== "prepare-choice" && quizOn() && quiz.view) body = quizViewHtml(quiz.view, skin);
-      if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
       await widget.setAttribute("x-rcm-expanded", String(expanded));
+      await widget.setAttribute("x-rcm-lineage-state", currentLineageOperation(state)?.status ?? "resolved");
       await widget.setAttribute(STATUS_TIMED_ATTRIBUTE, current.startedAt ? "true" : "false");
-      await widget.setInnerHTML(`<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);max-height:calc(100dvh - 60px);overflow:auto;overscroll-behavior:contain;box-sizing:border-box">${body}</div>` : ""}`);
+      await widget.setInnerHTML(renderStatusWidget(state, {
+        current, expanded, connectionReady: quizConnectionReady(), quizEnabled: quizOn(),
+        quizNext: quiz.next, quizLoadFailed: quiz.loadFailed, quizView: quiz.view, actionError,
+      }));
       await cacheElapsedClockElements(expanded ? activeStatusTimingRows(state).length : 0);
       await syncElapsedClocks(current);
       await keepInViewport();
@@ -729,10 +769,44 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       await quiz.refresh();
       await render();
     };
+    let quizStatusPending = false;
+    let inheritedQuizPending = false;
+    const refreshWaitingQuiz = async (): Promise<void> => {
+      // Status observation is read-only. Fetch a question only after the server
+      // has one, regardless of the notice occupying the status header.
+      if (quizStatusPending || !quizOn() || quiz.view) return;
+      if (!inheritedQuizPending && (!expanded || dashboardHidden || !quiz.next || quiz.next.available)) return;
+      const chatId = state.current!.chatId;
+      const lineageKey = lineageQuizKey();
+      quizStatusPending = true;
+      try {
+        // A newly selected chat must reset its old session before we load its pool.
+        await syncVisibility();
+        const previous = quiz.next;
+        const status = await client.quizStatus(chatId);
+        if (state.current?.chatId !== chatId || lineageQuizKey() !== lineageKey || quiz.next !== previous || quiz.view || !quizOn()) return;
+        inheritedQuizPending = false;
+        if (status.unanswered > 0) {
+          await quiz.refresh();
+          await render();
+        }
+      } catch { /* Keep the existing entry; the next activity poll can retry. */ }
+      finally { quizStatusPending = false; }
+    };
     state.refreshStatusWidget = () => {
-      // Settings/status transitions only repaint. Opening the chip or advancing
-      // a question remains the normal request trigger, never switching RCM/UI on.
+      // Inheritance refreshes the pool even while collapsed or dashboard-hidden.
+      // Ordinary status polls only observe an already-open waiting entry.
       if (!quizOn()) quiz.reset();
+      const nextLineageQuizKey = lineageQuizKey();
+      if (nextLineageQuizKey !== widgetLineageQuizKey) {
+        widgetLineageQuizKey = nextLineageQuizKey;
+        inheritedQuizPending = state.statusSummary?.lineage?.status === "inherited";
+        // Inheritance replaced the child's quiz pool. Acknowledge alone does not.
+        if (state.statusSummary?.lineage?.status === "inherited") {
+          quiz.reset();
+        }
+      }
+      void refreshWaitingQuiz();
       const next = currentVisual().current;
       const nextKey = `${statusVisualKey(next)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
       // An open quiz is not rebuilt by status polls; only a chat or skin change redraws it.
@@ -740,6 +814,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       if (widgetChatId !== state.current?.chatId || (nextKey !== renderedStatusKey && !quizHolds)) {
         renderedStatusKey = nextKey;
         void render().then(scheduleElapsedTick, reportElapsedClockError);
+      } else if (nextKey !== renderedStatusKey) {
+        renderedStatusKey = nextKey;
+        void schedulePatch().then(scheduleElapsedTick, reportElapsedClockError);
       } else requestElapsedPatch();
     };
     await bodyHost.appendChild(widget);

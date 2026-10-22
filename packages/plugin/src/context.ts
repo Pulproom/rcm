@@ -305,6 +305,13 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
 export async function readDashboardContext(state: RuntimeState): Promise<DashboardContext> {
   const generation = state.mainGeneration;
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  if (state.current?.chatId !== chatId) {
+    state.statusSummary = undefined;
+    state.lastPrepare = undefined;
+    state.chatOpen = undefined;
+    state.lineageOperation = undefined;
+    state.activityReady = false;
+  }
   state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   generation?.observe(chatId, chat);
   const database = await risuai.getDatabase(["personas", "selectedPersona"]);
@@ -326,6 +333,7 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
     includeUserMessages: state.settings.includeUserMessages[chatId] ?? true,
     memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
     upcomingOccasions: state.settings.upcomingOccasions[chatId] ?? true,
+    pairProgress: state.settings.pairProgress[chatId] ?? false,
     sourceProtectionTurns: state.settings.sourceProtectionTurns, editProtectionTurns: state.settings.editProtectionTurns,
     canonicalizationPolicy: state.settings.canonicalizationPolicy,
     extractionGroupTurns: state.settings.extractionGroupTurns[chatId] ?? 6,
@@ -350,9 +358,27 @@ export async function readOptionalDashboardContext(state: RuntimeState): Promise
   }
 }
 
+/** Complete, stable IDs only: absent metadata must never imply host deletion. */
+export async function readCurrentChatPresence(): Promise<{ chatId: string; chatTitle?: string; inventory?: { characterId: string; chatIds: string[] } }> {
+  const { character, chatId, chat, chatIndex, characterIndex } = await readCurrentChatIdentity();
+  const {chatTitle} = chatIdentityFields(characterIndex,character,chatIndex,chat);
+  const characterId = character.chaId ?? character.id;
+  const chats = character.chats;
+  if (typeof characterId !== "string" || !characterId || !Array.isArray(chats)
+    || chats.some(chat => typeof chat?.id !== "string" || !chat.id)) return { chatId, chatTitle };
+  const chatIds = chats.map(chat => chat.id as string);
+  if (!chatIds.includes(chatId) || new Set(chatIds).size !== chatIds.length) return { chatId, chatTitle };
+  return { chatId, chatTitle, inventory: { characterId, chatIds } };
+}
+
 export async function readCurrentChatId(state?: RuntimeState): Promise<string> {
+  return (await readCurrentChatScope(state)).chatId;
+}
+
+/** Read both activation keys from the same lightweight host snapshot. */
+export async function readCurrentChatScope(state?: RuntimeState): Promise<{ chatId: string; characterId: string }> {
   const generation = state?.mainGeneration;
-  const { chatId, chat } = await readCurrentChatIdentity();
+  const { chatId, chat, character, characterIndex, chatIndex } = await readCurrentChatIdentity();
   generation?.observe(chatId, chat);
   if (generation && state?.mainGeneration?.id === generation.id) {
     const hashes = await Promise.all((Array.isArray(chat.message) ? chat.message : []).map((message: any, ordinal: number) => {
@@ -361,7 +387,7 @@ export async function readCurrentChatId(state?: RuntimeState): Promise<string> {
     }));
     generation.observe(chatId, chat, hashes);
   }
-  return chatId;
+  return { chatId, characterId: chatIdentityFields(characterIndex, character, chatIndex, chat).characterId };
 }
 
 /** Existing host snapshots only: false before headers is not a generation-end signal. */
@@ -506,6 +532,7 @@ export async function readCurrentContext(
     includeUserMessages: state.settings.includeUserMessages[chatId] ?? true,
     memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
     upcomingOccasions: state.settings.upcomingOccasions[chatId] ?? true,
+    pairProgress: state.settings.pairProgress[chatId] ?? false,
     sourceProtectionTurns: Math.min(20, Math.max(1, Math.round(state.settings.sourceProtectionTurns ?? 10))),
     editProtectionTurns: Math.min(5, Math.max(1, Math.round(state.settings.editProtectionTurns ?? 2))),
     canonicalizationPolicy: state.settings.canonicalizationPolicy,
@@ -544,6 +571,7 @@ export function makePrepareRequest(
     includeUserMessages: context.includeUserMessages,
     memoryOnlyInjection: context.memoryOnlyInjection ?? false,
     upcomingOccasions: context.upcomingOccasions ?? true,
+    pairProgress: context.pairProgress ?? false,
     extractionGroupTurns: context.extractionGroupTurns,
     editProtectionTurns: context.editProtectionTurns ?? 2,
     canonicalizationPolicy: context.canonicalizationPolicy,

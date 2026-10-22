@@ -10,9 +10,20 @@ const chatTranslationGeneration = new Map<string, number>();
 export function invalidateChatTranslations(chatId: string): void {
   chatTranslationGeneration.set(chatId, (chatTranslationGeneration.get(chatId) ?? 0) + 1);
 }
-function translationCurrent(state: RuntimeState, chatIds: string[], current: () => boolean) {
+async function translationCurrent(state: RuntimeState, chatIds: string[], current: () => boolean) {
   const generations = chatIds.map(id => chatTranslationGeneration.get(id));
-  return () => current() && chatIds.every((id, index) => isChatMemoryEnabled(state.settings, id) && chatTranslationGeneration.get(id) === generations[index]);
+  const characters = new Map<string, string>();
+  if (state.current) characters.set(state.current.chatId, state.current.characterId);
+  if (chatIds.some(id => !characters.get(id))) {
+    try {
+      const inventory = await clientFor(state).request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats");
+      for (const chat of inventory.items) characters.set(chat.id, chat.characterId);
+    } catch {
+      addLog(state.logs, "warn", "번역할 채팅의 캐릭터를 확인하지 못했어요.");
+      return () => false;
+    }
+  }
+  return () => current() && chatIds.every((id, index) => isChatMemoryEnabled(state.settings, id, characters.get(id)) && chatTranslationGeneration.get(id) === generations[index]);
 }
 
 const GOOGLE_URL_BYTE_LIMIT = 6_000;
@@ -227,7 +238,7 @@ const packetTag = () => /<!--[\s\S]*?-->|<\/?[A-Za-z_][\w:.-]*(?:[^<>"']|"[^"]*"
 export async function translatePacket(state: RuntimeState, packet: string, sourceLanguage: MemoryLanguage, isCurrent: () => boolean = () => true): Promise<string> {
   const provider = state.settings.translationProvider;
   const chatId = state.current?.chatId;
-  isCurrent = translationCurrent(state, chatId ? [chatId] : [], isCurrent);
+  isCurrent = await translationCurrent(state, chatId ? [chatId] : [], isCurrent);
   try {
     if (provider === "google") return await translateGoogle(packet, sourceLanguage, isCurrent);
     const tags = [...packet.matchAll(packetTag())];
@@ -270,7 +281,7 @@ function changeActivity(state: RuntimeState, delta: number, error?: string): voi
 
 async function translateRecordsUnlocked(state: RuntimeState, records: TranslationSource[], provider = state.settings.translationProvider, isCurrent: () => boolean = () => true, background = false, replaceGoogle = false): Promise<TranslationResult[]> {
   if (!records.length) return [];
-  isCurrent = translationCurrent(state, [...new Set(records.map(record => record.chatId))], isCurrent);
+  isCurrent = await translationCurrent(state, [...new Set(records.map(record => record.chatId))], isCurrent);
   if (records.every((record) => record.sourceLanguage === "ko")) return records.map((source) => ({ ...source, translated: source.text, cached: true }));
   let pendingStarted = 0;
   try {
@@ -355,7 +366,7 @@ function releaseTranslation(): void {
 
 /** Screen requests take the next slot before background batches. */
 export async function translateRecords(state: RuntimeState, records: TranslationSource[], provider?: TranslationProvider): Promise<TranslationResult[]> {
-  const current = translationCurrent(state, [...new Set(records.map(record => record.chatId))], () => true);
+  const current = await translationCurrent(state, [...new Set(records.map(record => record.chatId))], () => true);
   if (translationBusy) await new Promise<void>(resolve => screenTranslationWaiters.push(resolve));
   else translationBusy = true;
   // An explicit provider is a one-off override; normal screen work resolves it after waiting.
@@ -427,7 +438,7 @@ export async function invalidateTranslationCache(state: RuntimeState, match: Par
 /** Wait out old cache writes before clearing, so late responses cannot restore the old translation. */
 export async function retranslateChatRecords(state: RuntimeState, scope: Pick<TranslationSource, "chatId" | "serverInstanceId">, records: TranslationSource[]): Promise<TranslationResult[]> {
   invalidateChatTranslations(scope.chatId);
-  const current = translationCurrent(state, [scope.chatId], () => true);
+  const current = await translationCurrent(state, [scope.chatId], () => true);
   if (translationBusy) await new Promise<void>(resolve => screenTranslationWaiters.push(resolve)); else translationBusy = true;
   try {
     if (!current()) throw new Error("번역 설정이 바뀌었어요. 다시 시도해 주세요.");

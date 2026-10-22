@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { recordSmallReviews } from "./small-review.js";
 import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import type { JobTrigger } from "@rcm/shared";
@@ -120,7 +121,7 @@ export function completeEpisodeJob(
   if (audit?.patch) {
     const audited = applyExtractionAuditPatch(db, job.chat_id, sourceMessageIds, draft, audit.patch);
     if (!audited.result.memories.some((memory) => memory.key === `episode:${episodeId}`)) {
-      throw new Error("Extraction audit removed the required episode parent without an explicit pending decision");
+      throw new ModelContentValidationError("Extraction audit removed the required episode parent without an explicit pending decision");
     }
     auditedDraft = audited.result;
   }

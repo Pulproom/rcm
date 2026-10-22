@@ -9,11 +9,12 @@ import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { createHash, randomUUID } from "node:crypto";
 import { deleteDerivedRows } from "./derived-state.js";
+import { memoryTransferQueuedJobs, cancelQueuedMemoryTransferJobs } from "./jobs.js";
 import { migrateTranslationKeys, pruneTranslationCache, translationCacheKey } from "./translation-cache.js";
 import { ledgerEditOriginsKey, readRemovedAliases, readUserDeletions, removedAliasesKey, userDeletionsKey, type Deletion, type RemovedAliases } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 
-export const BACKUP_VERSION = 33 as const;
+export const BACKUP_VERSION = 34 as const;
 
 export class BackupValidationError extends Error {
   readonly code = "BACKUP_VALIDATION_FAILED";
@@ -23,7 +24,7 @@ const insertionOrder = [
   "chats", "messages", "message_revisions", "entities", "aliases", "episodes", "episode_messages", "episode_sections",
   "source_passages", "memories", "memory_details", "memory_dialogues", "evidence_spans", "memory_traces", "memory_recall_events", "memory_activation_state", "memory_edges", "item_access", "assertions", "beliefs",
   "story_spine_nodes", "story_spine_support", "story_spine_sources",
-  "relationship_baselines", "relationship_events", "relationship_projections", "relationship_projection_queue", "physical_intimacy_milestones", "social_knowledge_events", "entity_scene_presence", "entity_prominence", "promises", "promise_events", "conflicts", "jobs", "extraction_audits", "reconciliation_items", "recall_logs", "embedding_blocks", "initial_calibrations", "chat_lineage", "chat_lineage_items", "extraction_batches", "atom_relations",
+  "pair_progress", "relationship_baselines", "relationship_events", "relationship_projections", "relationship_projection_queue", "physical_intimacy_milestones", "social_knowledge_events", "entity_scene_presence", "entity_prominence", "promises", "promise_events", "conflicts", "jobs", "extraction_audits", "reconciliation_items", "recall_logs", "embedding_blocks", "initial_calibrations", "chat_lineage", "chat_lineage_items", "extraction_batches", "atom_relations",
   "embedding_items", "embedding_failures", "translation_cache",
 ] as const;
 
@@ -43,8 +44,8 @@ function insertRows(db: RcmDatabase, table: string, rows: Row[]): void {
 type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
-  version: 31 | 32 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | typeof DATABASE_SCHEMA_VERSION;
+  version: 31 | 32 | 33 | typeof BACKUP_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -66,6 +67,7 @@ export interface CompleteBackupInspection {
   privateData: CompleteBackupPrivateData;
 }
 export interface MemoryTransplantPreview {
+  targetQueuedJobs: number;
   fingerprint: string;
   parent: { chatId: string; chatTitle: string; characterId: string; characterName: string };
   target: { chatId: string; chatTitle: string; characterId: string; characterName: string };
@@ -171,9 +173,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 34 && manifest.schemaVersion === 57 || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or ${DATABASE_SCHEMA_VERSION})`);
+    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or 56, or backup 34 / schema ${DATABASE_SCHEMA_VERSION})`);
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -208,7 +210,7 @@ function archiveTables(files: Record<string, Uint8Array>): Record<string, Row[]>
 }
 
 function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): void {
-  const current = persistentTables(db).filter(table => (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state"));
+  const current = persistentTables(db).filter(table => (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state") && (manifest.schemaVersion >= 57 || table !== "pair_progress"));
   if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError(`Backup database contract does not match schema ${manifest.schemaVersion}`);
   for (const table of current) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
@@ -243,14 +245,15 @@ function transplantCounts(db: RcmDatabase, chatId: string): Record<string, numbe
 }
 
 export function previewMemoryTransplant(db: RcmDatabase, sourceChatId: string, targetChatId: string): MemoryTransplantPreview {
+  const targetQueuedJobs = memoryTransferQueuedJobs(db, sourceChatId, targetChatId);
   const parent = chatDescriptor(db, sourceChatId);
   const target = chatDescriptor(db, targetChatId);
   const inheritedCounts = transplantCounts(db, sourceChatId);
   const targetDerivedCounts = transplantCounts(db, targetChatId);
   const forkOrdinal = Number((db.prepare("SELECT COALESCE(MAX(ordinal),-1) AS ordinal FROM messages WHERE chat_id=?").get(sourceChatId) as { ordinal: number }).ordinal);
-  const fingerprint = createHash("sha256").update(JSON.stringify({ sourceChatId, targetChatId, inheritedCounts, targetDerivedCounts, forkOrdinal })).digest("hex");
+  const fingerprint = createHash("sha256").update(JSON.stringify({ sourceChatId, targetChatId, inheritedCounts, targetDerivedCounts, forkOrdinal, targetQueuedJobs })).digest("hex");
   return { fingerprint, parent, target, kind: "copy", commonMessages: 0, lastCommonMessageId: "", forkOrdinal, clientPrunedMessages: 0,
-    inheritedCounts, targetDerivedCounts, requiresReplacement: Object.values(targetDerivedCounts).some((value) => value > 0) };
+    inheritedCounts, targetDerivedCounts, targetQueuedJobs, requiresReplacement: Object.values(targetDerivedCounts).some((value) => value > 0) };
 }
 
 function restoreVectors(db: RcmDatabase, files: Record<string, Uint8Array>, itemIdMap?: Map<string, string>): number {
@@ -361,7 +364,7 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
 }
 
 /** Restores the original chat identity without touching other chats or secrets. */
-export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatId:string;chatSettings:ChatBackupSettings;vectorsRestored:number} {
+export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatId:string;characterId:string;chatSettings:ChatBackupSettings;vectorsRestored:number} {
   const parsed=readCompleteArchive(archive);
   if (parsed.manifest.scope !== "chat") throw new Error("Use complete restore for a complete backup");
   validateCurrentSchema(db,parsed.manifest);
@@ -402,7 +405,7 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }
-  return {chatId,chatSettings:parsed.privateData.chatSettings??{},vectorsRestored};
+  return {chatId,characterId:parsed.manifest.chats[0]!.characterId,chatSettings:parsed.privateData.chatSettings??{},vectorsRestored};
 }
 
 function rewriteIdentifier(value: string, ids: Map<string, string>): string {
@@ -449,7 +452,7 @@ export function transplantCompleteArchive(db: RcmDatabase, archive: Uint8Array, 
     "messages", "message_revisions", "entities", "aliases", "episodes", "episode_messages", "episode_sections",
     "source_passages", "memories", "memory_details", "memory_dialogues", "evidence_spans", "memory_traces", "memory_recall_events", "memory_edges", "atom_relations", "item_access",
     "assertions", "beliefs", "story_spine_nodes", "story_spine_support", "story_spine_sources",
-    "relationship_baselines", "relationship_events", "relationship_projections", "physical_intimacy_milestones",
+    "pair_progress", "relationship_baselines", "relationship_events", "relationship_projections", "physical_intimacy_milestones",
     "social_knowledge_events", "entity_scene_presence", "entity_prominence", "promises", "promise_events",
     "embedding_blocks", "embedding_items", "translation_cache",
   ]);
@@ -541,6 +544,7 @@ export function transplantCompleteArchive(db: RcmDatabase, archive: Uint8Array, 
   let vectorsRestored = 0;
   db.pragma("defer_foreign_keys = ON");
   db.transaction(() => {
+    cancelQueuedMemoryTransferJobs(db, targetChatId);
     const vectorRows = db.prepare("SELECT rowid FROM embedding_items WHERE chat_id=?").all(targetChatId) as Array<{ rowid: number }>;
     if (vectorRows.length) {
       try { db.prepare(`DELETE FROM embedding_vectors_v4_chat WHERE rowid IN (${vectorRows.map(() => "?").join(",")})`).run(...vectorRows.map((row) => BigInt(row.rowid))); } catch { /* sqlite-vec is optional */ }

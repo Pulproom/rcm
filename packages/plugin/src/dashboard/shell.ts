@@ -72,9 +72,9 @@ export function renderFoldSummary(label: string, count?: number): string {
   return `<summary><span>${escapeHtml(label)}</span>${countSlot}${foldChevron()}</summary>`;
 }
 
-/** Gives every plain disclosure the film fold shape. Menus, inline evidence (`.cite`), collapsed acts, in-place clamps, scene gaps and contact rows (`.acq`) keep their own shape. */
+/** Gives every plain disclosure the film fold shape. Menus, inline evidence (`.cite`), collapsed acts, in-place clamps, scene gaps, contact rows (`.acq`) and the pair-progress add form and done rows (`.prog__add`, `.prog__fold`) keep their own shape. */
 export function decorateFoldSummaries(scope: ParentNode): void {
-  scope.querySelectorAll<HTMLDetailsElement>("details:not([data-menu]):not(.cite):not(.msg):not(.clamp):not(.gap):not(.acq)").forEach((details) => {
+  scope.querySelectorAll<HTMLDetailsElement>("details:not([data-menu]):not(.cite):not(.msg):not(.clamp):not(.gap):not(.acq):not(.prog__add):not(.prog__fold):not(.fam__fold)").forEach((details) => {
     const summary = Array.from(details.children).find((child): child is HTMLElement => child instanceof HTMLElement && child.tagName === "SUMMARY");
     if (!summary) return;
     // Inset card rows keep their own row styling; only the chevron is shared.

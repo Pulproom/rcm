@@ -1,3 +1,4 @@
+import { resetProgress } from "./pair-progress.js";
 import { staticMetadata } from "./setup-storage.js";
 import { reopenSeedsBySource } from "./story-seeds.js";
 import { syncManualCognition } from "./social-knowledge.js";
@@ -13,7 +14,7 @@ import { readDetailAccessEdits, readDialogueAccessIdentities, writeDialogueAcces
 import { invalidateStorySupports, markStorySupportsInvalid, maybeEnqueueStorySpine, storyMemorySupportIds } from "./story-spine.js";
 import { rebuildCharacterRecallTraces } from "./ingest.js";
 import { invalidateSourcePassageAccess } from "./source-evidence.js";
-import { personaHintKey } from "./view-preferences.js";
+import { writePersonaHint } from "./view-preferences.js";
 
 const DAY = 86_400_000;
 const archiveEligibleVisibility = (visibility: string): boolean => visibility === "active" || visibility === "all_before";
@@ -55,6 +56,7 @@ function invalidateDerived(
     const placeholders = relationIds.map(() => "?").join(",");
     db.prepare(`UPDATE atom_relations SET active=0 WHERE chat_id=? AND active=1 AND id IN (${placeholders})`).run(chatId, ...relationIds);
   };
+  resetProgress(db, chatId, "scene", messageId);
   reopenSeedsBySource(db, chatId, messageId);
   invalidateSourcePassageAccess(db, chatId, messageId);
   db.prepare("UPDATE source_passages SET active=0 WHERE chat_id=? AND message_id=?").run(chatId, messageId);
@@ -258,6 +260,19 @@ function classifyMissing(
   return { lifecycle: "deleted", purgeAfter: now() + 30 * DAY };
 }
 
+/** Host title metadata does not change source revisions or schedule work. */
+export function syncChatTitle(db: RcmDatabase, chatId: string, title?: string): boolean {
+  const value = title?.trim();
+  if (!value) return false;
+  return db.transaction(() => {
+    const exists = db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId);
+    if (!exists) return false;
+    db.prepare("UPDATE chats SET chat_title=? WHERE id=? AND chat_title IS NOT ?").run(value,chatId,value);
+    db.prepare("UPDATE chat_lineage SET parent_title=? WHERE parent_chat_id=? AND parent_title IS NOT ?").run(value,chatId,value);
+    return true;
+  })();
+}
+
 export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): SyncStats {
   return db.transaction(() => {
     const timestamp = now();
@@ -298,8 +313,8 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
       timestamp,
       timestamp,
     );
-    if (request.identityHints !== undefined) db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-      .run(personaHintKey(request.chatId), JSON.stringify(request.identityHints.userPersonaName?.trim() || null));
+    syncChatTitle(db,request.chatId,request.chatTitle);
+    writePersonaHint(db, request.chatId, request.identityHints?.userPersonaName);
     if (existingChat) {
       const derivedExists = hasDerivedState(db, request.chatId);
       if (requestedMemoryLanguage === existingChat.memory_language) {

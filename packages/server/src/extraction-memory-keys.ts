@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { createHash } from "node:crypto";
 import type { ExtractionResult } from "@rcm/shared";
 
@@ -8,7 +9,7 @@ import type { ExtractionResult } from "@rcm/shared";
  * Apply once after model/audit processing, before canonical storage. */
 export function scopeExtractionMemoryKeys(result: ExtractionResult, scopeId: string): ExtractionResult {
   if (new Set(result.memories.map(memory => memory.key)).size !== result.memories.length) {
-    throw new Error("Duplicate local memory key in extraction result");
+    throw new ModelContentValidationError("Duplicate local memory key in extraction result");
   }
   const keys = new Map(result.memories.map(memory => [memory.key,
     `batch:${scopeId}:${createHash("sha256").update(memory.key).digest("hex")}`]));
@@ -22,6 +23,7 @@ export function scopeExtractionMemoryKeys(result: ExtractionResult, scopeId: str
       ...(item.validFromMemoryKey ? { validFromMemoryKey: remap(item.validFromMemoryKey) } : {}),
       ...(item.socialRelation ? { socialRelation: withMemoryKey(item.socialRelation) } : {}),
     })),
+    pairProgress: result.pairProgress?.map(withMemoryKey),
     promises: result.promises.map(withMemoryKey),
     socialKnowledge: result.socialKnowledge?.map(withMemoryKey),
     relationshipEvents: result.relationshipEvents?.map(withMemoryKey),

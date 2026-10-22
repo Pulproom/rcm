@@ -9,7 +9,7 @@ import { applyExtractionAuditPatch } from "./extraction-audit.js";
 import { completeExtractionJob } from "./extraction-completion.js";
 import { inspectDraftEvidence } from "./evidence-review.js";
 import { prepareReconciliation } from "./reconciliation.js";
-import { prepareStateExtraction } from "./state-extraction.js";
+import { recordProgressSent, prepareStateExtraction } from "./state-extraction.js";
 import {
   auditExtractionWithServerLlm, reconcileWithServerLlm, repairPassageAccessWithServerLlm,
   repairSourceEvidenceWithServerLlm, type ServerLlmStore,
@@ -94,6 +94,7 @@ export async function finalizeExtractPage(options: FinalizeExtractPageOptions) {
       : { required: false, candidateSetHash: "", systemPrompt: "", userPrompt: "" };
     const accessPlan = store.canRepair(job.id) && !audit?.patch?.keepPendingItemRefs.length
       ? planSourceAccessRepair(draft, job.sourceUnits ?? [], job.auditSourceMessages ?? []) : undefined;
+    if ("progressSent" in prepared) recordProgressSent(db, job.id, prepared.progressSent);
     if (prepared.required) {
       options.onStage?.("state_reconciliation");
       reconciliation = { candidateSetHash: prepared.candidateSetHash,

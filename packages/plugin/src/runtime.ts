@@ -1,10 +1,10 @@
 import { supportFailure } from "./support-diagnostics.js";
 import { captureSetupRequest, discardSetupCapture, observeSetupAttention, completeSetupAttentionTurn } from "./setup-sources.js";
 declare const __RCM_DISTRIBUTION__: boolean;
-import { withMemoryGuidance } from "@rcm/shared";
+import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
 import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
 import { ServerClient, type PrepareClientTimings } from "./api-client.js";
-import { injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readCurrentChatId, readCurrentContext, resolvedSetupProjection, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
+import { injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readCurrentChatId, readCurrentChatScope, readCurrentContext, resolvedSetupProjection, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
 import { CACHE_KEY, addLog, isChatMemoryEnabled, loadSettings, loadStoredJson, saveSettings, saveStoredJson } from "./settings.js";
 import type { CachedChatState, RuntimeState } from "./types.js";
 import { beginMainGeneration, clearMainGeneration, endMainGeneration, isInternalModelRequest, scheduleWorker } from "./worker.js";
@@ -240,6 +240,7 @@ function isPreparedContextRetry(state: RuntimeState, chatId: string, contexts: s
   const injection = state.lastInjection;
   if (!prepared || prepared.chatId !== chatId || !injection || injection.chatId !== chatId
     || (prepared.upcomingOccasions ?? true) !== (state.settings.upcomingOccasions[chatId] ?? true)
+    || (prepared.pairProgress ?? false) !== (state.settings.pairProgress[chatId] ?? false)
     || (prepared.memoryOnlyInjection ?? false) !== (state.settings.memoryOnlyInjection[chatId] ?? false)
     || injection.turnKey !== prepared.turnKey || injection.omitted || contexts.length !== 1) return false;
   return contexts[0]!.trim() === injection.packet.trim();
@@ -290,7 +291,7 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
   try {
     const context = await readCurrentContext(state);
     if (state.unloaded) return;
-    if (context.chatId !== chatId || !isChatMemoryEnabled(state.settings, context.chatId)) {
+    if (context.chatId !== chatId || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) {
       addLog(state.logs, "info", `Post-response memory sync skipped for inactive chat ${chatId}`);
       return;
     }
@@ -299,7 +300,7 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
     void syncQuizEnabled(state, client).catch(() => undefined);
     const statusRevision = state.statusSummaryRevision ?? 0;
     const response = await client.prepare(makePrepareRequest(context, 0, { deferExtraction: false }), 5_000);
-    if ((state.statusSummaryRevision ?? 0) === statusRevision) observeSetupAttention(state, chatId, response.initialCalibration?.status);
+    if ((state.statusSummaryRevision ?? 0) === statusRevision) observeSetupAttention(state, chatId, response.initialCalibration?.status, response.lineage);
   } catch (error) {
     addLog(state.logs, "warn", `Post-response memory sync deferred: [오류 원문 제외]`);
   } finally {
@@ -382,7 +383,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
       } };
       const execute = async () => {
       try {
-        const currentChatId = await readCurrentChatId(state);
+        const { chatId: currentChatId, characterId } = await readCurrentChatScope(state);
         if (state.modelRequestEpoch !== requestEpoch || controller.signal.aborted) throw new MemoryInjectionBlockedError("request replaced during setup");
         if (state.mainGeneration?.id === generationId) state.mainGeneration.chatId = currentChatId;
         const assertCurrentRequest = async () => {
@@ -392,7 +393,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             throw new MemoryInjectionBlockedError("request belongs to another chat or generation");
           }
         };
-        if (!isChatMemoryEnabled(state.settings, currentChatId)) {
+        if (!isChatMemoryEnabled(state.settings, currentChatId, characterId)) {
           state.lastPromptValidation = { chatId: currentChatId, status: "disabled", at: Date.now() };
           state.activeModelRequest = undefined;
           state.automaticTurnPacket = undefined;
@@ -417,11 +418,11 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           await assertCurrentRequest();
         }
         if (existing.contexts.length > 0 && knownRetryChatId) {
-          if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId)
+          if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)
             && isPreparedContextRetry(state, knownRetryChatId, existing.contexts)) {
             return reuseExistingContext(state, client, messages, knownRetryChatId);
           }
-          if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId)) {
+          if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)) {
             throw new MemoryInjectionBlockedError("stale or unverified existing memory context");
           }
           throw new MemoryInjectionBlockedError("existing memory context belongs to another chat");
@@ -431,6 +432,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           && state.lastInjection?.turnKey === state.automaticTurnPacket?.turnKey
           && state.lastInjection?.omitted === true
           && (state.automaticTurnPacket?.upcomingOccasions ?? true) === (state.settings.upcomingOccasions[knownRetryChatId] ?? true)
+          && (state.automaticTurnPacket?.pairProgress ?? false) === (state.settings.pairProgress[knownRetryChatId] ?? false)
           && (state.automaticTurnPacket?.memoryOnlyInjection ?? false) === (state.settings.memoryOnlyInjection[knownRetryChatId] ?? false)
           && isIntentionalEmptyPrepare(state.automaticTurnPacket?.response);
         if (preparedEmptyRetry) {
@@ -468,7 +470,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         }
         const selectedMemoryBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
         const totalMemoryBudget = selectedMemoryBudget;
-        const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}\0${context.upcomingOccasions ?? true}`);
+        const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}\0${context.upcomingOccasions ?? true}\0${context.pairProgress ?? false}`);
         const referenceTurnKey = crypto.randomUUID();
         state.memoryReferenceSnapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
         const referenceTurnChanged = state.mcpTurnKey !== referenceTurnKey;
@@ -598,6 +600,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 context.profile = state.settings.profiles[context.chatId] ?? state.settings.defaultProfile;
                 context.includeUserMessages = state.settings.includeUserMessages[context.chatId] ?? true;
                 context.upcomingOccasions = state.settings.upcomingOccasions[context.chatId] ?? true;
+                context.pairProgress = state.settings.pairProgress[context.chatId] ?? false;
                 context.memoryOnlyInjection = state.settings.memoryOnlyInjection[context.chatId] ?? false;
                 context.extractionGroupTurns = Math.min(50, Math.max(1, Math.round(state.settings.extractionGroupTurns[context.chatId] ?? 6)));
                 context.memoryLanguage = state.settings.memoryLanguages[context.chatId] ?? response.memoryLanguage;
@@ -605,10 +608,11 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 context.perspectiveMode = inheritedPerspectives.length > 0 ? "manual" : "auto";
                 state.current = context;
                 void syncQuizEnabled(state, client).catch(() => undefined);
-                const inheritedEnabled = isChatMemoryEnabled(state.settings, context.chatId);
+                const inheritedEnabled = isChatMemoryEnabled(state.settings, context.chatId, context.characterId);
                 const requestChanged = prepareRequest.profile !== context.profile
                   || prepareRequest.includeUserMessages !== context.includeUserMessages
                   || prepareRequest.upcomingOccasions !== context.upcomingOccasions
+                  || prepareRequest.pairProgress !== context.pairProgress
                   || prepareRequest.memoryOnlyInjection !== context.memoryOnlyInjection
                   || prepareRequest.extractionGroupTurns !== context.extractionGroupTurns
                   || prepareRequest.memoryLanguage !== context.memoryLanguage
@@ -679,6 +683,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 chatId: context.chatId,
                 memoryOnlyInjection: context.memoryOnlyInjection ?? false,
                 upcomingOccasions: context.upcomingOccasions ?? true,
+                pairProgress: context.pairProgress ?? false,
                 requestedBudget: effectiveAutoBudget,
                 promptSourceMessageIds,
                 latestMessageId: context.snapshot.at(-1)?.id,
@@ -724,11 +729,9 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         }
         await assertCurrentRequest();
         const evidenceAvailable = hasMemoryEvidence(packet);
-        // Relationship, world-state, belief and continuity sections count as
-        // evidence too. Tool availability alone does not justify spending the
-        // common guidance; the first tool result supplies it when needed.
-        if (evidenceAvailable) packet = withMemoryGuidance(packet);
-        else packet = "";
+        // Shared-history guidance is standing context, including the first story turn.
+        if (evidenceAvailable || packet.includes("<not_yet>")) packet = withMemoryGuidance(packet);
+        else packet = fallback ? "" : sharedPastPacket;
         const packetStartedAt = performance.now();
         const injected = injectMemory(messages, packet, effectiveAutoBudget, Math.floor(effectiveAutoBudget * 115 / 100));
         packetApplyMs = performance.now() - packetStartedAt;
@@ -812,7 +815,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           startedAt: Date.now(), packet: injected.packet,
           plannedTools: sentWithoutMemory ? [] : currentTurnMemoryToolNames(state, context.chatId),
         };
-        observeSetupAttention(state, context.chatId, response?.initialCalibration?.status);
+        observeSetupAttention(state, context.chatId, response?.initialCalibration?.status, response?.lineage);
         addLog(
           state.logs,
           "info",

@@ -184,6 +184,8 @@ export const stateKindLabel = (kind: string, stateKind?: StateKind): string => k
  * answered, secret, or resolved by lexical matching. */
 export function rankStateEvidence(items: StateEvidence[], query: string, options: {
   automaticPromises?: boolean; trace?: StateOutcomeCapture; perspective: string; archive?: boolean; history?: boolean; continuity?: boolean; activeNames?: string[]; semantic?: Map<string, number>;
+  /** Automatic packets only: resolved subject scope from the scene-names renderer. */
+  sceneRecognitionIds?: ReadonlySet<string>;
 }): Array<{ item: StateEvidence; score: number }> {
   const eligiblePromise = (item: StateEvidence) => options.automaticPromises && item.kind === "promise" && (item.promisePinned || item.promiseRecent);
   const visible = items.filter(item => {
@@ -204,7 +206,9 @@ export function rankStateEvidence(items: StateEvidence[], query: string, options
     .filter(entry => entry.score > 0 && (options.continuity || entry.score >= .2)).sort((a, b) => b.score - a.score);
   const semantic = visible.filter(item => (options.semantic?.get(item.id) ?? 0) >= .35).sort((a, b) => options.semantic!.get(b.id)! - options.semantic!.get(a.id)!);
   const names = new Set([options.perspective, ...(options.activeNames ?? [])].map(norm));
-  const associated = (options.continuity ?? !options.history) ? visible.filter(item => (item.current || eligiblePromise(item) || options.history) && (item.kind === "relationship" && (options.activeNames?.length ?? 0) > 1 ? item.subjects.slice(1) : item.subjects).some(subject => names.has(norm(subject)))) : [];
+  const associated = (options.continuity ?? !options.history) ? visible.filter(item => (item.current || eligiblePromise(item) || options.history)
+    && (item.kind === "recognition" && options.sceneRecognitionIds !== undefined ? options.sceneRecognitionIds.has(item.id)
+      : (item.kind === "relationship" && (options.activeNames?.length ?? 0) > 1 ? item.subjects.slice(1) : item.subjects).some(subject => names.has(norm(subject))))) : [];
   const scores = new Map<string, number>();
   for (const channel of [lexical.map(entry => entry.item), semantic, associated]) channel.forEach((item, index) => scores.set(item.id, (scores.get(item.id) ?? 0) + 1 / (60 + index + 1)));
   const ranked = visible.filter(item => {

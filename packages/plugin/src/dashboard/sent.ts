@@ -15,6 +15,13 @@ export function sentOccasions(packet: string): { asOf: string; items: Array<{ da
   return items.length ? { asOf: decode(block[1]!), items } : null;
 }
 
+function progressSection(packet:string):string {
+  // Product-owned XML, read from the delivered packet rather than the current ledger.
+  const text=(packet ?? "").match(/<not_yet>([\s\S]*?)<\/not_yet>/)?.[1];
+  if(!text)return "";
+  const decoded=text.replace(/&(amp|lt|gt|quot|apos);/g,(_,key:string)=>({amp:"&",lt:"<",gt:">",quot:'"',apos:"'"})[key]!);
+  return `<section><h2 class="sent__h">두 사람의 진도</h2><p class="sent__note">${escapeHtml(decoded)}</p></section>`;
+}
 function occasionsSection(packet: string): string {
   const occasions = sentOccasions(packet);
   if (!occasions) return "";
@@ -175,6 +182,6 @@ export function sentPage(data: SentData, view: SentView): string {
       </div>
       ${data.fallback ? "" : mix(data)}
     </div>
-    ${data.fallback ? occasionsSection(data.packet) + searchSection + raw : `<div class="sent__cols"><div>${memorySection}</div><div>${occasionsSection(data.packet)}${peopleSection}${nowSection}${searchSection}${raw}</div></div>`}
+    ${data.fallback ? (progressSection(data.packet) + occasionsSection(data.packet)) + searchSection + raw : `<div class="sent__cols"><div>${memorySection}</div><div>${(progressSection(data.packet) + occasionsSection(data.packet))}${peopleSection}${nowSection}${searchSection}${raw}</div></div>`}
   </div>`;
 }

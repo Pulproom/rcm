@@ -1,3 +1,4 @@
+import { renderProgress } from "./pair-progress.js";
 import { latestStoryTime, calculateOccasions, occasionOffsetLabel } from "@rcm/shared";
 import { formatStoryTime, RelationshipProjectionItemSchema } from "@rcm/shared";
 import type { SocialKnowledgeApiItem } from "../api-client.js";
@@ -389,6 +390,6 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
     const initialCard = initialItems.length ? `<section class="psec">${film ? "" : '<h2 class="sec">처음 설정된 관계</h2>'}${fold(film ? "처음 설정된 관계" : "캐릭터 카드에서 읽은 처음 모습", `${initialFelt ? emotionMeters(initialDirections, canonicalAxes, initialAxis, options, "처음 설정된 감정") : ""}<div class="povs povs--initial">${initialViews}</div>`, { role: "section", preserveKey: `pair-initial:${pair.key}` })}</section>` : "";
 
     const chronicle = log.replace('<h2 class="sec">기록 ', '<h2 class="sec">함께한 장면 ');
-    return `<article class="reader pairsheet pairsheet--app appsheet">${bar}${picker}${hero}${callCard}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes }, basisFooter)}${hearts}${promiseCard}${markCard}${chronicle}${intimacyCard}${initialCard}</article>`;
+    return `<article class="reader pairsheet pairsheet--app appsheet">${bar}${picker}${hero}${callCard}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes }, basisFooter)}${hearts}${promiseCard}${renderProgress(data.pairProgress?.find(p => pairKey(p.persona,p.character)===pair.key),data.memories,data.pairProgressUnavailableReason)}${markCard}${chronicle}${intimacyCard}${initialCard}</article>`;
   }
 }

@@ -24,11 +24,46 @@ export function installMenuController(root: HTMLElement): () => void {
   const close = (menu: HTMLDetailsElement): void => {
     menu.open = false;
   };
+  const popOf = (menu: HTMLDetailsElement): HTMLElement | null => menu.querySelector<HTMLElement>(":scope > .menu__pop");
+  /**
+   * A dropdown (wide screens) is lifted out of its card: fixed and anchored to its button, so a rounded card's
+   * `overflow: hidden` can never clip it. Narrow screens already show menus as a fixed bottom sheet and are left alone.
+   */
+  const anchor = (menu: HTMLDetailsElement): void => {
+    const pop = popOf(menu);
+    const button = menu.querySelector<HTMLElement>(":scope > summary");
+    if (!pop || !button || typeof getComputedStyle !== "function") return;
+    if (!pop.dataset.anchored && getComputedStyle(pop).position !== "absolute") return;
+    pop.dataset.anchored = "true";
+    const view = { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight };
+    const rect = button.getBoundingClientRect();
+    Object.assign(pop.style, { position: "fixed", left: "auto", bottom: "auto", right: `${Math.max(8, view.width - rect.right)}px`, top: `${rect.bottom + 6}px` });
+    const height = pop.offsetHeight;
+    const below = rect.bottom + 6 + height <= view.height - 8;
+    const top = below ? rect.bottom + 6 : Math.max(8, rect.top - 6 - height);
+    pop.style.top = `${top}px`;
+    // A transformed ancestor would make "fixed" relative to itself; correct by the measured drift.
+    const placed = pop.getBoundingClientRect();
+    const drift = { x: placed.right - (view.width - Math.max(8, view.width - rect.right)), y: placed.top - top };
+    if (Math.abs(drift.y) > 1) pop.style.top = `${top - drift.y}px`;
+    if (Math.abs(drift.x) > 1) pop.style.right = `${Math.max(8, view.width - rect.right) + drift.x}px`;
+  };
+  const release = (menu: HTMLDetailsElement): void => {
+    const pop = popOf(menu);
+    if (!pop?.dataset.anchored) return;
+    delete pop.dataset.anchored;
+    for (const key of ["position", "left", "right", "top", "bottom"] as const) pop.style[key] = "";
+  };
+  // Re-measure from the stylesheet each time, so a resize into the phone sheet layout drops the anchoring.
+  const reanchor = (): void => { for (const menu of openMenus()) if (popOf(menu)?.dataset.anchored) { release(menu); anchor(menu); } };
 
   const onToggle = (event: Event): void => {
+    const target = event.target as HTMLDetailsElement | null;
+    if (target?.matches?.("details[data-menu]") && !target.open) release(target);
     const menu = openMenuFor(event.target);
     if (!menu) return;
     for (const candidate of openMenus()) if (candidate !== menu) close(candidate);
+    anchor(menu);
   };
   const onPointerDown = (event: PointerEvent): void => {
     for (const menu of openMenus()) {
@@ -68,10 +103,14 @@ export function installMenuController(root: HTMLElement): () => void {
   root.addEventListener("click", onClick);
   root.addEventListener("keydown", onKeyDown);
   document.addEventListener("pointerdown", onPointerDown);
+  document.addEventListener("scroll", reanchor, true);
+  globalThis.window?.addEventListener("resize", reanchor);
   return () => {
     root.removeEventListener("toggle", onToggle, true);
     root.removeEventListener("click", onClick);
     root.removeEventListener("keydown", onKeyDown);
     document.removeEventListener("pointerdown", onPointerDown);
+    document.removeEventListener("scroll", reanchor, true);
+    globalThis.window?.removeEventListener("resize", reanchor);
   };
 }

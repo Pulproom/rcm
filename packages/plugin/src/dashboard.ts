@@ -29,9 +29,10 @@ import { readServerModelConnection, testSettingsConnection } from "./connection-
 import { connectionCheck } from "./dashboard/film/ui.js";
 import { manualRetryState, updateWorkerMenuButton, widgetState } from "./attention.js";
 import { createOrganizationView, memoryOrganization, toggleOrganizationRange, organizationMemoryRanges, organizationJumpRange, type AdditionView, type OrganizationData } from './memory-organization.js';
-import { subscribeActivity } from "./activity.js";
+import { stopDeletedHostChatWork, subscribeActivity } from "./activity.js";
 import { translatePacket, clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
-import { inheritLineageSettings } from "./lineage-settings.js";
+export { syncLineageActivity } from "./lineage-settings.js";
+import { syncLineageActivity, currentLineageOperation, runLineageOperation, inheritLineageSettings, needsOpenedChatResolution, resolveOpenedChat, lineageFailureMessage } from "./lineage-settings.js";
 import {exportChatSettings,restoreChatSettings} from "./backup-settings.js";
 import { ServerCompatibilityError, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, SERVER_RESPONSE_DELAYED, type ServerConnectionIssue } from "./connection.js";
 import { syncQuizSettings } from "./quiz-sync.js";
@@ -65,6 +66,7 @@ import { dayPart, sceneDate, slugline } from "./dashboard/film/scene.js";
 import { actScenes, compareStoryMemories, pickFrames, sceneLocator, sceneNumbers, storyScenes } from "./dashboard/scenes.js";
 import { buildCast } from "./dashboard/film/cast.js";
 import { installMenuController } from "./dashboard/film/menu.js";
+import { chatFamilies, familyShortTitle } from "./dashboard/chat-families.js";
 import { buildHomePairs, homePencilCounts, homeRecentMemories, homeTranslationRecords, injectedStateRows, type InjectionManifest } from "./dashboard/home.js";
 import { sentPage, sentWidget, type SentData, type SentPerson, type SentScene, type SentView } from "./dashboard/sent.js";
 
@@ -73,7 +75,9 @@ export type Tab = "overview" | "initial" | "story" | "timeline" | "relationships
 export function mergeCompleteBackupSettings(current: PluginSettings, restored: unknown): PluginSettings {
   if (!restored || typeof restored !== "object" || !supportedSettingsRevision((restored as { settingsRevision?: unknown }).settingsRevision)) return current;
   return { ...(restored as PluginSettings), settingsRevision: defaults.settingsRevision,
+    characterEnabled: normalizeMemoryOnlyInjection((restored as Partial<PluginSettings>).characterEnabled),
     upcomingOccasions: normalizeMemoryOnlyInjection((restored as Partial<PluginSettings>).upcomingOccasions),
+    pairProgress: normalizeMemoryOnlyInjection((restored as Partial<PluginSettings>).pairProgress),
     memoryOnlyInjection: normalizeMemoryOnlyInjection((restored as Partial<PluginSettings>).memoryOnlyInjection),
     serverUrl: current.serverUrl, serverToken: current.serverToken };
 }
@@ -201,32 +205,25 @@ export type StoryViewState = {
 
 type StoryOverviewBackup = RuntimeState["settings"]["storyOverviewBackups"][string];
 export type HostChatInventoryItem = { characterId: string; characterName: string; chatId: string; chatTitle: string; messageCount: number };
-type DataConfirmation = { action: "rebuild" | "delete"; chatId: string; acknowledged?: boolean };
-type ServerInspector = {
-  chatId: string;
-  loading?: boolean;
-  error?: string;
-  memories: any[];
-  storySpine: any;
-  relationships: any[];
-  assertions: any[];
-  beliefs: any[];
-  promises: any[];
-  endedAssertions: any[];
-  endedBeliefs: any[];
-  userDeletedBeliefs: any[];
-  promiseHistory: any[];
-  reconciliationReviews: any[];
-  conflicts: any[];
-  ledger?: { items: any[]; total: number; offset: number; limit: number; includesContent: boolean };
+type HostChatInventory = {
+  items: HostChatInventoryItem[];
+  characterIds: Set<string>;
+  completeCharacterIds: Set<string>;
+  charactersComplete: boolean;
 };
+type DataConfirmation = { action: "rebuild" | "delete"; chatId: string; acknowledged?: boolean };
 type DataViewState = {
   inventoryStatus: "idle" | "loading" | "ready" | "unavailable";
   inventory: HostChatInventoryItem[];
+  deletedChatIds?: string[];
+  inventoryPartial?: boolean;
+  inventoryError?: string;
+  cleanupConfirmation?: string[];
+  cleanupRunning?: boolean;
+  cleanupResult?: string;
   query: string;
   filter: "all" | "current" | "other";
   confirmation?: DataConfirmation;
-  inspector?: ServerInspector;
   backupExportPhase?: "creating" | "downloading";
   backupExportChatId?: string;
   backupExportError?: string;
@@ -296,6 +293,8 @@ export function dashboardThemeFromColor(value: string, prefersDark: boolean): "d
 }
 
 export interface DashboardData {
+  pairProgress?: import("@rcm/shared").PairProgress[];
+  pairProgressUnavailableReason?: import("@rcm/shared").PairProgressUnavailableReason;
   quizStatus?: import("@rcm/shared").QuizStatus;
   chatId?: string;
   loadedDatasets?: DashboardChatDataset[];
@@ -312,7 +311,7 @@ export interface DashboardData {
     mcpSelector?:McpSelectorPublicConfig;
     translationConnection?:TranslationConnectionPublicConfig;
     serverWorker?: ServerWorkerStatus;
-    capabilities?: { memoryLineEditing?: boolean; recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; sourceLedgerInspection?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
+    capabilities?: { memoryLineEditing?: boolean; recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
   };
   memories: any[];
   storySpine: any;
@@ -397,18 +396,18 @@ export function availableNavigationSnapshot(snapshot: ViewSnapshot, data: Dashbo
   return next;
 }
 
-export const EDITOR_FORM_SELECTOR = "#memory-form, #manual-memory-form, #story-overview-form, #intimacy-form, #social-form, #world-state-form, #relationship-form, #anniversary-form, #anniversary-new-form, #detail-access-form, #memory-line-form, .person-editor, .initial-relationship-editor, .reconciliation-edit";
+export const EDITOR_FORM_SELECTOR = "#pair-progress-form, #memory-form, #manual-memory-form, #story-overview-form, #intimacy-form, #social-form, #world-state-form, #relationship-form, #anniversary-form, #anniversary-new-form, #detail-access-form, #memory-line-form, .person-editor, .initial-relationship-editor, .reconciliation-edit";
 const EDITABLE_DASHBOARD_TABS: readonly Tab[] = ["initial", "story", "timeline", "relationships", "world", "reviews"];
 
-type DashboardChatDataset = "memories" | "messages" | "relationships" | "world" | "conflicts" | "jobs" | "recallLogs" | "entities" | "reviews" | "lineage" | "socialKnowledge" | "physicalIntimacy" | "viewPreferences" | "status" | "audits" | "initialCalibration" | "storySpine";
+type DashboardChatDataset = "pairProgress" | "memories" | "messages" | "relationships" | "world" | "conflicts" | "jobs" | "recallLogs" | "entities" | "reviews" | "lineage" | "socialKnowledge" | "physicalIntimacy" | "viewPreferences" | "status" | "audits" | "initialCalibration" | "storySpine";
 
 const ALL_DASHBOARD_DATASETS: DashboardChatDataset[] = [
   "memories", "messages", "relationships", "world", "conflicts", "jobs", "recallLogs", "entities",
-  "reviews", "lineage", "socialKnowledge", "physicalIntimacy", "viewPreferences", "status", "audits", "initialCalibration", "storySpine",
+  "pairProgress", "reviews", "lineage", "socialKnowledge", "physicalIntimacy", "viewPreferences", "status", "audits", "initialCalibration", "storySpine",
 ];
 
 /** The empty placeholder starts as "unseeded"; trust the setup state only after the server answered. */
-const setupPendingIn = (data: DashboardData): boolean => Boolean(data.loadedDatasets?.includes("initialCalibration")) && setupPickerNeeded(data.initialCalibration?.status);
+const setupPendingIn = (data: DashboardData): boolean => Boolean(data.loadedDatasets?.includes("initialCalibration")) && setupPickerNeeded(data.initialCalibration?.status, data.lineage);
 
 export function dashboardDatasetsForTab(tab: Tab): DashboardChatDataset[] {
   const byTab: Record<Tab, DashboardChatDataset[]> = {
@@ -416,7 +415,7 @@ export function dashboardDatasetsForTab(tab: Tab): DashboardChatDataset[] {
     initial: ["memories", "relationships", "entities", "world", "socialKnowledge", "physicalIntimacy", "viewPreferences", "initialCalibration", "status"],
     story: ["memories", "storySpine", "entities", "relationships", "viewPreferences", "status"],
     timeline: ["memories", "messages", "status"],
-    relationships: ["memories", "relationships", "entities", "world", "socialKnowledge", "physicalIntimacy", "viewPreferences", "initialCalibration", "status"],
+    relationships: ["pairProgress", "memories", "relationships", "entities", "world", "socialKnowledge", "physicalIntimacy", "viewPreferences", "initialCalibration", "status"],
     world: ["memories", "world", "messages", "entities", "viewPreferences", "initialCalibration", "conflicts", "reviews", "audits", "status"],
     reviews: ["conflicts", "reviews", "audits", "status"],
     conflicts: ["conflicts", "status"],
@@ -552,8 +551,11 @@ export async function requestBackupArchive(
     if (current.chatId !== chatId) throw new Error("현재 채팅이 바뀌었습니다. 다시 시도해 주세요.");
     await syncCompleteSourceLedger(client, current);
   }
+  const characterId = !chatId ? undefined : state.current?.chatId === chatId ? state.current.characterId
+    : (await client.request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats")).items.find(chat => chat.id === chatId)?.characterId;
+  if (chatId && !characterId) throw new Error("백업할 채팅의 캐릭터를 찾지 못했어요.");
   return client.raw("/v1/export", { method: "POST", body: JSON.stringify(
-    chatId ? { chatId, chatSettings: exportChatSettings(state.settings, chatId) }
+    chatId ? { chatId, chatSettings: exportChatSettings(state.settings, chatId, characterId!) }
       : { pluginSettings: state.settings, serverUrl: state.settings.serverUrl },
   ) }, 120_000);
 }
@@ -622,7 +624,8 @@ export async function previewMemoryTransfer(
 }
 
 function transferCountSummary(counts: Record<string, number>): string {
-  return `기억 ${Number(counts.memories ?? 0).toLocaleString()}개 · 관계 ${Number(counts.relationships ?? 0).toLocaleString()}개 · 세계 상태 ${(Number(counts.assertions ?? 0) + Number(counts.beliefs ?? 0)).toLocaleString()}개 · 약속 ${Number(counts.promises ?? 0).toLocaleString()}개${Number(counts.translations ?? 0) > 0 ? ` · 번역 ${Number(counts.translations).toLocaleString()}개` : ""}`;
+  const relationships = counts.relationships === undefined ? `관계 변화 ${Number(counts.relationshipEvents ?? 0).toLocaleString()}건` : `관계 ${Number(counts.relationships).toLocaleString()}개`;
+  return `기억 ${Number(counts.memories ?? 0).toLocaleString()}개 · ${relationships} · 세계 상태 ${(Number(counts.assertions ?? 0) + Number(counts.beliefs ?? 0)).toLocaleString()}개 · 약속 ${Number(counts.promises ?? 0).toLocaleString()}개${Number(counts.translations ?? 0) > 0 ? ` · 번역 ${Number(counts.translations).toLocaleString()}개` : ""}`;
 }
 
 export function memoryTransferConfirmation(
@@ -652,6 +655,7 @@ export function memoryTransferConfirmation(
   if (preview.requiresReplacement) {
     lines.push("", `현재 채팅의 기존 기록(${transferCountSummary(preview.targetDerivedCounts)})은 가져올 기록으로 교체돼요.`);
   }
+  if (preview.targetQueuedJobs) lines.push("", `현재 채팅의 대기 작업 ${preview.targetQueuedJobs.toLocaleString()}개를 취소하고 기억을 가져와요.`);
   return {
     message: lines.join("\n"),
     title: "기억 가져오기 확인",
@@ -928,7 +932,7 @@ const status = (kind: "ok" | "warn" | "error" | "neutral", text: string): string
 
 type HomeMessageTone = "neutral" | "success" | "warning" | "danger";
 
-function homeMessage(options: {
+export function homeMessage(options: {
   title: string;
   bodyHtml?: string;
   actionsHtml?: string;
@@ -1022,7 +1026,7 @@ export function estimateBackfillAuxiliaryCalls(state: RuntimeState, data: Pick<D
 
 export function shouldOfferBackfill(state: RuntimeState, data: DashboardData): boolean {
   const context = state.current;
-  if (!context || data.connectionIssue || !isChatMemoryEnabled(state.settings, context.chatId) || context.sourceActiveMessageCount === 0) return false;
+  if (!context || data.connectionIssue || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId) || context.sourceActiveMessageCount === 0) return false;
   const serverInventoryKnown = Boolean(data.health?.ok) && !data.adminError;
   const serverChat = data.adminChats.find((chat) => chat.id === context.chatId);
   if ([data.lineage?.status, serverChat?.lineage?.status, state.lineageProbe?.result?.status].some(status => status === "choice_required" || status === "ambiguous")) return false;
@@ -1048,8 +1052,8 @@ function managedBackfillSource(state: RuntimeState, data: DashboardData): { coun
     turns: Number(data.bufferedTurns ?? 0) + Number(data.protectedTurns ?? 0) + Math.ceil(unsynced / 2) };
 }
 
-function requireChatMemoryEnabled(state: RuntimeState, chatId: string): void {
-  if (!isChatMemoryEnabled(state.settings, chatId)) {
+function requireChatMemoryEnabled(state: RuntimeState, chatId: string, characterId = state.current?.chatId === chatId ? state.current.characterId : undefined): void {
+  if (!isChatMemoryEnabled(state.settings, chatId, characterId)) {
     throw new Error("현재 채팅에서 RCM이 꺼져 있어 새 기억 작업을 만들 수 없습니다. Settings에서 이 채팅의 RCM을 먼저 켜세요.");
   }
 }
@@ -1078,6 +1082,7 @@ function invalidateRestoredChatState(state: RuntimeState,chatId:string):void {
     state.statusSummary = { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 };
   }
 }
+
 
 export function syncReviewActivity(state: RuntimeState, data: Pick<DashboardData, "reconciliationReviews"> & Partial<Pick<DashboardData, "conflicts" | "pendingReviews">> & { extractionAudits?: any[] }): void {
   const pendingReconciliations = data.reconciliationReviews.filter((item) => item.status === "pending").length;
@@ -1155,11 +1160,11 @@ export async function closeDashboardContainer(
   await hideContainer();
 }
 
-function backfillNotice(state: RuntimeState, data: DashboardData): string {
+export function backfillNotice(state: RuntimeState, data: DashboardData): string {
   const lineageNotice = lineageProbeNotice(state);
   if (lineageNotice) return lineageNotice;
   const context = state.current;
-  if (context && !isChatMemoryEnabled(state.settings, context.chatId)) return homeMessage({
+  if (context && !isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) return homeMessage({
     title: CHAT_WORK_HELD_MESSAGE,
     bodyHtml: "<p>기억과 대기 작업은 그대로예요. 다시 켜면 이어서 처리해요.</p>",
   });
@@ -1179,13 +1184,13 @@ function backfillNotice(state: RuntimeState, data: DashboardData): string {
   const calls = estimateBackfillAuxiliaryCalls(state, data);
   return homeMessage({
     title,
-    bodyHtml: `<p>${detail}</p>${serverChat?.hasImportedMemory ? "<p>가져온 기억과 겹치는 대화는 다시 처리되어 비용이 늘 수 있습니다.</p>" : ""}<details class="home-backfill__details" data-preserve-open="home-backfill-calls"><summary><span>Risu 원문 ${pocketCount.toLocaleString()}개 · 서버 ${syncedCount.toLocaleString()}개 · 정리 묶음 약 ${calls.extractionGroups.toLocaleString()}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="home-backfill__calls"><p>기본은 묶음마다 장면 추출과 상태 추출·대조, 두 번의 호출입니다. 관계·줄거리 정리에도 보조 모델을 호출합니다. 전체 호출 수는 추출 결과에 따라 늘어납니다.</p><ul><li>${calls.groupTurns}턴씩 기억 정리 · 장면·상태 합계 약 ${(calls.extractionGroups * 2).toLocaleString()}회</li><li>초기 장부 ${calls.initialCalls}회 · 줄거리 정리 약 ${calls.storyCalls.toLocaleString()}회</li><li>관계 상태·마지막 장부 대조: 추출 결과에 따라 추가</li><li>재검수: 선택 시 묶음마다 1회 추가${calls.reviewIncluded ? " · 현재 기본값 켜짐" : ""}</li><li>형식·근거 보완, 이어서 추출, 재시도는 필요할 때 추가됩니다.</li></ul>${managed || context.estimatedSourceTokens === undefined ? "" : `<p>원문 약 ${context.estimatedSourceTokens.toLocaleString()}토큰</p>`}<p>원문 토큰은 실제 전송량이나 청구량이 아닙니다. 진행 화면에서 후처리를 포함한 실제 호출 수를 확인할 수 있습니다.</p></div></details><p class="home-backfill__hint">로어북에 과거 줄거리 요약이 있다면 잠시 끈 뒤 시작해 주세요.</p>`,
+    bodyHtml: `<p>${detail}</p>${serverChat?.hasImportedMemory ? "<p>가져온 기억과 겹치는 대화는 다시 처리되어 비용이 늘 수 있습니다.</p>" : ""}<details class="home-backfill__details" data-preserve-open="home-backfill-calls"><summary><span>Risu 원문 ${pocketCount.toLocaleString()}개 · 서버 ${syncedCount.toLocaleString()}개 · 정리 묶음 약 ${calls.extractionGroups.toLocaleString()}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="home-backfill__calls"><p>기본은 묶음마다 장면 추출과 상태 추출·대조, 두 번의 호출입니다. 관계·줄거리 정리에도 보조 모델을 호출합니다. 전체 호출 수는 추출 결과에 따라 늘어납니다.</p><ul><li>${calls.groupTurns}턴씩 기억 정리 · 장면·상태 합계 약 ${(calls.extractionGroups * 2).toLocaleString()}회</li><li>초기 장부 ${calls.initialCalls}회 · 줄거리 정리 약 ${calls.storyCalls.toLocaleString()}회</li><li>관계 상태·마지막 장부 대조: 추출 결과에 따라 추가</li><li>재검수: 선택 시 묶음마다 1회 추가${calls.reviewIncluded ? " · 현재 기본값 켜짐" : ""}</li><li>형식·근거 보완, 이어서 추출, 재시도는 필요할 때 추가됩니다.</li></ul>${managed || context.estimatedSourceTokens === undefined ? "" : `<p>원문 약 ${context.estimatedSourceTokens.toLocaleString()}토큰</p>`}<p>원문 토큰은 실제 전송량이나 청구량이 아닙니다. 진행 화면에서 후처리를 포함한 실제 호출 수를 확인할 수 있습니다.</p></div></details>${setupPendingIn(data) ? `<p class="home-backfill__hint">과거 줄거리를 요약한 로어북이 있다면 <button type="button" class="home-backfill__link" data-action="open-setup-sources">설정 재료</button>에서 빼고 시작해 주세요.</p>` : ""}`,
     actionsHtml: `<button class="btn btn--primary home-backfill__action" data-action="approve-backfill">${managed ? "남은 대화로 기억 생성" : "과거 대화로 기억 생성"}</button>`,
     className: "home-backfill",
   });
 }
 
-function lineageProbeNotice(state: RuntimeState): string {
+export function lineageProbeNotice(state: RuntimeState): string {
   const probe = state.lineageProbe;
   if (probe?.status !== "ready" || !probe.result || probe.result.status === "none") return "";
   const candidates = probe.result.candidates;
@@ -1218,11 +1223,11 @@ function lineageProbePayload(context: NonNullable<Awaited<ReturnType<typeof read
 }
 
 async function probeDashboardLineage(state: RuntimeState, client: ServerClient, context: NonNullable<RuntimeState["current"]>): Promise<void> {
-  if (!isChatMemoryEnabled(state.settings, context.chatId)) return;
+  if (!isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) return;
   let payload: LineageProbeRequest;
   try { payload = context.snapshot !== undefined ? lineageProbePayload(context) : await readDashboardLineageRequest(context); }
   catch { return; }
-  if (state.current?.chatId !== context.chatId || !isChatMemoryEnabled(state.settings, context.chatId)) return;
+  if (state.current?.chatId !== context.chatId || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) return;
   const projection = payload.messageVisibility;
   if (!projection.length) return;
   const last = projection.at(-1);
@@ -1238,7 +1243,8 @@ async function probeDashboardLineage(state: RuntimeState, client: ServerClient, 
       state.lineageProbe = { key, status: "ready", result, selectedParentId: result.candidates[0]?.chatId };
     } catch (error) {
       if (state.current?.chatId !== context.chatId) return;
-      state.lineageProbe = { key, status: "failed", error: String(error) };
+      addLog(state.logs, "error", `Lineage preview failed: ${String(error)}`);
+      state.lineageProbe = { key, status: "failed", error: lineageFailureMessage(error) };
     } finally {
       lineageProbeFlights.delete(key);
     }
@@ -1253,7 +1259,7 @@ export function pendingBufferNotice(data: DashboardData): string {
   return `<div class="notice" role="status">${icon("clock")}<div><strong>정리 가능한 턴 ${data.bufferedTurns}/${data.extractionGroupTurns} · 약 ${tokens} tokens</strong></div></div>`;
 }
 
-function workerAttentionNotice(state: RuntimeState, linkToQueue = false): string {
+export function workerAttentionNotice(state: RuntimeState, linkToQueue = false): string {
   const attention = state.settings.workerAttention;
   if (!attention) return "";
   return homeMessage({
@@ -1267,7 +1273,8 @@ function workerAttentionNotice(state: RuntimeState, linkToQueue = false): string
   });
 }
 
-export function initialCalibrationNotice(data: Pick<DashboardData, "initialCalibration">): string {
+export function initialCalibrationNotice(data: Pick<DashboardData, "initialCalibration"> & Partial<Pick<DashboardData, "lineage">>): string {
+  if (["choice_required", "ambiguous"].includes(data.lineage?.status ?? "")) return "";
   const calibration = data.initialCalibration;
   if (calibration?.status === "queued") return homeMessage({
     title: "초기 장부를 만들고 있습니다",
@@ -1279,7 +1286,7 @@ export function initialCalibrationNotice(data: Pick<DashboardData, "initialCalib
     actionsHtml: '<button class="btn btn--quiet" data-action="open-initial-calibration">초기 장부 확인 <span aria-hidden="true">→</span></button>',
     tone: "warning",
   });
-  if (setupPickerNeeded(calibration?.status)) return notice("설정 재료를 골라 주세요", {
+  if (setupPickerNeeded(calibration?.status, data.lineage)) return notice("설정 재료를 골라 주세요", {
     body: "초기 인물과 관계를 정할 내용이에요",
     action: btn("설정 재료 고르기", { kind: "quiet", iconEnd: "chevron", action: "open-setup-sources", hit: true }),
     tone: "cut",
@@ -1295,7 +1302,7 @@ export function initialCalibrationNotice(data: Pick<DashboardData, "initialCalib
 
 export function dashboardLiveDataSignature(summary: RuntimeState["statusSummary"], context?: RuntimeState["current"]): string {
   return JSON.stringify({ progress: summary?.progress, initialCalibration: summary?.initialCalibration?.status,
-    identity: [context?.chatId, context?.identityHints.userPersonaName],
+    lineage: summary?.lineage, identity: [context?.chatId, context?.identityHints.userPersonaName],
     embeddings: [summary?.pendingEmbeddings, summary?.failedEmbeddings, summary?.embeddingError] });
 }
 
@@ -1369,9 +1376,20 @@ function homeDailyMemory(state: RuntimeState, data: DashboardData, view?: DailyM
 
 export function overview(state: RuntimeState, data: DashboardData, translations: Map<string, string> = new Map(), loaded = true, sentView?: SentView, dailyMemoryView?: DailyMemoryView): string {
   if (data.connectionIssue?.kind === "incompatible") return incompatibleHome(state, data);
+  if (state.current && (!data.chatId || data.chatId === state.current.chatId) && state.statusSummary?.lineage) data = { ...data, lineage: state.statusSummary.lineage };
+  const operation = currentLineageOperation(state);
+  // A parent choice keeps its own card through running and failure; opening a chat gets one plain card.
+  if (operation) return `<div class="home lineage-operation" data-lineage-state="${operation.status}" aria-busy="${operation.status === "running"}">${operation.kind === "select" ? lineagePanel(data, operation) : homeMessage({
+    title: operation.status === "running" ? "기억을 이어받고 있어요" : "기억 이어받기를 확인하지 못했어요",
+    bodyHtml: operation.status === "running" ? `<p role="status">원본을 확인하고 기억을 가져오고 있어요. 대화가 길면 조금 걸려요.</p>${LINEAGE_PROGRESS}` : `<p role="alert">완료됐는지 확인하지 못했어요. 원문과 기존 기억은 그대로예요.</p>${operation.error ? `<p class="lc__err">${escapeHtml(operation.error)}</p>` : ""}`,
+    actionsHtml: operation.status === "failed" ? btn("다시 확인", { kind: "primary", action: "retry-lineage-open" }) : "",
+    tone: operation.status === "failed" ? "warning" : "neutral",
+    iconName: operation.status === "failed" ? undefined : "branch",
+    className: "lc",
+  })}</div>`;
   if (!loaded) {
     const failed = data.failedDatasets?.some((dataset) => dashboardDatasetsForTab("overview").includes(dataset));
-    const body = failed ? notice("데이터를 불러오지 못했어요.", { tone: "cut", action: btn("다시 시도", { kind: "quiet", action: "refresh", hit: true }) }) : loading();
+    const body = lineagePanel(data) || (failed ? notice("데이터를 불러오지 못했어요.", { tone: "cut", action: btn("다시 시도", { kind: "quiet", action: "refresh", hit: true }) }) : loading());
     return `<div class="home"><h1 class="sr-only">홈</h1><div class="home__poster"><section class="poster is-empty">${body}</section></div></div>`;
   }
   const canonicalLanguage = state.lastPrepare?.memoryLanguage ?? state.current?.memoryLanguage ?? (state.current ? state.settings.memoryLanguages[state.current.chatId] : undefined) ?? "en";
@@ -1393,7 +1411,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const injectionAt = liveInjection?.at ?? compatibleCache?.lastInjectionAt;
   const packetTokens = liveInjection ? liveInjection.injectedTokens : packet ? estimateTokens(packet) : 0;
   const hardTokenCeiling = liveInjection ? Math.floor(liveInjection.requestedBudget * 115 / 100) : 0;
-  const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId) : false;
+  const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId) : false;
   const validation = state.lastPromptValidation?.chatId === currentChatId ? state.lastPromptValidation : undefined;
   const validationCopy = !state.current ? "활성 채팅 없음"
     : !chatEnabled ? "현재 채팅에서 RCM 꺼짐"
@@ -1623,45 +1641,57 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   </div>`;
 }
 
-function lineagePanel(data: DashboardData): string {
+/** 「10월 21일」, with the year only when it is not this year. */
+function shortActivityDate(ms: number, now = new Date()): string {
+  const date = new Date(ms);
+  return `${date.getFullYear() === now.getFullYear() ? "" : `${date.getFullYear()}년 `}${date.getMonth() + 1}월 ${date.getDate()}일`;
+}
+
+const LINEAGE_PROGRESS ='<div class="lc__bar" role="progressbar" aria-label="기억 가져오는 중"><i></i></div>';
+
+export function lineagePanel(data: DashboardData, operation?: RuntimeState["lineageOperation"]): string {
   const lineage = data.lineage;
   if (!lineage || ["none", "reverted", "independent"].includes(lineage.status) || lineage.acknowledgedAt) return "";
   if (lineage.status === "ambiguous" || lineage.status === "choice_required") {
     const candidates = lineage.ambiguousCandidates ?? [];
     const fingerprint = candidates[0]?.fingerprint ?? "";
-    return homeMessage({
-      title: candidates.length > 1 ? "이어받을 원본 채팅을 선택해 주세요" : "복사된 채팅의 기억을 이어받을까요?",
-      bodyHtml: candidates.length > 1
-        ? "<p>같은 메시지를 가진 후보가 여러 개입니다.</p>"
-        : "<p>원본의 기억을 이어받거나, 이 채팅을 독립적으로 시작할 수 있습니다.</p>",
-      actionsHtml: `${candidates.map((item) => `<button class="btn${candidates.length === 1 ? " btn--primary" : ""}" data-action="select-lineage" data-parent-id="${escapeHtml(item.chatId)}">${candidates.length === 1 ? "기억 이어받기" : `${escapeHtml(item.title)} · ${item.sharedMessages}개 일치`}</button>`).join("")}<button class="btn" data-action="decline-lineage" data-fingerprint="${escapeHtml(fingerprint)}">새로 시작</button>`,
+    const running = operation?.kind === "select" && operation.status === "running";
+    const failed = operation?.kind === "select" && operation.status === "failed" ? operation : undefined;
+    const chosen = candidates.find((item) => item.chatId === operation?.parentChatId);
+    if (failed) return homeMessage({
+      title: `「${chosen?.title || "원본 채팅"}」의 기억을 가져오지 못했어요`,
+      bodyHtml: `<p role="alert">원문과 기존 기억은 그대로예요.</p>${failed.error ? `<p class="lc__err">${escapeHtml(failed.error)}</p>` : ""}`,
+      actionsHtml: `${chosen ? btn("다시 시도", { kind: "primary", action: "select-lineage", data: { parentId: chosen.chatId, lineageChoice: "true" } }) : ""}${btn(candidates.length > 1 ? "다른 채팅 고르기" : "돌아가기", { action: "lineage-choose-again" })}`,
       tone: "warning",
+      className: "lc",
+    });
+    // Each candidate is one tappable row; the chosen row carries the progress so the card never splits in two.
+    const row = (item: (typeof candidates)[number], index: number) => {
+      const busy = running && item.chatId === operation?.parentChatId;
+      const sub = busy ? "기억을 가져오고 있어요… 대화가 길면 조금 걸려요" : [
+        `메시지 ${item.totalActiveMessages === undefined ? "" : `${item.totalActiveMessages.toLocaleString()}개 중 `}${item.sharedMessages.toLocaleString()}개 같음`,
+        item.memories === undefined ? "" : `기억 ${item.memories.toLocaleString()}개`,
+        item.lastActivityAt === undefined ? "" : `마지막 대화 ${shortActivityDate(item.lastActivityAt)}`,
+      ].filter(Boolean).map((part) => `<span>${part}</span>`).join(" · ");
+      return `<button type="button" class="lc__row${busy ? " is-busy" : running ? " is-dim" : ""}" data-lineage-choice="true" data-action="select-lineage" data-parent-id="${escapeHtml(item.chatId)}"${running ? " disabled" : ""}${busy ? ' aria-busy="true"' : ""}><span class="lc__av" data-tone="${index % 2}" aria-hidden="true">${escapeHtml(Array.from(item.title || "?")[0] ?? "?")}</span><span class="lc__tx"><b>${escapeHtml(item.title || item.chatId)}</b><small>${sub}</small></span>${busy ? '<span class="lc__spin" aria-hidden="true"></span>' : `<span class="lc__chev" aria-hidden="true">${icon("chevron")}</span>`}</button>`;
+    };
+    return homeMessage({
+      title: candidates.length > 1 ? "어느 채팅의 기억을 이어받을까요?" : "복사된 채팅이에요. 기억을 이어받을까요?",
+      bodyHtml: `${candidates.length > 1 ? `<p>메시지가 똑같은 채팅이 ${candidates.length}개 있어요. 이 채팅의 원본을 골라 주세요.</p>` : ""}<div class="lc__list">${candidates.map(row).join("")}</div>${running ? LINEAGE_PROGRESS : `<button type="button" class="lc__fresh" data-action="decline-lineage" data-fingerprint="${escapeHtml(fingerprint)}">이어받지 않고 새로 시작</button>`}`,
+      tone: "neutral",
+      iconName: "branch",
+      className: "lc",
     });
   }
-  const labels: Record<string, string> = { messages: "원문", memories: "기억", relationships: "관계", assertions: "사실", beliefs: "belief", promises: "약속", socialKnowledge: "지인", physicalIntimacy: "스킨십", translations: "번역", pendingReextraction: "자식에서 다시 정리할 원문" };
-  const counts = Object.entries(lineage.inheritedCounts ?? {}).filter(([, value]) => value > 0).map(([key, value]) => `${labels[key] ?? key} ${value}`).join(" · ");
-  const kind = lineage.kind === "branch" ? "과거 분기" : lineage.kind === "pruned_copy" ? "앞부분을 자른 복사" : "전체 복사";
+  const counts = lineage.inheritedCounts ?? {};
+  const where = lineage.kind === "branch" ? "분기한 지점까지의" : lineage.kind === "pruned_copy" ? "복사본에 남은 부분의" : "복사한 대화의";
+  const redo = Number(counts.pendingReextraction ?? 0);
   return homeMessage({
-    title: `${lineage.parentTitle ?? lineage.parentChatId ?? "원본 채팅"}에서 기억을 상속했습니다.`,
-    bodyHtml: `<p>${kind}${lineage.forkOrdinal !== undefined ? ` · fork #${lineage.forkOrdinal}` : ""}${counts ? ` · ${escapeHtml(counts)}` : ""}</p>`,
+    title: `「${lineage.parentTitle ?? lineage.parentChatId ?? "원본 채팅"}」의 기억을 이어받았어요`,
+    bodyHtml: `<p>${where} ${escapeHtml(transferCountSummary(counts))}를 가져왔어요.${redo > 0 ? ` 분기 직전 메시지 ${redo.toLocaleString()}개는 이 채팅에서 다시 정리해요.` : ""}</p>`,
     actionsHtml: '<button class="btn btn--primary" data-action="acknowledge-lineage">확인</button><button class="btn btn--danger" data-action="revert-lineage">상속 취소</button>',
     tone: "success",
   });
-}
-
-export function lineagePath(data: DashboardData): string {
-  const ancestry = data.lineage?.ancestry ?? [];
-  if (ancestry.length < 2) return "";
-  const renderPath = (items: typeof ancestry): string => `<ol class="lineage">${items.map((item, index) => {
-    const edge = index === 0 ? "" : `<span class="lineage__edge">${item.kind === "branch" ? "분기" : item.kind === "pruned_copy" ? "잘린 복사" : item.detection === "manual_cross_bot" ? "수동 상속" : "복사"}${item.forkOrdinal === undefined ? "" : ` #${item.forkOrdinal}`}</span>`;
-    const label = item.title || item.chatId;
-    const node = item.exists
-      ? `<button type="button" class="linkbtn" data-action="view-server-data" data-chat-id="${escapeHtml(item.chatId)}" title="${escapeHtml(item.chatId)}">${escapeHtml(label)}</button>`
-      : `<span class="sub" title="${escapeHtml(item.chatId)}">${escapeHtml(label)} · 원본 서버 자료 없음</span>`;
-    return `<li>${edge}${node}</li>`;
-  }).join("")}</ol>`;
-  const path = renderPath(ancestry);
-  return `<section class="lineage-block"><h2 class="sec">채팅 계보 <span class="n">각 채팅은 상속 시점 이후 독립적으로 진행됩니다</span></h2>${ancestry.length > 5 ? fold(`${ancestry[0]?.title || ancestry[0]?.chatId} → ${ancestry.length - 2}개 중간 세대 → ${ancestry.at(-1)?.title || ancestry.at(-1)?.chatId}`, path, { role: "section", preserveKey: "lineage-path" }) : path}</section>`;
 }
 
 export function noActiveChat(data: DashboardData, tab: Tab, state: RuntimeState): string {
@@ -2743,7 +2773,7 @@ export function relationshipsV2(state: RuntimeState, data: DashboardData, select
   const stateContent = `<div class="relations${hasDetail && (mobileDetail || basicEditor) ? " is-detail" : ""}"><div class="split">${list}<div class="readercol" data-preserve-scroll="reader:relationship:${escapeHtml(selectedPair?.key ?? "")}:${escapeHtml(basicEditor ? "edit" : "")}">${reader}</div></div></div>`;
 
   const socialJobs = data.socialKnowledgeJobs ?? {}, socialBusy = Number(socialJobs.queued ?? 0) + Number(socialJobs.leased ?? 0);
-  const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId) : false;
+  const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId) : false;
   const social = [...(data.socialKnowledge ?? [])].sort((left: any, right: any) => comparePeople(data, String(left.holder), String(right.holder))
     || comparePeople(data, String(left.subject), String(right.subject))
     || compareUiText([(left.knownAs ?? []).join(" "), (right.knownAs ?? []).join(" ")]));
@@ -3053,8 +3083,8 @@ export function attentionPage(data: DashboardData, translations: TranslationView
   });
   const small: AttentionItem[] = data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending").map((item: any) => ({
     id: `small:${audit.id}:${item.id}`, type: "small" as const, title: item.kind === "recognition" ? `${item.holder} → ${item.subject}` : item.text,
-    summary: item.kind === "recognition" ? item.text : item.canKeep ? "확인된 원문이 있어요" : "원문 확인 보류", time: audit.updatedAt,
-    category: item.kind === "recognition" ? "인식 연결" : item.kind === "dialogue" ? "대사" : "발췌", value: {...item, auditId: audit.id},
+    summary: item.kind === "recognition" ? (item.memoryTitle ? `「${item.memoryTitle}」` : item.text) : item.canKeep ? "확인된 원문이 있어요" : "원문 확인 보류", time: audit.updatedAt,
+    category: item.kind === "recognition" ? "인식 연결" : item.kind === "dialogue" ? "대사" : "발췌", value: {...item, auditId: audit.id, sourceRangeId: audit.sourceRangeId},
   })));
   const all = [...audits, ...duplicates, ...conflictsPending, ...small].sort((left, right) => Number(right.time ?? 0) - Number(left.time ?? 0));
   if (!all.length) return `<div class="attention">${pageHeader("상태 확인", "RCM이 자동으로 바꾸지 않은 상태와 충돌만 모았습니다.")}${empty("확인할 기록이 없습니다", "새로 확인이 필요한 기록이 생기면 여기에 모입니다.")}</div>`;
@@ -3142,7 +3172,7 @@ export function pluginDiagnosticSummary(state: RuntimeState, data: DashboardData
 
 export function operations(state: RuntimeState, data: DashboardData): string {
   const serverMode = state.settings.extractionEngine === "server";
-  const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId) : false;
+  const chatEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId) : false;
   const serverWorker = data.health?.serverWorker ?? state.serverWorker;
   const failedCount = data.jobs.filter((job) => job.status === "failed").length;
   const blockingFailed = data.jobs.filter((job) => job.status === "failed" && job.type === "extract").length;
@@ -3249,24 +3279,26 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const metadata = [triggerLabel, target].filter(Boolean).join(' · ');
     const groupDetail = (metadata ? `<p class="sub">${escapeHtml(metadata)}</p>` : '')
       + (storyLevel && typeof payload.targetGroupId === 'string' ? `<p class="sub">대상 그룹 · ${escapeHtml(payload.targetGroupId)}</p>` : '');
+    const progressSent = payload.progressSent as {count?: number} | undefined;
+    const progressNote = Number(progressSent?.count) > 0 ? `<p class="sub">진도 확인 ${Number(progressSent!.count)}칸 · 체크 ${Number(payload.progressApplied ?? 0)}칸</p>` : "";
+    const progressTechnical = Array.isArray(payload.progressDrops) && payload.progressDrops.length ? fold("기술 세부정보", `<pre class="packet">${escapeHtml(JSON.stringify({progressSent,progressReturned:payload.progressReturned,progressApplied:payload.progressApplied,progressDrops:payload.progressDrops},null,2))}</pre>`, {role:"section",preserveKey:`progress-technical:${job.id}`}) : "";
     const auditDrops = Array.isArray(payload.auditAdditionDrops) ? payload.auditAdditionDrops as import("@rcm/shared").ExtractionAuditSubmission["additionDrops"] : undefined;
     const auditDropNote = auditDrops?.length ? `<details class="fold"><summary>재검수 추가 항목 ${auditDrops.length}개 제외</summary><ul>${auditDrops.map(drop =>
       `<li>${escapeHtml(`${drop.array}[${drop.index}]`)}<ul>${drop.issues.map(issue => `<li>${escapeHtml(issue.path.join("."))}: ${escapeHtml(issue.message)}</li>`).join("")}</ul></li>`).join("")}</ul></details>` : "";
     const withheldRecognitions = Array.isArray(payload.withheldRecognitions) ? payload.withheldRecognitions.filter((item): item is { holder?: unknown; what?: unknown } => Boolean(item && typeof item === "object")) : [];
-    const sourceRange = payload.sourceRange && typeof payload.sourceRange === "object" ? payload.sourceRange as { id?: unknown } : undefined;
     // Withheld recognition is a note on a finished job, not an error: the row names it, the body lists it once.
     const withheldNote = withheldRecognitions.length ? `기억 ${Number(payload.memoriesSaved ?? 0)}개 저장 · 인물 인지 ${withheldRecognitions.length}건 보류` : "";
     const withheldFold = withheldRecognitions.length ? `<section class="withheld" aria-label="보류한 인물 인지"><p class="withheld__head">보류한 인물 인지 ${withheldRecognitions.length}건</p><ul class="withheld__list">${withheldRecognitions.map((item) => {
       const holder = String(item.holder ?? "").trim() || "인물";
       const what = String(item.what ?? "").trim() || "인식 기록";
       return `<li><b>${escapeHtml(holder)}</b><span>${escapeHtml(what)}</span></li>`;
-    }).join("")}</ul><p class="withheld__why">연결된 기억에 이 인물이 사실을 알게 된 장면이 없어 보류했어요. 맞다면 원문에서 직접 추가할 수 있어요.</p>${sourceRange?.id ? btn("원문에서 기억 추가", { kind: "quiet", icon: "search", action: "organization-add-memory", data: { id: String(sourceRange.id) } }) : ""}</section>` : "";
+    }).join("")}</ul><p class="withheld__why">연결된 기억에 이 인물이 사실을 알게 된 장면이 없어 보류했어요.</p>${btn("상태에서 확인", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "reviews", attentionFilter: "small" } })}</section>` : "";
     const rowDetail = [job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : job.status === "leased" ? stageLabel || "기억 처리 중" : "", metadata].filter(Boolean).join(' · ');
     const terminalTag = terminalState ? `<span class="job__status is-${escapeHtml(statusKey)}">${escapeHtml(statusLabel)}</span>` : "";
     // Inside a same-kind burst the kind is already the parent's title; a child names only what differs.
     const childName = child ? target || triggerLabel || title : title;
     const childDetail = [held ? CHAT_WORK_HELD_MESSAGE : child ? (job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : "") : rowDetail, withheldNote].filter(Boolean).join(" · ");
-    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}${Number(payload.smallReviewCount) > 0 ? `<p class="review-small__processing">후보 보류 · 추가 호출 없음</p>` : ""}${withheldFold}${auditDropNote}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
+    return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}${Number(payload.smallReviewCount) > 0 ? `<p class="review-small__processing">후보 보류 · 추가 호출 없음</p>` : ""}${withheldFold}${auditDropNote}${progressNote}${progressTechnical}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
   };
   const isUnresolvedJob = (job: any): boolean => ["queued", "leased", "failed"].includes(job.status);
   const currentRunId = data.coldStartProgress?.acknowledged ? undefined : data.coldStartProgress?.backfillRunId;
@@ -3453,31 +3485,118 @@ export function acknowledgeBackfillLocally(data: DashboardData, runId: string): 
 
 const normalizeBotName = (value: unknown): string => String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
 
-export async function readHostChatInventory(): Promise<HostChatInventoryItem[]> {
+export async function readHostChatInventory(): Promise<HostChatInventory> {
   const database = await risuai.getDatabase(["characters"]);
   if (!database || !("characters" in database)) throw new Error("Risu 채팅 목록 권한을 사용할 수 없습니다");
   const raw = database?.characters;
-  const characters = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? Object.values(raw) : [];
+  if (!raw || typeof raw !== "object") throw new Error("Risu 캐릭터 목록을 읽지 못했습니다");
+  const characters = Array.isArray(raw) ? raw : Object.values(raw);
   const items: HostChatInventoryItem[] = [];
+  const characterIds = new Set<string>();
+  const completeCharacterIds = new Set<string>();
+  const duplicateCharacterIds = new Set<string>();
+  let charactersComplete = true;
   for (const [index, character] of characters.entries()) {
-    if (!character || typeof character !== "object") continue;
+    if (!character || typeof character !== "object") { charactersComplete = false; continue; }
+    const stableId = character.chaId ?? character.id;
+    const stableCharacter = typeof stableId === "string" && stableId.length > 0;
+    if (!stableCharacter) charactersComplete = false;
+    else {
+      if (characterIds.has(stableId)) { charactersComplete = false; duplicateCharacterIds.add(stableId); }
+      characterIds.add(stableId);
+    }
     const characterId = String((character as any).chaId ?? (character as any).id ?? index);
     const characterName = String((character as any).name ?? characterId).trim() || characterId;
     const chats = Array.isArray((character as any).chats) ? (character as any).chats : [];
+    let complete = stableCharacter && Array.isArray(character.chats);
+    const chatIds = new Set<string>();
     for (const [chatIndex, chat] of chats.entries()) {
-      if (!chat || typeof chat !== "object") continue;
+      if (!chat || typeof chat !== "object") { complete = false; continue; }
+      if (typeof chat.id !== "string" || !chat.id || chatIds.has(chat.id)) complete = false;
+      if (typeof chat.id === "string" && chat.id) chatIds.add(chat.id);
       const chatId = String(chat.id ?? `${characterId}:${chatIndex}`);
       let messageCount = Array.isArray((chat as any).message) ? (chat as any).message.length : 0;
       if (!messageCount) {
         try {
           const full = await risuai.getChatFromIndex(index, chatIndex);
+          if (!full || full.id !== chat.id || !Array.isArray(full.message)) complete = false;
           messageCount = Array.isArray(full?.message) ? full.message.length : 0;
-        } catch { /* explicit inventory remains useful even when one chat body is unavailable */ }
+        } catch { complete = false; /* Keep counts already read, but never infer deletion from this character. */ }
       }
       items.push({ characterId, characterName, chatId, chatTitle: String(chat.name ?? chat.title ?? "").trim() || `채팅 ${chatIndex + 1}`, messageCount });
     }
+    if (complete) completeCharacterIds.add(characterId);
   }
-  return items;
+  for (const id of duplicateCharacterIds) completeCharacterIds.delete(id);
+  return { items, characterIds, completeCharacterIds, charactersComplete };
+}
+
+export function deletedHostChats(state: RuntimeState, data: Pick<DashboardData, "adminChats">, view: DataViewState): any[] {
+  const ids = new Set(view.deletedChatIds);
+  return data.adminChats.filter(chat => ids.has(chat.id) && chat.id !== state.current?.chatId);
+}
+
+export async function scanDeletedHostChats(state: RuntimeState, client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats">, view: DataViewState): Promise<void> {
+  view.deletedChatIds = [];
+  view.cleanupConfirmation = undefined;
+  view.cleanupResult = undefined;
+  view.inventoryError = undefined;
+  view.inventoryPartial = false;
+  view.inventoryStatus = "loading";
+  let inventory: HostChatInventory;
+  try {
+    inventory = await readHostChatInventory();
+  } catch {
+    view.inventory = [];
+    view.inventoryStatus = "unavailable";
+    return;
+  }
+  view.inventory = inventory.items;
+  view.inventoryPartial = !inventory.charactersComplete || inventory.completeCharacterIds.size !== inventory.characterIds.size;
+  const hostIds = new Set(inventory.items.map(item => item.chatId));
+  view.deletedChatIds = data.adminChats.filter(chat => chat.id !== state.current?.chatId && !hostIds.has(chat.id)
+    && (inventory.completeCharacterIds.has(chat.characterId)
+      || (inventory.charactersComplete && !inventory.characterIds.has(chat.characterId)))).map(chat => chat.id);
+  const failures: string[] = [];
+  for (const chat of deletedHostChats(state, data, view)) {
+    if (chat.id === state.current?.chatId) continue;
+    try { await stopDeletedHostChatWork(state, client, chat.id); }
+    catch (error) { failures.push(`${chat.chatTitle || chat.id}: ${sanitizeDiagnosticText(String(error))}`); }
+  }
+  view.inventoryError = failures.length ? `작업 중지 실패 ${failures.length}개 · ${failures.join(" · ")}. 다시 찾아 주세요.` : undefined;
+  view.inventoryStatus = "ready";
+}
+
+/** The per-chat delete path is shared by individual and bulk cleanup. */
+export async function deleteServerChatRecords(state: RuntimeState, client: Pick<ServerClient, "request">, chatId: string): Promise<void> {
+  await client.request(`/v1/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" }, 30_000);
+  await discardSetupCapture(state, chatId);
+  clearDeletedChatState(state, chatId);
+  await invalidateTranslationCache(state, { chatId });
+  await saveSettings(state.settings);
+}
+
+export async function cleanupDeletedHostChats(state: RuntimeState, client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats">, view: DataViewState): Promise<void> {
+  if (view.cleanupRunning || !view.cleanupConfirmation || view.inventoryStatus !== "ready") return;
+  const confirmed = new Set(view.cleanupConfirmation);
+  const chats = deletedHostChats(state, data, view).filter(chat => confirmed.has(chat.id));
+  view.cleanupRunning = true;
+  view.cleanupConfirmation = undefined;
+  let deleted = 0;
+  let skipped = 0;
+  const failures: string[] = [];
+  try {
+    for (const chat of chats) {
+      if (chat.id === state.current?.chatId) { skipped++; continue; }
+      try {
+        await deleteServerChatRecords(state, client, chat.id);
+        data.adminChats = data.adminChats.filter(item => item.id !== chat.id);
+        view.deletedChatIds = view.deletedChatIds?.filter(id => id !== chat.id);
+        deleted++;
+      } catch (error) { failures.push(`${chat.chatTitle || chat.id}: ${sanitizeDiagnosticText(String(error))}`); }
+    }
+    view.cleanupResult = `RCM 기록 ${deleted}개 정리했어요${failures.length ? ` · 실패 ${failures.length}개: ${failures.join(" · ")}` : ""}${skipped ? ` · 현재 채팅 ${skipped}개 제외` : ""}`;
+  } finally { view.cleanupRunning = false; }
 }
 
 function confirmationPanel(chat: any, confirmation?: DataConfirmation): string {
@@ -3493,39 +3612,16 @@ function confirmationPanel(chat: any, confirmation?: DataConfirmation): string {
   return `<div class="confirm${action === "delete" ? " is-danger" : ""}" role="alert"><b>${title}</b><p class="sub">${escapeHtml(detail)}</p>${check}<div class="decide">${buttons}</div></div>`;
 }
 
-function sourceLedgerTable(inspector: ServerInspector): string {
-  const ledger = inspector.ledger;
-  if (!ledger) return '<p class="sub">원문 장부 요약을 불러오는 중입니다.</p>';
-  const rows = ledger.items.map((item) => `<tr><td>${Number(item.ordinal)}</td><td>${escapeHtml(item.role)}</td><td>${escapeHtml(item.lifecycle)}</td><td>${escapeHtml(item.host_visibility)}</td><td>${escapeHtml(item.extraction_state)}</td><td>${formatTime(item.event_time)}</td><td>${Number(item.content_bytes ?? 0).toLocaleString()}</td>${ledger.includesContent ? `<td class="srclog__content">${escapeHtml(item.content ?? "(본문 정리됨)")}</td>` : ""}</tr>`).join("");
-  const previous = Math.max(0, ledger.offset - ledger.limit);
-  const next = ledger.offset + ledger.limit;
-  return `<div class="srclog__bar"><span class="sub">${ledger.offset + 1}–${Math.min(ledger.total, next)} / ${ledger.total}</span>${btn("이전", { kind: "quiet", icon: "back", action: "ledger-page", data: { offset: String(previous) }, disabled: ledger.offset === 0 })}${btn("다음", { kind: "quiet", iconEnd: "chevron", action: "ledger-page", data: { offset: String(next) }, disabled: next >= ledger.total })}</div><div class="tablewrap"><table class="table"><thead><tr><th>#</th><th>Role</th><th>Lifecycle</th><th>Visibility</th><th>Extraction</th><th>Time</th><th>Chars</th>${ledger.includesContent ? "<th>원문</th>" : ""}</tr></thead><tbody>${rows}</tbody></table></div>${ledger.includesContent ? notice("원문은 이 화면에만 표시됩니다. 공유 화면이나 캡처에 포함되지 않도록 주의하세요.") : `<p class="sub">기본 보기에는 원문 본문을 전송하지 않습니다. 개인정보가 포함될 수 있습니다.</p>${btn("원문 내용 표시", { kind: "secondary", action: "reveal-ledger-content" })}`}`;
-}
-
-function serverInspectorView(data: DashboardData, inspector: ServerInspector | undefined, translations: TranslationView, display: RuntimeState["settings"]["translationDisplay"]): string {
-  if (!inspector) return "";
-  const chat = data.adminChats.find((item) => item.id === inspector.chatId);
-  const effectiveDisplay: TranslationDisplay = chat?.memoryLanguage === "ko" ? "en" : display;
-  const head = `<div class="inspector__head"><h2 class="sec">기록 보기 <span class="n">${escapeHtml(chat?.chatTitle || inspector.chatId)} · 읽기 전용</span></h2>${btn("닫기", { kind: "quiet", icon: "close", action: "close-server-inspector" })}</div>`;
-  if (inspector.loading) return `<section class="inspector">${head}<p class="sub">불러오는 중입니다.</p></section>`;
-  if (inspector.error) return `<section class="inspector">${head}${notice(inspector.error, { tone: "cut" })}</section>`;
-  const memoryRows = inspector.memories.map((item) => {
-    const title = displayText(String(item.title ?? ""), translations.get(`${item.id}:title`), effectiveDisplay);
-    const content = displayText(String(item.content ?? ""), translations.get(`${item.id}:content`), effectiveDisplay);
-    return `<details class="fold"><summary><span>${title}</span></summary><div class="fold__body"><p class="rec">${content}</p></div></details>`;
-  }).join("") || '<p class="sub">기억이 없습니다.</p>';
-  const relationshipRows = inspector.relationships.map((item) => `<tr><td>${escapeHtml(relationshipFrom(item))} → ${escapeHtml(relationshipTo(item))}</td><td>${["affection","trust","intimacy","fear","jealousy","hostility"].map((axis) => `${axis} ${relationshipAxisText(item, axis)}`).join(" · ")}</td></tr>`).join("");
-  const worldRows = [
-    ...inspector.assertions.map((item) => ["Fact", `${item.subject}.${item.predicate} = ${item.value}`]),
-    ...inspector.beliefs.map((item) => ["Belief", `${item.holder}: ${item.subject}.${item.predicate} = ${item.value}`]),
-    ...inspector.promises.map((item) => ["Promise", `${item.promisor} → ${item.promisee}: ${item.content} (${item.status})`]),
-  ].map(([kind, value]) => `<tr><td>${kind}</td><td>${escapeHtml(value)}</td></tr>`).join("");
-  const ledger = data.health?.capabilities?.sourceLedgerInspection ? sourceLedgerTable(inspector) : '<p class="sub">원문 장부 열람은 API 12 서버 업데이트가 필요합니다.</p>';
-  return `<section class="inspector">${head}<h3 class="subhead">Memories</h3>${memoryRows}<h3 class="subhead">Relationships</h3><div class="tablewrap"><table class="table"><tbody>${relationshipRows || '<tr><td class="sub">관계가 없습니다.</td></tr>'}</tbody></table></div><h3 class="subhead">World facts · beliefs · promises</h3><div class="tablewrap"><table class="table"><tbody>${worldRows || '<tr><td class="sub">구조화 상태가 없습니다.</td></tr>'}</tbody></table></div><h3 class="subhead">Review · Conflicts</h3><p class="sub">${inspector.reconciliationReviews.length} review · ${inspector.conflicts.length} conflict</p><h3 class="subhead">Source ledger</h3>${ledger}</section>`;
-}
-
 export function dataManagement(state: RuntimeState, data: DashboardData, view: DataViewState, translations: TranslationView): string {
+  const operation = currentLineageOperation(state);
+  if (state.current?.chatId === data.chatId && state.statusSummary?.lineage) data = {...data,lineage:state.statusSummary.lineage};
+  const operationNotice = operation && (operation.kind !== 'select' || !['ambiguous','choice_required'].includes(data.lineage?.status ?? ''))
+    ? `<section class="lineage-operation" data-lineage-state="${operation.status}" aria-busy="${operation.status === 'running'}">${notice(operation.status === 'running'
+      ? '기억을 가져오고 있어요… 대화가 길면 조금 걸려요.' : operation.error ?? '완료됐는지 확인하지 못했어요. 다시 상태를 확인해 주세요.',
+      {action: operation.status === 'failed' ? btn('다시 확인',{action:'retry-lineage-open'}) : ''})}</section>` : '';
   const localByChat = new Map(view.inventory.map((item) => [item.chatId, item]));
+  const deletedChats = deletedHostChats(state, data, view);
+  const deletedIds = new Set(deletedChats.map(chat => chat.id));
   const currentCharacterId = state.current?.characterId;
   const serverHasCurrent = Boolean(state.current && data.adminChats.some((chat) => chat.id === state.current!.chatId));
   const visibleChats = serverHasCurrent || !state.current ? data.adminChats : [...data.adminChats, {
@@ -3554,30 +3650,40 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
       || Number(right.id === state.current?.chatId) - Number(left.id === state.current?.chatId)
       || String(left.chatTitle ?? "").localeCompare(String(right.chatTitle ?? ""), ["ko", "en"], { numeric: true })
       || Number(right.updatedAt ?? 0) - Number(left.updatedAt ?? 0));
-  let lastGroup = "";
-  const rows = filtered.map((chat) => {
+  const titleOf = (chat: any): string => localByChat.get(chat.id)?.chatTitle || state.current?.chatTitles?.[chat.id] || (state.current?.chatId === chat.id ? state.current?.chatTitle : "") || chat.chatTitle || "제목 없음";
+  const botOf = (chat: any): string => String(localByChat.get(chat.id)?.characterName || chat.characterName || chat.characterId || "봇 이름 없음");
+  // One row; `family` adds where a child came from and the 지금/새로 시작 tags.
+  const chatRow = (chat: any, family?: { parent?: any; rootTitle: string; kid: boolean }) => {
     const registered = chat.serverRegistered !== false;
     const local = localByChat.get(chat.id);
     const chatId = String(chat.id);
-    const titleText = local?.chatTitle || state.current?.chatTitles?.[chat.id] || (state.current?.chatId === chat.id ? state.current?.chatTitle : "") || chat.chatTitle || "제목 없음";
-    const botName = local?.characterName || chat.characterName || chat.characterId || "봇 이름 없음";
+    const titleText = titleOf(chat);
+    const botName = botOf(chat);
     const sourceCount = local?.messageCount ?? (state.current?.chatId === chat.id ? state.current?.sourceMessageCount : undefined);
-    const inherited = chat.lineage?.status === "inherited" ? `<small>${escapeHtml(chat.lineage.parentTitle ?? chat.lineage.parentChatId ?? "원본")}에서 이어받음</small>` : "";
+    const parentTitle = family?.parent ? titleOf(family.parent) : chat.lineage?.parentTitle ?? chat.lineage?.parentChatId ?? "원본";
+    const copied = chat.lineage?.kind === "copy" || chat.lineage?.kind === "pruned_copy";
+    const fork = chat.lineage?.forkOrdinal;
+    const from = !family ? parentTitle : family.parent && titleOf(family.parent) === family.rootTitle ? "원본" : familyShortTitle(parentTitle, family.rootTitle);
+    const fromText = chat.lineage?.status !== "inherited" ? "" : copied ? `${from} 복사` : `${from}에서${fork === undefined ? "" : ` · ${(fork + 1).toLocaleString()}번째`}`;
+    // Inside a family the origin leads the meta line; elsewhere (search hits, a deleted parent) it gets its own line.
+    const inherited = fromText && !family?.kid ? `<small class="chatrow__from">${escapeHtml(fromText)}</small>` : "";
+    const tags = `${state.current?.chatId === chat.id ? '<span class="chatrow__tag chatrow__tag--now">지금 채팅</span>' : ""}${["independent", "reverted"].includes(chat.lineage?.status) ? '<span class="chatrow__tag">새로 시작</span>' : ""}${deletedIds.has(chat.id) ? '<span class="chatrow__tag chatrow__tag--gone">Risu에서 삭제됨</span>' : ""}`;
+    const glyph = family?.kid ? `<span class="chatrow__glyph" aria-hidden="true">${icon(copied ? "copy" : "branch")}</span>` : "";
     const diagnostics = (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) && data.health?.capabilities?.retrievalDiagnostics === true
       ? [{ label: chat.retrievalDiagnosticsEnabled === true ? "진단 기록 끄기" : "진단 기록 켜기", icon: "settings", action: "toggle-retrieval-diagnostics", data: { chatId, enabled: String(chat.retrievalDiagnosticsEnabled === true) } }]
       : [];
     const actions = registered ? menu({ label: `${botName} · ${titleText} 더보기`, title: `${botName} · ${titleText}`, items: [
-      { label: "기록 보기", icon: "search", action: "view-server-data", data: { chatId } },
       { label: "이 채팅 백업", icon: "download", action: "export-chat-backup", data: { chatId }, disabled: Boolean(view.backupExportPhase) },
       ...diagnostics,
-      ...(state.current && chat.id !== state.current.chatId ? [{ label: "현재 채팅으로 기억 가져오기", icon: "arrow-right", action: "inherit-from-chat", data: { chatId } }] : []),
+      ...(state.current && chat.id !== state.current.chatId ? [{ label: "현재 채팅으로 기억 가져오기", icon: "arrow-right", action: "inherit-from-chat", data: { chatId }, disabled: operation?.status === 'running' }] : []),
       { label: "다시 만들기", icon: "refresh", action: "open-data-operation", data: { operation: "rebuild", chatId } },
       { label: "RCM 기록 삭제", icon: "delete", action: "open-data-operation", data: { operation: "delete", chatId }, danger: true },
     ] }) : '<span class="sub">RCM 서버 미등록</span>';
-    // A row says what a person acts on; ids, byte sizes and per-table totals stay behind 기록 보기.
+    // Keep the row focused on the records and actions people manage.
     const unsynced = sourceCount === undefined ? 0 : Math.max(0, Number(sourceCount) - Number(chat.messages ?? 0));
     const attention = Number(chat.pendingReviews ?? 0) + Number(chat.pendingConflicts ?? 0);
     const meta = [
+      family?.kid ? fromText : "",
       `기억 ${Number(chat.memories ?? 0).toLocaleString()} · 관계 ${Number(chat.relationships ?? 0)}`,
       registered ? `갱신 ${formatRelativeTime(chat.updatedAt)}` : "",
     ].filter(Boolean).map(escapeHtml).join(" · ");
@@ -3585,26 +3691,46 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
       unsynced ? `<span class="chatrow__flag">원문 ${unsynced.toLocaleString()}개 미동기화</span>` : "",
       attention ? `<span class="chatrow__flag">확인 필요 ${attention}</span>` : "",
     ].join("");
-    const group = String(botName);
-    const header = group !== lastGroup ? `<h2 class="sec chats__bot">${escapeHtml(group)}</h2>` : "";
-    lastGroup = group;
-    return `${header}<div class="chat" data-data-row><div class="chatrow"><div class="chatrow__main"><b>${escapeHtml(titleText)}</b>${inherited}<span class="chatrow__meta">${meta}</span>${flags}</div><div class="chatrow__acts">${actions}</div></div>${confirmationPanel(chat, view.confirmation)}</div>`;
-  }).join("");
-  const inventoryLabel = view.inventoryStatus === "loading" ? "Risu 원문과 대조 중…" : "Risu 원문과 대조";
+    return `<div class="chat${family?.kid ? " chat--kid" : ""}${state.current?.chatId === chat.id ? " is-current" : ""}" data-data-row><div class="chatrow">${glyph}<div class="chatrow__main"><b>${escapeHtml(titleText)}${tags}</b>${inherited}<span class="chatrow__meta">${meta}</span>${flags}</div><div class="chatrow__acts">${actions}</div></div>${confirmationPanel(chat, view.confirmation)}</div>`;
+  };
+  // Bots keep their order; inside a bot, each original chat leads its branches and copies, folded one level deep.
+  // A search shows plain matching rows so a hit is never hidden inside a closed family.
+  const bots: Array<[string, any[]]> = [];
+  for (const chat of filtered) {
+    const name = botOf(chat);
+    const group = bots.find(([bot]) => bot === name);
+    if (group) group[1].push(chat); else bots.push([name, [chat]]);
+  }
+  const rows = bots.map(([bot, chats]) => `<h2 class="sec chats__bot">${escapeHtml(bot)}</h2>${query ? chats.map((chat) => chatRow(chat)).join("") : chatFamilies(chats, state.current?.chatId).map(({ root, members }) => {
+    const rootTitle = titleOf(root);
+    if (!members.length) return `<div class="fam">${chatRow(root)}</div>`;
+    const open = root.id === state.current?.chatId || members.some(({ chat }) => chat.id === state.current?.chatId);
+    return `<div class="fam">${chatRow(root)}<details class="fam__fold" data-preserve-open="data-family:${escapeHtml(String(root.id))}"${open ? " open" : ""}><summary><span>분기·복사 ${members.length}개</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary>${members.map(({ chat, parent }) => chatRow(chat, { parent, rootTitle, kid: true })).join("")}</details></div>`;
+  }).join("")}`).join("");
+  const inventoryLabel = view.inventoryStatus === "loading" ? "Risu에서 지워진 채팅 찾는 중…" : "Risu에서 지워진 채팅 찾기";
+  const scanNotice = view.inventoryStatus === "ready"
+    ? notice(deletedChats.length ? `Risu에 없는 채팅 ${deletedChats.length}개 · RCM 기록만 남아 있어요`
+      : view.inventoryPartial ? "읽은 목록에서는 지워진 채팅을 찾지 못했어요" : "Risu에서 지워진 채팅이 없어요", {
+      action: deletedChats.length ? btn("모두 정리", { kind: "secondary", action: "open-deleted-chat-cleanup", disabled: view.cleanupRunning }) : "",
+    }) : view.inventoryStatus === "unavailable" ? notice("Risu 목록을 읽지 못했어요. 다시 찾아 주세요.") : "";
+  const scanPartial = view.inventoryStatus === "ready" && view.inventoryPartial ? notice("일부 Risu 목록을 끝까지 읽지 못했어요. 해당 목록은 삭제 판정에서 제외했어요.") : "";
+  const cleanupChats = deletedChats.filter(chat => view.cleanupConfirmation?.includes(chat.id));
+  const cleanupConfirmation = view.cleanupConfirmation && cleanupChats.length ? `<div class="confirm is-danger" role="alert"><b>채팅 ${cleanupChats.length}개의 RCM 기록을 삭제할까요?</b><p class="sub">${cleanupChats.map(chat => escapeHtml(titleOf(chat))).join(" · ")}</p><p class="sub">RCM 원문 장부와 기억을 삭제해요. RCM ZIP 백업 외에는 복구할 수 없어요.</p><div class="decide">${btn("취소", { kind: "quiet", action: "cancel-deleted-chat-cleanup" })}${btn("RCM 기록 삭제", { kind: "danger-solid", action: "confirm-deleted-chat-cleanup" })}</div></div>` : "";
+  const cleanupStatus = view.cleanupRunning ? notice("RCM 기록을 정리하고 있어요…") : view.cleanupResult ? notice(view.cleanupResult) : "";
   // Search and the bot filter earn their space only once the list is long; a typed query keeps them visible.
   const controls = visibleChats.length > 5 || query || view.filter !== "all"
-    ? `<div class="tl-tools datatools"><label class="search">${icon("search")}<span class="sr-only">채팅 검색</span><input class="input" data-action="data-search" value="${escapeHtml(view.query)}" placeholder="봇 이름, 채팅 제목, ID 검색"></label><label class="relperson"><span class="sr-only">봇 필터</span><select class="select" data-action="data-filter"><option value="all" ${view.filter === "all" ? "selected" : ""}>전체 봇</option><option value="current" ${view.filter === "current" ? "selected" : ""}>현재 봇</option><option value="other" ${view.filter === "other" ? "selected" : ""}>다른 봇</option></select></label></div>`
+    ? `<div class="tl-tools datatools"><label class="search">${icon("search")}<span class="sr-only">채팅 검색</span><input class="input" data-action="data-search" value="${escapeHtml(view.query)}" placeholder="채팅 검색"></label><label class="relperson"><span class="sr-only">봇 필터</span><select class="select" data-action="data-filter"><option value="all" ${view.filter === "all" ? "selected" : ""}>모든 봇</option><option value="current" ${view.filter === "current" ? "selected" : ""}>현재 봇</option><option value="other" ${view.filter === "other" ? "selected" : ""}>다른 봇</option></select></label></div>`
     : "";
   const backupBusy = Boolean(view.backupExportPhase);
-  const pageMenu = menu({ label: "데이터 더보기", items: [{ label: inventoryLabel, icon: "refresh", action: "load-data-inventory", disabled: view.inventoryStatus === "loading" }] });
+  const pageMenu = menu({ label: "데이터 더보기", items: [{ label: inventoryLabel, icon: "refresh", action: "load-data-inventory", disabled: view.inventoryStatus === "loading" || view.cleanupRunning }] });
   const importAction = `${btn("전체 백업", { kind: "secondary", action: "export-complete-backup", disabled: backupBusy })}<label class="btn btn--secondary" for="backup-file" title="백업 불러오기">백업 불러오기</label><input class="sr-only" id="backup-file" type="file" accept=".zip,application/zip"${backupBusy ? " disabled" : ""}>${pageMenu}`;
   const backupProgress = backupBusy ? notice(`${view.backupExportPhase === "creating" ? "백업 생성" : "다운로드"} · ${view.backupExportChatId ? "선택한 채팅의 RCM 데이터와 채팅별 설정" : "모든 RCM 데이터·설정·키"}을 저장하고 있습니다.`) : "";
   const backupError = view.backupExportError ? notice(`백업을 만들지 못했습니다. ${view.backupExportError}`, { tone: "cut" }) : "";
   return `<div class="datapage">${pageHeader("데이터", "채팅별 RCM 기록을 확인하고 백업하거나 삭제합니다.", importAction)}
-    ${lineagePanel(data)}
-    ${lineagePath(data)}
+    ${operationNotice}${lineagePanel(data, operation)}
     ${lineageProbeNotice(state)}
-    ${backupProgress}${backupError}${controls}${serverInspectorView(data, view.inspector, translations, state.settings.translationDisplay)}
+    ${backupProgress}${backupError}${controls}
+    ${scanNotice}${scanPartial}${view.inventoryError ? notice(view.inventoryError, { tone: "cut" }) : ""}${cleanupConfirmation}${cleanupStatus}
     <section class="chats" aria-label="채팅별 RCM 데이터">${rows || empty("조건에 맞는 RCM 데이터가 없습니다", "검색어나 봇 필터를 바꿔 보세요.")}</section>
     <p class="sub">전체 백업에는 서버 토큰과 API 키가 들어 있습니다. 개인 파일로만 보관하세요.</p></div>`;
 }
@@ -3732,7 +3858,8 @@ export function settingsV2(
   const settings = state.settings;
   const hasCurrentChat = Boolean(state.current);
   const quizGenerating = quizManagementBusy(state, data);
-  const currentChatEnabled = state.current ? isChatMemoryEnabled(settings, state.current.chatId) : settings.defaultChatEnabled;
+  const currentCharacterEnabled = state.current ? settings.characterEnabled[state.current.characterId] !== false : true;
+  const currentChatEnabled = state.current ? (settings.chatEnabled[state.current.chatId] ?? settings.defaultChatEnabled) : settings.defaultChatEnabled;
   const includeUserMessages = state.current ? (settings.includeUserMessages[state.current.chatId] ?? true) : true;
   const upcomingOccasions = state.current ? (settings.upcomingOccasions[state.current.chatId] ?? true) : true;
   const memoryOnlyInjection = state.current ? (settings.memoryOnlyInjection[state.current.chatId] ?? false) : false;
@@ -3767,7 +3894,8 @@ export function settingsV2(
 
   const currentChat = pane("chat", "현재 채팅", `
     ${group("사용", `<div class="form__row">
-      ${check("chatEnabled", "이 채팅에서 RCM 사용", currentChatEnabled, "끄면 이 채팅의 동기화와 기억 작업이 멈춰요.", !hasCurrentChat)}
+      ${check("characterEnabled", "이 캐릭터에서 RCM 사용", currentCharacterEnabled, "끄면 이 캐릭터의 모든 채팅에서 동기화와 기억 작업이 멈춰요.", !hasCurrentChat)}
+      ${check("chatEnabled", "이 채팅에서 RCM 사용", currentChatEnabled, "", !hasCurrentChat || !currentCharacterEnabled).replace("</label>", `<small class="sub" data-character-enabled-note${currentCharacterEnabled ? "" : " hidden"}>끄면 이 채팅의 동기화와 기억 작업이 멈춰요.</small><small class="sub" data-character-disabled${currentCharacterEnabled ? " hidden" : ""}>캐릭터에서 꺼져 있어서 이 채팅도 멈춰 있어요.</small></label>`)}
       ${dashboardChatProfileControl(currentProfile, !hasCurrentChat)}
       ${check("includeUserMessages", "유저 메시지도 기억에 포함", includeUserMessages, "", !hasCurrentChat)}
     </div>`)}
@@ -3776,6 +3904,7 @@ export function settingsV2(
       <label class="field"><span>기억 정본 언어</span><select name="memoryLanguage" ${chatOff}><option value="en" ${desiredMemoryLanguage === "en" ? "selected" : ""}>English</option><option value="ko" ${desiredMemoryLanguage === "ko" ? "selected" : ""}>한국어</option><option value="ja" ${desiredMemoryLanguage === "ja" ? "selected" : ""}>日本語</option><option value="zh" ${desiredMemoryLanguage === "zh" ? "selected" : ""}>中文</option></select>${hint(pendingMemoryLanguage ? `다음 재생성부터 ${escapeHtml(pendingMemoryLanguage.toUpperCase())}` : activeMemoryLanguage !== desiredMemoryLanguage ? `지금은 ${escapeHtml(activeMemoryLanguage.toUpperCase())}` : "")}</label>
       <label class="field"><span>기억 주입량</span><select name="chatMemoryBudget" ${chatOff}><option value="inherit" ${currentMemoryBudget === undefined ? "selected" : ""}>공통값 · ${settings.defaultMemoryBudget.toLocaleString()}</option>${[4_000, 6_000, 8_000, 12_000].map((value) => `<option value="${value}" ${currentMemoryBudget === value ? "selected" : ""}>${value.toLocaleString()} tokens</option>`).join("")}</select></label>
       ${check("memoryOnlyInjection", "기억만 보내기", memoryOnlyInjection, "인물·현재 탭은 계속 기록하지만 상태 장부는 보내지 않습니다. 다가오는 날은 아래 설정을 따릅니다.", !hasCurrentChat)}
+      ${check("pairProgress", "진도 알리기", state.current ? (settings.pairProgress[state.current.chatId] ?? false) : false, "아직 기록되지 않은 두 사람의 경험을 메인 모델에게 알려 줍니다.", !hasCurrentChat)}
       ${check("upcomingOccasions", "다가오는 날 알리기", upcomingOccasions, "생일·기념일이 2주 안으로 다가오면 메인 모델에게 한 줄로 알려 줍니다. 날짜를 자주 건너뛰는 이야기라면 꺼 두세요.", !hasCurrentChat)}
     </div>`)}
     ${group("관점", `<div class="form__row">
@@ -4033,6 +4162,8 @@ export async function loadDashboardData(
   client: ServerClient,
   options: { tab?: Tab; previous?: DashboardData } = {},
 ): Promise<DashboardData> {
+  const startedStatusRevision = state.statusSummaryRevision ?? 0;
+  if (currentLineageOperation(state)?.status === "running") return { ...(options.previous ?? emptyData()), chatId: state.current?.chatId, initialCalibration: undefined };
   const contextPromise = readOptionalDashboardContext(state);
   const requested = new Set(options.tab ? dashboardDatasetsForTab(options.tab) : ALL_DASHBOARD_DATASETS);
   if (!isServerConfigured(state.settings)) {
@@ -4075,9 +4206,11 @@ export async function loadDashboardData(
       memories: "memories", messages: "messages", relationships: "relationships", world: "world-state?includeHistory=true",
       conflicts: "conflicts", jobs: "jobs", recallLogs: "recall-logs", entities: "entities", reviews: "reconciliation-reviews",
       lineage: "lineage", socialKnowledge: "social-knowledge", physicalIntimacy: "physical-intimacy", status: "status",
-      viewPreferences: "view-preferences", audits: "extraction-audits", initialCalibration: "initial-calibration", storySpine: "story-spine",
+      pairProgress: "pair-progress", viewPreferences: "view-preferences", audits: "extraction-audits", initialCalibration: "initial-calibration", storySpine: "story-spine",
     };
-    return `/v1/chats/${chat}/${paths[dataset]}`;
+    const personaHint = context?.identityHints.userPersonaName?.trim();
+    const query = dataset === "pairProgress" && personaHint ? `?userPersonaName=${encodeURIComponent(personaHint)}` : "";
+    return `/v1/chats/${chat}/${paths[dataset]}${query}`;
   };
   const chatCalls = new Map<DashboardChatDataset, PromiseSettledResult<any>>();
   if (context && serverHasCurrent && healthCall.status === "fulfilled" && adminCall.status === "fulfilled") {
@@ -4122,6 +4255,7 @@ export async function loadDashboardData(
     userDeletedBeliefs: previous.userDeletedBeliefs, promiseHistory: previous.promiseHistory,
   });
   const relationshipState = value("relationships", { items: previous.relationships, events: previous.relationshipEvents });
+  const progressState = value("pairProgress", { items: previous.pairProgress, unavailableReason: previous.pairProgressUnavailableReason });
   const viewPreferences = value("viewPreferences", previous.viewPreferences);
   const entities = value("entities", { items: previous.entities }).items;
   // Identity can arrive after the datasets (or during their requests). Resolve
@@ -4139,7 +4273,16 @@ export async function loadDashboardData(
     historicalBackfillMessages: previous.historicalBackfillMessages, ingestionState: previous.ingestionState,
   });
   const statusState = value("status", { pendingReviews: previous.pendingReviews, progress: previous.coldStartProgress });
-  const lineage = value("lineage", previous.lineage ?? { status: "none" }) as ChatLineageStatus;
+  const lineage = value("lineage", statusState.lineage ?? previous.lineage ?? { status: "none" }) as ChatLineageStatus;
+  const calibration = value("initialCalibration", previous.initialCalibration);
+  if ((!options.tab || options.tab === "overview" || options.tab === "initial")
+    && context && healthCall.status === "fulfilled" && adminCall.status === "fulfilled" && isChatMemoryEnabled(state.settings, context.chatId, context.characterId)
+    && needsOpenedChatResolution(state, calibration, lineage)) {
+    void resolveOpenedChat(state, client).catch(() => undefined); // operation owns visible errors
+    return { ...emptyData(), chatId: context.chatId, health: healthCall.value, initialCalibration: undefined };
+  }
+  if (context && lineage.status !== "none" && (state.statusSummaryRevision ?? 0) === startedStatusRevision
+    && JSON.stringify(state.statusSummary?.lineage) !== JSON.stringify(lineage)) syncLineageActivity(state, context.chatId, lineage, calibration);
   const currentAdmin = context ? adminChats.find((chat: any) => chat.id === context.chatId) : undefined;
   const currentHasDerived = currentAdmin && ["memories", "relationships", "assertions", "beliefs", "promises"].some((key) => Number(currentAdmin[key] ?? 0) > 0);
   if (requested.has("lineage") && context && healthCall.status === "fulfilled" && healthCall.value?.capabilities?.readOnlyLineageProbe && lineage.status === "none" && !currentHasDerived) {
@@ -4164,6 +4307,8 @@ export async function loadDashboardData(
     entities,
     socialKnowledge: value("socialKnowledge", { items: previous.socialKnowledge }).items,
     socialKnowledgeJobs: value("socialKnowledge", { jobs: previous.socialKnowledgeJobs }).jobs ?? {},
+    pairProgress: progressState.items ?? [],
+    pairProgressUnavailableReason: progressState.unavailableReason,
     viewPreferences: {
       personaEntity: typeof viewPreferences?.personaEntity === "string" ? viewPreferences.personaEntity : null,
       hiddenAnniversaries: Array.isArray(viewPreferences?.hiddenAnniversaries) ? viewPreferences.hiddenAnniversaries.map(String) : [],
@@ -4207,6 +4352,8 @@ export async function loadDashboardData(
 }
 
 /** One stylesheet per skin; components share markup and each sheet draws it. */
+export const DASHBOARD_FONT_LINKS = '<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112..125,400..600&display=swap">';
+
 export const dashboardStylesheet = (skin: DashboardSkin = "film"): string => (skin === "phone" ? PHONE_CSS : FILM_CSS) + HOLIDAY_CSS + SNOW_CSS;
 
 function applyDashboardSkin(skin: DashboardSkin): void {
@@ -4261,7 +4408,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   document.documentElement.dataset.skin = state.settings.dashboardSkin;
   document.title = "Risu Cognitive Memory";
   if (!document.getElementById("rcm-style")) {
-    document.head.innerHTML = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112..125,400..600&display=swap"><style id="rcm-style">${dashboardStylesheet(state.settings.dashboardSkin)}</style>`;
+    document.head.innerHTML = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">${DASHBOARD_FONT_LINKS}<style id="rcm-style">${dashboardStylesheet(state.settings.dashboardSkin)}</style>`;
   } else applyDashboardSkin(state.settings.dashboardSkin);
   document.body.className = "film";
   document.body.innerHTML = '<div id="app" class="app" aria-busy="true"></div>';
@@ -4537,17 +4684,24 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const nextTranslation=formData.has("translationServerProvider")?readTranslationConnectionSettings(formData):undefined;
     const nextMcp=formData.has("mcpModel")?readMcpSelectorSettings(formData):undefined;
     const includeUserMessages = formData.has("includeUserMessages");
-    const chatEnabled = formData.has("chatEnabled");
+    const characterEnabled = formData.has("characterEnabled");
+    // Disabled controls are absent from FormData; keep the chat's own checked value.
+    const chatEnabled = form.querySelector<HTMLInputElement>('[name="chatEnabled"]')?.checked ?? false;
+    const effectiveEnabled = characterEnabled && chatEnabled;
+    const characterEnabledById = { ...state.settings.characterEnabled };
     const chatEnabledById = { ...state.settings.chatEnabled };
     const catchUpPending = { ...state.settings.chatCatchUpPending };
-    const chatWasEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId) : false;
+    const chatWasEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId) : false;
     if (state.current) {
+      characterEnabledById[state.current.characterId] = characterEnabled;
       chatEnabledById[state.current.chatId] = chatEnabled;
-      if (!chatWasEnabled && chatEnabled) catchUpPending[state.current.chatId] = true;
-      if (!chatEnabled) delete catchUpPending[state.current.chatId];
+      if (!chatWasEnabled && effectiveEnabled) catchUpPending[state.current.chatId] = true;
+      if (!effectiveEnabled) delete catchUpPending[state.current.chatId];
     }
     const perChat = { ...state.settings.includeUserMessages };
     if (state.current) perChat[state.current.chatId] = includeUserMessages;
+    const progressByChat = { ...state.settings.pairProgress };
+    if (state.current) progressByChat[state.current.chatId] = formData.has("pairProgress");
     const occasionsByChat = { ...state.settings.upcomingOccasions };
     if (state.current) occasionsByChat[state.current.chatId] = formData.has("upcomingOccasions");
     const memoryOnlyByChat = { ...state.settings.memoryOnlyInjection };
@@ -4619,16 +4773,31 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const memoryToolsWereEnabled = state.settings.memoryToolsEnabled;
     const quizWasEnabled = state.settings.quizEnabled === true;
     if (state.current) {
-      const result = await new ServerClient(() => ({ ...state.settings, ...nextServerConnection })).request<{ worker: ServerWorkerStatus }>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/work`, {
-        method: "PUT", body: JSON.stringify({ enabled: chatEnabled }),
-      });
-      state.serverWorker = result.worker;
-      if (chatWasEnabled !== chatEnabled) { invalidateChatTranslations(state.current.chatId); translations.clear(); translationRequested.clear(); }
+      const workClient = new ServerClient(() => ({ ...state.settings, ...nextServerConnection }));
+      const characterChanged = (state.settings.characterEnabled[state.current.characterId] !== false) !== characterEnabled;
+      if (characterChanged) {
+        const result = await workClient.request<{ chatIds: string[] }>(`/v1/characters/${encodeURIComponent(state.current.characterId)}/work`, {
+          method: "PUT", body: JSON.stringify({ enabled: characterEnabled, chatEnabled: chatEnabledById, defaultChatEnabled: state.settings.defaultChatEnabled }),
+        });
+        for (const id of new Set([...result.chatIds, state.current.chatId])) {
+          invalidateChatTranslations(id);
+          if (characterEnabled && (chatEnabledById[id] ?? state.settings.defaultChatEnabled)) catchUpPending[id] = true;
+          else delete catchUpPending[id];
+        }
+        state.serverWorker = undefined;
+      } else {
+        const result = await workClient.request<{ worker: ServerWorkerStatus }>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/work`, {
+          method: "PUT", body: JSON.stringify({ enabled: effectiveEnabled }),
+        });
+        state.serverWorker = result.worker;
+      }
+      if (chatWasEnabled !== effectiveEnabled || characterChanged) { invalidateChatTranslations(state.current.chatId); translations.clear(); translationRequested.clear(); }
     }
     if (reviewChanged) await applyQueuedExtractionReview(new ServerClient(() => ({ ...state.settings, ...nextServerConnection })), formData.has("postExtractionReview"));
-    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", christmasSnow: formData.has("christmasSnow"), defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, upcomingOccasions: occasionsByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
+    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", christmasSnow: formData.has("christmasSnow"), defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), characterEnabled: characterEnabledById, chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, upcomingOccasions: occasionsByChat, pairProgress: progressByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
     if (state.current) {
       state.current.includeUserMessages = includeUserMessages;
+      state.current.pairProgress = progressByChat[state.current.chatId] ?? false;
       state.current.upcomingOccasions = occasionsByChat[state.current.chatId] ?? true;
       state.current.memoryOnlyInjection = memoryOnlyByChat[state.current.chatId] ?? false;
       state.current.sourceProtectionTurns = sourceProtectionTurns;
@@ -4636,8 +4805,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       state.current.canonicalizationPolicy = state.settings.canonicalizationPolicy;
       state.current.extractionGroupTurns = extractionGroupTurns;
       state.current.memoryLanguage = memoryLanguage;
-      state.lastPromptValidation = chatEnabled ? undefined : { chatId: state.current.chatId, status: "disabled", at: Date.now() };
-      if (!chatEnabled) {
+      state.lastPromptValidation = effectiveEnabled ? undefined : { chatId: state.current.chatId, status: "disabled", at: Date.now() };
+      if (!effectiveEnabled) {
         await discardSetupCapture(state, state.current.chatId);
         state.automaticTurnPacket = undefined;
         state.activeModelRequest = undefined;
@@ -4683,7 +4852,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       });
       state.serverWorker = result.worker;
       if (state.settings.translationProvider === "server") translationChanged = true;
-      if (state.current && isChatMemoryEnabled(state.settings, state.current.chatId)) {
+      if (state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) {
         const chatId = state.current.chatId;
         const estimate = await client.request<{ jobs: number }>(`/v1/chats/${encodeURIComponent(chatId)}/jobs/retry-failed/estimate`);
         retryOffer = estimate.jobs > 0 ? { chatId, count: estimate.jobs } : undefined;
@@ -4708,7 +4877,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const keyField=root.querySelector<HTMLInputElement>('[name="mcpApiKey"]');if(keyField)keyField.value="";
       }
     }
-    if (serverConfigured && state.current && chatWasEnabled && isChatMemoryEnabled(state.settings, state.current.chatId)) {
+    if (serverConfigured && state.current && chatWasEnabled && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) {
       state.lastPrepare = await client.prepare(makePrepareRequest(await readCurrentContext(state), 0, { deferExtraction: false }), 5_000);
     }
     if (translationChanged && state.current && data.health?.instanceId) {
@@ -4722,56 +4891,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   };
 
   const loadDataInventory = async () => {
-    if (dataView.inventoryStatus !== "idle") return;
-    dataView.inventoryStatus = "loading";
+    if (dataView.inventoryStatus === "loading" || dataView.cleanupRunning) return;
+    const scan = scanDeletedHostChats(state, client, data, dataView);
     render();
-    try {
-      dataView.inventory = await readHostChatInventory();
-      dataView.inventoryStatus = "ready";
-    } catch (error) {
-      dataView.inventory = [];
-      dataView.inventoryStatus = "unavailable";
-      addLog(state.logs, "warn", `Risu chat inventory unavailable: [오류 원문 제외]`);
-    }
-    if (activeTab === "data") render();
-  };
-
-  const loadServerInspector = async (chatId: string, offset = 0, includeContent = false) => {
-    dataView.inspector = { chatId, loading: true, memories: [], storySpine: [], relationships: [], assertions: [], beliefs: [], promises: [], endedAssertions: [], endedBeliefs: [], userDeletedBeliefs: [], promiseHistory: [], reconciliationReviews: [], conflicts: [] };
-    render();
-    try {
-      const encoded = encodeURIComponent(chatId);
-      const ledgerRequest = data.health?.capabilities?.sourceLedgerInspection
-        ? client.request<any>(`/v1/admin/chats/${encoded}/source-ledger?offset=${Math.max(0, offset)}&limit=50&includeContent=${includeContent}`)
-        : Promise.resolve(undefined);
-      const [memories, storySpineState, relationshipsState, worldState, reconciliationState, conflictState, ledger] = await Promise.all([
-        client.request<any>(`/v1/chats/${encoded}/memories`),
-        client.request<any>(`/v1/chats/${encoded}/story-spine`),
-        client.request<any>(`/v1/chats/${encoded}/relationships`),
-        client.request<any>(`/v1/chats/${encoded}/world-state?includeHistory=true`),
-        client.request<any>(`/v1/chats/${encoded}/reconciliation-reviews`),
-        client.request<any>(`/v1/chats/${encoded}/conflicts`),
-        ledgerRequest,
-      ]);
-      dataView.inspector = {
-        chatId,
-        memories: memories.items ?? [], storySpine: storySpineState, relationships: relationshipsState.items ?? [],
-        assertions: worldState.assertions ?? [], beliefs: worldState.beliefs ?? [], promises: worldState.promises ?? [],
-        endedAssertions: worldState.endedAssertions ?? [], endedBeliefs: worldState.endedBeliefs ?? [],
-        userDeletedBeliefs: worldState.userDeletedBeliefs ?? [], promiseHistory: worldState.promiseHistory ?? [],
-        reconciliationReviews: reconciliationState.items ?? [], conflicts: conflictState.items ?? [], ledger,
-      };
-      const sourceLanguage = activeCanonicalLanguage(chatId);
-      if (data.health?.instanceId && state.settings.translationDisplay !== "en" && sourceLanguage !== "ko") {
-        const cached = await readCachedTranslations(state, (memories.items ?? []).flatMap((memory: any) => [
-          { serverInstanceId: data.health!.instanceId, chatId, sourceLanguage, kind: "memory-title", itemId: `${memory.id}:title`, text: String(memory.title ?? "") },
-          { serverInstanceId: data.health!.instanceId, chatId, sourceLanguage, kind: "memory-content", itemId: `${memory.id}:content`, text: String(memory.content ?? "") },
-        ]), state.settings.translationProvider);
-        cached.forEach((item) => translations.set(item.itemId, item.translated));
-      }
-    } catch (error) {
-      dataView.inspector = { chatId, error: String(error), memories: [], storySpine: [], relationships: [], assertions: [], beliefs: [], promises: [], endedAssertions: [], endedBeliefs: [], userDeletedBeliefs: [], promiseHistory: [], reconciliationReviews: [], conflicts: [] };
-    }
+    await scan;
     if (activeTab === "data") render();
   };
 
@@ -4797,7 +4920,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const restored=await response.json() as any;
     invalidateRestoredChatState(state,restored.chatId);
     state.settings.serverInstances[state.settings.serverUrl.replace(/\/$/,"")]=restored.serverInstanceId;
-    restoreChatSettings(state.settings,restored.chatId,restored.chatSettings);
+    restoreChatSettings(state.settings,restored.chatId,restored.chatSettings,restored.characterId);
     await saveStoredJson(CACHE_KEY,state.cache);
     await saveSettings(state.settings);
     await alertDashboard("채팅의 RCM 기록과 설정을 복원했습니다.");
@@ -4979,7 +5102,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
 
   const updateTopbar = () => {
     root.querySelectorAll<HTMLButtonElement>('[data-action="retry-failed"], [data-action="retry-embeddings"]').forEach(button => {
-      button.disabled = retryBusy || !state.current || !isChatMemoryEnabled(state.settings, state.current.chatId);
+      button.disabled = retryBusy || !state.current || !isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId);
       if (retryBusy) {
         button.dataset.retryLabel ??= button.textContent ?? "다시 시도";
         button.textContent = "재시도 요청 중…";
@@ -5112,7 +5235,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       : data.jobs.find(job => job.status === "failed" && parseJson<Record<string, unknown>>(job.payload_json, {}).pipelineManualRetry === true) : undefined;
     const retryNotice = retryFeedback && retryFeedback.chatId === state.current?.chatId
       ? notice(retryFailure?.last_error || retryFeedback.message, { tone: retryFailure || retryFeedback.kind === "error" ? "cut" : "plain" }) : "";
-    const retrySuggestion = retryOffer?.chatId === state.current?.chatId && state.current && isChatMemoryEnabled(state.settings, state.current.chatId)
+    const retrySuggestion = retryOffer?.chatId === state.current?.chatId && state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)
       ? notice(`새 설정을 저장했어요. 실패한 작업 ${retryOffer!.count}건을 다시 시도할 수 있어요.`, { action: btn("새 설정으로 다시 시도", { kind: "primary", action: "retry-failed", disabled: retryBusy }) }) : "";
     const content = retryNotice + retrySuggestion + activeContent();
     if (!root.querySelector(".topbar")) root.innerHTML = '<header class="topbar"></header><main class="main" id="main-content"><div class="subnav"></div><div class="page"></div></main><nav class="nav" aria-label="RCM 메뉴"></nav>';
@@ -5290,12 +5413,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (refreshed.initialCalibration?.status === "awaiting_confirmation"
         && ["overview", "data", "operations"].includes(activeTab)) activeTab = "initial";
       const setupChatId = refreshed.chatId;
-      if (setupChatId && setupChatId === state.current?.chatId) {
-        observeSetupAttention(state, setupChatId, refreshed.initialCalibration?.status);
+      if (setupChatId && setupChatId === state.current?.chatId && !currentLineageOperation(state)) {
+        observeSetupAttention(state, setupChatId, refreshed.initialCalibration?.status, refreshed.lineage);
         if (!setupOpenChecked.has(setupChatId)) {
           setupOpenChecked.add(setupChatId);
           if (!setupPicker && activeTab === "overview") {
-            const picker = await firstOpenSetupPicker(state, setupChatId, refreshed.initialCalibration?.status);
+            const picker = await firstOpenSetupPicker(state, setupChatId, refreshed.initialCalibration?.status, refreshed.lineage);
             if (picker && dashboardOpen && generation === refreshGeneration && state.current?.chatId === setupChatId && activeTab === "overview") {
               setupPicker = picker;
               activeTab = "initial";
@@ -5649,7 +5772,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (!target) return;
     const action = target.dataset.action;
     if (action === "open-setup-sources" || action === "initial-retry") {
+      if (currentLineageOperation(state)) return;
       if (!state.current || setupLoading) return;
+      if (["choice_required", "ambiguous"].includes(data.lineage?.status ?? "")) return;
+      if (action === "open-setup-sources" && !setupPendingIn(data)) return;
       if (action === "initial-retry" && ["ready", "inherited", "skipped"].includes(data.initialCalibration?.status ?? "")
         && !await confirmDashboard("", false, { title: "초기 설정 다시 읽기", bodyHtml: REREAD_NOTICE_HTML, confirm: "재료 고르기", cancel: "취소", className: "reread-dialog" })) return;
       setupLoading = true;
@@ -5689,6 +5815,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (action === "setup-skip" && ["ready", "inherited", "skipped"].includes(data.initialCalibration?.status)) { setupPicker = undefined; render(); return; }
         view.busy = true; view.error = undefined; render();
         try {
+          const lineage = await client.request<ChatLineageStatus>(`/v1/chats/${encodeURIComponent(view.chatId)}/lineage`);
+          if (["choice_required", "ambiguous"].includes(lineage.status) || (lineage.status === "inherited" && !view.reread)) {
+            setupPicker = undefined;
+            await refresh({ forceApply: true });
+            return;
+          }
           if (action === "setup-submit" && !view.fallback && (await readSetupHost()).chatId !== view.chatId) throw new Error("Risu에서 이 채팅을 다시 열고 재료를 선택해 주세요.");
           const projection = action === "setup-submit" ? await selectedSetupProjection(view) : undefined;
           if (action === "setup-submit" && !projection) throw new Error("읽을 재료를 하나 이상 골라 주세요.");
@@ -5948,23 +6080,46 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       return;
     }
     if (action === "load-data-inventory") {
-      dataView.inventoryStatus = "idle";
       void loadDataInventory();
       return;
     }
+    if (action === "open-deleted-chat-cleanup") {
+      if (dataView.inventoryStatus !== "ready" || dataView.cleanupRunning) return;
+      dataView.confirmation = undefined;
+      dataView.cleanupConfirmation = deletedHostChats(state, data, dataView).map(chat => chat.id);
+      render(); return;
+    }
+    if (action === "cancel-deleted-chat-cleanup") { dataView.cleanupConfirmation = undefined; render(); return; }
+    if (action === "confirm-deleted-chat-cleanup") {
+      if (dataView.cleanupRunning) return;
+      const cleanup = cleanupDeletedHostChats(state, client, data, dataView);
+      render();
+      await cleanup;
+      ++refreshGeneration;
+      pendingData = undefined;
+      newDataAvailable = false;
+      await refresh({ forceApply: true });
+      return;
+    }
     if (action === "apply-probed-lineage" && state.current && state.lineageProbe?.result?.fingerprint) {
+      if (currentLineageOperation(state)?.status === "running") return;
       const parentChatId = target.dataset.parentId || state.lineageProbe.selectedParentId;
       if (!parentChatId) return;
+      const chatId = state.current.chatId;
+      const fingerprint = state.lineageProbe.result.fingerprint;
       try {
-        await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/lineage/apply`, { method: "POST", body: JSON.stringify({ ...lineageProbePayload(await readCurrentContext(state)), parentChatId, fingerprint: state.lineageProbe.result.fingerprint }) }, 60_000);
-        await inheritLineageSettings(state, state.current, parentChatId);
+        await runLineageOperation(state, chatId, "select", async () => {
+          const current = await readCurrentContext(state);
+          if (current.chatId !== chatId) throw new Error("채팅이 변경되었습니다. 현재 채팅에서 다시 선택해 주세요.");
+          return client.request(`/v1/chats/${encodeURIComponent(chatId)}/lineage/apply`, { method: "POST", body: JSON.stringify({ ...lineageProbePayload(current), parentChatId, fingerprint }) }, 60_000);
+        });
         state.lineageProbe = undefined;
         addLog(state.logs, "info", "Read-only lineage match applied without provider calls");
         await refresh({ forceApply: true });
       } catch (error) {
         const failedProbe = state.lineageProbe;
-        if (failedProbe) state.lineageProbe = { key: failedProbe.key, status: "failed", result: failedProbe.result, selectedParentId: parentChatId, error: String(error) };
-        data.error = String(error);
+        if (failedProbe) state.lineageProbe = { key: failedProbe.key, status: "failed", result: failedProbe.result, selectedParentId: parentChatId, error: lineageFailureMessage(error) };
+        data.error = lineageFailureMessage(error);
         render();
       }
       return;
@@ -6236,6 +6391,18 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       render();
       return;
     }
+    if (action?.startsWith("progress-") && state.current) {
+      target.setAttribute("disabled","true");
+      try {
+        const kind=action.slice("progress-".length);
+        const body={persona:target.dataset.persona,character:target.dataset.character,action:{kind,itemId:target.dataset.itemId,...(kind==="cell"?{side:target.dataset.side,state:target.dataset.state}:{})}};
+        await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/pair-progress`,{method:"POST",body:JSON.stringify(body)});
+        state.automaticTurnPacket=undefined;
+        await refresh({forceApply:true});
+      } catch(error) { showActionSaveState({kind:"error",message:error instanceof Error?error.message:String(error)}); }
+      finally { target.removeAttribute("disabled"); }
+      return;
+    }
     if (action === "submit-form") {
       const form = target.dataset.formId
         ? root.querySelector<HTMLFormElement>(`#${target.dataset.formId}`)
@@ -6247,6 +6414,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (action === "inherit-from-chat") {
       if (!state.current) return;
+      if (currentLineageOperation(state)?.status === 'running') return;
       const sourceChatId = target.dataset.chatId ?? "";
       if (!sourceChatId) return;
       const button = target as HTMLButtonElement;
@@ -6260,26 +6428,33 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const copy = memoryTransferConfirmation(preview, mode, eligibleMessages);
         const confirmed = await confirmDashboard(copy.message, false, copy);
         if (!confirmed) return;
+        if (state.current?.chatId !== current.chatId) throw new Error('Chat changed before lineage resolution');
         button.textContent = "기억 가져오는 중…";
-        if (mode === "lineage") {
-          await client.request(`/v1/chats/${encodeURIComponent(current.chatId)}/lineage/inherit`, {
-            method: "POST",
-            body: JSON.stringify({ ...request, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
-          }, 120_000);
-          addLog(state.logs, "info", `동일한 대화 원문 ${preview.commonMessages}개를 확인해 현재 채팅으로 기억을 가져왔습니다.`);
-        } else {
-          await client.request(`/v1/chats/${encodeURIComponent(current.chatId)}/memory-transplant`, {
-            method: "POST",
-            body: JSON.stringify({ sourceChatId, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
-          }, 120_000);
-          addLog(state.logs, "info", "메시지 ID 연결이 없어 보관된 기억을 현재 채팅의 독립 기록으로 가져왔습니다.");
-        }
+        await runLineageOperation(state,current.chatId,'transfer',async () => {
+          if (mode === "lineage") {
+            const result = await client.request<{lineage:ChatLineageStatus}>(`/v1/chats/${encodeURIComponent(current.chatId)}/lineage/inherit`, {
+              method: "POST",
+              body: JSON.stringify({ ...request, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
+            }, 120_000);
+            addLog(state.logs, "info", `동일한 대화 원문 ${preview.commonMessages}개를 확인해 현재 채팅으로 기억을 가져왔습니다.`);
+            return result;
+          } else {
+            const result = await client.request<{lineage:ChatLineageStatus}>(`/v1/chats/${encodeURIComponent(current.chatId)}/memory-transplant`, {
+              method: "POST",
+              body: JSON.stringify({ sourceChatId, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
+            }, null);
+            addLog(state.logs, "info", "메시지 ID 연결이 없어 보관된 기억을 현재 채팅의 독립 기록으로 가져왔습니다.");
+            return result;
+          }
+        },mode === 'lineage' ? sourceChatId : undefined);
         await refresh({ forceApply: true });
         await alertDashboard(mode === "lineage"
           ? "같은 대화 원문을 연결하고 기억을 가져왔어요. 확인된 원문은 다시 처리하지 않습니다."
           : "보관된 기억을 독립 기록으로 가져왔어요. 현재 채팅 원문은 별도로 처리될 수 있습니다.");
       } catch (error) {
-        await alertDashboard(`기억을 가져오지 못했어요.\n\n${error instanceof Error ? error.message : String(error)}`);
+        addLog(state.logs, "error", `Memory transfer failed: ${String(error)}`);
+        if (currentLineageOperation(state)) render();
+        else await alertDashboard(lineageFailureMessage(error));
       } finally {
         if (button.isConnected) {
           button.disabled = false;
@@ -6289,7 +6464,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       }
       return;
     }
-    if (action === "view-server-data") { await loadServerInspector(target.dataset.chatId ?? ""); return; }
     if ((typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) && action === "toggle-retrieval-diagnostics") {
       const chatId = target.dataset.chatId ?? "";
       try {
@@ -6299,19 +6473,19 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } catch (error) { data.error = String(error); render(); }
       return;
     }
-    if (action === "close-server-inspector") { dataView.inspector = undefined; render(); return; }
-    if (action === "reveal-ledger-content" && dataView.inspector) { await loadServerInspector(dataView.inspector.chatId, dataView.inspector.ledger?.offset ?? 0, true); return; }
-    if (action === "ledger-page" && dataView.inspector) { await loadServerInspector(dataView.inspector.chatId, Number(target.dataset.offset ?? 0), dataView.inspector.ledger?.includesContent === true); return; }
     if (action === "export-complete-backup" || action === "export-chat-backup") { try { const chatId=action==="export-chat-backup"?(target.dataset.chatId||state.current?.chatId):undefined;if(action==="export-chat-backup"&&!chatId)throw new Error("백업할 채팅을 선택해주세요.");await exportCompleteBackup(chatId); } catch (error) { dataView.backupExportError = error instanceof Error ? error.message : String(error); render(); } return; }
     if (action === "open-data-operation") {
+      if (dataView.cleanupRunning) return;
+      dataView.cleanupConfirmation = undefined;
       dataView.confirmation = { action: target.dataset.operation as DataConfirmation["action"], chatId: target.dataset.chatId ?? "" };
       render(); return;
     }
     if (action === "cancel-data-operation") { dataView.confirmation = undefined; render(); return; }
     if (action === "confirm-data-operation" && dataView.confirmation) {
+      if (dataView.cleanupRunning) return;
       const { action: operation, chatId } = dataView.confirmation;
       try {
-        if (operation === "rebuild") requireChatMemoryEnabled(state, chatId);
+        if (operation === "rebuild") requireChatMemoryEnabled(state, chatId, data.adminChats.find(chat => chat.id === chatId)?.characterId);
         const extractionReviewOverride = operation === "rebuild"
           ? await chooseExtractionReviewOverride(
             "전체 기억을 재검수할까요?",
@@ -6320,8 +6494,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           )
           : undefined;
         if (operation === "rebuild" && extractionReviewOverride === undefined) return;
-        const path = operation === "rebuild" ? `/v1/chats/${encodeURIComponent(chatId)}/reprocess`
-          : `/v1/chats/${encodeURIComponent(chatId)}`;
         let rebuildContext: Awaited<ReturnType<typeof readCurrentContext>> | undefined;
         let expectedSourceMessages: number | undefined;
         if (operation === "rebuild" && state.current?.chatId === chatId) {
@@ -6332,16 +6504,16 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           state.settings.serverInstances[serverUrl] = synced.serverInstanceId;
           await saveSettings(state.settings);
         }
-        const result = await client.request<any>(path, {
-          method: operation === "rebuild" ? "POST" : "DELETE",
-          ...(operation === "rebuild" ? {
-            body: JSON.stringify(withExtractionReviewOverride({
-              activatePendingMemoryLanguage: true,
-              identityHints: rebuildContext?.identityHints,
-              expectedSourceMessages,
-            }, extractionReviewOverride as boolean)),
-          } : {}),
-        }, operation === "rebuild" ? 120_000 : 30_000).catch(async (error) => {
+        let result: any = {};
+        if (operation === "delete") await deleteServerChatRecords(state, client, chatId);
+        else result = await client.request<any>(`/v1/chats/${encodeURIComponent(chatId)}/reprocess`, {
+          method: "POST",
+          body: JSON.stringify(withExtractionReviewOverride({
+            activatePendingMemoryLanguage: true,
+            identityHints: rebuildContext?.identityHints,
+            expectedSourceMessages,
+          }, extractionReviewOverride as boolean)),
+        }, 120_000).catch(async (error) => {
           if (operation === "rebuild" && error?.code === "INITIAL_SETUP_REQUIRED" && state.current?.chatId === chatId) {
             setupPicker = { ...await loadSetupPicker(state, chatId), rebuild: { expectedSourceMessages, extractionReviewOverride: extractionReviewOverride as boolean } };
             dataView.confirmation = undefined;
@@ -6353,8 +6525,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (result.setupRequired) { render(); return; }
         if (operation === "rebuild" && state.current?.chatId === chatId && !state.settings.workerPaused) void drainWorker(state, client);
         if (operation === "delete") {
-          await discardSetupCapture(state, chatId);
-          clearDeletedChatState(state, chatId);
+          data.adminChats = data.adminChats.filter(item => item.id !== chatId);
+          dataView.deletedChatIds = dataView.deletedChatIds?.filter(id => id !== chatId);
           if (data.chatId === chatId) {
             ++refreshGeneration; // Ignore reads started before the deletion.
             data = { ...emptyData(), chatId, health: data.health, adminChats: data.adminChats.filter(item => item.id !== chatId) };
@@ -6363,8 +6535,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
             Object.assign(organizationView, createOrganizationView());
             render();
           }
-          await invalidateTranslationCache(state, { chatId });
-          await saveSettings(state.settings);
         }
         addLog(state.logs, "info", operation === "rebuild"
           ? result.awaitingCalibration
@@ -6373,7 +6543,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           : `Data operation completed: ${operation}`);
         if (operation === "rebuild" && result.awaitingCalibration) activeTab = "initial";
         dataView.confirmation = undefined;
-        if (dataView.inspector?.chatId === chatId) dataView.inspector = undefined;
         await refresh({ forceApply: operation === "delete" });
       } catch (error) {
         const message = String(error);
@@ -6384,36 +6553,54 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       }
       return;
     }
+    if (action === "retry-lineage-open" && state.current) {
+      if (currentLineageOperation(state)?.status === "running") return;
+      state.chatOpen = undefined;
+      try { await resolveOpenedChat(state, client); await refresh(); }
+      catch { render(); }
+      return;
+    }
     if (action === "select-lineage" && state.current) {
-      const selectedChatId = data.chatId ?? state.current.chatId;
-      const current = await readCurrentContext(state);
-      if (current.chatId !== selectedChatId) {
-        await refresh();
-        await alertDashboard('채팅이 변경되었습니다. 현재 채팅에서 다시 선택해 주세요.');
-        return;
-      }
+      if (currentLineageOperation(state)?.status === "running") return;
+      const chatId = state.current.chatId;
+      const parentChatId = target.dataset.parentId;
+      const fingerprint = data.lineage?.ambiguousCandidates?.find(item => item.chatId === parentChatId)?.fingerprint;
       try {
-        await client.request(`/v1/chats/${encodeURIComponent(current.chatId)}/lineage/select`, { method: "POST", body: JSON.stringify({ ...lineageProbePayload(current), parentChatId: target.dataset.parentId,
-          fingerprint: data.lineage?.ambiguousCandidates?.find(item => item.chatId === target.dataset.parentId)?.fingerprint }) }, 30_000);
-      } catch (error) {
-        if (!String(error).includes('LINEAGE_PROBE_STALE')) throw error;
+        await runLineageOperation(state, chatId, "select", async () => {
+          const current = await readCurrentContext(state);
+          if (current.chatId !== chatId) throw new Error("채팅이 변경되었습니다. 현재 채팅에서 다시 선택해 주세요.");
+          const result = await client.request<ChatLineageStatus & { initialCalibration: InitialCalibrationActivity }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage/select`, {
+            method: "POST", body: JSON.stringify({ ...lineageProbePayload(current), parentChatId, fingerprint }),
+          }, 60_000);
+          return { lineage: result, initialCalibration: result.initialCalibration };
+        }, parentChatId);
         await refresh();
-        await alertDashboard('원문이나 원본 기억이 변경되어 상속을 적용하지 않았습니다. 목록을 확인하고 다시 선택해 주세요.');
-        return;
-      }
-      await refresh(); return;
+      } catch { render(); }
+      return;
+    }
+    if (action === "lineage-choose-again" && state.current) {
+      if (currentLineageOperation(state)?.status !== "failed") return;
+      state.lineageOperation = undefined;
+      state.publishActivity?.();
+      render(); return;
     }
     if (action === "decline-lineage" && state.current) {
+      if (currentLineageOperation(state)?.status === "running") return;
       await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/lineage/decline`, { method: "POST", body: JSON.stringify({ fingerprint: target.dataset.fingerprint }) }, 15_000);
       await refresh(); return;
     }
     if (action === "acknowledge-lineage" && state.current) {
-      await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/lineage/acknowledge`, { method: "POST" }, 30_000);
+      const chatId = state.current.chatId;
+      const result = await client.request<{ lineage: ChatLineageStatus }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage/acknowledge`, { method: "POST" }, 30_000);
+      syncLineageActivity(state, chatId, result.lineage);
       await refresh(); return;
     }
     if (action === "revert-lineage" && state.current) {
+      const chatId = state.current.chatId;
       if (!await confirmDashboard("상속된 기억과 파생 상태를 비우고, 현재 Risu 원문만으로 다시 시작할까요? Risu 원문은 변경되지 않습니다.")) return;
-      await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/lineage/revert`, { method: "POST" }, 30_000);
+      if (state.current?.chatId !== chatId) return;
+      const result = await client.request<{ lineage: ChatLineageStatus }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage/revert`, { method: "POST" }, 30_000);
+      syncLineageActivity(state, chatId, result.lineage);
       await refresh(); return;
     }
     if (action === "select-memory") {
@@ -7076,6 +7263,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         return;
       }
       if (action === "initial-confirm" || action === "initial-skip") {
+        if (currentLineageOperation(state)) return;
         if (action === "initial-skip" && !await confirmDashboard(data.initialCalibration?.status === "failed"
           ? "초기 분석 없이 원문 기억 생성을 계속할까요? 이름과 별칭은 나중에 인물 설정에서 직접 추가할 수 있습니다."
           : "분석된 초기 이름·관계축을 사용하지 않고 원문 기억 생성을 시작할까요?")) return;
@@ -7193,11 +7381,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         state.statusSummary = {
           ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }),
           initialCalibration: prepared.initialCalibration,
+          lineage: prepared.lineage,
         };
         state.publishStatusSummary?.();
         const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
         state.settings.serverInstances[serverUrl] = prepared.serverInstanceId;
-        if (setupPickerNeeded(prepared.initialCalibration?.status)) {
+        if (setupPickerNeeded(prepared.initialCalibration?.status, prepared.lineage)) {
           setupPicker = await loadSetupPicker(state, fullContext.chatId);
           activeTab = "initial";
         }
@@ -7487,6 +7676,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
   });
 
+  root.addEventListener("keydown", event => {
+    if(event.key!=="Enter" || !(event.target instanceof HTMLInputElement) || !event.target.closest("#pair-progress-form"))return;
+    event.preventDefault();event.target.closest("form")?.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));
+  });
   root.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.target as HTMLFormElement;
@@ -7534,7 +7727,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       }
       return;
     }
-    const mutationForm = ["memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form", "memory-line-form"].includes(form.id);
+    const mutationForm = ["pair-progress-form", "memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form", "memory-line-form"].includes(form.id);
     const submitButton = form.querySelector<HTMLButtonElement>('button[type="submit"], button[data-action="submit-form"]')
       ?? root.querySelector<HTMLButtonElement>(`button[data-action="submit-form"][data-form-id="${form.id}"]`);
     if (mutationForm) { form.setAttribute("aria-busy", "true"); if (submitButton) submitButton.disabled = true; }
@@ -7554,6 +7747,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         return;
       } else if (!state.current) {
         throw new Error("현재 채팅 정보를 아직 불러오는 중입니다.");
+      } else if (form.id === "pair-progress-form") {
+        await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/pair-progress`,{method:"POST",body:JSON.stringify({persona:form.dataset.persona,character:form.dataset.character,action:{kind:"add",label:String(values.label??""),mode:values.mode}})});
+        state.automaticTurnPacket=undefined;
       } else if (form.id === "story-overview-form") {
         const overview = data.storySpine?.overview;
         const groupId = form.dataset.groupId ?? overview?.groupId ?? "";
@@ -7904,7 +8100,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (input.matches('#memory-line-form textarea')) { input.style.height="auto"; input.style.height=`${input.scrollHeight}px`; }
     if (input.closest('#organization-search-form')) { organizationView.search = input.value; return; }
     if (input.closest('#organization-jump-form')) { organizationView.jump = input.value; return; }
-    if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
+    if (input.closest("#pair-progress-form") || input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
     if (input.dataset.action === "people-search") {
       peopleView.query = input.value;
       applyPeopleSearch();
@@ -7968,6 +8164,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
 
   root.addEventListener("change", async (event) => {
     const input = event.target as HTMLInputElement;
+    if (input.name === "characterEnabled") {
+      const chat = root.querySelector<HTMLInputElement>('[name="chatEnabled"]');
+      if (chat) chat.disabled = !input.checked;
+      const note = root.querySelector<HTMLElement>("[data-character-disabled]");
+      if (note) note.hidden = input.checked;
+      const usual = root.querySelector<HTMLElement>("[data-character-enabled-note]");
+      if (usual) usual.hidden = !input.checked;
+    }
     if (input.name === "landmarkKind" && input.value === "other") {
       const other = input.closest("form")?.querySelector<HTMLElement>("[data-landmark-other]");
       if (other) other.hidden = !input.checked;
@@ -7980,7 +8184,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const title = input.closest(".reader")?.querySelector<HTMLElement>(".reader__title[data-title-verb]");
       if (title) title.textContent = `${worldRecordLabel("assertion", { stateKind: value })} ${title.dataset.titleVerb}`;
     }
-    if (input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
+    if (input.closest("#pair-progress-form") || input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
     if (input.name === "customRuleEnabled") updateRegexRuleSummary();
     if (input.dataset.action === "set-profile-select") {
       try {
@@ -8119,23 +8323,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   // stale until the next pointer event even though the DOM is already current.
   await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   const themeReady = applyDashboardTheme(state.settings.dashboardTheme);
-  await refresh();
-
-  // Statistics belong to Settings; they must not delay Home's data request.
-  if (dashboardOpen && isServerConfigured(state.settings)) {
-    void translationCacheStats(state).then(stats => {
-      if (!dashboardOpen) return;
-      cacheStats = stats;
-      if (activeTab === "settings" && !formDirty) render();
-    }).catch(() => {});
-  }
-  if (isServerConfigured(state.settings) && !state.updateDashboardChecked) {
-    state.updateDashboardChecked = true;
-    await refreshUpdateStatus(state, client, { remote: true, force: true });
-    render();
-  }
-  await themeReady;
-  await showCompletedProductReleaseNotice(state);
   lastServerActivitySignature = serverActivitySignature();
   lastLiveDataSignature = dashboardLiveDataSignature(state.statusSummary, state.current);
   const toolRegistrationSignature = () => JSON.stringify([state.memoryToolRegistration?.status, state.memoryToolRegistration?.failures]);
@@ -8153,6 +8340,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   }, () => render(), refreshFromActivity);
   const unsubscribeStatus = subscribeActivity(state, () => {
     if (!dashboardOpen) return;
+    if (currentLineageOperation(state)) { render(); return; }
     const summary = state.statusSummary;
     const busy = !!state.currentJob || (state.serverWorker?.activeCalls ?? 0) > 0 || (summary?.queuedJobs ?? 0) > 0 || (summary?.pendingEmbeddings ?? 0) > 0 || ["queued", "processing"].includes(state.episodeActivity?.status ?? "");
     const nextServerSignature = serverActivitySignature();
@@ -8161,6 +8349,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const liveDataChanged = nextLiveDataSignature !== lastLiveDataSignature;
     lastServerActivitySignature = nextServerSignature;
     lastLiveDataSignature = nextLiveDataSignature;
+    if (liveDataChanged && activeTab === "overview") render();
     updateTopbar();
     updateNavBadges();
     if (activeTab === "overview" && renderedDailyMemoryKey !== dailyMemoryKey(data.chatId ?? state.current?.chatId ?? "", new Date())) {
@@ -8182,4 +8371,23 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     activityWasBusy = busy;
   });
   unsubscribeActivity = () => { unsubscribeConnection(); unsubscribeStatus(); };
+  await refresh();
+  if (activityRefreshPending) void refreshFromActivity();
+
+  // Statistics belong to Settings; they must not delay Home's data request.
+  if (dashboardOpen && isServerConfigured(state.settings)) {
+    void translationCacheStats(state).then(stats => {
+      if (!dashboardOpen) return;
+      cacheStats = stats;
+      if (activeTab === "settings" && !formDirty) render();
+    }).catch(() => {});
+  }
+  if (isServerConfigured(state.settings) && !state.updateDashboardChecked) {
+    state.updateDashboardChecked = true;
+    await refreshUpdateStatus(state, client, { remote: true, force: true });
+    render();
+  }
+  await themeReady;
+  await showCompletedProductReleaseNotice(state);
+
 }

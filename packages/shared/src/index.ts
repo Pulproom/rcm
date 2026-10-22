@@ -1,3 +1,6 @@
+import { PairProgressPatchesSchema, SetupPairProgressSchema } from "./pair-progress.js";
+export * from "./pair-progress.js";
+export { SHARED_PAST_GUIDANCE } from "./social-memory-guidance.js";
 export { withKoreanParticle } from "./korean-particle.js";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
@@ -7,6 +10,8 @@ import { EntityBirthdaySchema } from "./birthday.js";
 export { EntityBirthdaySchema, birthdayMonthDays, type EntityBirthday } from "./birthday.js";
 import { resolveModelSourceReferences } from "./source-references.js";
 import { buildAuxiliaryRepairMessages, type AuxiliaryRepairMessage } from "./structured-repair.js";
+import { ModelContentValidationError } from "./structured-repair.js";
+export { ModelContentValidationError, isModelContentRejection } from "./structured-repair.js";
 export { composeQuerySignals, RISU_CONTINUATION_MARKER } from "./query-signals.js";
 export { modelImageRanges } from "./model-text.js";
 export { contiguousSourceRangeSelection } from "./source-range-selection.js";
@@ -29,7 +34,7 @@ export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFail
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 98;
+export const RCM_API_REVISION = 99;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -58,7 +63,7 @@ import { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "
 export { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "./dialogue-source-guidance.js";
 import { STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
 export { ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
-export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, withMemoryGuidance, memoryEvidenceKind } from "./memory-presentation.js";
+export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, sharedPastPacket, withMemoryGuidance, memoryEvidenceKind } from "./memory-presentation.js";
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory, isRecognitionMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
@@ -171,6 +176,7 @@ export const ChatLineageAncestorSchema = z.object({
   chatId: z.string().min(1),
   title: z.string().optional(),
   exists: z.boolean(),
+  independent: z.boolean().optional(),
   kind: z.enum(["copy", "branch", "pruned_copy"]).optional(),
   forkMessageId: z.string().optional(),
   forkOrdinal: z.number().int().nonnegative().optional(),
@@ -187,12 +193,16 @@ export const ChatLineageStatusSchema = z.object({
   forkOrdinal: z.number().int().nonnegative().optional(),
   detection: z.enum(["marker", "message_identity", "source_sequence", "user", "manual_cross_bot"]).optional(),
   acknowledgedAt: z.number().int().nonnegative().optional(),
+  appliedAt: z.number().int().nonnegative().optional(),
   inheritedCounts: z.record(z.string(), z.number().int().nonnegative()).optional(),
   ancestry: z.array(ChatLineageAncestorSchema).max(64).optional(),
   ambiguousCandidates: z.array(z.object({
     chatId: z.string(),
     title: z.string(),
     sharedMessages: z.number().int().nonnegative(),
+    totalActiveMessages: z.number().int().nonnegative().optional(),
+    memories: z.number().int().nonnegative().optional(),
+    lastActivityAt: z.number().int().nonnegative().optional(),
     forkMessageId: z.string().optional(),
     firstSharedOrdinal: z.number().int().nonnegative().optional(),
     kind: z.enum(["copy", "branch", "pruned_copy"]).optional(),
@@ -234,6 +244,7 @@ export const ManualLineagePreviewSchema = z.object({
   inheritedCounts: z.record(z.string(), z.number().int().nonnegative()),
   targetDerivedCounts: z.record(z.string(), z.number().int().nonnegative()),
   requiresReplacement: z.boolean(),
+  targetQueuedJobs: z.number().int().nonnegative().optional(),
 });
 export type ManualLineagePreview = z.infer<typeof ManualLineagePreviewSchema>;
 
@@ -349,6 +360,7 @@ const SocialTermsSchema = z.preprocess(
 );
 
 export const InitialCalibrationResultSchema = z.object({
+  pairProgress: SetupPairProgressSchema,
   entities: z.array(InitialCalibrationEntitySchema).optional(),
   relationships: z.array(InitialCalibrationRelationshipSchema).optional(),
   socialKnowledge: z.array(z.object({
@@ -361,6 +373,7 @@ export const InitialCalibrationResultSchema = z.object({
 }).refine(result => result.entities !== undefined || result.relationships !== undefined || result.socialKnowledge !== undefined, {
   message: "Initial calibration must include entities, relationships, or socialKnowledge; use an explicit empty array for an empty result.",
 }).transform(result => ({
+  ...(result.pairProgress ? { pairProgress: result.pairProgress } : {}),
   entities: result.entities ?? [],
   relationships: result.relationships ?? [],
   socialKnowledge: result.socialKnowledge ?? [],
@@ -398,7 +411,7 @@ export function mergeInitialCalibrationResults(results: InitialCalibrationResult
       description: previous.description === item.description ? item.description : `${previous.description}; ${item.description}`,
     } : item);
   }
-  return InitialCalibrationResultSchema.parse({ entities: [...entities.values()], relationships: [...relationships.values()], socialKnowledge: [...recognition.values()] });
+  return InitialCalibrationResultSchema.parse({ pairProgress: results.flatMap(result => result.pairProgress ?? []), entities: [...entities.values()], relationships: [...relationships.values()], socialKnowledge: [...recognition.values()] });
 }
 
 export const SearchQuerySignalSchema = z.object({
@@ -450,6 +463,7 @@ export const TurnPrepareRequestSchema = z.object({
   includeUserMessages: z.boolean().optional(),
   memoryOnlyInjection: z.boolean().optional(),
   upcomingOccasions: z.boolean().optional(),
+  pairProgress: z.boolean().optional(),
   extractionGroupTurns: z.number().int().min(1).max(50).optional(),
   editProtectionTurns: z.number().int().min(1).max(5).optional(),
   canonicalizationPolicy: CanonicalizationPolicySchema.optional(),
@@ -1154,6 +1168,7 @@ export const MemoryAdditionRequestOutcomeSchema = z.object({
   relatedMemoryIds: z.array(z.string().trim().min(1)).optional(),
 }).strict();
 export const ExtractionDraftResultSchema = z.object({
+  pairProgress: PairProgressPatchesSchema,
   requestOutcome: MemoryAdditionRequestOutcomeSchema.optional(),
   seedResolutions: z.array(SeedResolutionSchema).optional(),
   atomRelations: z.array(ExtractedAtomRelationSchema).optional(),
@@ -1186,7 +1201,7 @@ export const ExtractionAggregateSchema = z.object({ ...ExtractionDraftResultSche
 
 export function mergeExtractionPages(previous: ExtractionDraftResult | undefined, page: ExtractionDraftResult): ExtractionDraftResult {
   if (!previous) return page;
-  if (!page.unfinishedSource) throw new Error("Continuation output must explicitly report unfinishedSource, including an empty array when complete.");
+  if (!page.unfinishedSource) throw new ModelContentValidationError("Continuation output must explicitly report unfinishedSource, including an empty array when complete.");
   const result = structuredClone(previous);
   const unique = <T>(items: T[]): T[] => [...new Map(items.map((item) => [JSON.stringify(item), item])).values()];
   for (const memory of page.memories) {
@@ -1194,7 +1209,7 @@ export function mergeExtractionPages(previous: ExtractionDraftResult | undefined
     if (!old) { result.memories.push(memory); continue; }
     for (const detail of memory.details ?? []) {
       const existing = old.details?.find((item) => item.key === detail.key);
-      if (existing && JSON.stringify(existing) !== JSON.stringify(detail)) throw new Error(`Conflicting continuation detail key: ${detail.key}`);
+      if (existing && JSON.stringify(existing) !== JSON.stringify(detail)) throw new ModelContentValidationError(`Conflicting continuation detail key: ${detail.key}`);
     }
     old.details = unique([...(old.details ?? []), ...(memory.details ?? [])]);
     old.keyDialogues = unique([...(old.keyDialogues ?? []), ...(memory.keyDialogues ?? [])]);
@@ -1252,6 +1267,7 @@ export function normalizeExtractionDraftInput(value: unknown): unknown {
 }
 
 export const ExtractionResultSchema = z.object({
+  pairProgress: PairProgressPatchesSchema,
   seedResolutions: z.array(SeedResolutionSchema).optional(),
   atomRelations: z.array(ExtractedAtomRelationSchema).optional(),
   sourcePassages: z.array(SourcePassageSchema).optional(),
@@ -1621,7 +1637,8 @@ export const StateExtractionSchema = z.object({
   relationshipBaselines: z.array(RelationshipBaselineSchema).default([]),
   physicalIntimacy: z.array(PhysicalIntimacyEventSchema).default([]),
 }).strict();
-export const ReconciliationResultSchema = z.object({ decisions: z.array(ReconciliationDecisionSchema), state: StateExtractionSchema.optional(), seedResolutions: z.array(SeedResolutionSchema).optional() });
+// Preserve advisory candidates until server validation can record each rejection; draft storage still requires typed patches.
+export const ReconciliationResultSchema = z.object({ pairProgress: z.array(z.unknown()).optional().catch(undefined), decisions: z.array(ReconciliationDecisionSchema), state: StateExtractionSchema.optional(), seedResolutions: z.array(SeedResolutionSchema).optional() });
 export type ReconciliationResult = z.infer<typeof ReconciliationResultSchema>;
 
 /** Both workers preview this exact completion view. Retain the authored submission
@@ -1632,18 +1649,18 @@ export function mergeStateExtraction(draft: ExtractionDraftResult, result: Recon
   Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: state.memories, sourcePassages: [], unfinishedSource: [] });
   const keys = new Set(draft.memories.map(memory => memory.key));
   for (const memory of state.memories) {
-    if (keys.has(memory.key)) throw new Error("State extraction cannot replace an event memory");
+    if (keys.has(memory.key)) throw new ModelContentValidationError("State extraction cannot replace an event memory");
     keys.add(memory.key);
   }
   const memories = structuredClone([...draft.memories, ...state.memories]);
   for (const addition of state.detailAdditions) {
     const parent = memories.find(memory => memory.key === addition.memoryKey);
-    if (!parent || parent.details?.some(detail => detail.key === addition.detail.key)) throw new Error("State detail addition needs an existing parent and a fresh key");
+    if (!parent || parent.details?.some(detail => detail.key === addition.detail.key)) throw new ModelContentValidationError("State detail addition needs an existing parent and a fresh key");
     parent.details = [...(parent.details ?? []), addition.detail];
   }
   const { detailAdditions: _additions, ...stateRecords } = state;
   const authored = ExtractionAggregateSchema.parse({ ...draft, ...stateRecords,
-    entities: [...draft.entities, ...state.entities], memories, seedResolutions: result.seedResolutions ?? [] });
+    entities: [...draft.entities, ...state.entities], memories, pairProgress: result.pairProgress, seedResolutions: result.seedResolutions ?? [] });
   const normalized = normalizeRecognitionReferences(authored);
   return { draft: normalized.result, recognitionReviewDraft: normalized.rejected.length ? authored : undefined, recognitionIssues: normalized.rejected };
 }
@@ -1687,7 +1704,9 @@ export const ReconciliationReviewResolutionSchema = z.object({
 });
 
 const ChatWorkSettingsSchema = z.record(z.string().min(1).max(500), z.boolean()).optional();
-export const LeaseJobRequestSchema = z.object({ chatEnabled: ChatWorkSettingsSchema, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional() });
+const chatWorkPolicy = { chatEnabled: ChatWorkSettingsSchema, characterEnabled: ChatWorkSettingsSchema, defaultChatEnabled: z.boolean().optional() };
+export const CharacterWorkRequestSchema = z.object({ ...chatWorkPolicy, enabled: z.boolean() });
+export const LeaseJobRequestSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional() });
 export const CompleteJobRequestSchema = z.object({
   workerId: z.string().min(1),
   // The stored job kind selects the result schema at the completion boundary.
@@ -1698,6 +1717,7 @@ export const CompleteJobRequestSchema = z.object({
 export const FailJobRequestSchema = z.object({
   workerId: z.string().min(1),
   error: z.string().max(4000),
+  modelContentRejected: z.boolean().optional(),
   providerFailure: z.object({ status:z.number().int().min(100).max(599).optional(),code:z.string().max(80).optional(),finishReason:z.string().max(80).optional(),refusal:z.boolean().optional(),retryAfterMs:z.number().finite().min(0).optional() }).optional(),
 });
 
@@ -1794,7 +1814,7 @@ export const mcpRequestTimeoutMs = (config: Pick<McpSelectorConfig,"enabled"|"ll
   config.enabled ? config.llmTimeoutMs * (config.retries + 1) + config.retries * 2000 + 15000 : 15000;
 export const MCP_MAX_REQUEST_TIMEOUT_MS = 920000;
 
-export const WorkerControlSchema = z.object({ chatEnabled: ChatWorkSettingsSchema, workerId: z.string().min(1).max(200), chatId: z.string().min(1).max(500).optional() });
+export const WorkerControlSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1).max(200), chatId: z.string().min(1).max(500).optional() });
 
 export interface ServerLlmPublicConfig {
   relaxAuxiliaryCensorship?: boolean;

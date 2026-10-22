@@ -1,3 +1,4 @@
+import { resetProgress } from "./pair-progress.js";
 import { refreshDetailFts, memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import type { RcmDatabase } from "./db.js";
@@ -10,6 +11,8 @@ import { pruneDetailAccessEdits } from "./item-access.js";
  * revert share this registry so new derived tables cannot drift between paths.
  */
 export function deleteDerivedRows(db: RcmDatabase, chatId: string, options: { preserveInitialCalibration?: boolean; preserveUserCorrections?: boolean } = {}): void {
+  if (options.preserveInitialCalibration || options.preserveUserCorrections) resetProgress(db,chatId,"scene");
+  else db.prepare("DELETE FROM pair_progress WHERE chat_id=?").run(chatId);
   const setupMemory = "SELECT id FROM memories WHERE chat_id=? AND is_initial_calibration_memory(memory_key)";
   const setup = options.preserveInitialCalibration
     ? db.prepare(setupMemory).all(chatId) as Array<{id:string}> : [];

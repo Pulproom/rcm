@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { EVERYONE_HOLDER } from "./item-access.js";
 import { randomUUID } from "node:crypto";
@@ -244,7 +245,7 @@ export function ingestSocialKnowledge(
         AND (d.id=? OR (? IS NULL AND d.memory_id=? AND d.detail_key=?)) AND d.active=1 AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id
         AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`)
         .get(chatId, detailId ?? null, detailId ?? null, memoryId ?? null, key, item.holder) as { id: string } | undefined;
-      if (!detail) throw new Error("Cognition detail requires live evidence and access for its holder");
+      if (!detail) throw new ModelContentValidationError("Cognition detail requires live evidence and access for its holder");
       return detail.id;
     });
     if (current && !cognitionIds.length && levelRank(current.level) >= levelRank(item.level)
@@ -389,7 +390,11 @@ export function mentionedCharacters(db: RcmDatabase, chatId: string, text: strin
     })).map(entity => entity.name);
 }
 
-export interface SceneNames { text: string; pairCount: number; omittedCount: number; recognitionIds: string[] }
+export interface SceneNames {
+  text: string; pairCount: number; omittedCount: number; recognitionIds: string[];
+  /** Subject is present or mentioned, before holder access, name availability and output caps. */
+  sceneRecognitionIds: string[];
+}
 
 /** One stable, holder-scoped renderer shared by automatic packets and MCP. */
 export function renderSceneNames(db: RcmDatabase, chatId: string, holders: string[], present: string[], mentioned: string[], tokenBudget = 200): SceneNames {
@@ -403,8 +408,9 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
   const presentSet = new Set(present.map(canonical));
   const subjectSet = new Set([...present, ...mentioned].map(canonical));
   const visible = new Map(listSocialKnowledge(db, chatId).map(item => [item.id, item]));
-  const pairs = socialKnowledgeView(db, chatId).filter(item => holderSet.has(canonical(item.holder))
-    && subjectSet.has(canonical(item.subject)) && characters.has(canonical(item.subject))
+  const sceneRecognitions = socialKnowledgeView(db, chatId).filter(item => subjectSet.has(canonical(item.subject))
+    && characters.has(canonical(item.subject)));
+  const pairs = sceneRecognitions.filter(item => holderSet.has(canonical(item.holder))
     && canonical(item.holder) !== canonical(item.subject) && (item.knownAs.length || item.addressTerms.length)
     // A referenced recognition atom must still be accessible to its holder.
     && (!item.detailIds.length || visible.get(item.id)!.cognition.length > 0))
@@ -424,7 +430,8 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
     if (estimateTokens(render()) > Math.min(200, tokenBudget)) { lines.pop(); break; }
     recognitionIds.push(`recognition:${item.holder}:${item.subject}`);
   }
-  return { text: render(), pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds };
+  return { text: render(), pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds,
+    sceneRecognitionIds: sceneRecognitions.map(item => `recognition:${item.holder}:${item.subject}`) };
 }
 
 /** Insert inside the product-owned MCP envelope consumed by all adapters. */

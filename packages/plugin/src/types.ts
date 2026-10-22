@@ -14,6 +14,7 @@ export interface PluginSettings {
   serverUrl: string;
   serverToken: string;
   defaultChatEnabled: boolean;
+  characterEnabled: Record<string, boolean>;
   chatEnabled: Record<string, boolean>;
   chatCatchUpPending: Record<string, boolean>;
   workerPaused: boolean;
@@ -28,6 +29,7 @@ export interface PluginSettings {
   includeUserMessages: Record<string, boolean>;
   memoryOnlyInjection: Record<string, boolean>;
   upcomingOccasions: Record<string, boolean>;
+  pairProgress: Record<string, boolean>;
   sourceProtectionTurns: number;
   editProtectionTurns: number;
   canonicalizationPolicy: CanonicalizationPolicy;
@@ -104,6 +106,7 @@ export interface CurrentContext {
   includeUserMessages: boolean;
   memoryOnlyInjection?: boolean;
   upcomingOccasions?: boolean;
+  pairProgress?: boolean;
   sourceProtectionTurns?: number;
   editProtectionTurns?: number;
   canonicalizationPolicy?: CanonicalizationPolicy;
@@ -144,6 +147,8 @@ export interface RuntimeState {
   /** Identity already read by normal context sync; diagnostics only verify selection indices. */
   hostChatIdentity?: { characterIndex: number; chatIndex: number; chatId: string };
   lastPrepare?: TurnPrepareResponse;
+  chatOpen?: { key: string; pending: Promise<void>; resolved?: boolean };
+  lineageOperation?: { chatId: string; kind: "open" | "select" | "transfer"; status: "running" | "failed"; error?: string; parentChatId?: string; previousLineage?: import("@rcm/shared").ChatLineageStatus };
   lastResolvedSetup?: { chatId: string; projection: ResolvedSetupProjection };
   activeMemoryLanguages?: Record<string, MemoryLanguage>;
   perspectiveStatus?: { perspectives: string[]; unresolved: boolean; omissionReason?: TurnPrepareResponse["omissionReason"] };
@@ -152,6 +157,7 @@ export interface RuntimeState {
     chatId: string;
     memoryOnlyInjection?: boolean;
   upcomingOccasions?: boolean;
+  pairProgress?: boolean;
     requestedBudget: number;
     promptSourceMessageIds: string[];
     latestMessageId?: string;
@@ -268,6 +274,7 @@ export interface RuntimeState {
     lastJobSourceRecovery?: import("@rcm/shared").SourceRecoveryMetadata;
     progress?: ActivityProgress;
     initialCalibration?: InitialCalibrationActivity;
+    lineage?: import("@rcm/shared").ChatLineageStatus;
     episode?: EpisodeActivity | null;
   };
   episodeActivity?: EpisodeActivity | null;

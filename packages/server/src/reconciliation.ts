@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { parseSocialRelation, sameSocialRelationScope } from "./social-relations.js";
 import { transitionEvidenceJson, canAutomaticallyChange, committedEditOrdinal, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
@@ -136,6 +137,7 @@ function emptyFinal(draft: ExtractionDraftResult): ExtractionResult {
     memoryRecallObservations: draft.memoryRecallObservations,
     atomRelations: draft.atomRelations,
     seedResolutions: draft.seedResolutions,
+    pairProgress: draft.pairProgress,
   });
 }
 
@@ -181,12 +183,12 @@ function recordReview(db: RcmDatabase, chatId: string, jobId: string, sourceIds:
 /** Convert new state without writing reconciliation decisions or closing rows. */
 export function additiveReconciliationResult(draft: ExtractionDraftResult, submission?: ReconciliationSubmission): ExtractionResult {
   const result = emptyFinal(draft);
-  if (draft.seedResolutions?.length) throw new Error('Memory additions cannot resolve existing seeds');
+  if (draft.seedResolutions?.length) throw new ModelContentValidationError('Memory additions cannot resolve existing seeds');
   const decisions = new Map((submission?.result?.decisions ?? []).map(item => [item.itemRef, item]));
   for (const observation of draft.stateObservations) {
     const decision = decisions.get(`observation:${observation.key}`);
     if (decision && (!['create', 'coexist', 'ignore'].includes(decision.action) || decision.targetIds.length)) {
-      throw new Error('Memory additions cannot change existing state');
+      throw new ModelContentValidationError('Memory additions cannot change existing state');
     }
     if (decision?.action !== 'ignore') addObservation(result, observation, decision?.action ?? 'create', [], undefined, decision?.compatibleWithIds);
   }
@@ -215,11 +217,11 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
     const expectedRefs = new Set(prepared.items.map((entry) => entry.itemRef));
     const seen = new Set<string>();
     for (const decision of parsed.decisions) {
-      if (!expectedRefs.has(decision.itemRef)) throw new Error(`Model returned an unknown reconciliation itemRef: ${decision.itemRef}`);
-      if (seen.has(decision.itemRef)) throw new Error(`Model returned duplicate reconciliation decisions for ${decision.itemRef}`);
+      if (!expectedRefs.has(decision.itemRef)) throw new ModelContentValidationError(`Model returned an unknown reconciliation itemRef: ${decision.itemRef}`);
+      if (seen.has(decision.itemRef)) throw new ModelContentValidationError(`Model returned duplicate reconciliation decisions for ${decision.itemRef}`);
       seen.add(decision.itemRef);
     }
-    for (const itemRef of expectedRefs) if (!seen.has(itemRef)) throw new Error(`Missing model decision for ${itemRef}`);
+    for (const itemRef of expectedRefs) if (!seen.has(itemRef)) throw new ModelContentValidationError(`Missing model decision for ${itemRef}`);
   }
   for (const observation of prepared.local) addObservation(result, observation, "create", [], observation.kind === "promise_event" ? observation.promiseKeyHint : observation.predicateHint);
   let pending = 0;
@@ -233,11 +235,11 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
   for (const entry of prepared.items) {
     const decision = decisions.get(entry.itemRef)!;
     const targets = decision.targetIds.map((id) => entry.candidates.find((candidate) => candidate.id === id)).filter(Boolean) as Candidate[];
-    if (targets.length !== decision.targetIds.length) throw new Error(`Model selected a target outside the allowed candidates for ${entry.itemRef}`);
+    if (targets.length !== decision.targetIds.length) throw new ModelContentValidationError(`Model selected a target outside the allowed candidates for ${entry.itemRef}`);
     const needsTarget = ["reinforce", "supersede", "end", "dispute"].includes(decision.action);
-    if (needsTarget && targets.length === 0) throw new Error(`${decision.action} requires a target for ${entry.itemRef}`);
-    if (["create", "coexist", "ignore"].includes(decision.action) && targets.length > 0) throw new Error(`${decision.action} cannot select a target for ${entry.itemRef}`);
-    if (decision.compatibleWithIds?.some(id => !entry.candidates.some(candidate => candidate.id === id))) throw new Error("Coexistence references an unavailable candidate");
+    if (needsTarget && targets.length === 0) throw new ModelContentValidationError(`${decision.action} requires a target for ${entry.itemRef}`);
+    if (["create", "coexist", "ignore"].includes(decision.action) && targets.length > 0) throw new ModelContentValidationError(`${decision.action} cannot select a target for ${entry.itemRef}`);
+    if (decision.compatibleWithIds?.some(id => !entry.candidates.some(candidate => candidate.id === id))) throw new ModelContentValidationError("Coexistence references an unavailable candidate");
     if (requiresProtectedStateReview(entry, decision)) {
       recordReview(db, chatId, jobId, sourceIds, entry, decision, "User-managed canonical state cannot be changed automatically");
       pending += 1;

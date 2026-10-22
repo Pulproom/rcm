@@ -1,6 +1,9 @@
+import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
+import { editPairProgress, listPairProgress, pairProgressResponse, renderPairProgress } from "./pair-progress.js";
 import { prepareOccasions, renderOccasions } from "./occasions.js";
 import { readSmallReviews, smallReviewView, resolveSmallReviews } from "./small-review.js";
 import { patchMemoryLine } from './memory-detail-edits.js';
+import { CharacterWorkRequestSchema } from "@rcm/shared";
 import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
 import { EntityColorSchema, hasSocialTermSeparator } from "@rcm/shared";
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
@@ -81,13 +84,13 @@ import {
 import {backupServerSettings, type ServerConfig} from "./config.js";
 import { openDatabase, type RcmDatabase } from "./db.js";
 import { BackupValidationError, exportCompleteArchive, exportChatArchive, restoreChatArchive, inspectCompleteArchive, previewMemoryTransplant, restoreCompleteArchive, transplantCompleteArchive } from "./backup.js";
-import { deleteChats, listAdminChats, listSourceLedger, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
+import { deleteChats, listAdminChats, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
 import { recanonicalizeSourceLedger } from "./lifecycle.js";
 import { EmbeddingRequestError, type EmbeddingService } from "./embedding.js";
 import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
-import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot } from "./lifecycle.js";
+import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot, syncChatTitle } from "./lifecycle.js";
 import { automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, mergeMemoryContextItems, processedHistoryCoverage, retrieve, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
 import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
@@ -98,7 +101,7 @@ import { buildEntityIdentityResolver, deleteEntity, listEntities, mergeEntities,
 import { EVERYONE_HOLDER, publicKnowledgeScope, publicMemoryContext, publicMcpAnswers, memoryDetailAccess, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
 import { normalizeUnitScore } from "./scores.js";
 import { listReconciliationReviews, prepareReconciliation, resolveReconciliationReview } from "./reconciliation.js";
-import { prepareStateExtraction, usesStateExtraction } from "./state-extraction.js";
+import { recordProgressSent, prepareStateExtraction, usesStateExtraction } from "./state-extraction.js";
 import { memoryAdditionStopsAfterEvents } from "@rcm/shared";
 import { applyExtractionAuditPatch } from "./extraction-audit.js";
 import { changeEpisodeStart, closeEpisodeHold, episodeOverview, previewEpisodeStart, retryEpisode, releaseManualEpisode, startEpisodeHold, syncEpisodeMembership } from "./episodes.js";
@@ -106,7 +109,7 @@ import { resolveTurnPerspectives } from "./perspectives.js";
 import { hasBufferedSource, ingestionSummary } from "./ingestion-state.js";
 import { resolveConflict, type ConflictResolution } from "./conflicts.js";
 import { readMemoryBookmarks, setMemoryBookmark } from "./memory-bookmarks.js";
-import { InvalidViewPreferencesPatchError, readViewPreferences, ViewPreferencesStorageError, writeViewPreferences } from "./view-preferences.js";
+import { InvalidViewPreferencesPatchError, readViewPreferences, ViewPreferencesStorageError, writePersonaHint, writeViewPreferences } from "./view-preferences.js";
 import { acknowledgeChatLineage, applyManualLineage, applyProbedLineage, chooseChatLineage, declineChatLineage, ensureChatLineage, getChatLineage, previewManualLineage, probeChatLineage, revertChatLineage } from "./lineage.js";
 import { appendSceneNames, mentionedCharacters, renderSceneNames, listSocialKnowledge, retractSocialKnowledge, setManualSocialKnowledge } from "./social-knowledge.js";
 import { fingerprintMatches, parseSourceFingerprintJson } from "./source-fingerprint.js";
@@ -114,8 +117,8 @@ import { completeRelationshipProjectionJob, flushRelationshipProjectionQueue, li
 import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
 import { replaceItemAccess } from "./ingest.js";
 import { buildRetrievalQuerySignals, sourceQuerySignals } from "./retrieval-planner.js";
-import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage } from "./auxiliary-page-cache.js";
-import { beginInitialCalibration, prepareInitialCalibrationRetry, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
+import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, resetRejectedJobCache } from "./auxiliary-page-cache.js";
+import { assertSetupLineageResolved, beginInitialCalibration, prepareInitialCalibrationRetry, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
 import { previewRegeneration, applyCanonicalRegeneration, applyEpisodeRegeneration, discardRegeneration, listExtractionBatches, listRegenerations, regenerationRun, startCanonicalRegeneration, startEpisodeRegeneration } from "./regeneration.js";
 import { listSourceRanges, rangeMessages, setMemoryExclusion } from "./source-ranges.js";
 import { additionSources, additionMessageReason, previewMemoryAddition, startMemoryAddition, listMemoryAdditions, applyMemoryAddition, discardMemoryAddition } from './memory-addition.js';
@@ -255,7 +258,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const health = {
       ok: true, version: RCM_SERVER_VERSION, apiRevision: RCM_API_REVISION, instanceId: serverInstanceId,
       vectorEnabled, embeddingReady: embeddings.ready, embedding: embeddings.status, reranker: reranker.status, serverTranslationCache: true, completeMemoryBackup: true,
-      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, memoryLineEditing: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, sourceLedgerInspection: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
+      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, memoryLineEditing: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
     };
     Object.assign(health.capabilities, {
       chatOperationLifecycleV2: true,
@@ -625,10 +628,11 @@ export function createApp(dependencies: Dependencies): Hono {
     const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives,
       activeNames: namesPresent, query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
       covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
-      namesRecognitionIds: new Set(sceneNames.recognitionIds) });
+      namesRecognitionIds: new Set(sceneNames.recognitionIds), sceneRecognitionIds: new Set(sceneNames.sceneRecognitionIds) });
     const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(parsed.tokenBudget);
     const selectedState = selectAutomaticState(stateCandidates, stateBudget);
     const ceilingDroppedState = new Set<string>();
+    let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName),namesPresent);
     const occasions = parsed.upcomingOccasions === false ? { asOf: null, items: [] } : prepareOccasions(db, parsed.chatId, parsed.profile, retrievalPerspectives, parsed.identityHints?.userPersonaName);
     // Core portfolio selection sees the full budget. Calendar context yields first at the final ceiling.
     let includeOccasions = false;
@@ -637,6 +641,7 @@ export function createApp(dependencies: Dependencies): Hono {
       emittedManifest = mergePacketManifests([...structuredManifests, state.manifest]);
       let body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
       const calendar = includeOccasions ? renderOccasions(occasions.asOf, occasions.items) : "";
+      if (progress) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${progress}\n</rp_memory_context>`);
       if (calendar) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${calendar}\n</rp_memory_context>`);
       const deliveredDetails = selectedItems.flatMap(item => item.details
         .filter(detail => emittedManifest.atomKeys.includes(memoryDetailAtomKey(detail))).map(detail => detail.text));
@@ -647,8 +652,8 @@ export function createApp(dependencies: Dependencies): Hono {
           evidence.messageId === source.messageId && evidence.canonicalHash === source.canonicalHash
           && evidence.startOffset <= source.startOffset! && evidence.endOffset >= source.endOffset!)));
       const sourceXml = renderSourceEvidence(deliveredSources);
-      if (!sourceXml) return referencePacket(body);
-      return referencePacket(body.includes("</past_records>") ? body.replace("</past_records>", `${sourceXml}</past_records>`) : (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${sourceXml}</rp_memory_context>`));
+      if (!sourceXml) return referencePacket(body ? withMemoryGuidance(body) : sharedPastPacket);
+      return referencePacket(withMemoryGuidance(body.includes("</past_records>") ? body.replace("</past_records>", `${sourceXml}</past_records>`) : (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${sourceXml}</rp_memory_context>`)));
     };
     let packet = rebuildPacket();
     const focusLeaderIdSet = new Set(focusLeaderIds);
@@ -698,6 +703,7 @@ export function createApp(dependencies: Dependencies): Hono {
       ceilingDroppedState.add(selectedState.splice(index, 1)[0]!.item.id); packet = rebuildPacket();
     };
     while (estimateTokens(packet) > hardTokenCeiling) {
+      if (progress) { progress = ""; packet = rebuildPacket(); continue; }
       if (occasions.items.length) { occasions.items.pop(); packet = rebuildPacket(); continue; }
       const supplemental = lastMatchingIndex(selectedState, row => !!row.promiseSlot);
       if (supplemental >= 0) { dropState(supplemental); continue; }
@@ -829,7 +835,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const toolOpportunity = buildMemoryToolOpportunity([...eligibleAtoms.values()], selectedItems, finalManifest, promptCoveredAtoms, selectedCandidateClasses);
     toolOpportunity.archiveSearchAvailable = accessibleArchiveExists(db, parsed.chatId, activeTurnPerspectives)
       || memoryToolReadiness(db, parsed.chatId).processedStates > 0;
-    const sectionTokens = Object.fromEntries(["story_continuity", "current_state", "occasions"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
+    const sectionTokens = Object.fromEntries(["story_continuity", "current_state", "occasions", "not_yet"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
     const sceneDelivery = selectedItems.map(item => ({memoryId:item.id,ref:requestRefs.get(item.id),details:item.details.length,dialogues:item.keyDialogues.length}));
     const stateKinds = Object.fromEntries([...new Set(finalManifest.stateEvidenceIds.map(id=>id.split(":")[0]!))].map(kind=>[kind,finalManifest.stateEvidenceIds.filter(id=>id.startsWith(kind+":")).length]));
     const stateInventory = Object.fromEntries([...new Set(stateCorpus.map(item => item.kind))].map(kind => [kind, stateCorpus.filter(item => item.kind === kind).length]));
@@ -1080,6 +1086,24 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ ok: true, calibration: initialCalibrationLedger(db, context.req.param("id")) });
     } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
   });
+  app.post("/v1/chats/:id/open", async (context) => {
+    const body = TurnPrepareRequestSchema.parse(await context.req.json());
+    if (body.chatId !== context.req.param("id")) return context.json({ error: "chatId does not match route" }, 400);
+    // Opening a host chat only resolves identity and stores sources. It must not
+    // capture setup, retrieve a packet, enqueue work or wake a provider.
+    const request = { ...body, resolvedSetup: undefined, forceBackfill: false, backfillApproved: false, deferExtraction: true, tokenBudget: 0 };
+    const lineage = db.transaction(() => {
+      syncChatTitle(db,body.chatId,body.chatTitle);
+      const current = getChatLineage(db, body.chatId);
+      const resolved = current.status === "none" ? ensureChatLineage(db, request) : current;
+      // A concurrent prepare may already have advanced this chat. Opening is
+      // not an edit/rollback event; only fill a previously empty source ledger.
+      if (!db.prepare("SELECT 1 FROM messages WHERE chat_id=? LIMIT 1").get(body.chatId)) syncSnapshot(db, request);
+      writePersonaHint(db, body.chatId, body.identityHints?.userPersonaName);
+      return resolved;
+    })();
+    return context.json({ lineage, initialCalibration: initialCalibrationView(db, body.chatId), memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(body.chatId) as { memory_language: string }).memory_language });
+  });
   app.post("/v1/chats/:id/lineage/probe", async (context) => {
     try {
       const body = LineageProbeRequestSchema.parse(await context.req.json());
@@ -1120,7 +1144,7 @@ export function createApp(dependencies: Dependencies): Hono {
         deferExtraction: true,
       };
       const lineage = applyProbedLineage(db, request, body.parentChatId, body.fingerprint);
-      return context.json({ ok: true, lineage, queuedJobs: 0 });
+      return context.json({ ok: true, lineage, initialCalibration: initialCalibrationView(db, request.chatId), queuedJobs: 0 });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return context.json({ error: message }, ["LINEAGE_PROBE_STALE", "LINEAGE_ALREADY_APPLIED", "TARGET_HAS_DERIVED_DATA"].includes(message) ? 409 : 400);
@@ -1133,7 +1157,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const chatId = context.req.param("id");
       const lineage = chooseChatLineage(db, chatId, body.parentChatId, { ...body, chatId, messages: [], query: '', perspectives: [],
         tokenBudget: 0, forceBackfill: false, deferExtraction: true }, body.fingerprint);
-      return context.json({ ...lineage, queuedJobs: 0 });
+      return context.json({ ...lineage, initialCalibration: initialCalibrationView(db, chatId), queuedJobs: 0 });
     }
     catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
   });
@@ -1150,9 +1174,7 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/lineage/revert", (context) => {
     const chatId = context.req.param("id");
     revertChatLineage(db, chatId);
-    const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
-    const queued = enqueueExtractionJobs(db, chatId, chat.profile, true, Boolean(chat.include_user_messages), chat.extraction_group_turns);
-    if (queued) serverWorker.wake();
+    // Reverting is cancellation, not consent to a full source backfill.
     return context.json({ ok: true, lineage: getChatLineage(db, context.req.param("id")) });
   });
   app.post("/v1/chats/:id/lineage/preview", async (context) => {
@@ -1169,7 +1191,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const body = ManualLineageApplyRequestSchema.parse(await context.req.json());
       const chatId = context.req.param("id");
       const lineage = applyManualLineage(db, chatId, body.parentChatId, body.fingerprint, body.targetMessageInventory, body.replaceDerived, body.target);
-      return context.json({ ok: true, lineage, queuedJobs: 0 });
+      return context.json({ ok: true, lineage, initialCalibration:initialCalibrationView(db,chatId), queuedJobs: 0 });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return context.json({ error: message }, ["TARGET_HAS_DERIVED_DATA", "TARGET_INVENTORY_REQUIRED", "LINEAGE_PREVIEW_STALE"].includes(message) ? 409 : 400);
@@ -1185,29 +1207,40 @@ export function createApp(dependencies: Dependencies): Hono {
     const body = await context.req.json() as { sourceChatId?: string; fingerprint?: string; replaceDerived?: boolean };
     if (!body.sourceChatId || !body.fingerprint) return context.json({ error: "sourceChatId and fingerprint are required" }, 400);
     const targetChatId = context.req.param("id");
-    const preview = previewMemoryTransplant(db, body.sourceChatId, targetChatId);
-    if (preview.fingerprint !== body.fingerprint) return context.json({ error: "TRANSPLANT_PREVIEW_STALE" }, 409);
-    if (preview.requiresReplacement && !body.replaceDerived) return context.json({ error: "TARGET_HAS_DERIVED_DATA" }, 409);
-    const wasPaused = serverWorker.status.state === "paused";
-    serverWorker.pause("Transplanting memory from a server chat");
     try {
-      const result = transplantCompleteArchive(db, exportCompleteArchive(db), body.sourceChatId, targetChatId);
+      const result = db.transaction(() => {
+        const preview = previewMemoryTransplant(db, body.sourceChatId!, targetChatId);
+        if (preview.fingerprint !== body.fingerprint) throw new Error("TRANSPLANT_PREVIEW_STALE");
+        if (preview.requiresReplacement && !body.replaceDerived) throw new Error("TARGET_HAS_DERIVED_DATA");
+        return transplantCompleteArchive(db, exportCompleteArchive(db), body.sourceChatId!, targetChatId);
+      })();
       void embeddings.indexPending(targetChatId);
-      return context.json({ ok: true, ...result });
-    } finally { if (!wasPaused) serverWorker.resume("server-chat-transplant"); }
+      return context.json({ ok: true, ...result, lineage:getChatLineage(db,targetChatId),initialCalibration:initialCalibrationView(db,targetChatId) });
+    } catch (error) {
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+    }
   });
 
-  const syncChatWork = (settings: Record<string, boolean> = {}) => {
-    for (const [chatId, enabled] of Object.entries(settings)) {
+  const syncChatWork = (body: { chatEnabled?: Record<string, boolean>; characterEnabled?: Record<string, boolean>; defaultChatEnabled?: boolean }, characterId?: string) => {
+    const settings = body.chatEnabled ?? {};
+    const effective = new Map(characterId ? [] : Object.entries(settings));
+    if (body.characterEnabled) {
+      const chats = db.prepare(`SELECT id,character_id FROM chats${characterId ? " WHERE character_id=?" : ""}`)
+        .all(...(characterId ? [characterId] : [])) as Array<{ id: string; character_id: string }>;
+      for (const chat of chats) effective.set(chat.id, body.characterEnabled[chat.character_id] !== false
+        && (settings[chat.id] ?? body.defaultChatEnabled ?? true));
+    }
+    for (const [chatId, enabled] of effective) {
       if (isChatWorkHeld(db, chatId) === !enabled) continue;
       setChatWorkEnabled(db, chatId, enabled);
-      if (enabled) void embeddings.indexPending(chatId);
+      if (enabled) { serverWorker.wake(); void embeddings.indexPending(chatId); }
     }
+    return [...effective.keys()];
   };
 
   app.post("/v1/jobs/lease", async (context) => {
     const body = LeaseJobRequestSchema.parse(await context.req.json());
-    syncChatWork(body.chatEnabled);
+    syncChatWork(body);
     if (llmStore.config.engine === "server") return context.json({ job: null });
     if(body.modelSettingsFingerprint) db.prepare("INSERT INTO server_meta(key,value) VALUES('risu_model_settings_fingerprint',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(body.modelSettingsFingerprint);
     const job = attachAuxiliaryPlan(db, leaseJob(db, body.workerId, config.leaseSeconds), {
@@ -1318,6 +1351,7 @@ export function createApp(dependencies: Dependencies): Hono {
       : prepareReconciliation(db, job.chat_id, preparedResult, maxInputTokens);
     (jobPayload as any).auxiliaryPromptParts = prepared.parts?.map((part) => ({ purpose: "reconciliation", systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) ?? [];
     db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND lease_owner=? AND status='leased'").run(JSON.stringify(jobPayload), Date.now(), context.req.param("id"), body.workerId);
+    if ("progressSent" in prepared) recordProgressSent(db, context.req.param("id"), prepared.progressSent);
     const parts = prepared.parts?.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(jobPayload as any, "reconciliation", part.systemPrompt, part.userPrompt) }));
     return context.json({ required: prepared.required, candidateSetHash: prepared.candidateSetHash, systemPrompt: prepared.systemPrompt,
       userPrompt: prepared.userPrompt, parts, ...('stateExtraction' in prepared || evidenceIssues.length ? { groundingDraft: preparedResult, evidenceIssues } : {}) });
@@ -1358,7 +1392,7 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/jobs/:id/fail", async (context) => {
     const body = FailJobRequestSchema.parse(await context.req.json());
     const failedJob = db.prepare("SELECT chat_id,type,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param("id"), body.workerId) as { chat_id: string; type: string; payload_json: string } | undefined;
-    const result = failJob(db, context.req.param("id"), body.workerId, {message:body.error,...body.providerFailure});
+    const result = failJob(db, context.req.param("id"), body.workerId, {message:body.error,...body.providerFailure,modelContentRejected:body.modelContentRejected});
     if (result?.status === "failed" && failedJob?.type === "ledger_consistency") {
       finalizeLedgerConsistencyRun(db, failedJob.chat_id, String((JSON.parse(failedJob.payload_json) as { backfillRunId?: string }).backfillRunId ?? ""));
     }
@@ -1572,19 +1606,6 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ error: "Chat not found" }, 404);
     }
   });
-  app.get("/v1/admin/chats/:id/source-ledger", (context) => {
-    try {
-      return context.json(listSourceLedger(
-        db,
-        context.req.param("id"),
-        Number(context.req.query("offset") ?? 0),
-        Number(context.req.query("limit") ?? 50),
-        context.req.query("includeContent") === "true",
-      ));
-    } catch (error) {
-      return context.json({ error: error instanceof Error ? error.message : String(error) }, 404);
-    }
-  });
   let connectionTestBusy = false;
   app.post("/v1/admin/connection-test", async context => {
     const body = await context.req.json().catch(() => null);
@@ -1693,13 +1714,13 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/worker/heartbeat", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
-    syncChatWork(body.chatEnabled);
+    syncChatWork(body);
     serverWorker.heartbeat(body.workerId);
     return context.json({ ok: true, worker: body.chatId ? serverWorker.statusForChat(body.chatId) : serverWorker.status });
   });
   app.post("/v1/worker/resume", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
-    syncChatWork(body.chatEnabled);
+    syncChatWork(body);
     return context.json({ ok: true, worker: serverWorker.resume(body.workerId) });
   });
   app.post("/v1/worker/pause", (context) => context.json({ ok: true, worker: serverWorker.pause() }));
@@ -1731,6 +1752,7 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/reprocess", async (context) => {
     try {
       const chatId = context.req.param("id");
+      assertSetupLineageResolved(db, chatId);
       const body = await context.req.json().catch(() => ({})) as {
         activatePendingMemoryLanguage?: unknown;
         extractionReviewOverride?: unknown;
@@ -1888,8 +1910,12 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ items: items.map((item) => {
       const sourceMessageIds = JSON.parse(item.sourceMessageIds || "[]");
       const draft = JSON.parse(item.draft);
-      return { ...item, sourceMessageIds, sourceFingerprint: JSON.parse(item.sourceFingerprint || "[]"), draft,
-        smallReviews: readSmallReviews(draft).map(candidate => smallReviewView(db, context.req.param("id"), sourceMessageIds, candidate)),
+      const smallReviews = readSmallReviews(draft);
+      // A held recognition offers "add from source" on the range that covers its audit.
+      const sourceRange = sourceMessageIds.length && smallReviews.some(candidate => candidate.kind === "recognition" && candidate.status === "pending")
+        ? listSourceRanges(db, context.req.param("id"), sourceMessageIds).find(range => sourceMessageIds.every((id: string) => range.sourceMessageIds.includes(id))) : undefined;
+      return { ...item, sourceMessageIds, sourceFingerprint: JSON.parse(item.sourceFingerprint || "[]"), draft, ...(sourceRange ? { sourceRangeId: sourceRange.id } : {}),
+        smallReviews: smallReviews.map(candidate => smallReviewView(db, context.req.param("id"), sourceMessageIds, candidate)),
         patch: item.patch ? JSON.parse(item.patch) : undefined, usage: JSON.parse(item.usage || "{}"),
         ...(["pending_review", "failed"].includes(item.status) ? { evidenceReview: describeEvidenceReview(db, context.req.param("id"), item.jobId, draft, sourceMessageIds) } : {}) };
     }) });
@@ -2108,6 +2134,30 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ ok: true, jobId });
   });
 
+  app.get("/v1/chats/:id/pair-progress", (context) => {
+    const chatId = context.req.param("id");
+    if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId)) return context.json({ error: "Chat not found" }, 404);
+    writePersonaHint(db, chatId, context.req.query("userPersonaName"));
+    const result = pairProgressResponse(db, chatId);
+    const persona=context.req.query("persona"), character=context.req.query("character");
+    if (persona && character) result.items = result.items.filter(p=>p.persona===persona&&p.character===character);
+    return context.json(result);
+  });
+  app.post("/v1/chats/:id/pair-progress", async (context) => {
+    const schema=z.object({persona:z.string().min(1),character:z.string().min(1),action:z.discriminatedUnion("kind",[
+      z.object({kind:z.literal("cell"),itemId:z.string().min(1),side:z.string().min(1),state:z.enum(["done","not_yet"])}),
+      z.object({kind:z.literal("remaining_not_yet")}),
+      z.object({kind:z.literal("add"),label:z.string().trim().min(1).max(120),mode:z.enum(["each","mutual"])}),
+      z.object({kind:z.enum(["remove","hide","restore"]),itemId:z.string().min(1)}),
+    ])});
+    try {
+      const input=schema.parse(await context.req.json());
+      const result=db.transaction(()=>editPairProgress(db,context.req.param("id"),input.persona,input.character,input.action))();
+      db.prepare("UPDATE chats SET revision=revision+1 WHERE id=?").run(context.req.param("id"));
+      return context.json(result);
+    } catch(error) { return context.json({error:error instanceof Error?error.message:"Invalid progress request"},400); }
+  });
+
   app.get("/v1/chats/:id/view-preferences", (context) => context.json(readViewPreferences(db, context.req.param("id"))));
   app.put("/v1/chats/:id/view-preferences", async (context) => {
     try {
@@ -2231,6 +2281,13 @@ export function createApp(dependencies: Dependencies): Hono {
   app.delete("/v1/chats/:id/messages/:messageId", (context) => context.json({
     ok: hardDeleteMessage(db, context.req.param("id"), context.req.param("messageId")),
   }));
+  app.put("/v1/characters/:id/work", async context => {
+    const body = CharacterWorkRequestSchema.safeParse(await context.req.json().catch(() => null));
+    if (!body.success) return context.json({ error: "Invalid character work settings" }, 400);
+    const characterId = context.req.param("id");
+    const chatIds = syncChatWork({ ...body.data, characterEnabled: { [characterId]: body.data.enabled } }, characterId);
+    return context.json({ ok: true, chatIds });
+  });
   app.put("/v1/chats/:id/work", async context => {
     const body = z.object({ enabled: z.boolean() }).safeParse(await context.req.json().catch(() => null));
     if (!body.success) return context.json({ error: "enabled must be boolean" }, 400);
@@ -2274,8 +2331,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const body = await context.req.json() as { chatTitle?: unknown };
     const chatTitle = typeof body.chatTitle === "string" ? body.chatTitle.trim().slice(0, 240) : "";
     if (!chatTitle) return context.json({ error: "chatTitle is required" }, 400);
-    const result = db.prepare("UPDATE chats SET chat_title=?,updated_at=? WHERE id=?").run(chatTitle, Date.now(), context.req.param("id"));
-    return result.changes ? context.json({ ok: true, chatTitle }) : context.json({ error: "Chat not found" }, 404);
+    return syncChatTitle(db,context.req.param('id'),chatTitle) ? context.json({ ok: true, chatTitle }) : context.json({ error: "Chat not found" }, 404);
   });
   app.post("/v1/chats/:id/memories", async (context) => {
     const chatId = context.req.param("id");
@@ -3327,7 +3383,12 @@ export function createApp(dependencies: Dependencies): Hono {
     }
   });
 
-  app.onError((error, context) => {
+  app.onError(async (error, context) => {
+    // Includes prepare failures from replayed audit checkpoints as well as completion.
+    if (context.req.routePath.startsWith("/v1/jobs/:id/")) {
+      const body = await context.req.json().catch(() => ({}));
+      if (typeof body?.workerId === "string") resetRejectedJobCache(db, context.req.param("id")!, body.workerId, error);
+    }
     const code = typeof (error as any)?.code === "string" ? (error as any).code : "REQUEST_FAILED";
     const summary = error instanceof ExtractionValidationError
       ? error.summary

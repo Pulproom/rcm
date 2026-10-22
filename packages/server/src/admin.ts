@@ -6,7 +6,7 @@ import { deleteDerivedRows } from "./derived-state.js";
 import { rewindAutomaticSuccessorsToCorrections } from "./user-corrections.js";
 import { materializeInitialRelationshipProjections } from "./initial-calibration.js";
 import { memoryBookmarksKey } from "./memory-bookmarks.js";
-import { viewPreferencesKey } from "./view-preferences.js";
+import { readPersonaName, viewPreferencesKey, writePersonaHint } from "./view-preferences.js";
 import { removedAliasesKey } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 import { chatPacketBudgetKey } from "./story-spine.js";
@@ -62,7 +62,8 @@ function requireNoActiveLease(db: RcmDatabase, chatIds: string[]): void {
 export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = false): ChatAdminSummary[] {
   const rows = db.prepare(`
     SELECT c.id,c.chat_title,c.character_id,c.profile,c.memory_language,c.pending_memory_language,c.static_json,c.ingestion_state,c.updated_at,
-      l.status AS lineage_status,l.kind AS lineage_kind,l.parent_chat_id,l.parent_title,l.fork_ordinal,
+      l.status AS lineage_status,l.kind AS lineage_kind,l.parent_chat_id,
+      COALESCE((SELECT chat_title FROM chats p WHERE p.id=l.parent_chat_id),l.parent_title) AS parent_title,l.fork_ordinal,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id) AS messages,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.source_kind<>'archive' AND m.host_visibility='active' AND m.lifecycle IN ('committed','pending')) AS active_messages,
       EXISTS(SELECT 1 FROM messages m WHERE m.chat_id=c.id AND m.source_kind='archive') AS has_imported_memory,
@@ -193,27 +194,6 @@ export function prepareChatReprocess(db: RcmDatabase, chatId: string): number {
   })();
 }
 
-export interface SourceLedgerPage {
-  items: Array<Record<string, unknown>>;
-  total: number;
-  offset: number;
-  limit: number;
-  includesContent: boolean;
-}
-
-export function listSourceLedger(db: RcmDatabase, chatId: string, offset: number, limit: number, includeContent: boolean): SourceLedgerPage {
-  const boundedOffset = Math.max(0, Math.floor(offset));
-  const boundedLimit = Math.min(50, Math.max(1, Math.floor(limit)));
-  const total = Number((db.prepare("SELECT count(*) count FROM messages WHERE chat_id=?").get(chatId) as { count: number } | undefined)?.count ?? 0);
-  if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId)) throw new Error("Chat not found");
-  const fields = includeContent
-    ? "message_id,role,ordinal,lifecycle,host_visibility,extraction_state,memory_excluded,event_time,updated_at,length(CAST(content AS BLOB)) AS content_bytes,content"
-    : "message_id,role,ordinal,lifecycle,host_visibility,extraction_state,memory_excluded,event_time,updated_at,length(CAST(content AS BLOB)) AS content_bytes,content IS NOT NULL AS has_content";
-  const items = db.prepare(`SELECT ${fields} FROM messages WHERE chat_id=? ORDER BY CASE lifecycle WHEN 'client_pruned' THEN 0 ELSE 1 END,ordinal LIMIT ? OFFSET ?`)
-    .all(chatId, boundedLimit, boundedOffset) as Array<Record<string, unknown>>;
-  return { items, total, offset: boundedOffset, limit: boundedLimit, includesContent: includeContent };
-}
-
 export function deleteChats(db: RcmDatabase, embeddings: EmbeddingService, chatIds: string[]): number {
   const unique = [...new Set(chatIds)];
   if (unique.length === 0) return 0;
@@ -221,6 +201,11 @@ export function deleteChats(db: RcmDatabase, embeddings: EmbeddingService, chatI
   unique.forEach((chatId) => embeddings.removeChat(chatId));
   const placeholders = unique.map(() => "?").join(",");
   return db.transaction(() => {
+    // Resolve before deleting any ancestor, including multi-generation bulk cleanup.
+    const children = db.prepare(`SELECT child_chat_id FROM chat_lineage
+      WHERE status='inherited' AND parent_chat_id IN (${placeholders})
+        AND child_chat_id NOT IN (${placeholders})`).all(...unique, ...unique) as Array<{ child_chat_id: string }>;
+    for (const child of children) writePersonaHint(db, child.child_chat_id, readPersonaName(db, child.child_chat_id));
     db.prepare(`DELETE FROM memory_fts WHERE chat_id IN (${placeholders})`).run(...unique);
     for (const chatId of unique) {
       clearAuxiliaryInputs(db,chatId);

@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { recordSmallReviews, ingestReviewedDialogue, finishSmallReviewRetry, readSmallReviews } from "./small-review.js";
 import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import type { JobTrigger } from "@rcm/shared";
@@ -23,7 +24,7 @@ import { refreshMemoryFts } from "./memory-search-document.js";
 import { canonicalizeExtraction } from "./entities.js";
 import type { RecallAtomReference } from "./atom-relations.js";
 import { scopeExtractionMemoryKeys } from "./extraction-memory-keys.js";
-import { finishStateExtraction, usesStateExtraction } from "./state-extraction.js";
+import { finishStateExtraction, usesStateExtraction, recordStateObservationDrops, type StateObservationDrop } from "./state-extraction.js";
 import { recordSeedResolutionDrops, type SeedResolutionDrop } from "./story-seeds.js";
 
 export interface DialogueRecoveryCandidate {
@@ -33,7 +34,7 @@ export interface DialogueRecoveryCandidate {
   dialogue: NonNullable<ExtractionDraftResult["memories"][number]["keyDialogues"]>[number];
 }
 
-export class ExtractionValidationError extends Error {
+export class ExtractionValidationError extends ModelContentValidationError {
   readonly code = "EXTRACTION_SOURCE_INVALID";
   readonly summary = "기억 후보의 필수 출처를 확인할 수 없어 작업을 저장하지 못했습니다.";
   readonly issues: StructuredIssue[];
@@ -91,9 +92,9 @@ export function completeExtractionJob(
     }
   }
   const original = ExtractionAggregateSchema.parse(payload.regenerationRunId ? {
-    ...result, entities: [], stateObservations: [], relationshipEvents: [], socialKnowledge: [],
+    ...result, pairProgress: undefined, entities: [], stateObservations: [], relationshipEvents: [], socialKnowledge: [],
     relationshipBaselines: [], physicalIntimacy: [], memoryRecallObservations: [],
-  } : result);
+  } : { ...result, pairProgress: undefined });
   if (payload.postExtractionReview && (!audit?.patch || audit.error) && !original.unfinishedSource?.length) {
     throw new Error(audit?.error ? `Extraction audit failed: ${audit.error}` : "Worker did not provide the requested extraction audit");
   }
@@ -103,16 +104,19 @@ export function completeExtractionJob(
   let recognitionReviewDraft: ExtractionDraftResult | undefined;
   let recognitionIssues: ReturnType<typeof normalizeRecognitionReferences>["rejected"] = [];
   let seedResolutionDrops: SeedResolutionDrop[] = [];
+  let stateObservationDrops: StateObservationDrop[] = [];
   const budgetPayload = payload as typeof payload & { auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
   const reconciliationBudget = Number(budgetPayload.auxiliaryBudget?.maxInputTokens ?? budgetPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000);
   if (usesStateExtraction(job.type, payload) && !submitted.unfinishedSource?.length && !reviewed.pendingRefs.length
     && !inspectDraftEvidence(db, job.chat_id, sourceMessageIds, submitted).some(issue => issue.blocking)) {
-    const completed = finishStateExtraction(db, job.chat_id, sourceMessageIds, submitted, reconciliation, reconciliationBudget);
+    const completed = finishStateExtraction(db, job.chat_id, sourceMessageIds, submitted, reconciliation, reconciliationBudget, undefined, jobId);
     submitted = completed.draft;
     reconciliation = completed.reconciliation;
     recognitionReviewDraft = completed.recognitionReviewDraft;
     recognitionIssues = completed.recognitionIssues;
     seedResolutionDrops = completed.seedResolutionDrops;
+    stateObservationDrops = completed.stateObservationDrops;
+    Object.assign(payload, completed.progressDiagnostics);
   }
   const recognition = normalizeRecognitionReferences(submitted);
   if (recognition.rejected.length) {
@@ -205,7 +209,7 @@ export function completeExtractionJob(
         if (!candidate || candidate.status !== "pending") { markJobComplete(db, jobId, workerId); return; }
       }
       const passages = audited.result.sourcePassages ?? [];
-      if (passages.some((item) => !sourceMessageIds.includes(item.messageId))) throw new Error("Recovery passage cites a source outside this job");
+      if (passages.some((item) => !sourceMessageIds.includes(item.messageId))) throw new ModelContentValidationError("Recovery passage cites a source outside this job");
       const passagesAdded = storeSourcePassages(db, job.chat_id, passages, payload.batchId, sourceMessageIds);
       let unresolvedDialogues = 0;
       const pendingDialogues: DialogueRecoveryCandidate[] = [];
@@ -282,7 +286,7 @@ export function completeExtractionJob(
       const existing = db.prepare("SELECT source_batch_id,user_managed FROM memories WHERE chat_id=? AND memory_key=?")
         .get(job.chat_id, memory.key) as { source_batch_id: string | null; user_managed: number } | undefined;
       if (existing && (existing.user_managed || existing.source_batch_id !== (payload.batchId ?? null))) {
-        finalValidationErrors.push("Scoped memory identity belongs to another batch or a user-managed memory");
+        throw new Error("Extraction source validation failed: Scoped memory identity belongs to another batch or a user-managed memory");
       }
     }
     if (finalValidationErrors.length) throw new ExtractionValidationError(finalValidationErrors);
@@ -290,6 +294,7 @@ export function completeExtractionJob(
       { sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] });
     normalizedEpisodic.warnings.push(...relationWarnings);
     recordSeedResolutionDrops(db,jobId,seedResolutionDrops);
+    recordStateObservationDrops(db,jobId,stateObservationDrops);
     if (relationWarnings.length) {
       db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.atomRelationWarnings',json(?)) WHERE id=?")
         .run(JSON.stringify(relationWarnings), jobId);

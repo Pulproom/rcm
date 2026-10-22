@@ -1,3 +1,6 @@
+import { ModelContentValidationError } from "@rcm/shared";
+import { applyProgressDone, resetProgress, ensurePairProgress } from "./pair-progress.js";
+import { writePersonaHint } from "./view-preferences.js";
 import { randomUUID } from "node:crypto";
 import { canAutomaticallyChange } from "./user-corrections.js";
 import {
@@ -162,12 +165,14 @@ export function materializeInitialRelationshipProjections(db: RcmDatabase, chatI
 }
 
 export function resolveInitialCalibrationConfirmation(db: RcmDatabase, chatId: string, action: "confirm" | "skip"): { forceBackfill: boolean; extractionReview?: boolean; backfillRunId?: string } {
+  assertSetupLineageResolved(db, chatId);
   const row = db.prepare(`SELECT status,pending_force_backfill AS forceBackfill,pending_extraction_review AS extractionReview
     FROM initial_calibrations WHERE chat_id=?`).get(chatId) as { status: string; forceBackfill: number; extractionReview: number | null } | undefined;
   if (!row) throw new Error("Initial calibration not found");
   if (action === "confirm" && row.status !== "awaiting_confirmation") throw new Error("Initial calibration is not awaiting confirmation");
   db.transaction(() => {
     if (action === "skip") {
+      resetProgress(db,chatId,"setup");
       updateSetupRecognition(db, chatId, "delete");
       db.prepare(`DELETE FROM relationship_projections WHERE chat_id=? AND projection_origin='setup' AND user_edit_ordinal IS NULL AND auto_locked=0
         AND NOT EXISTS (SELECT 1 FROM relationship_baselines b WHERE b.chat_id=relationship_projections.chat_id AND b.from_entity=relationship_projections.from_entity AND b.to_entity=relationship_projections.to_entity AND b.user_managed=1)`).run(chatId);
@@ -207,6 +212,7 @@ export function initialCalibrationRetryInput(db: RcmDatabase, chatId: string): {
 }
 
 export function prepareInitialCalibrationRetry(db: RcmDatabase, chatId: string): void {
+  assertSetupLineageResolved(db, chatId);
   const row = db.prepare("SELECT status,locked_at FROM initial_calibrations WHERE chat_id=?").get(chatId) as { status: string; locked_at: number | null } | undefined;
   if (!row || !["awaiting_setup", "awaiting_confirmation", "failed", "ready", "inherited", "skipped"].includes(row.status)) throw new Error("Initial setup is not replaceable");
   // Re-reading merges into the ledger. Never clear identities, corrections or deletion guards.
@@ -223,6 +229,7 @@ export function beginInitialCalibration(
   projection: ResolvedSetupProjection | undefined,
   options: { confirmationRequired?: boolean; forceBackfill?: boolean; extractionReview?: boolean } = {},
 ): InitialCalibrationView {
+  assertSetupLineageResolved(db, chatId);
   const existing = initialCalibrationView(db, chatId);
   if (!["unseeded", "awaiting_setup", "failed"].includes(existing.status)) return existing;
   const timestamp = now();
@@ -242,10 +249,17 @@ export function beginInitialCalibration(
 }
 
 export function calibrationBlocksExtraction(db: RcmDatabase, chatId: string): boolean {
+  if (db.prepare("SELECT 1 FROM chat_lineage WHERE child_chat_id=? AND status IN ('choice_required','ambiguous')").get(chatId)) return true;
   const row = db.prepare("SELECT status,confirmation_required FROM initial_calibrations WHERE chat_id=?").get(chatId) as { status: string; confirmation_required: number } | undefined;
   if (!row) return false;
   if (["awaiting_setup", "queued", "awaiting_confirmation"].includes(row.status)) return true;
   return row.status === "failed" && row.confirmation_required === 1;
+}
+
+export function assertSetupLineageResolved(db: RcmDatabase, chatId: string): void {
+  if (db.prepare("SELECT 1 FROM chat_lineage WHERE child_chat_id=? AND status IN ('choice_required','ambiguous')").get(chatId)) {
+    throw new Error("기억 이어받기 또는 새로 시작을 먼저 선택해 주세요.");
+  }
 }
 
 function exactSlice(source: string, candidate: string): string | undefined {
@@ -265,6 +279,7 @@ export function normalizeAndValidateSetupEvidence(
   identityHints: { hostCharacterName?: string; userPersonaName?: string } = {},
 ): InitialCalibrationResult {
   const normalized: InitialCalibrationResult = {
+    pairProgress: result.pairProgress,
     socialKnowledge: (result.socialKnowledge ?? []).map(item => ({...item, evidence: item.evidence.map(e => ({...e}))})),
     entities: result.entities.map((entity) => ({ ...entity, aliases: [...entity.aliases], evidence: entity.evidence.map((item) => ({ ...item })) })),
     relationships: result.relationships.map((relationship) => ({
@@ -332,7 +347,7 @@ export function normalizeAndValidateSetupEvidence(
     if (!exact.length || exact.length !== item.evidence.length) issues.push("Setup recognition has non-verbatim evidence");
     item.evidence = exact;
   }
-  if (issues.length) throw new Error(`Initial calibration evidence validation failed: ${issues.slice(0, 8).join("; ")}${issues.length > 8 ? `; +${issues.length - 8} more` : ""}`);
+  if (issues.length) throw new ModelContentValidationError(`Initial calibration evidence validation failed: ${issues.slice(0, 8).join("; ")}${issues.length > 8 ? `; +${issues.length - 8} more` : ""}`);
   return normalized;
 }
 
@@ -413,6 +428,16 @@ export function completeInitialCalibrationJob(
         randomUUID(), job.chat_id, from.name, to.name, JSON.stringify(knownAxes), relationship.summary,
         quote, JSON.stringify(relationship.evidence), payload.resolvedSetup!.fingerprint, JSON.stringify(relationship.axes), relationship.summary, timestamp,
       );
+    }
+    const personaName = payload.identityHints?.userPersonaName ?? entities.find(e=>e.role==="persona")?.displayName;
+    writePersonaHint(db, job.chat_id, personaName);
+    ensurePairProgress(db, job.chat_id);
+    for (const patch of validatedResult.pairProgress ?? []) {
+      const persona=byKey.get(patch.personaKey), character=byKey.get(patch.characterKey);
+      const text=payload.resolvedSetup!.messages[patch.evidence.sourceIndex]?.content;
+      if (!persona || !character || !text?.includes(patch.evidence.quote)) continue;
+      const side=patch.side==="mutual"?"mutual":byKey.get(patch.side)?.name;
+      if(side) applyProgressDone(db,job.chat_id,{persona:persona.name,character:character.name,itemId:patch.itemId,side},"setup");
     }
     const status = calibration?.confirmation_required === 1 ? "awaiting_confirmation" : "ready";
     updateSetupRecognition(db, job.chat_id, "delete");

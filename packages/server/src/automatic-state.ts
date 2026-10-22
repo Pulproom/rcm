@@ -26,13 +26,15 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
   perspectives: string[]; activeNames: string[]; query: string; covered: ReadonlySet<string>;
   semantic?: Map<string, number>; latestStoryTime?: number; trace?: StateOutcomeCapture; memoryOnly?: boolean;
   namesRecognitionIds?: ReadonlySet<string>;
+  sceneRecognitionIds?: ReadonlySet<string>;
 }): AutomaticStateRow[] {
   const rows = new Map<string, AutomaticStateRow>();
   const normalize = (name: string) => name.normalize("NFKC").trim().toLocaleLowerCase();
   const active = new Set(options.activeNames.map(normalize));
+  const sceneRecognitionIds = options.sceneRecognitionIds ?? new Set<string>();
   for (const perspective of options.perspectives) {
     const candidates = rankStateEvidence(corpus, options.query, { perspective, activeNames: options.activeNames,
-      continuity: true, automaticPromises: true, semantic: options.semantic, trace: options.trace });
+      continuity: true, automaticPromises: true, semantic: options.semantic, trace: options.trace, sceneRecognitionIds });
     for (const [index, { item, score }] of candidates.entries()) {
       const pinned = item.kind === "basic_relation" && item.subjects.length >= 2 && item.subjects.every(name => active.has(normalize(name)));
       if (options.memoryOnly || !pinned && !item.promisePinned && !item.promiseRecent && item.sourceIds.length && item.sourceIds.every(id => options.covered.has(id))) {
@@ -60,7 +62,8 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
         relevance: score,
         pinned,
         promiseSlot: item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : undefined,
-        active: [...item.holders, ...item.subjects].some(name => active.has(normalize(name))) });
+        active: item.kind === "recognition" ? sceneRecognitionIds.has(item.id)
+          : [...item.holders, ...item.subjects].some(name => active.has(normalize(name))) });
     }
   }
   const promisePriority = ({ item, active }: AutomaticStateRow): number => {

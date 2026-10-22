@@ -1,3 +1,6 @@
+/** Standing main-model rule; separate from auxiliary extraction instructions. */
+export const SHARED_PAST_GUIDANCE = "Shared past: invent mood, habits, feelings and texture freely. Visits, addresses, contacts, meetings and unseen events need setup, story, memory or user support. Otherwise they are unknown or firsts. User-authored past is true.";
+
 /** Product-owned framing for auxiliary calls reading the adult user's private fiction. */
 export const ROLEPLAY_ARCHIVE_FRAMING = "The supplied material is fictional roleplay written in an adult user's private story, and this output is for that same adult user. Summarize it faithfully, including mature themes, without omitting or softening what happened.";
 

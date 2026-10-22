@@ -48,9 +48,10 @@ export function injectedStateRows(
         whoHtml: pair ? `${safeText(from)} → ${safeText(to)}` : "", textHtml: pair ? safeText(pair.summary) : unavailableDelivery });
     } else {
       const person: any = (data.socialKnowledge ?? []).find((row: any) => `${row.holder}:${row.subject}` === id);
-      const cognition = text((person?.cognition ?? []).map((detail: any) => detail.text).join(" "));
+      const cognition = (person?.cognition ?? []).filter((detail: any) => text(detail.text))
+        .map((detail: any) => displayText(String(detail.text), detail.userEdited ? undefined : translations.get(`social-cognition:${detail.id}`), display)).join(" ");
       rows.push({ kind, id, key: person?.subject, tag: "인지", whoHtml: person ? `${safeText(person.holder)} → ${safeText(person.subject)}` : "",
-        textHtml: cognition ? safeText(cognition) : unavailableDelivery });
+        textHtml: cognition || unavailableDelivery });
     }
   };
   // Manifest IDs are product-owned typed addresses, never prose to interpret.
@@ -81,7 +82,7 @@ export function homeRecentMemories(memories: DashboardData["memories"]): Dashboa
 
 export function homeTranslationRecords(
   manifest: InjectionManifest | undefined,
-  data: Pick<DashboardData, "memories" | "assertions" | "promises" | "beliefs">,
+  data: Pick<DashboardData, "memories" | "assertions" | "promises" | "beliefs"> & Partial<Pick<DashboardData, "socialKnowledge">>,
   /** The full view of this turn's delivery is open, so every 현재 record it lists is visible. */
   sentOpen = false,
   dailyMemory?: any,
@@ -104,6 +105,9 @@ export function homeTranslationRecords(
       ...manifest.assertionIds.flatMap((id) => { const item: any = byId(data.assertions as any[], id); return item ? [{ kind: "assertion", itemId: `assertion:${item.id}`, text: text(item.value) }] : []; }),
       ...(manifest.beliefIds ?? []).flatMap((id) => { const item: any = byId(data.beliefs as any[], id); return item ? [{ kind: "belief", itemId: `belief:${item.id}`, text: text(item.value) }] : []; }),
       ...manifest.promiseIds.flatMap((id) => { const item: any = byId(data.promises as any[], id); return item ? [{ kind: "promise", itemId: `promise:${item.id ?? item.promise_key}`, text: text(item.content) }] : []; }),
+      ...(data.socialKnowledge ?? []).filter((item: any) => manifest.stateEvidenceIds?.includes(`recognition:${item.holder}:${item.subject}`))
+        .flatMap((item: any) => (item.cognition ?? []).filter((detail: any) => !detail.userEdited)
+          .map((detail: any) => ({ kind: "social-cognition", itemId: `social-cognition:${detail.id}`, text: String(detail.text ?? "") }))),
     ] : []),
     // The phone home leads with the first overdue promise; it reads the same promise key as the ledger.
     ...overduePromiseEntries(buildNowPage(data as DashboardData, (data as DashboardData).personaEntity ?? null, "promise", "recent")).slice(0, 1)

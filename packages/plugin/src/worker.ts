@@ -1,4 +1,4 @@
-import { optionalSourceSelectorsOnly } from "@rcm/shared";
+import { optionalSourceSelectorsOnly, isModelContentRejection } from "@rcm/shared";
 import { parseExtractionAuditResponse } from "@rcm/shared";
 import { sha256 } from './context.js';
 import { operationLabel, providerFailureMetadata, assertProviderOutputAllowed } from "@rcm/shared";
@@ -6,7 +6,6 @@ import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming } from "@rcm/sha
 import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
-import { isChatMemoryEnabled } from "./settings.js";
 import { parseReconciliationResult, mergeStateExtraction, type SourceUnit } from "@rcm/shared";
 import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
 import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
@@ -639,6 +638,7 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
   if (prepared.candidateSetHash && prepared.parts?.length) {
     const decisions = [];
     const seedResolutions = [];
+    const pairProgress = [];
     let extractedState;
     for (const [index, part] of prepared.parts.entries()) {
       const submission = part.cachedResult !== undefined
@@ -647,12 +647,13 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
       if (part.cachedResult === undefined) await validatedPartRecorders.get(state)?.("reconciliation", part, submission.result);
       decisions.push(...(submission.result?.decisions ?? []));
       seedResolutions.push(...(submission.result?.seedResolutions ?? []));
+      pairProgress.push(...(submission.result?.pairProgress ?? []));
       if (part.stateExtraction) {
         if (!submission.result?.state) throw new Error("State extraction response is missing state");
         extractedState = submission.result.state;
       }
     }
-    return { candidateSetHash: prepared.candidateSetHash, result: { decisions, seedResolutions, ...(extractedState ? {state: extractedState} : {}) } };
+    return { candidateSetHash: prepared.candidateSetHash, result: { decisions, seedResolutions, pairProgress, ...(extractedState ? {state: extractedState} : {}) } };
   }
   if (!prepared.candidateSetHash || !prepared.systemPrompt || !prepared.userPrompt) return {};
   const messages = [{ role: "system", content: prepared.systemPrompt }, { role: "user", content: prepared.userPrompt }];
@@ -914,7 +915,8 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         addLog(state.logs, "error", "Auxiliary job failed", supportFailure("worker_job", error, { kind: job.kind, attempt: job.attempt }));
         const metadata=providerFailureMetadata(error);
         const typedFailure=metadata.status!==undefined || metadata.finishReason!==undefined || metadata.refusal!==undefined || metadata.retryAfterMs!==undefined;
-        const failure = typedFailure ? await client.fail(job.id,state.workerId,String(error),metadata) : await client.fail(job.id, state.workerId, String(error));
+        const failure = isModelContentRejection(error) ? await client.fail(job.id,state.workerId,String(error),metadata,true)
+          : typedFailure ? await client.fail(job.id,state.workerId,String(error),metadata) : await client.fail(job.id, state.workerId, String(error));
         if (failure.status === "queued") {
           addLog(state.logs, "warn", `기억 묶음 재시도 ${failure.attempt + 1}/${failure.maxAttempts}: [오류 원문 제외]`);
           continue;

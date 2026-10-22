@@ -132,7 +132,7 @@ export function smallReviewView(db: RcmDatabase, chatId: string, sources: string
   return { id: item.id, kind: item.kind, status: item.status, reason: item.reason, retryJobId: item.retryJobId,
     text: item.dialogue?.text ?? item.passage?.quote ?? (recognition?.cognitionDetailKeys ?? [])
       .map(key => item.memory?.details?.find(detail => detail.key === key)?.text).filter(Boolean).join(" · "),
-    speaker: item.dialogue?.speaker ?? item.passage?.speaker, holder: recognition?.holder, subject: recognition?.subject,
+    speaker: item.dialogue?.speaker ?? item.passage?.speaker, holder: recognition?.holder, subject: recognition?.subject, memoryTitle: recognition ? item.memory?.title : undefined,
     verifiedEvidence: item.verifiedEvidence ?? prepared?.socialKnowledge?.[0]?.evidence,
     canKeep: item.status === "pending" && Boolean(prepared), canRetry: item.status === "pending" && item.kind !== "recognition" && !item.retryJobId };
 }

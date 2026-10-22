@@ -1,4 +1,4 @@
-import { estimateTokens, type ResolvedSetupProjection } from "@rcm/shared";
+import { estimateTokens, type ChatLineageStatus, type ResolvedSetupProjection } from "@rcm/shared";
 import { sha256 } from "./context.js";
 import { addLog, isChatMemoryEnabled } from "./settings.js";
 import type { RuntimeState } from "./types.js";
@@ -44,8 +44,9 @@ export interface SetupPicker {
 const setupAttentionKey = (chatId: string, kind: string) => `rcm:setup-attention:${kind}:${encodeURIComponent(chatId)}`;
 const attentionClaims = new Set<string>();
 /** Both first-turn setup and chats enabled after their opening need the picker. */
-export function setupPickerNeeded(status: string | undefined): boolean {
-  return status === "unseeded" || status === "awaiting_setup";
+export function setupPickerNeeded(status: string | undefined, lineage?: ChatLineageStatus): boolean {
+  return !["choice_required", "ambiguous", "inherited"].includes(lineage?.status ?? "")
+    && (status === "unseeded" || status === "awaiting_setup");
 }
 
 export async function claimSetupAttention(chatId: string, kind: "opened" | "alerted", eligible = () => true): Promise<boolean> {
@@ -61,15 +62,15 @@ export async function claimSetupAttention(chatId: string, kind: "opened" | "aler
   } finally { attentionClaims.delete(key); }
 }
 
-export function observeSetupAttention(state: RuntimeState, chatId: string, status: string | undefined): void {
+export function observeSetupAttention(state: RuntimeState, chatId: string, status: string | undefined, lineage?: ChatLineageStatus): void {
   if (!status) return;
   state.setupAttention ??= {};
-  if (setupPickerNeeded(status)) state.setupAttention[chatId] ??= { completedTurns: 0 };
+  if (setupPickerNeeded(status, lineage)) state.setupAttention[chatId] ??= { completedTurns: 0 };
   else delete state.setupAttention[chatId];
 }
 
-export async function firstOpenSetupPicker(state: RuntimeState, chatId: string, status: string | undefined): Promise<SetupPicker | undefined> {
-  if (!setupPickerNeeded(status)) return;
+export async function firstOpenSetupPicker(state: RuntimeState, chatId: string, status: string | undefined, lineage?: ChatLineageStatus): Promise<SetupPicker | undefined> {
+  if (!setupPickerNeeded(status, lineage)) return;
   try {
     if (await claimSetupAttention(chatId, "opened")) return await loadSetupPicker(state, chatId);
   } catch { addLog(state.logs, "warn", "설정 재료 안내를 열지 못했어요. 홈에서 다시 열 수 있어요."); }
@@ -92,7 +93,7 @@ export function completeSetupAttentionTurn(state: RuntimeState, chatId: string, 
     if (waiting.completedTurns < 3 || state.settings.statusWidgetVisible !== false) return;
     setTimeout(() => {
       const eligible = () => !state.unloaded && !state.mainGeneration && state.current?.chatId === chatId
-        && isChatMemoryEnabled(state.settings, chatId) && state.settings.statusWidgetVisible === false
+        && isChatMemoryEnabled(state.settings, chatId, state.current?.chatId === chatId ? state.current.characterId : undefined) && state.settings.statusWidgetVisible === false
         && state.setupAttention?.[chatId] === waiting;
       if (!eligible() || typeof risuai.alert !== "function") return;
       void (async () => {

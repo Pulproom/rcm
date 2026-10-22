@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { recordSmallReviews } from "./small-review.js";
 import { optionalSourceSelectorsOnly } from "@rcm/shared";
 import { recordAuditAdditionDrops } from "./extraction-audit.js";
@@ -12,7 +13,7 @@ import { rangeMessages, listSourceRanges, memoryTargetFingerprint, sourceAccessF
 import { sourceFingerprint, fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from './source-fingerprint.js';
 import { inspectDraftEvidence } from './evidence-review.js';
 import { applyExtractionAuditPatch } from './extraction-audit.js';
-import { finishStateExtraction } from './state-extraction.js';
+import { finishStateExtraction, recordStateObservationDrops } from './state-extraction.js';
 import { recordSeedResolutionDrops } from './story-seeds.js';
 import { additiveReconciliationResult } from './reconciliation.js';
 import { scopeExtractionMemoryKeys } from './extraction-memory-keys.js';
@@ -26,6 +27,7 @@ import { canonicalizeExtraction } from './entities.js';
 import { intimacyMilestoneKeys } from './intimacy-milestones.js';
 
 const fail = (message: string, code = 'MEMORY_ADDITION_INVALID') => Object.assign(new Error(message), { code });
+const contentFailure = (message: string) => Object.assign(new ModelContentValidationError(message), { code: 'MEMORY_ADDITION_INVALID' });
 interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
   sourceMessageIds: string[]; sourceFingerprint: SourceFingerprintItem[]; rangeIds: string[];
   userRequest: string; existingMemories: any[]; memoryIds: string[]; targetFingerprint: string; accessFingerprint: string;
@@ -173,7 +175,7 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     return { chatId: job.chat_id, warnings: [reason ?? '같은 작업에서 남은 원문을 이어서 읽어요'], pendingReconciliations: 0 };
   }
   if (memoryAdditionStopsAfterEvents(draft)) {
-    if (draft.requestOutcome?.relatedMemoryIds?.some(id => !payload.memoryIds.includes(id))) throw fail('요청 결과가 제공되지 않은 기억을 가리켜요');
+    if (draft.requestOutcome?.relatedMemoryIds?.some(id => !payload.memoryIds.includes(id))) throw contentFailure('요청 결과가 제공되지 않은 기억을 가리켜요');
     const refused = Boolean(payload.userRequest && !draft.requestOutcome);
     const error = refused ? '모델이 요청을 처리하지 않았어요. 추가 검열 완화 (실험적)를 켜고 새로 요청해 보세요.' : null;
     db.prepare("UPDATE jobs SET status=?,lease_owner=NULL,leased_until=NULL,last_error=?,payload_json=?,updated_at=? WHERE id=?")
@@ -185,14 +187,15 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   if (payload.postExtractionReview && (!audit?.patch || audit.error)) throw fail('요청한 추출 검수를 끝내지 못했어요');
   if (audit?.patch) {
     const reviewed = applyExtractionAuditPatch(db, job.chat_id, payload.sourceMessageIds, draft, audit.patch);
-    if (reviewed.pendingRefs.length) throw fail('기억 근거 검수가 끝나지 않았어요');
+    if (reviewed.pendingRefs.length) throw contentFailure('기억 근거 검수가 끝나지 않았어요');
     draft = reviewed.result;
   }
   const completed = finishStateExtraction(db, job.chat_id, payload.sourceMessageIds, draft, reconciliation,
-    payload.auxiliaryBudget?.maxInputTokens ?? 80_000, { userRequest: payload.userRequest, existingMemories: payload.existingMemories });
+    payload.auxiliaryBudget?.maxInputTokens ?? 80_000, { userRequest: payload.userRequest, existingMemories: payload.existingMemories }, jobId);
   draft = completed.draft;
+  Object.assign(payload, completed.progressDiagnostics);
   const issues = inspectDraftEvidence(db, job.chat_id, payload.sourceMessageIds, draft);
-  if (issues.length && !optionalSourceSelectorsOnly(issues)) throw fail(`기억 근거를 확인할 수 없어요: ${issues.slice(0, 3).map(issue => `${issue.path}: ${issue.reason}`).join('; ')}`);
+  if (issues.length && !optionalSourceSelectorsOnly(issues)) throw contentFailure(`기억 근거를 확인할 수 없어요: ${issues.slice(0, 3).map(issue => `${issue.path}: ${issue.reason}`).join('; ')}`);
   const smallReviewDraft = issues.length || completed.recognitionReviewDraft ? structuredClone(completed.recognitionReviewDraft ?? draft) : undefined;
   if (issues.length) draft = {...draft,
     sourcePassages: draft.sourcePassages?.filter((_, index) => !issues.some(issue => issue.path.startsWith(`sourcePassages[${index}]`))),
@@ -214,21 +217,22 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     return intimacyMilestoneKeys(item.act).some(key => !db.prepare('SELECT 1 FROM physical_intimacy_milestones WHERE chat_id=? AND participant_a=? AND participant_b=? AND milestone_key=?').get(job.chat_id,a,b,key));
   });
   const memoryKeys = new Set(final.memories.map(memory => memory.key));
-  const checkNewParent = (item: { memoryKey?: string }) => { if (item.memoryKey && !memoryKeys.has(item.memoryKey)) throw fail('추가 후보는 기존 기억을 수정 대상으로 지정할 수 없어요'); };
+  const checkNewParent = (item: { memoryKey?: string }) => { if (item.memoryKey && !memoryKeys.has(item.memoryKey)) throw contentFailure('추가 후보는 기존 기억을 수정 대상으로 지정할 수 없어요'); };
   [...final.promises, ...(final.socialKnowledge ?? []), ...(final.relationshipEvents ?? []), ...(final.physicalIntimacy ?? [])].forEach(checkNewParent);
   for (const memory of payload.userRequest ? [] : final.memories) {
     const duplicate = payload.existingMemories.some(existing => normalizeLedgerText(existing.content) === normalizeLedgerText(memory.content)
       && (memory.details ?? []).every(detail => existing.details.some((old: any) => normalizeLedgerText(old.text) === normalizeLedgerText(detail.text)))
       && (memory.keyDialogues ?? []).every(dialogue => existing.keyDialogues.some((old: any) => old.text === dialogue.text && old.speaker === dialogue.speaker)));
-    if (duplicate) throw fail('기존 기억과 같은 후보가 반환됐어요. 빠진 내용을 더 구체적으로 요청해 주세요');
+    if (duplicate) throw contentFailure('기존 기억과 같은 후보가 반환됐어요. 빠진 내용을 더 구체적으로 요청해 주세요');
   }
   const candidate = validateDialogueEvidence(db, job.chat_id, payload.sourceMessageIds,
     scopeExtractionMemoryKeys(final, `addition:${jobId}`));
   const errors = validateExtractionSources(db, job.chat_id, payload.sourceMessageIds, candidate);
-  if (errors.length) throw fail(errors.join('; '));
+  if (errors.length) throw contentFailure(errors.join('; '));
   db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
     .run(JSON.stringify({ ...payload, candidateStatus: 'ready', candidate, smallReviewDraft, pipelineStage: 'complete' }), Date.now(), jobId);
   recordSeedResolutionDrops(db,jobId,completed.seedResolutionDrops);
+  recordStateObservationDrops(db,jobId,completed.stateObservationDrops);
   return { chatId: job.chat_id, warnings: smallReviewDraft ? ['일부 선택 후보를 보류했어요. 기억 적용 뒤 작은 확인에 표시해요.'] : [], pendingReconciliations: 0 };
 }
 

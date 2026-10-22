@@ -2,23 +2,26 @@ import {ChatBackupSettingsSchema, type ChatBackupSettings} from "@rcm/shared";
 import type {PluginSettings} from "./types.js";
 import {serverScopeKey} from "./settings.js";
 
-export function exportChatSettings(settings:PluginSettings,id:string):ChatBackupSettings {
+export function exportChatSettings(settings:PluginSettings,id:string,characterId:string):ChatBackupSettings {
   const scope=serverScopeKey(settings,id);
   return ChatBackupSettingsSchema.parse({
+    characterEnabled:settings.characterEnabled[characterId]??true,
     enabled:settings.chatEnabled[id]??settings.defaultChatEnabled,catchUpPending:settings.chatCatchUpPending[id],
     profile:settings.profiles[id]??settings.defaultProfile,
     perspectives:settings.perspectives[id],detectedPerspectives:scope?settings.detectedPerspectives[scope]:undefined,
     includeUserMessages:settings.includeUserMessages[id],extractionGroupTurns:settings.extractionGroupTurns[id],
     upcomingOccasions:settings.upcomingOccasions[id]??true,
+    pairProgress:settings.pairProgress[id]??false,
     memoryOnlyInjection:settings.memoryOnlyInjection[id]??false,
     memoryLanguage:settings.memoryLanguages[id],backfillApproved:scope?settings.backfillApproved[scope]:undefined,
     memoryBudget:settings.memoryBudgets[id]??settings.defaultMemoryBudget,storyOverviewBackup:settings.storyOverviewBackups[id],
   });
 }
 
-export function restoreChatSettings(settings:PluginSettings,id:string,input:unknown):void {
+export function restoreChatSettings(settings:PluginSettings,id:string,input:unknown,characterId:string):void {
   const value=ChatBackupSettingsSchema.parse(input);
   const put=<T>(record:Record<string,T>,entry:T|undefined)=>{if(entry===undefined)delete record[id];else record[id]=structuredClone(entry);};
+  settings.characterEnabled[characterId]=value.characterEnabled??true;
   put(settings.chatEnabled,value.enabled);put(settings.chatCatchUpPending,value.catchUpPending);
   put(settings.profiles,value.profile);
   put(settings.perspectives,value.perspectives);
@@ -29,6 +32,7 @@ export function restoreChatSettings(settings:PluginSettings,id:string,input:unkn
   }
   put(settings.includeUserMessages,value.includeUserMessages);put(settings.extractionGroupTurns,value.extractionGroupTurns);
   put(settings.upcomingOccasions,value.upcomingOccasions);
+  put(settings.pairProgress,value.pairProgress);
   put(settings.memoryOnlyInjection,value.memoryOnlyInjection);
   put(settings.memoryLanguages,value.memoryLanguage);
   put(settings.memoryBudgets,value.memoryBudget);put(settings.storyOverviewBackups,value.storyOverviewBackup);

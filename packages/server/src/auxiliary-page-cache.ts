@@ -1,6 +1,24 @@
 import { createHash } from "node:crypto";
 import { InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, inspectSourceReferences } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
+import { isModelContentRejection } from "@rcm/shared";
+import { fingerprintMatches } from "./source-fingerprint.js";
+
+/** Reset only rejected content owned by this lease. Never spend tokens or reset attempt counters here. */
+export function resetRejectedJobCache(db: RcmDatabase, jobId: string, workerId: string, error: unknown): void {
+  if (!isModelContentRejection(error)) return;
+  const row = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND status='leased' AND lease_owner=?")
+    .get(jobId, workerId) as {chat_id:string;payload_json:string} | undefined;
+  if (!row) return;
+  const payload = JSON.parse(row.payload_json);
+  if (payload.sourceFingerprint?.length && !fingerprintMatches(db, row.chat_id, payload.sourceFingerprint)) return;
+  const fields = ["validatedAuxiliaryParts", "risuStageCheckpoints", "validatedExtractionCheckpoint", "validatedPreReconciliationCheckpoint"];
+  if (!fields.some(field => payload[field] !== undefined)) return;
+  for (const field of fields) delete payload[field];
+  payload.cacheResetDiagnostic = { reason: "model_content_rejected", count: (payload.cacheResetDiagnostic?.count ?? 0) + 1 };
+  db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner=?")
+    .run(JSON.stringify(payload), Date.now(), jobId, workerId);
+}
 
 export type CachedAuxiliaryPurpose = "initial_calibration" | "ledger_consistency" | "reconciliation";
 export const auxiliaryPageKey = (purpose: CachedAuxiliaryPurpose, systemPrompt: string, userPrompt: string): string =>

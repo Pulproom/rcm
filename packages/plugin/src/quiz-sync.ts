@@ -7,7 +7,7 @@ import type { RuntimeState } from "./types.js";
 export async function syncQuizEnabled(state: RuntimeState, client: Pick<ServerClient, "quizSetEnabled">): Promise<void> {
   if (!state.current || state.quizSupported === false || !isServerConnectionReady(state)) return;
   const chatId = state.current.chatId;
-  if (!isChatMemoryEnabled(state.settings, chatId)) return;
+  if (!isChatMemoryEnabled(state.settings, chatId, state.current?.chatId === chatId ? state.current.characterId : undefined)) return;
   const enabled = state.settings.quizEnabled === true;
   if (state.quizSynced?.chatId === chatId && state.quizSynced.enabled === enabled) return;
   const syncMark = { chatId, enabled };

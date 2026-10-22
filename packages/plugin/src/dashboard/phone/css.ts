@@ -707,8 +707,6 @@ button.scene__title:hover { color: var(--accent-text); }
 .home-backfill__calls { border-radius: 12px; background: color-mix(in srgb, var(--lock-ink) 6%, transparent); color: var(--lock-ink-2); font-size: var(--t-meta); }
 .lock__notes > .msg .msg__body .home-backfill__calls p { margin: 0; color: inherit; font-size: inherit; line-height: inherit; }
 .lock__notes > .msg .msg__body p.home-backfill__hint { color: var(--lock-ink-2); font-size: var(--t-meta); }
-.home-backfill__action { height: 32px; padding: 0 14px; border-radius: 16px; background: var(--tungsten-dim); color: var(--accent-text); font-size: var(--t-meta); }
-.home-backfill__action:hover, .home-backfill__action.is-hover { background: color-mix(in srgb, var(--tungsten-dim) 100%, var(--tungsten) 10%); }
 .lw, .noti, .wg, .lock__notes > .notice, .lock__notes > .msg { background: var(--lock-glass); box-shadow: inset 0 0 0 .5px var(--lock-edge); }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .lw, .noti, .wg, .lock__notes > .notice, .lock__notes > .msg { -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8); }
@@ -1171,6 +1169,27 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 .chats .chatrow__main b { font-size: var(--t-ui); font-weight: 600; color: var(--ink); }
 .chats .chatrow__meta { margin-top: 2px; font-size: var(--t-meta); line-height: 1.4; color: var(--ink-3); }
 .chats .chatrow__acts > .menu { margin-block: -8px; }
+/* Chat families as one card each: original row, then a 분기·복사 fold one step in. */
+.chats > .fam { border-radius: 12px; background: var(--screen); overflow: hidden; }
+.chats > .fam + .fam { margin-top: 10px; border-top: 0; }
+.fam .chat { padding: 0 6px 0 16px; }
+.fam .chatrow { align-items: center; padding: 10px 0; }
+.chat--kid { padding-left: 22px !important; border-top: .5px solid var(--sep); }
+.chat.is-current { background: var(--tungsten-dim); }
+.chat.is-current > .chatrow { box-shadow: none; padding-left: 0; }
+.chatrow__glyph { margin-top: 0; }
+.chatrow__glyph .i { width: 15px; height: 15px; }
+.chatrow__from { font-size: var(--t-meta); color: var(--ink-2); }
+.chatrow__tag { padding: 1px 7px; border: 0; border-radius: 8px; background: var(--fill); font: 600 11px/1.5 var(--sans); letter-spacing: 0; color: var(--ink-2); }
+.chatrow__tag--now { background: var(--tungsten-dim); color: var(--accent-text); }
+.chatrow__tag--gone { background: var(--cut-dim); color: var(--cut); }
+.fam__fold > summary { justify-content: space-between; min-height: 40px; padding: 0 14px 0 16px; border-top: .5px solid var(--sep); font: 600 var(--t-meta)/1.2 var(--sans); letter-spacing: 0; color: var(--accent-text); }
+.fam__fold[open] > summary .chev { transform: rotate(-90deg); }
+.fam__fold:not([open]) > summary .chev { transform: rotate(90deg); }
+.datatools { flex-wrap: nowrap; }
+.datatools .search { flex: 1; flex-basis: auto; }
+.datatools .relperson { flex: none; width: auto; }
+.datatools .relperson .select { width: auto; padding-right: 30px; }
 .datapage > .sub:last-child { margin: 12px 4px 0; font-size: var(--t-meta); color: var(--ink-3); }
 /* relationship edit: an axis's 상태 and 변화 sit side by side, one row per axis */
 .pairsheet__edit .form__row:has(> .field > select) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
@@ -1725,7 +1744,7 @@ button.say:hover .say__bub { filter: brightness(.97); }
 .anni__date small { font-size: var(--t-cap); font-weight: 500; color: var(--ink-3); }
 .anni__tx { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .anni--row .anni__slug { overflow: hidden; font-size: var(--t-cap); white-space: nowrap; text-overflow: ellipsis; color: var(--ink-3); }
-.anni--row .anni__acts { top: 50%; transform: translateY(-50%); }
+.anni--row .anni__acts { top: 0; bottom: 0; display: flex; align-items: center; }
 .appsheet .anni + .anni { background-size: calc(100% - 74px) .5px; }
 
 .appsheet .scenelog .mark .i { stroke-width: 2.4; }
@@ -1767,6 +1786,9 @@ button.say:hover .say__bub { filter: brightness(.97); }
 .review-small__knows { display: flex; align-items: center; gap: 8px; }
 .review-small__knows > .i { flex: none; width: 14px; height: 14px; color: var(--ink-3); }
 .review-small__text { flex: 1; min-width: 0; font-size: var(--t-ui); line-height: 1.45; }
+.review-small__knows .review-small__text { display: grid; gap: 2px; }
+.review-small__knows .review-small__text b { font-weight: 600; }
+.review-small__knows .review-small__text small { font-size: var(--t-meta); color: var(--ink-3); }
 .review-small__who { margin: 6px 4px 0; font-size: var(--t-cap); color: var(--ink-3); }
 .review-small__ok { display: flex; align-items: center; gap: 5px; font-size: var(--t-cap); font-weight: 600; color: var(--ok); }
 .review-small__ok .i { width: 12px; height: 12px; stroke-width: 2.4; }
@@ -1789,6 +1811,38 @@ button.say:hover .say__bub { filter: brightness(.97); }
 
 /* 기념일 종류 reads like every other form label */
 .anniversary-kind > legend.label { padding: 0; margin-bottom: 6px; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
+
+/* 두 사람의 진도: one card like Reminders, round ticks, green when done */
+.prog__card { padding: 0 4px 0 16px; border-radius: var(--r); background: var(--screen); overflow: hidden; }
+.prog__cols { padding: 10px 0 0; font-size: 11px; }
+.prog__row { min-height: 56px; border-top: .5px solid var(--sep); }
+.prog__t { font-size: var(--t-ui); }
+.prog__s { font-size: var(--t-meta); }
+.prog__tick { color: #fff; }
+.prog__tick > span { width: 24px; height: 24px; border: 1.5px solid var(--ink-3); border-radius: 50%; }
+.prog__tick.is-unknown > span { border-color: var(--rule-2); }
+.prog__tick[aria-pressed=true] > span { border-color: var(--k-green); background: var(--k-green); }
+.prog__tick .i { width: 14px; height: 14px; }
+.prog__source { text-decoration: none; color: var(--accent-text); }
+.prog__fold { margin: 0 0 0 -16px; padding-left: 16px; border-top: .5px solid var(--sep); }
+.prog__fold > summary { min-height: 40px; font: 600 var(--t-meta)/1.2 var(--sans); letter-spacing: 0; color: var(--ink-3); }
+.prog__actions { margin-left: -16px; padding: 2px 16px; border-top: .5px solid var(--sep); justify-content: center; }
+.prog__actions > .btn { color: var(--accent-text); }
+.appsheet .psec.prog > .fold.fold--section { margin-top: 28px; }
+.prog__add .form { margin: 4px 0 10px; padding: 14px 16px; border-radius: 12px; background: var(--screen); }
+.prog__add .form .form__bar { margin: 14px 0 0; padding: 0; border-top: 0; background: none; }
+
+/* Lineage choice on the lock screen: blue app icon, candidate rows on a frosted inset */
+.lock__notes > .msg.lc:not(.msg--warning) > .msg__icon { background: var(--tungsten); color: #fff; }
+.lc__list { border: 0; border-radius: 12px; background: rgba(255,255,255,.55); }
+:root[data-theme="night"] .lc__list { background: rgba(255,255,255,.08); }
+.lc__row { color: inherit; }
+.lc__row + .lc__row { border-top: .5px solid var(--sep); }
+.lc__row:hover:not(:disabled) { background: rgba(255,255,255,.35); }
+.lc__av { border-radius: 8px; color: #fff; background: linear-gradient(hsl(212 58% 64%), hsl(212 50% 48%)); }
+.lc__av[data-tone="1"] { background: linear-gradient(hsl(28 70% 62%), hsl(20 60% 48%)); }
+.lc__tx small, .lc__chev { color: var(--lock-ink-2, var(--ink-3)); }
+.lc__fresh { font-size: var(--t-meta); }
 `;
 
 export const PHONE_CSS: string = FILM_CSS + PHONE_SKIN_CSS;

@@ -10,10 +10,11 @@ export function rememberDiagnosticSecrets(values: readonly string[]): void {
 }
 
 export const defaults: PluginSettings = {
-  settingsRevision: 21,
+  settingsRevision: 22,
   serverUrl: "http://127.0.0.1:7331",
   serverToken: "",
   defaultChatEnabled: true,
+  characterEnabled: {},
   chatEnabled: {},
   chatCatchUpPending: {},
   workerPaused: false,
@@ -26,6 +27,7 @@ export const defaults: PluginSettings = {
   includeUserMessages: {},
   memoryOnlyInjection: {},
   upcomingOccasions: {},
+  pairProgress: {},
   sourceProtectionTurns: 10,
   editProtectionTurns: 2,
   canonicalizationPolicy: defaultCanonicalizationPolicy(),
@@ -64,9 +66,9 @@ function parseStored<T>(value: unknown): T | undefined {
   try { return JSON.parse(value) as T; } catch { return undefined; }
 }
 
-/** Revision 20 differs only by the optional, default-off injection preference. */
+/** Revisions 20/21 migrate optional per-chat injection preferences using their defaults. */
 export function supportedSettingsRevision(revision: unknown): boolean {
-  return revision === defaults.settingsRevision || revision === 20;
+  return revision === defaults.settingsRevision || revision === 21 || revision === 20;
 }
 
 export function normalizeMemoryOnlyInjection(value: unknown): Record<string, boolean> {
@@ -108,6 +110,7 @@ export async function loadSettings(): Promise<PluginSettings> {
   const settings: PluginSettings = {
     ...defaults,
     defaultChatEnabled: stored?.defaultChatEnabled ?? defaults.defaultChatEnabled,
+    characterEnabled: normalizeMemoryOnlyInjection(stored?.characterEnabled),
     chatEnabled: stored?.chatEnabled ?? {},
     chatCatchUpPending: stored?.chatCatchUpPending ?? {},
     workerPaused: stored?.workerPaused ?? defaults.workerPaused,
@@ -121,6 +124,7 @@ export async function loadSettings(): Promise<PluginSettings> {
     includeUserMessages: stored?.includeUserMessages ?? {},
     memoryOnlyInjection: normalizeMemoryOnlyInjection(stored?.memoryOnlyInjection),
     upcomingOccasions: normalizeMemoryOnlyInjection(stored?.upcomingOccasions),
+    pairProgress: normalizeMemoryOnlyInjection(stored?.pairProgress),
     sourceProtectionTurns: Math.min(20, Math.max(1, Math.round(Number(stored?.sourceProtectionTurns ?? defaults.sourceProtectionTurns)))),
     editProtectionTurns: Math.min(5, Math.max(1, Math.round(Number(stored?.editProtectionTurns ?? defaults.editProtectionTurns)))),
     canonicalizationPolicy,
@@ -177,6 +181,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.serverUrl === right.serverUrl
     && left.serverToken === right.serverToken
     && left.defaultChatEnabled === right.defaultChatEnabled
+    && JSON.stringify(left.characterEnabled) === JSON.stringify(right.characterEnabled)
     && JSON.stringify(left.chatEnabled) === JSON.stringify(right.chatEnabled)
     && JSON.stringify(left.chatCatchUpPending) === JSON.stringify(right.chatCatchUpPending)
     && left.workerPaused === right.workerPaused
@@ -206,6 +211,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && JSON.stringify(left.detectedPerspectives) === JSON.stringify(right.detectedPerspectives)
     && JSON.stringify(left.includeUserMessages) === JSON.stringify(right.includeUserMessages)
     && JSON.stringify(left.upcomingOccasions) === JSON.stringify(right.upcomingOccasions)
+    && JSON.stringify(left.pairProgress) === JSON.stringify(right.pairProgress)
     && JSON.stringify(left.memoryOnlyInjection) === JSON.stringify(right.memoryOnlyInjection)
     && left.sourceProtectionTurns === right.sourceProtectionTurns
     && left.editProtectionTurns === right.editProtectionTurns
@@ -216,8 +222,9 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && JSON.stringify(left.serverInstances) === JSON.stringify(right.serverInstances);
 }
 
-export function isChatMemoryEnabled(settings: PluginSettings, chatId: string): boolean {
-  return settings.chatEnabled[chatId] ?? settings.defaultChatEnabled;
+export function isChatMemoryEnabled(settings: PluginSettings, chatId: string, characterId: string | undefined): boolean {
+  return !!characterId && settings.characterEnabled[characterId] !== false
+    && (settings.chatEnabled[chatId] ?? settings.defaultChatEnabled);
 }
 
 export function serverScopeKey(settings: PluginSettings, chatId: string): string | undefined {

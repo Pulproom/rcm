@@ -296,7 +296,7 @@ export class ServerClient {
 
   async lease(workerId: string, modelSettingsFingerprint?:string): Promise<LeasedJob | null> {
     const result = await this.request<{ job: LeasedJob | null }>("/v1/jobs/lease", {
-      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled }),
+      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
     });
     return result.job;
   }
@@ -335,15 +335,15 @@ export class ServerClient {
     });
   }
 
-  fail(jobId: string, workerId: string, error: string, providerFailure?: import('@rcm/shared').ProviderFailureMetadata): Promise<{ ok: boolean; status: "queued" | "failed"; attempt: number; maxAttempts: number; retryable: boolean }> {
+  fail(jobId: string, workerId: string, error: string, providerFailure?: import('@rcm/shared').ProviderFailureMetadata, modelContentRejected?: boolean): Promise<{ ok: boolean; status: "queued" | "failed"; attempt: number; maxAttempts: number; retryable: boolean }> {
     return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/fail`, {
-      method: "POST", body: JSON.stringify({ workerId, error, providerFailure }),
+      method: "POST", body: JSON.stringify({ workerId, error, providerFailure, modelContentRejected }),
     });
   }
 
   async heartbeat(workerId: string, chatId?: string): Promise<ServerWorkerStatus> {
     const result = await this.request<{ worker: ServerWorkerStatus }>("/v1/worker/heartbeat", {
-      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), chatEnabled: this.settings().chatEnabled }),
+      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
     });
     return result.worker;
   }
@@ -355,7 +355,7 @@ export class ServerClient {
 
   async resumeServerWorker(workerId: string): Promise<ServerWorkerStatus> {
     const result = await this.request<{ worker: ServerWorkerStatus }>("/v1/worker/resume", {
-      method: "POST", body: JSON.stringify({ workerId, chatEnabled: this.settings().chatEnabled }),
+      method: "POST", body: JSON.stringify({ workerId, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
     });
     return result.worker;
   }

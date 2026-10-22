@@ -21,16 +21,19 @@ export function smallReviewDetail(item: any, back: string): string {
   const data = { auditId: String(item.auditId), id: String(item.id) };
   const quotes = (item.verifiedEvidence ?? []).map((e: any) => `<p class="review-small__source">${escapeHtml(e.quote)}</p>`).join("");
   const subject = kind === "recognition"
-    ? `<div class="review-small__card review-small__knows">${avatar(String(item.holder ?? ""), "sm")}${icon("arrow-right")}<span class="review-small__text">${escapeHtml(item.text || "연결된 세부 기억을 확인하지 못했어요.")}</span></div>`
+    ? `<div class="review-small__card review-small__knows">${avatar(String(item.holder ?? ""), "sm")}<span class="review-small__text"><b>${escapeHtml(item.holder ?? "")}</b><span>${escapeHtml(item.memoryTitle ? `「${item.memoryTitle}」` : item.subject ?? "")}</span>${item.text ? `<small>${escapeHtml(item.text)}</small>` : ""}</span></div>`
     : `<div class="review-small__card">${item.speaker ? `<div class="review-small__speaker">${avatar(String(item.speaker), "sm")}<b>${escapeHtml(item.speaker)}</b></div>` : ""}<span class="review-small__quote${kind === "dialogue" ? " is-bubble" : ""}">${escapeHtml(item.text || "")}</span></div>`;
   // Phrased without a particle after the name, so any name reads naturally.
   const missing = kind === "recognition" ? "원문에서 이 인식의 근거를 찾지 못했어요" : "원문에서 하나로 확인된 부분을 찾지 못했어요";
   const source = quotes
     ? `<h3 class="sec">원문에서 찾은 부분</h3><div class="review-small__card review-small__found"><span class="review-small__ok">${icon("check")}원문 확인됨</span>${quotes}</div>`
     : `<div class="review-small__card review-small__missing">${icon("search")}<span>${missing}</span></div>`;
+  // A held recognition is already out of retrieval; the useful move is adding the scene from source, not "keep holding".
   const keep = item.canKeep
     ? btn("남기기", { kind: "primary", action: "resolve-small-review", data: { ...data, resolution: "keep" } })
-    : btn("보류 유지", { kind: "secondary", action: "resolve-small-review", data: { ...data, resolution: "hold" } });
+    : kind === "recognition"
+      ? item.sourceRangeId ? btn("원문에서 기억 추가", { kind: "primary", icon: "search", action: "organization-add-memory", data: { id: String(item.sourceRangeId) } }) : ""
+      : btn("보류 유지", { kind: "secondary", action: "resolve-small-review", data: { ...data, resolution: "hold" } });
   const retry = !item.canKeep && item.canRetry
     ? `<button type="button" class="review-small__retry" data-action="resolve-small-review" data-audit-id="${escapeHtml(data.auditId)}" data-id="${escapeHtml(data.id)}" data-resolution="retry">${icon("sparkle")}<b>보조 모델로 다시 확인</b><span>· 호출 1회</span></button>`
     : item.retryJobId ? '<p class="review-small__note">보조 모델 재확인을 요청했어요.</p>' : "";
@@ -42,6 +45,6 @@ export function smallReviewDetail(item: any, back: string): string {
     ${source}
     <div class="review-small__acts">${keep}${btn("빼기", { kind: "danger", action: "resolve-small-review", data: { ...data, resolution: "discard" } })}</div>
     ${retry}
-    <p class="review-small__note">고르기 전까지는 기억 검색과 모델 전달에서 빠져 있어요.</p>
+    <p class="review-small__note">${kind === "recognition" && !item.canKeep ? "그대로 두어도 괜찮아요. 고르기 전까지는 기억 검색과 모델 전달에서 빠져 있어요." : "고르기 전까지는 기억 검색과 모델 전달에서 빠져 있어요."}</p>
     </article>`;
 }

@@ -55,6 +55,7 @@ export const ICONS: Record<string, string> = {
   pin: '<path d="M7 3h10l-1 7 4 4H4l4-4-1-7Z"/><path d="M12 14v7"/>',
   inactive: '<circle cx="12" cy="12" r="8"/><path d="M6.3 6.3 17.7 17.7"/>',
   "arrow-right": '<path d="M5 12h14M15 8l4 4-4 4"/>',
+  branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-11.2 7"/>',
   chevron: '<path d="m9 6 6 6-6 6"/>',
   back: '<path d="m15 6-6 6 6 6"/>',
   landmark: '<path d="M12 3.5 20.5 12 12 20.5 3.5 12z"/>',

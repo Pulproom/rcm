@@ -1,14 +1,15 @@
 import { prefetchCurrentChatTranslations } from "./dashboard.js";
 import { observeSetupAttention } from "./setup-sources.js";
 import { backgroundTranslationEnabled, googleTranslationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
-import { observeCurrentHostGeneration, readCurrentChatId, readOptionalDashboardContext } from "./context.js";
-import { SERVER_STATUS_TIMEOUT_MS, type ServerClient } from "./api-client.js";
+import { observeCurrentHostGeneration, readCurrentChatPresence, readOptionalDashboardContext } from "./context.js";
+import { SERVER_STATUS_TIMEOUT_MS, ServerRequestError, type ServerClient } from "./api-client.js";
 import type { RuntimeState } from "./types.js";
 import { reconcileAutomaticServerPause } from "./worker.js";
 import { ServerCompatibilityError, isServerApiIncompatible, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess } from "./connection.js";
 import { syncQuizEnabled } from "./quiz-sync.js";
-import { isChatMemoryEnabled } from "./settings.js";
+import { isChatMemoryEnabled, saveSettings } from "./settings.js";
 import { refreshUpdateStatus } from "./updates.js";
+import { currentLineageOperation, needsOpenedChatResolution, resolveOpenedChat, reconcileLineageOperation } from "./lineage-settings.js";
 
 interface StatusResponse {
   auxiliaryAuthFailed?: boolean;
@@ -36,6 +37,7 @@ interface StatusResponse {
   embeddingError?: string;
   progress?: NonNullable<RuntimeState["statusSummary"]>["progress"];
   initialCalibration?: NonNullable<RuntimeState["statusSummary"]>["initialCalibration"];
+  lineage?: NonNullable<RuntimeState["statusSummary"]>["lineage"];
   worker: RuntimeState["serverWorker"];
   episode?: RuntimeState["episodeActivity"];
 }
@@ -81,6 +83,14 @@ export function subscribeActivity(state: RuntimeState, subscriber: (summary: Run
   return () => state.activitySubscribers?.delete(subscriber);
 }
 
+/** Preserve the archive, revoke work leases, then remove queued/failed jobs. */
+export async function stopDeletedHostChatWork(state: RuntimeState, client: Pick<ServerClient, "request">, chatId: string): Promise<void> {
+  state.settings.chatEnabled[chatId] = false;
+  await saveSettings(state.settings);
+  await client.request(`/v1/chats/${encodeURIComponent(chatId)}/work`, { method: "PUT", body: JSON.stringify({ enabled: false }) });
+  await client.request(`/v1/chats/${encodeURIComponent(chatId)}/jobs`, { method: "DELETE" });
+}
+
 export function installActivityCoordinator(state: RuntimeState, client: ServerClient): void {
   if (state.activityTimer) clearTimeout(state.activityTimer);
   state.activitySubscribers ??= new Set();
@@ -88,6 +98,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
   state.publishStatusSummary = () => publishStatusSummary(state);
   let previous = signature(state);
   let hostSelection: string | undefined;
+  const hostInventories = new Map<string, Set<string>>();
+  const syncedTitles = new Map<string,string>();
   let unloaded = false;
   let prefetchBusy = false;
   let prefetchRevision: string | undefined;
@@ -104,16 +116,43 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         const chat = await risuai.getCurrentChatIndex();
         return Number.isInteger(chat) && chat >= 0 ? `${character}:${chat}` : "none";
       })().catch(() => "none");
-      // Only fetch transcript/context when selection changes, not every status poll.
-      if (selection !== hostSelection || (selection !== "none" && !state.current)) {
+      // Branching/copying can replace the chat at the same host indices.
+      const presence = selection === "none" ? undefined : await readCurrentChatPresence().catch(() => undefined);
+      const activeChatId = presence?.chatId;
+      if (presence?.chatTitle && isServerConfigured(state.settings) && currentLineageOperation(state)?.status !== 'running') {
+        const key = `${state.settings.serverUrl}\0${presence.chatId}`;
+        if (syncedTitles.get(key) !== presence.chatTitle) {
+          const result = await client.request<{ok:boolean}>(`/v1/chats/${encodeURIComponent(presence.chatId)}/title`, {
+            method:'PUT',body:JSON.stringify({chatTitle:presence.chatTitle}),
+          }).catch(error => { if (error instanceof ServerRequestError && error.status === 404) return {ok:false}; throw error; });
+          if (result.ok) syncedTitles.set(key,presence.chatTitle);
+          if (state.current?.chatId === presence.chatId) state.current.chatTitle = presence.chatTitle;
+        }
+      }
+      if (presence?.inventory && isServerConfigured(state.settings)) {
+        const { characterId, chatIds } = presence.inventory;
+        const ids = new Set(chatIds);
+        const removed = [...(hostInventories.get(characterId) ?? [])].filter(id => !ids.has(id));
+        if (removed.length) {
+          // Only disappearance from two complete inventories is authoritative.
+          // Keep the archive; stop work and revoke leases before removing jobs.
+          for (const id of removed) await stopDeletedHostChatWork(state, client, id);
+        }
+        hostInventories.set(characterId, ids);
+      }
+      if (selection !== hostSelection || activeChatId !== state.current?.chatId) {
         hostSelection = selection;
-        const activeChatId = selection === "none" ? undefined : await readCurrentChatId().catch(() => undefined);
         if (activeChatId !== state.current?.chatId) {
           state.current = undefined;
           state.statusSummary = undefined;
+          state.lastPrepare = undefined;
+          state.chatOpen = undefined;
+          state.lineageOperation = undefined;
+          state.activityReady = false;
           state.episodeActivity = null;
           state.refreshStatusWidget?.();
           if (activeChatId) await readOptionalDashboardContext(state);
+          publishActivity(state);
         }
       }
       if (!isServerConfigured(state.settings)) {
@@ -133,15 +172,25 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           if (mismatch.receivedRevision !== mismatch.expectedRevision) throw mismatch;
           state.activityReady = true;
           noteServerConnectionSuccess(state);
-        } else if (state.current?.chatId && isChatMemoryEnabled(state.settings, state.current.chatId)) {
+        } else if (state.current?.chatId && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) {
         const chatId = state.current.chatId;
+        if (currentLineageOperation(state)?.status === "running") {
+          state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+          return;
+        }
         const startedRevision = state.statusSummaryRevision ?? 0;
-        const result = await client.request<StatusResponse>(`/v1/chats/${encodeURIComponent(chatId)}/status`, {}, SERVER_STATUS_TIMEOUT_MS);
+        let result = await client.request<StatusResponse>(`/v1/chats/${encodeURIComponent(chatId)}/status`, {}, SERVER_STATUS_TIMEOUT_MS);
+        if (needsOpenedChatResolution(state, result.initialCalibration, result.lineage)) {
+          void resolveOpenedChat(state, client).catch(() => undefined); // operation owns visible errors
+          state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+          return;
+        }
         if (state.current?.chatId !== chatId || (state.statusSummaryRevision ?? 0) !== startedRevision) {
           if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), isActive(state) ? 1_000 : 4_000);
           return;
         }
-        observeSetupAttention(state, chatId, result.initialCalibration?.status);
+        observeSetupAttention(state, chatId, result.initialCalibration?.status, result.lineage);
+        reconcileLineageOperation(state,chatId,result.lineage);
         state.statusSummary = {
           queuedJobs: Number(result.queuedJobs ?? 0), failedJobs: Number(result.failedJobs ?? 0), blockingFailedJobs: Number(result.blockingFailedJobs ?? result.failedJobs ?? 0), advisoryFailedJobs: Number(result.advisoryFailedJobs ?? 0),
           pendingReviews: Number(result.pendingReviews ?? 0), pendingReconciliations: Number(result.pendingReconciliations ?? 0), waitingForAssistant: Number(result.waitingForAssistant ?? 0), bufferedMessages: Number(result.bufferedMessages ?? 0), bufferedTurns: Number(result.bufferedTurns ?? 0), bufferedSourceTokens: Number(result.bufferedSourceTokens ?? 0), extractionGroupTurns: Number(result.extractionGroupTurns ?? 6), recoverableMessages: Number(result.recoverableMessages ?? 0), historicalBackfillMessages: Number(result.historicalBackfillMessages ?? 0), ingestionState: result.ingestionState, pendingEmbeddings: Number(result.pendingEmbeddings ?? 0),
@@ -168,6 +217,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
             acknowledged: result.progress.acknowledged === true, backfillRunId: typeof result.progress.backfillRunId === "string" ? result.progress.backfillRunId : undefined,
           } : undefined,
           initialCalibration: result.initialCalibration,
+          lineage: result.lineage,
           episode: result.episode ?? null,
         };
         state.episodeActivity = result.episode ?? null;
@@ -179,7 +229,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           && !(state.settings.translationProvider === "google" && googleTranslationCooldownMs())) {
           prefetchBusy = true; prefetchNextAt = now + 30_000;
           const current = () => !unloaded && state.current?.chatId === chatId && state.settings.serverUrl === serverUrl
-            && isChatMemoryEnabled(state.settings, chatId) && state.settings.autoTranslate && state.settings.translationDisplay === "ko";
+            && isChatMemoryEnabled(state.settings, chatId, state.current?.chatId === chatId ? state.current.characterId : undefined) && state.settings.autoTranslate && state.settings.translationDisplay === "ko";
           const work = revision !== prefetchRevision
             ? prefetchCurrentChatTranslations(state, client, chatId, { serverInstanceId: result.serverInstanceId, memoryLanguage: result.memoryLanguage }, current)
             : prefetchTranslationRecords(state, prefetchPending, current);

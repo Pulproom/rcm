@@ -669,9 +669,12 @@ export function maybeEnqueueStorySpine(db: RcmDatabase, chatId: string, backfill
   }
   const flushTail = Boolean(backfillRunId);
   let count = 0;
-  if (maybeEnqueueOverview(db, chatId, backfillRunId, trigger)) count += 1;
   if (maybeEnqueueArc(db, chatId, backfillRunId, flushTail, trigger)) count += 1;
   if (maybeEnqueueSegment(db, chatId, backfillRunId, flushTail, trigger)) count += 1;
+  // Wait for the hierarchy already being built, including inherited ranges
+  // missing their parent nodes, instead of generating an intermediate overview.
+  if (!queued(db, chatId, "segment") && !queued(db, chatId, "arc")
+    && maybeEnqueueOverview(db, chatId, backfillRunId, trigger)) count += 1;
   return count;
 }
 

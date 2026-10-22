@@ -1,7 +1,10 @@
+import { pendingProgress } from "./pair-progress.js";
+import { writePersonaHint } from "./view-preferences.js";
+import { PAIR_PROGRESS_DEFAULTS } from "@rcm/shared";
 import { auxiliaryInputOutcome } from './auxiliary-input-cache.js';
 import { relationshipInputFingerprint, recordRelationshipInputs } from './relationship-projections.js';
 import { recordLedgerInputs } from './ledger-consistency.js';
-import { auxiliaryInputBudgetMessage, providerFailureMetadata } from '@rcm/shared';
+import { auxiliaryInputBudgetMessage, providerFailureMetadata, isModelContentRejection } from '@rcm/shared';
 import { ROLEPLAY_ARCHIVE_FRAMING, JOB_TRIGGER_VALUES, type JobTrigger, type SourceRecoveryMetadata } from "@rcm/shared";
 import { isPermanentProviderError, isProviderContextLimitError, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
@@ -33,7 +36,7 @@ import { buildStoryConsolidationJob, maybeEnqueueStorySpine, refreshStoryInputGu
 import { retrieve } from "./retrieval.js";
 import { buildRecallCandidateSnapshot, type RecallCandidateSnapshot } from "./recall-candidates.js";
 import { buildLedgerConsistencyJob } from "./ledger-consistency.js";
-import { cachedAuxiliaryPage } from "./auxiliary-page-cache.js";
+import { cachedAuxiliaryPage, resetRejectedJobCache } from "./auxiliary-page-cache.js";
 import { diagnoseAuxiliaryModelResponse } from "./server-llm.js";
 
 export interface PendingMessage {
@@ -551,7 +554,8 @@ ${IDENTITY_TERM_GUIDANCE}
 - description is a short current recognition phrase about the subject relative to the holder: known role, explicitly known tie and any necessary cover-identity or recognition limit. Do not narrate an introduction or copy a biography. World identity is not automatically holder knowledge. Never expose hidden identity or roles unless this holder explicitly knows them.
 - Seed only the story's established starting situation. A rendered dynamic lore entry or later-history recap is not evidence that the holder knew it at the start. Omit recognition whose starting time or holder knowledge is ambiguous. Empty arrays are valid; this is not a completeness quota.
 - Every recognition needs exact setup excerpts establishing both holder knowledge and description. The sourceIndex is the renderedSetup index. Do not create timeline events or physical milestones from setup.
-- Return one strict JSON object only: {entities:[{key,displayName,aliases,role,prominence,evidence}],relationships:[{fromKey,toKey,axes:{affection,trust,intimacy,fear,jealousy,hostility},summary,evidence}],socialKnowledge:[{holderKey,subjectKey,level,knownAs,description,evidence}]}.
+- Optionally return pairProgress:[{personaKey,characterKey,itemId,side,evidence:{sourceIndex,quote}}]. Only persona ↔ primary character pairs in entities qualify. Use supplied progress defaults or custom labels as data. each side is the OWNER's entity key: visited_home means the other has been inside their home; knows_residence means the other knows their residence; met_family_friends means the other has met their family/friends. mutual uses side:"mutual". contact_exchange means they exchanged contact information. Mark done only when setup clearly establishes this shared history; cite an exact setup quote. Ambiguous history is not completion. Existing pairs may update ONLY supplied pending cells; user-locked cells are never eligible. New pairs use the defaults. Omit unsupported entries.
+- Return one strict JSON object only: {entities:[{key,displayName,aliases,role,prominence,evidence}],relationships:[{fromKey,toKey,axes:{affection,trust,intimacy,fear,jealousy,hostility},summary,evidence}],socialKnowledge:[{holderKey,subjectKey,level,knownAs,description,evidence}],pairProgress:[{personaKey,characterKey,itemId,side,evidence:{sourceIndex,quote}}]}. pairProgress may be empty or omitted.
 - No Markdown, commentary, additional keys, or prose outside JSON.`;
 
 export function enqueueInitialCalibration(
@@ -562,6 +566,7 @@ export function enqueueInitialCalibration(
   backfillRunId?: string,
 ): boolean {
   if (db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='initial_calibration' AND status IN ('queued','leased') LIMIT 1").get(chatId)) return false;
+  writePersonaHint(db, chatId, identityHints.userPersonaName);
   const timestamp = now();
   const memoryLanguage = (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: MemoryLanguage }).memory_language;
   db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
@@ -850,6 +855,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       WHERE (j.status='queued' OR (j.status='leased' AND j.leased_until < ?))
         AND j.attempts < 3
         AND NOT EXISTS (SELECT 1 FROM chat_work_state held WHERE held.chat_id=j.chat_id AND held.enabled=0)
+        AND NOT EXISTS (SELECT 1 FROM chat_lineage lineage WHERE lineage.child_chat_id=j.chat_id AND lineage.status IN ('choice_required','ambiguous'))
         AND COALESCE(json_extract(j.payload_json,'$.nextAttemptAt'),0) <= ?
         AND (?=0 OR j.type='story_consolidation')
         AND j.id NOT IN (SELECT value FROM json_each(?))
@@ -975,6 +981,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
         .run(workerId, timestamp + leaseSeconds * 1000, timestamp, row.id);
       const userPrompt = JSON.stringify({
         identityHints: payload.identityHints ?? {},
+        progressDefaults: PAIR_PROGRESS_DEFAULTS, pendingProgress: pendingProgress(db,row.chat_id),
         renderedSetup: payload.resolvedSetup.messages.map((message, sourceIndex) => ({ sourceIndex, role: message.role, content: message.content })),
       });
       return {
@@ -1113,11 +1120,12 @@ export function attachAuxiliaryPlan(db: RcmDatabase, job: LeasedJob | null, budg
   // Saved budgets describe the previous attempt, never the next lease.
   try {
     if (job.kind === "initial_calibration" && job.initialCalibration && job.systemPrompt) {
-      const emptyEnvelope = JSON.stringify([{ role: "system", content: job.systemPrompt }, { role: "user", content: JSON.stringify({ identityHints: job.initialCalibration.identityHints, renderedSetup: [] }) }]);
+      const { renderedSetup: _setup, ...setupContext } = JSON.parse(job.userPrompt!);
+      const emptyEnvelope = JSON.stringify([{ role: "system", content: job.systemPrompt }, { role: "user", content: JSON.stringify({ ...setupContext, renderedSetup: [] }) }]);
       const setup = job.initialCalibration.resolvedSetup.messages.flatMap((message, sourceIndex) => {
         let target = Math.max(1, budget.maxInputTokens - estimateTokens(emptyEnvelope) - 128);
         let pieces = splitAuxiliarySource(message.content, estimateTokens, target);
-        const renderOne = (text: string) => JSON.stringify({ identityHints: job!.initialCalibration!.identityHints, renderedSetup: [{ sourceIndex, role: message.role, content: text }] });
+        const renderOne = (text: string) => JSON.stringify({ ...setupContext, renderedSetup: [{ sourceIndex, role: message.role, content: text }] });
         while (pieces.some((piece) => !measureAuxiliaryPrompt([{ role: "system", content: job!.systemPrompt! }, { role: "user", content: renderOne(piece.text) }], estimateTokens, budget).fits)) {
           if (target === 1) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
           target = Math.max(1, Math.floor(target * .75));
@@ -1127,7 +1135,7 @@ export function attachAuxiliaryPlan(db: RcmDatabase, job: LeasedJob | null, budg
       });
       const groups: Array<typeof setup> = [];
       let current: typeof setup = [];
-      const render = (items: typeof setup) => JSON.stringify({ identityHints: job!.initialCalibration!.identityHints, renderedSetup: items });
+      const render = (items: typeof setup) => JSON.stringify({ ...setupContext, renderedSetup: items });
       for (const item of setup) {
         const trial = [...current, item];
         const fits = measureAuxiliaryPrompt([{ role: "system", content: job.systemPrompt }, { role: "user", content: render(trial) }], estimateTokens, budget).fits;
@@ -1228,6 +1236,7 @@ export function recordSourceRecoveryOutcome(db: RcmDatabase, jobId: string, resu
 }
 
 export function failJob(db: RcmDatabase, jobId: string, workerId: string, failure: unknown): JobFailureResult | undefined {
+  resetRejectedJobCache(db, jobId, workerId, failure);
   let error = failure instanceof Error ? failure.message : typeof failure==='string' ? failure : String((failure as any)?.message ?? 'Auxiliary call failed');
   const providerFailure=providerFailureMetadata(failure);
   const row = db.prepare("SELECT attempts,type,payload_json,chat_id FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(jobId, workerId) as
@@ -1243,7 +1252,7 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
   // errors here describe a deterministic rejected result. Keep typed transport,
   // SQLite and runtime failures on their existing retry path.
   const completionInvalid = originalPayload.pipelineStage === "storing" && failure instanceof Error && (
-    failure.name === "ZodError"
+    isModelContentRejection(failure)
     || (failure.constructor === Error && !providerFailure.code && providerFailure.status === undefined)
     || ["EXTRACTION_SOURCE_INVALID", "MEMORY_ADDITION_INVALID", "SOURCE_CHANGED"].includes(providerFailure.code ?? ""));
   const nonRetryable = isPermanentProviderError(failure) || completionInvalid;
@@ -1318,6 +1327,24 @@ export function resplitFailedExtractionJob(db: RcmDatabase, chatId: string, jobI
   })();
 }
 
+/** Read-only preview guard; apply calls it again inside the import transaction. */
+export function memoryTransferQueuedJobs(db: RcmDatabase, sourceChatId: string, targetChatId: string): number {
+  if (db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND status='leased'").get(targetChatId)) throw new Error("TARGET_MEMORY_WORK_ACTIVE");
+  if (db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND status IN ('queued','leased')").get(sourceChatId)) throw new Error("SOURCE_MEMORY_WORK_PENDING");
+  return (db.prepare("SELECT COUNT(*) count FROM jobs WHERE chat_id=? AND status='queued'").get(targetChatId) as {count:number}).count;
+}
+
+/** Caller owns the transaction together with the replacement; never cancels a lease. */
+export function cancelQueuedMemoryTransferJobs(db: RcmDatabase, chatId: string): void {
+  if (db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND status='leased'").get(chatId)) throw new Error("TARGET_MEMORY_WORK_ACTIVE");
+  for (const table of ['extraction_batches','regeneration_runs']) {
+    db.prepare(`UPDATE ${table} SET status='stale',updated_at=? WHERE chat_id=? AND status<>'applied'
+      AND job_id IN (SELECT id FROM jobs WHERE chat_id=? AND status='queued')`).run(now(),chatId,chatId);
+  }
+  db.prepare("DELETE FROM jobs WHERE chat_id=? AND status='queued'").run(chatId);
+  db.prepare("UPDATE messages SET extraction_state='pending' WHERE chat_id=? AND extraction_state='queued'").run(chatId);
+}
+
 export function cancelExtractionJobs(db: RcmDatabase, chatId: string): { deletedJobs: number; cancelledMessages: number } {
   return db.transaction(() => {
     const timestamp = now();
@@ -1365,7 +1392,7 @@ export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string
 export function projectJobListPayload(payload: Record<string, unknown>, kind?: string): Record<string, unknown> {
   const projected = Object.fromEntries([
     "sourceRecovery", "sourceRecoveryMetadata", "pipelineStage", "pipelineManualRetry", "pipelineRetryAttempt", "llmCallStats", "llmUsage", "llmCallDiagnostics",
-    "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops", "auditAdditionDrops", "smallReviewCount",
+    "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops", "stateObservationDrops", "progressSent", "progressReturned", "progressApplied", "progressDrops", "cacheResetDiagnostic", "auditAdditionDrops", "smallReviewCount",
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
   if (JOB_TRIGGER_VALUES.includes(payload.trigger as JobTrigger)) projected.trigger = payload.trigger;
   if (kind === 'story_consolidation' && ['segment','arc','overview'].includes(payload.level as string)

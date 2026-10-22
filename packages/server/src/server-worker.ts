@@ -20,7 +20,7 @@ import { completeInitialCalibrationJob } from "./initial-calibration.js";
 import { completeStoryConsolidationJob, maybeEnqueueStorySpine } from "./story-spine.js";
 import { applyExtractionAuditPatch } from "./extraction-audit.js";
 import { prepareReconciliation } from "./reconciliation.js";
-import { prepareStateExtraction, usesStateExtraction } from "./state-extraction.js";
+import { recordProgressSent, prepareStateExtraction, usesStateExtraction } from "./state-extraction.js";
 import { completeLedgerConsistencyJob, finalizeLedgerConsistencyRun } from "./ledger-consistency.js";
 
 const CONTROL_LEASE_MS = 45_000;
@@ -285,11 +285,13 @@ export class ServerExtractionWorker {
         const prepared = grounded ? (stateExtraction
           ? prepareStateExtraction(this.db, job.chatId, job.sourceMessageIds, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000)
           : prepareReconciliation(this.db, job.chatId, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000)) : { required: false, candidateSetHash: "", systemPrompt: "", userPrompt: "", parts: [] };
+        if ("progressSent" in prepared) recordProgressSent(this.db, job.id, prepared.progressSent);
         if (prepared.required) {
           active.phase = "state_reconciliation";
           setJobPipelineStage(this.db, job.id, "state_reconciliation", active.owner);
           const decisions = [];
           const seedResolutions = [];
+          const pairProgress = [];
           let stateResult;
           this.store.planPages(job.id, "reconciliation", prepared.parts!);
           for (const part of prepared.parts!) {
@@ -303,8 +305,9 @@ export class ServerExtractionWorker {
             if (cached === undefined) this.store.cachePage(job.id, "reconciliation", part.systemPrompt, part.userPrompt, page);
             decisions.push(...page.decisions);
             seedResolutions.push(...(page.seedResolutions ?? []));
+            pairProgress.push(...(page.pairProgress ?? []));
           }
-          reconciliation = { candidateSetHash: prepared.candidateSetHash, result: { decisions, seedResolutions, ...(stateResult ? { state: stateResult } : {}) } };
+          reconciliation = { candidateSetHash: prepared.candidateSetHash, result: { decisions, seedResolutions, pairProgress, ...(stateResult ? { state: stateResult } : {}) } };
         }
       }
       controller.signal.throwIfAborted();

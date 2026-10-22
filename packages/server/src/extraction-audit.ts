@@ -1,3 +1,4 @@
+import { ModelContentValidationError } from "@rcm/shared";
 import { ExtractionAggregateSchema, applySourceAccessPatch } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { ExtractionDraftResultSchema, type ExtractionAuditPatch, type ExtractionAuditSubmission, type ExtractionDraftResult } from "@rcm/shared";
@@ -57,7 +58,7 @@ function removeDraftRefs(result: ExtractionDraftResult, refs: string[]): void {
   result.memories = result.memories.filter(item => keep(`memory:${item.key}`));
   result.stateObservations = result.stateObservations.filter(item => keep(`observation:${item.key}`));
   if (result.physicalIntimacy) result.physicalIntimacy = result.physicalIntimacy.filter((_item, index) => keep(`physical:${index}`));
-  if (remaining.size) throw new Error(`Unknown audit itemRef: ${remaining.values().next().value}`);
+  if (remaining.size) throw new ModelContentValidationError(`Unknown audit itemRef: ${remaining.values().next().value}`);
 }
 
 function allEvidence(result: ExtractionDraftResult): Evidence[] {
@@ -81,45 +82,46 @@ function validateAuditEvidence(db: RcmDatabase, chatId: string, sourceIds: strin
     .all(chatId, ...sourceIds) as Array<{ message_id: string; content: string | null }> : [];
   const content = new Map(rows.map((row) => [row.message_id, row.content ?? ""]));
   for (const evidence of evidenceItems) {
-    if (!allowed.has(evidence.messageId) || !content.has(evidence.messageId)) throw new Error(`Audit addition cites unavailable evidence: ${evidence.messageId}`);
+    if (!allowed.has(evidence.messageId)) throw new ModelContentValidationError(`Audit addition cites unavailable evidence: ${evidence.messageId}`);
+    if (!content.has(evidence.messageId)) throw new Error(`Audit addition cites unavailable evidence: ${evidence.messageId}`);
   }
 }
 
 export function applyExtractionAuditPatch(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult, patch: ExtractionAuditPatch): { result: ExtractionDraftResult; pendingRefs: string[] } {
   const result = structuredClone(draft);
   applySourceAccessPatch(result, patch);
-  for (const item of patch.access.filter((entry) => !entry.itemRef.startsWith("source:"))) if (!refSetAccess(result, item.itemRef, item.grants)) throw new Error(`Unknown audit itemRef: ${item.itemRef}`);
+  for (const item of patch.access.filter((entry) => !entry.itemRef.startsWith("source:"))) if (!refSetAccess(result, item.itemRef, item.grants)) throw new ModelContentValidationError(`Unknown audit itemRef: ${item.itemRef}`);
   for (const item of patch.epistemic) {
     let found = false;
     for (const memory of result.memories) for (const detail of memory.details ?? []) if (item.itemRef === `detail:${memory.key}:${detail.key}`) {
       detail.epistemic = item.value; found = true;
     }
-    if (!found) throw new Error(`Unknown epistemic itemRef: ${item.itemRef}`);
+    if (!found) throw new ModelContentValidationError(`Unknown epistemic itemRef: ${item.itemRef}`);
   }
   for (const item of patch.relationKinds) {
     const index = /^relation:(\d+)$/.exec(item.itemRef)?.[1];
     const relation = index === undefined ? undefined : result.atomRelations?.[Number(index)];
-    if (!relation) throw new Error(`Unknown audit itemRef: ${item.itemRef}`);
+    if (!relation) throw new ModelContentValidationError(`Unknown audit itemRef: ${item.itemRef}`);
     relation.kind = item.kind;
   }
   const removedRefs = [...patch.discardItemRefs, ...patch.keepPendingItemRefs];
   const relationIndices = new Set(removedRefs.filter(ref => ref.startsWith("relation:")).map(ref => {
     const index = /^relation:(\d+)$/.exec(ref)?.[1];
-    if (index === undefined || !result.atomRelations?.[Number(index)]) throw new Error(`Unknown audit itemRef: ${ref}`);
+    if (index === undefined || !result.atomRelations?.[Number(index)]) throw new ModelContentValidationError(`Unknown audit itemRef: ${ref}`);
     return Number(index);
   }));
   if (result.atomRelations) result.atomRelations = result.atomRelations.filter((_relation, index) => !relationIndices.has(index));
   removeDraftRefs(result, removedRefs.filter(ref => !ref.startsWith("source:") && !ref.startsWith("relation:")));
   for (const memoryRef of new Set(patch.landmarkPatches.map(item => item.memoryRef))) {
     const memory = result.memories.find(candidate => memoryRef === `memory:${candidate.key}`);
-    if (!memory) throw new Error(`Unknown audit memoryRef: ${memoryRef}`);
+    if (!memory) throw new ModelContentValidationError(`Unknown audit memoryRef: ${memoryRef}`);
     const original = memory.landmarkKinds ?? [];
     const changes = patch.landmarkPatches.filter(item => item.memoryRef === memoryRef);
     const indexed = new Map<number, typeof changes[number]>();
     for (const item of changes) if (item.action !== "add") {
       const index = item.landmarkIndex!;
-      if (!original[index]) throw new Error(`Unknown audit landmark index: ${memoryRef}:${index}`);
-      if (indexed.has(index)) throw new Error(`Conflicting audit landmark patches: ${memoryRef}:${index}`);
+      if (!original[index]) throw new ModelContentValidationError(`Unknown audit landmark index: ${memoryRef}:${index}`);
+      if (indexed.has(index)) throw new ModelContentValidationError(`Conflicting audit landmark patches: ${memoryRef}:${index}`);
       indexed.set(index, item);
     }
     const landmarks = original.flatMap((landmark, index) => {
@@ -132,7 +134,7 @@ export function applyExtractionAuditPatch(db: RcmDatabase, chatId: string, sourc
   }
   for (const item of patch.observationPatches) {
     const index = result.stateObservations.findIndex((candidate) => item.itemRef === `observation:${candidate.key}`);
-    if (index < 0) throw new Error(`Unknown audit observation ref: ${item.itemRef}`);
+    if (index < 0) throw new ModelContentValidationError(`Unknown audit observation ref: ${item.itemRef}`);
     if (item.action === "remove") result.stateObservations.splice(index, 1);
     else result.stateObservations[index] = item.observation!;
   }
@@ -151,15 +153,15 @@ export function applyExtractionAuditPatch(db: RcmDatabase, chatId: string, sourc
   ]);
   for (const addition of patch.detailAdditions) {
     const memory = result.memories.find((item) => addition.memoryRef === `memory:${item.key}`);
-    if (!memory) throw new Error(`Unknown audit memoryRef: ${addition.memoryRef}`);
-    if ((memory.details ?? []).some((item) => item.key === addition.detail.key)) throw new Error(`Duplicate audit detail key: ${addition.detail.key}`);
+    if (!memory) throw new ModelContentValidationError(`Unknown audit memoryRef: ${addition.memoryRef}`);
+    if ((memory.details ?? []).some((item) => item.key === addition.detail.key)) throw new ModelContentValidationError(`Duplicate audit detail key: ${addition.detail.key}`);
     memory.details = [...(memory.details ?? []), addition.detail];
   }
   for (const addition of patch.dialogueAdditions) {
     const memory = result.memories.find((item) => addition.memoryRef === `memory:${item.key}`);
-    if (!memory) throw new Error(`Unknown audit memoryRef: ${addition.memoryRef}`);
+    if (!memory) throw new ModelContentValidationError(`Unknown audit memoryRef: ${addition.memoryRef}`);
     if ((memory.keyDialogues ?? []).some((item) => item.messageId === addition.dialogue.messageId && item.text === addition.dialogue.text)) {
-      throw new Error(`Duplicate audit dialogue: ${addition.dialogue.messageId}`);
+      throw new ModelContentValidationError(`Duplicate audit dialogue: ${addition.dialogue.messageId}`);
     }
     memory.keyDialogues = [...(memory.keyDialogues ?? []), addition.dialogue];
   }
@@ -168,13 +170,13 @@ export function applyExtractionAuditPatch(db: RcmDatabase, chatId: string, sourc
 
   const knownMemoryKeys = new Set(result.memories.map((memory) => memory.key));
   for (const memory of patch.memoryAdditions ?? []) {
-    if (knownMemoryKeys.has(memory.key)) throw new Error(`Duplicate audit memory key: ${memory.key}`);
+    if (knownMemoryKeys.has(memory.key)) throw new ModelContentValidationError(`Duplicate audit memory key: ${memory.key}`);
     knownMemoryKeys.add(memory.key);
     result.memories.push(memory);
   }
   const observationKeys = new Set(result.stateObservations.map((item) => item.key));
   for (const observation of patch.observationAdditions) {
-    if (observationKeys.has(observation.key)) throw new Error(`Duplicate audit observation key: ${observation.key}`);
+    if (observationKeys.has(observation.key)) throw new ModelContentValidationError(`Duplicate audit observation key: ${observation.key}`);
     observationKeys.add(observation.key);
     result.stateObservations.push(observation);
   }
@@ -182,7 +184,7 @@ export function applyExtractionAuditPatch(db: RcmDatabase, chatId: string, sourc
   result.socialKnowledge = [...(result.socialKnowledge ?? []), ...(additions.socialKnowledge ?? [])];
   const socialPatches = new Map<number, typeof patch.socialKnowledgePatches[number]>();
   for (const change of patch.socialKnowledgePatches ?? []) {
-    if (!draft.socialKnowledge?.[change.index] || socialPatches.has(change.index)) throw new Error("Invalid or duplicate social knowledge patch index");
+    if (!draft.socialKnowledge?.[change.index] || socialPatches.has(change.index)) throw new ModelContentValidationError("Invalid or duplicate social knowledge patch index");
     socialPatches.set(change.index, change);
     if (change.record) validateAuditEvidence(db, chatId, sourceIds, change.record.evidence);
   }

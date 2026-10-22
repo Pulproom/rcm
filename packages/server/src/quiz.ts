@@ -108,8 +108,8 @@ function quizGenerationEligible(db: RcmDatabase, chatId: string): boolean {
   return memories.n >= QUIZ_MIN_MEMORIES || sourceProgress(db, chatId).completedTurns >= QUIZ_MIN_SOURCE_TURNS;
 }
 
-function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows(db, chatId)): QuizSceneRow[] {
-  if (scenes.length >= QUIZ_MIN_MEMORIES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
+function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows(db, chatId), includeSources = false): QuizSceneRow[] {
+  if (!includeSources && scenes.length >= QUIZ_MIN_MEMORIES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
   const { cutoff } = sourceProgress(db, chatId);
   const rows = db.prepare(`SELECT message_id,role,ordinal,content,updated_at,memory_excluded FROM messages WHERE chat_id=?
     AND ordinal>? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal`)
@@ -217,6 +217,59 @@ export function setQuizEnabled(db: RcmDatabase, chatId: string, enabled: boolean
     db.prepare("UPDATE quiz_state SET enabled=?,updated_at=? WHERE chat_id=?").run(enabled ? 1 : 0, now(), chatId);
     if (!enabled) db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE chat_id=? AND type='quiz' AND status='queued'").run(now(), chatId);
   })();
+}
+
+/** Copy only quizzes whose material survived the fork, with new child-owned IDs. No queued work or prompts. */
+export function inheritQuizzes(db: RcmDatabase, parent: string, child: string, memoryIds: Map<string, string>, messageIds: Map<string, string>, detailIds: Map<string, string>): number {
+  const state = db.prepare("SELECT * FROM quiz_state WHERE chat_id=?").get(parent) as QuizStateRow | undefined;
+  if (!state) return 0;
+  const enabled = (db.prepare("SELECT enabled FROM quiz_state WHERE chat_id=?").get(child) as { enabled: number } | undefined)?.enabled ?? state.enabled;
+  const parentScenes = new Map(quizContentRows(db, parent, quizSceneRows(db, parent), true).map(row => [row.id, row]));
+  const childMemoryScenes = quizSceneRows(db, child);
+  const childScenes = new Map(quizContentRows(db, child, childMemoryScenes, true).map(row => [row.id, row]));
+  const sources = (chatId: string) => new Map((db.prepare(`SELECT message_id,content_hash,canonical_hash FROM messages WHERE chat_id=?
+    AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') AND content IS NOT NULL`).all(chatId) as Array<{message_id:string;content_hash:string;canonical_hash:string}>).map(row => [row.message_id, row.canonical_hash || row.content_hash]));
+  const parentSources = sources(parent), childSources = sources(child);
+  const remapMessage = (id: string) => messageIds.get(id) ?? id;
+  const mappedScenes = new Map<string, QuizSceneRow>();
+  for (const before of parentScenes.values()) {
+    const targetId = before.sourceOnly ? SOURCE_REF + remapMessage(before.id.slice(SOURCE_REF.length)) : memoryIds.get(before.id);
+    const after = targetId && childScenes.get(targetId);
+    if (!after || before.title !== after.title || before.content !== after.content) continue;
+    const corrections = before.lineCorrections && JSON.stringify((JSON.parse(before.lineCorrections) as Array<{id:string}>).map(row => ({ ...row, id: detailIds.get(row.id) ?? row.id })).sort((a,b) => a.id.localeCompare(b.id)));
+    const afterCorrections = after.lineCorrections && JSON.stringify((JSON.parse(after.lineCorrections) as Array<{id:string}>).sort((a,b) => a.id.localeCompare(b.id)));
+    if (corrections !== afterCorrections) continue;
+    const ids = before.sourceMessageIds ?? quizMemorySourceIds(db, parent, before.id);
+    if (!ids.length || ids.some(id => !parentSources.has(id) || parentSources.get(id) !== childSources.get(remapMessage(id)))) continue;
+    mappedScenes.set(before.id, after);
+  }
+  db.prepare("DELETE FROM quiz_items WHERE chat_id=?").run(child);
+  db.prepare(`INSERT OR REPLACE INTO quiz_state(chat_id,enabled,streak,best_streak,answered,correct,last_batch_scene_count,updated_at)
+    VALUES(?,?,?,?,?,?,?,?)`).run(child, enabled, state.streak, state.best_streak, state.answered, state.correct, state.last_batch_scene_count, now());
+  const batchIds = new Map<string, string>();
+  const progress = sourceProgress(db, child);
+  const insert = db.prepare(`INSERT INTO quiz_items(id,chat_id,batch_id,format,difficulty,question,options_json,answer_index,explanation,quote,memory_id,memory_fingerprint,
+    position,created_at,answered_at,chosen_index,correct,retry_after,retired_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  let copied = 0;
+  for (const row of db.prepare("SELECT * FROM quiz_items WHERE chat_id=? ORDER BY created_at,rowid").all(parent) as Array<QuizItemRow & { batch_id:string;memory_fingerprint:string|null;position:number;created_at:number;retired_at:number|null }>) {
+    const scene = mappedScenes.get(row.memory_id);
+    if (!scene || (row.memory_fingerprint && row.memory_fingerprint !== sceneFingerprint(parentScenes.get(row.memory_id)!))) continue;
+    let batchId = batchIds.get(row.batch_id);
+    if (!batchId) {
+      batchId = randomUUID(); batchIds.set(row.batch_id, batchId);
+      const job = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='quiz'").get(row.batch_id, parent) as {payload_json:string}|undefined;
+      const metadata = job ? JSON.parse(job.payload_json) : undefined;
+      const turns = Number(metadata?.sourceTurns);
+      // Archived provenance retains quota age; it can never be leased or refilled as a live job.
+      db.prepare("INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'quiz','archived',?,0,?,?)")
+        .run(batchId, child, JSON.stringify({sourceTurns:Number.isFinite(turns) ? Math.min(turns,progress.turns) : progress.turns,
+          sceneCount:childMemoryScenes.length, ...(metadata?.exhausted ? {exhausted:true} : {})}), row.created_at, now());
+    }
+    insert.run(randomUUID(), child, batchId, row.format, row.difficulty, row.question, row.options_json, row.answer_index, row.explanation, row.quote,
+      scene.id, sceneFingerprint(scene), row.position, row.created_at, row.answered_at, row.chosen_index, row.correct, row.retry_after, row.retired_at);
+    copied++;
+  }
+  return copied;
 }
 
 export function disableAllQuizzes(db: RcmDatabase): void {

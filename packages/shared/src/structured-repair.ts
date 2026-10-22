@@ -14,6 +14,16 @@ import {
   SIGNED_RELATIONSHIP_BASELINE_VALUES,
 } from "./structured-contract-values.js";
 import { StructuredJsonSyntaxError } from "./structured-json.js";
+import { z } from "zod";
+
+/** Deterministic model-content rejection, distinct from transport, lease and stale-input errors. */
+export class ModelContentValidationError extends Error {
+  readonly modelContentRejected = true;
+}
+
+export function isModelContentRejection(error: unknown): boolean {
+  return error instanceof z.ZodError || Boolean(error && typeof error === "object" && "modelContentRejected" in error && error.modelContentRejected === true);
+}
 
 export interface AuxiliaryRepairMessage {
   role: "system" | "user" | "assistant";

@@ -1,14 +1,16 @@
 import { z } from "zod";
 
-/** Only chat-owned preferences may travel in a single-chat archive. */
+/** Chat preferences and its owning character switch; never unrelated settings. */
 export const ChatBackupSettingsSchema = z.object({
   enabled: z.boolean().optional(),
+  characterEnabled: z.boolean().optional(),
   catchUpPending: z.boolean().optional(),
   profile: z.enum(["companion", "simulation"]).optional(),
   perspectives: z.array(z.string()).optional(),
   detectedPerspectives: z.array(z.string()).optional(),
   includeUserMessages: z.boolean().optional(),
   upcomingOccasions: z.boolean().optional(),
+  pairProgress: z.boolean().optional(),
   memoryOnlyInjection: z.boolean().optional(),
   extractionGroupTurns: z.number().int().positive().optional(),
   memoryLanguage: z.enum(["en", "ko", "ja", "zh"]).optional(),
