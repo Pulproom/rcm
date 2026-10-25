@@ -96,10 +96,15 @@ export function isServerConnectionFailure(error: unknown): boolean {
     || error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
 }
 
+// Settings saves also create short-lived clients. Share only server capabilities,
+// in memory, so their edits use the same transport learned by the health reader.
+const methodOverrideServers = new Set<string>();
+
 export class ServerClient {
   constructor(private readonly settings: () => PluginSettings) {}
 
   async request<T>(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<T> {
+    const serverUrl = this.settings().serverUrl.replace(/\/$/, "");
     const controller = new AbortController();
     let active = true;
     let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -149,7 +154,15 @@ export class ServerClient {
       if (timings) timings.bodyStage = "read";
       finishPhase(); phase = "parseMs"; phaseStartedAt = performance.now();
       if (!body) return undefined as T;
-      try { const parsed = JSON.parse(body) as T; if (timings) timings.jsonStage = "parsed"; return parsed; }
+      try {
+        const parsed = JSON.parse(body);
+        if ((init.method ?? "GET").toUpperCase() === "GET" && path.split("?")[0] === "/v1/health") {
+          if (parsed?.capabilities?.methodOverride === true) methodOverrideServers.add(serverUrl);
+          else methodOverrideServers.delete(serverUrl);
+        }
+        if (timings) timings.jsonStage = "parsed";
+        return parsed as T;
+      }
       catch { if (timings) timings.jsonStage = "failed"; throw new Error(`Invalid JSON response from ${path}: ${body.slice(0, 240)}`); }
     };
     try { return await Promise.race([read(), deadline]); }
@@ -205,14 +218,16 @@ export class ServerClient {
     }, timeoutMs);
     try {
       const method = (init.method ?? "GET").toUpperCase();
-      const body = init.body ?? (["POST", "PUT"].includes(method) ? "{}" : undefined);
+      const serverUrl = settings.serverUrl.replace(/\/$/, "");
+      const override = methodOverrideServers.has(serverUrl) && ["PATCH", "PUT", "DELETE"].includes(method);
+      const body = init.body ?? (override || ["POST", "PUT"].includes(method) ? "{}" : undefined);
       // Frozen recovery protocol: released API90 servers reject either plugin
       // header on revision mismatch. Keep these authenticated requests unversioned.
       const recoveryRequest = method === "GET" && ["/v1/health", "/v1/update/status"].includes(path.split("?")[0]!)
         || method === "POST" && ["/v1/update/stage", "/v1/update/apply"].includes(path);
-      const response = await Promise.race([risuai.nativeFetch(`${settings.serverUrl.replace(/\/$/, "")}${path}`, {
+      const response = await Promise.race([risuai.nativeFetch(`${serverUrl}${path}`, {
         ...init,
-        method,
+        method: override ? "POST" : method,
         ...(body === undefined ? {} : { body }),
         headers: {
           "Content-Type": "application/json",
@@ -222,6 +237,7 @@ export class ServerClient {
             "X-RCM-API-Revision": String(RCM_API_REVISION),
           } : {}),
           ...(init.headers ?? {}),
+          ...(override ? { "X-HTTP-Method-Override": method } : {}),
         },
         signal: controller.signal,
       }), deadline]);

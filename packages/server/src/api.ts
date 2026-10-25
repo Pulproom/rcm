@@ -41,6 +41,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { methodOverride } from "hono/method-override";
 import {
   CompleteJobRequestSchema,
   ExtractionAggregateSchema,
@@ -253,7 +254,17 @@ export function createApp(dependencies: Dependencies): Hono {
   const restartScheduler = dependencies.restartScheduler ?? scheduleManagedRestart;
   let managedRestartScheduled = false;
   const serverInstanceId = (db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value: string }).value;
-  app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "Authorization", "X-RCM-Plugin-Version", "X-RCM-API-Revision"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "Authorization", "X-RCM-Plugin-Version", "X-RCM-API-Revision", "X-HTTP-Method-Override"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
+  const overrideMethod = methodOverride({ app, header: "X-HTTP-Method-Override" });
+  app.use("*", async (context, next) => {
+    const override = context.req.header("X-HTTP-Method-Override");
+    if (context.req.method !== "POST" || override === undefined) return next();
+    if (!["PATCH", "PUT", "DELETE"].includes(override)) {
+      return context.json({ error: "Method override must be PATCH, PUT or DELETE", code: "INVALID_METHOD_OVERRIDE" }, 400);
+    }
+    // Hono must dispatch again with the effective method before route matching.
+    return overrideMethod(context, next);
+  });
   app.get("/v1/health", (context) => {
     const health = {
       ok: true, version: RCM_SERVER_VERSION, apiRevision: RCM_API_REVISION, instanceId: serverInstanceId,
@@ -261,6 +272,7 @@ export function createApp(dependencies: Dependencies): Hono {
       serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, memoryLineEditing: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
     };
     Object.assign(health.capabilities, {
+      methodOverride: true,
       chatOperationLifecycleV2: true,
       mcpEvidenceRerank: true,
       turnLineageDiscovery: true,
