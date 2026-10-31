@@ -20,6 +20,8 @@ export interface ChatAdminSummary {
   memoryLanguage: "en" | "ko" | "ja" | "zh";
   pendingMemoryLanguage?: "en" | "ko" | "ja" | "zh";
   updatedAt: number;
+  engagedAt: number | null;
+  lastSeenAt: number;
   messages: number;
   committedMessages: number;
   activeMessages: number;
@@ -61,7 +63,7 @@ function requireNoActiveLease(db: RcmDatabase, chatIds: string[]): void {
 
 export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = false): ChatAdminSummary[] {
   const rows = db.prepare(`
-    SELECT c.id,c.chat_title,c.character_id,c.profile,c.memory_language,c.pending_memory_language,c.static_json,c.ingestion_state,c.updated_at,
+    SELECT c.engaged_at,c.last_seen_at,c.id,c.chat_title,c.character_id,c.profile,c.memory_language,c.pending_memory_language,c.static_json,c.ingestion_state,c.updated_at,
       l.status AS lineage_status,l.kind AS lineage_kind,l.parent_chat_id,
       COALESCE((SELECT chat_title FROM chats p WHERE p.id=l.parent_chat_id),l.parent_title) AS parent_title,l.fork_ordinal,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id) AS messages,
@@ -88,7 +90,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
         + COALESCE((SELECT sum(length(CAST(title AS BLOB))+length(CAST(content AS BLOB))) FROM memories m WHERE m.chat_id=c.id),0) AS approximate_bytes
     FROM chats c LEFT JOIN chat_lineage l ON l.child_chat_id=c.id ORDER BY c.updated_at DESC
   `).all() as Array<{
-    id: string; chat_title: string | null; character_id: string; profile: string; memory_language: "en" | "ko" | "ja" | "zh"; pending_memory_language: "en" | "ko" | "ja" | "zh" | null; static_json: string | null; ingestion_state: "historical_pending" | "managed" | "cleared"; updated_at: number;
+    engaged_at: number | null; last_seen_at: number; id: string; chat_title: string | null; character_id: string; profile: string; memory_language: "en" | "ko" | "ja" | "zh"; pending_memory_language: "en" | "ko" | "ja" | "zh" | null; static_json: string | null; ingestion_state: "historical_pending" | "managed" | "cleared"; updated_at: number;
     messages: number; active_messages: number; has_imported_memory: number; committed_messages: number; client_pruned_messages: number; disabled_messages: number; memories: number; relationships: number; assertions: number; beliefs: number; promises: number; pending_reviews: number; pending_conflicts: number; embeddings: number; jobs: number; retrieval_diagnostics_enabled: number; reprocessable_messages: number; buffered_messages: number; waiting_for_assistant: number; recoverable_messages: number; approximate_bytes: number;
     lineage_status: string | null; lineage_kind: string | null; parent_chat_id: string | null; parent_title: string | null; fork_ordinal: number | null;
   }>;
@@ -108,6 +110,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       pendingMemoryLanguage: row.pending_memory_language ?? undefined,
       ...(includeRetrievalDiagnostics ? { retrievalDiagnosticsEnabled: row.retrieval_diagnostics_enabled > 0 } : {}),
       updatedAt: row.updated_at,
+      engagedAt: row.engaged_at, lastSeenAt: row.last_seen_at,
       messages: row.messages,
       activeMessages: row.active_messages,
       hasImportedMemory: Boolean(row.has_imported_memory),

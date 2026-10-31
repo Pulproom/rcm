@@ -1,3 +1,5 @@
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
+import { MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
 import { pendingProgress } from "./pair-progress.js";
 import { writePersonaHint } from "./view-preferences.js";
 import { PAIR_PROGRESS_DEFAULTS } from "@rcm/shared";
@@ -1243,6 +1245,8 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
     | { attempts: number; type: string; payload_json: string; chat_id: string }
     | undefined;
   if (!row) return undefined;
+  const truncated = providerFailure.code === "MODEL_OUTPUT_TRUNCATED" || error.includes("MODEL_OUTPUT_TRUNCATED");
+  if (truncated) error = `MODEL_OUTPUT_TRUNCATED: ${MODEL_OUTPUT_TRUNCATED_MESSAGE}`;
   // These are provider/protocol error markers, not RP semantic matching.
   if (row.type === 'memory_group' && isProviderContextLimitError(error)
     && resplitMemoryGroupInput(db, jobId, JSON.parse(row.payload_json))) return { accepted: true, status: 'queued', attempt: row.attempts, maxAttempts: 3, retryable: true };
@@ -1255,7 +1259,7 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
     isModelContentRejection(failure)
     || (failure.constructor === Error && !providerFailure.code && providerFailure.status === undefined)
     || ["EXTRACTION_SOURCE_INVALID", "MEMORY_ADDITION_INVALID", "SOURCE_CHANGED"].includes(providerFailure.code ?? ""));
-  const nonRetryable = isPermanentProviderError(failure) || completionInvalid;
+  const nonRetryable = truncated || isPermanentProviderError(failure) || completionInvalid;
   if (completionInvalid) error = `EXTRACTION_COMPLETION_INVALID: ${error}`;
   const status = nonRetryable || repairBudgetSpent(originalPayload) || stateRepairBudgetSpent(originalPayload) || row.attempts >= maxAttempts ? "failed" : "queued";
   const failedPayload = {
@@ -1275,10 +1279,13 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
     pipelineMaxAttempts: maxAttempts,
     pipelineStageUpdatedAt: now(),
   };
+  const settingCode = settingsFailureCode(failure);
+  const safeError = (/^AUXILIARY_INPUT_(?:TOO_LARGE|BUDGET_EXCEEDED):/.test(error) ? error
+    : settingCode ? `${settingCode}: ${settingsFailureMessage(failure)}` : error).slice(0, 4000);
   db.prepare("UPDATE jobs SET status=?,payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=?,updated_at=? WHERE id=?").run(
     status,
     JSON.stringify(failedPayload),
-    error.slice(0, 4000),
+    safeError,
     now(),
     jobId,
   );
@@ -1287,13 +1294,13 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
     failureCode: (originalPayload.llmCallDiagnostics as LlmCallDiagnostic[] | undefined)?.at(-1)?.code ?? "SOURCE_RECOVERY_CALL_FAILED" });
   const payload = JSON.parse(row.payload_json) as { batchId?: string; regenerationRunId?: string; sourceRecovery?: boolean };
   if (payload.batchId && !payload.regenerationRunId && !payload.sourceRecovery) db.prepare("UPDATE extraction_batches SET status=?,updated_at=? WHERE id=?").run(status === "failed" ? "failed" : "queued", now(), payload.batchId);
-  if (payload.regenerationRunId) db.prepare("UPDATE regeneration_runs SET status=?,error=?,updated_at=? WHERE id=?").run(status === "failed" ? "failed" : "queued", error.slice(0, 4000), now(), payload.regenerationRunId);
+  if (payload.regenerationRunId) db.prepare("UPDATE regeneration_runs SET status=?,error=?,updated_at=? WHERE id=?").run(status === "failed" ? "failed" : "queued", safeError, now(), payload.regenerationRunId);
   if (row.type === "episode") {
     const episodeId = (JSON.parse(row.payload_json) as { episodeId?: string }).episodeId;
-    if (episodeId) db.prepare("UPDATE episodes SET status=?,last_error=?,updated_at=? WHERE id=?").run(status === "failed" ? "failed" : "pending", error.slice(0, 4000), now(), episodeId);
+    if (episodeId) db.prepare("UPDATE episodes SET status=?,last_error=?,updated_at=? WHERE id=?").run(status === "failed" ? "failed" : "pending", safeError, now(), episodeId);
   }
   if (row.type === "initial_calibration") {
-    db.prepare("UPDATE initial_calibrations SET status=?,last_error=?,updated_at=? WHERE chat_id=?").run(status === "failed" ? "failed" : "queued", error.slice(0, 4000), now(), row.chat_id);
+    db.prepare("UPDATE initial_calibrations SET status=?,last_error=?,updated_at=? WHERE chat_id=?").run(status === "failed" ? "failed" : "queued", safeError, now(), row.chat_id);
   }
   return { accepted: true, status, attempt: row.attempts, maxAttempts, retryable: status === "queued" };
 }
@@ -1304,7 +1311,7 @@ export function resplitFailedExtractionJob(db: RcmDatabase, chatId: string, jobI
       | { type: string; status: string; payload_json: string }
       | undefined;
     if (!job || job.type !== "extract" || job.status !== "failed") throw new Error("Failed extraction job not found");
-    const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[] };
+    const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; batchId?: string; backfillRunId?: string; postExtractionReview?: boolean };
     const ids = payload.sourceMessageIds ?? [];
     if (ids.length === 0) throw new Error("Failed extraction job has no source messages");
     const placeholders = ids.map(() => "?").join(",");
@@ -1318,10 +1325,15 @@ export function resplitFailedExtractionJob(db: RcmDatabase, chatId: string, jobI
     const turns = extractionUnits(messages, chat.include_user_messages === 1).length;
     if (turns <= 1) throw Object.assign(new Error("하나의 완료 턴 자체가 모델 context보다 큽니다. 더 큰 context 모델을 선택하세요."), { code: "ATOMIC_TURN_TOO_LARGE" });
     db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE id=?").run(now(), jobId);
+    if (payload.batchId) db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE id=?").run(now(), payload.batchId);
     const reset = db.prepare("UPDATE messages SET extraction_state='pending',updated_at=? WHERE chat_id=? AND message_id=? AND host_visibility IN ('active','all_before') AND lifecycle='committed'");
     for (const id of ids) reset.run(now(), chatId, id);
+    const queued = enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages === 1,
+      Math.min(chat.extraction_group_turns, Math.ceil(turns / 2)), payload.backfillRunId ? "ledger" : "current", payload.postExtractionReview, ids, payload.backfillRunId);
+    if (!queued) throw new Error("Extraction sources changed before replanning");
+    db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.plannedParts',?) WHERE id=?").run(queued, jobId);
     return {
-      queued: enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages === 1, chat.extraction_group_turns, "current", undefined, ids),
+      queued,
       turns,
     };
   })();

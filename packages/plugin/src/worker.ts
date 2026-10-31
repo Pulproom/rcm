@@ -1,3 +1,5 @@
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
+import { isStructuredOutputTruncated, modelOutputTruncatedError } from "@rcm/shared";
 import { optionalSourceSelectorsOnly, isModelContentRejection } from "@rcm/shared";
 import { parseExtractionAuditResponse } from "@rcm/shared";
 import { sha256 } from './context.js';
@@ -62,7 +64,7 @@ export async function reconcileAutomaticServerPause(
 
 export class AuxiliaryStreamError extends Error {
   readonly code = "AUXILIARY_STREAM_UNREADABLE";
-  constructor(cause?: unknown) { super("Auxiliary model stream could not be read", { cause }); this.name = "AuxiliaryStreamError"; }
+  constructor(cause?: unknown, message = "Auxiliary model stream could not be read") { super(message, { cause }); this.name = "AuxiliaryStreamError"; }
 }
 
 export const RISU_AUXILIARY_TIMEOUT_MS = 300_000;
@@ -70,7 +72,7 @@ export const RISU_AUXILIARY_TIMEOUT_MS = 300_000;
 export class AuxiliaryModelTimeoutError extends Error {
   readonly code = "AUXILIARY_MODEL_TIMEOUT";
   constructor(timeoutMs: number) {
-    super(`AUXILIARY_MODEL_TIMEOUT: Risu model call and stream exceeded ${timeoutMs}ms`);
+    super(`AUXILIARY_MODEL_TIMEOUT: ${settingsFailureMessage({ code: "TIMEOUT" })}`);
     this.name = "AuxiliaryModelTimeoutError";
   }
 }
@@ -126,8 +128,8 @@ function risuAuxiliaryError(error: unknown): Error & { code?: string; status?: n
   if (error instanceof AuxiliaryModelTimeoutError || error instanceof AuxiliaryStreamError) return error;
   const status = (error as { status?: unknown } | null)?.status;
   const auth = isProviderAuthenticationError(error);
-  const code = auth ? "AUXILIARY_AUTH_FAILED" : isPermanentProviderError(error) ? "AUXILIARY_PROVIDER_REJECTED" : "MODEL_CONNECTION_FAILED";
-  const message = auth ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : "Risu 보조 모델 호출에 실패했어요. 모델 설정과 입력 한도를 확인해 주세요" + (isProviderContextLimitError(error) ? " · context length exceeded" : "");
+  const code = auth ? "AUXILIARY_AUTH_FAILED" : settingsFailureCode(error) ?? (isPermanentProviderError(error) ? "AUXILIARY_PROVIDER_REJECTED" : "MODEL_CONNECTION_FAILED");
+  const message = settingsFailureMessage({ code });
   const httpStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
   return Object.assign(new Error(`${code}: ${message}${httpStatus ? ` · HTTP ${httpStatus}` : ""}`), {
     ...providerFailureMetadata(error),code, ...(httpStatus ? { status: httpStatus } : {}),
@@ -154,15 +156,27 @@ async function auxiliaryCallDiagnostic(state: RuntimeState, options: Parameters<
 
 export async function responseText(response: any, signal?: AbortSignal): Promise<string> {
   if (typeof response === "string") return response;
-  if (response?.type === "fail") throw risuAuxiliaryError(Object.assign(new Error(`Auxiliary model failed: ${String(response.result ?? "unknown provider error")}`), {
+  if (response?.type === "fail") throw risuAuxiliaryError(Object.assign(new Error(`Auxiliary model failed: ${failureText(response.result)}`), {
     ...providerFailureMetadata(response), status: response.status ?? response.httpStatus, code: response.code ?? response.error?.code,
   }));
   if (response?.type === "streaming") return readModelStream(response.result, signal);
   if (typeof response?.result === "string") return response.result;
   if (typeof response?.content === "string") return response.content;
   if (typeof response?.text === "string") return response.text;
+  // Risu multi-choice generation returns [role, text] pairs; the first reply is the answer.
+  if (response?.type === "multiline" && Array.isArray(response.result)) {
+    const first = response.result.find((entry: unknown) => Array.isArray(entry) && typeof entry[1] === "string");
+    if (first) return first[1];
+  }
   if (Array.isArray(response)) return (await Promise.all(response.map(value => responseText(value, signal)))).join("");
-  return String(response ?? "");
+  if (response === undefined || response === null) return "";
+  throw new AuxiliaryStreamError(undefined, `Risu returned an unreadable model response (type=${String(response?.type ?? typeof response).slice(0, 40)})`);
+}
+
+function failureText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object" && "message" in result && typeof result.message === "string") return result.message;
+  return "unknown provider error";
 }
 
 export function parseJson(text: string): unknown {
@@ -389,8 +403,8 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     const output = await responseText(response);
     await modelDraftRecorders.get(state)?.(output);
     const finishReason = response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.candidates?.[0]?.finishReason;
-    if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase())) {
-      throw Object.assign(new Error(`Auxiliary model output truncated (${finishReason}); raw response retained`), { code: "MODEL_OUTPUT_TRUNCATED",finishReason:String(finishReason) });
+    if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase()) || isStructuredOutputTruncated(output)) {
+      throw modelOutputTruncatedError(finishReason === undefined ? undefined : String(finishReason));
     }
     const rawUsage = response?.usage ?? response?.usageMetadata;
     const inputTokens = rawUsage?.prompt_tokens ?? rawUsage?.input_tokens ?? rawUsage?.promptTokenCount;

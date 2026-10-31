@@ -1,4 +1,4 @@
-import { defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
+import { MemoryBudgetPresetSchema, defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
 import type { PluginSettings, RuntimeLog } from "./types.js";
 
 export const SETTINGS_KEY = "rcm.settings.v1";
@@ -161,12 +161,12 @@ export async function loadSettings(): Promise<PluginSettings> {
       || defaults.serverToken,
     defaultProfile: stored?.defaultProfile ?? (argProfile === "simulation" ? "simulation" : "companion"),
   };
-  const allowedBudgets = new Set([4_000, 6_000, 8_000, 12_000]);
-  settings.defaultMemoryBudget = allowedBudgets.has(Number(settings.defaultMemoryBudget))
-    ? Number(settings.defaultMemoryBudget) as PluginSettings["defaultMemoryBudget"]
-    : defaults.defaultMemoryBudget;
+  settings.defaultMemoryBudget = MemoryBudgetPresetSchema.safeParse(Number(settings.defaultMemoryBudget)).data ?? defaults.defaultMemoryBudget;
   settings.memoryBudgets = Object.fromEntries(Object.entries(settings.memoryBudgets)
-    .filter((entry): entry is [string, PluginSettings["defaultMemoryBudget"]] => allowedBudgets.has(Number(entry[1]))));
+    .flatMap(([id, value]) => {
+      const parsed = MemoryBudgetPresetSchema.safeParse(Number(value));
+      return parsed.success ? [[id, parsed.data]] : [];
+    }));
   settings.mcpCap = Math.max(1_500, Math.min(4_000, Number(settings.mcpCap) || defaults.mcpCap));
   settings.dashboardTheme = settings.dashboardTheme === "light" ? "light" : "dark";
   settings.dashboardSkin = settings.dashboardSkin === "phone" ? "phone" : "film";

@@ -1,4 +1,7 @@
 import { refreshDetailFts, memoryHasLineCorrectionSql } from './memory-detail-edits.js';
+import { diffRegenerationItems, regenerationItemsFingerprint, snapshotRegenerationItems } from './regeneration-items.js';
+import { prepareRegenerationKeep, restoreRegenerationKeep } from './regeneration-keep.js';
+import { applySeedResolutions } from './story-seeds.js';
 import { refreshMemoryFts } from './memory-search-document.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { removedAliasesKey } from "./user-deletions.js";
@@ -276,9 +279,10 @@ export function listRegenerations(db: RcmDatabase, chatId: string): Array<Record
 
 function validateRegenerationTarget(db: RcmDatabase, chatId: string, runId: string): void {
   const row = db.prepare("SELECT preview_json FROM regeneration_runs WHERE chat_id=? AND id=?").get(chatId, runId) as { preview_json: string };
-  const guard = JSON.parse(row.preview_json) as { targetBatchIds: string[]; targetFingerprint: string; canonicalStateFingerprint?: string };
+  const guard = JSON.parse(row.preview_json) as { targetBatchIds: string[]; targetFingerprint: string; canonicalStateFingerprint?: string; itemTargetFingerprint?: string };
   if (!Array.isArray(guard.targetBatchIds) || guard.targetFingerprint !== rangeTargetFingerprint(db, chatId, guard.targetBatchIds)
-    || (guard.canonicalStateFingerprint !== undefined && guard.canonicalStateFingerprint !== canonicalStateFingerprint(db, chatId))) {
+    || (guard.canonicalStateFingerprint !== undefined && guard.canonicalStateFingerprint !== canonicalStateFingerprint(db, chatId))
+    || (guard.itemTargetFingerprint !== undefined && guard.itemTargetFingerprint !== regenerationItemsFingerprint(db, chatId))) {
     db.prepare("UPDATE regeneration_runs SET status='stale',error='Target memories or access changed',updated_at=? WHERE id=?").run(now(), runId);
     throw Object.assign(new Error("대상 기억이나 접근 권한이 바뀌어 이 후보를 적용할 수 없어"), { code: "TARGET_CHANGED" });
   }
@@ -308,6 +312,7 @@ export function startCanonicalRegeneration(db: RcmDatabase, chatId: string, batc
     db.prepare("UPDATE regeneration_runs SET preview_json=? WHERE id=?").run(JSON.stringify({
       beforeCurrentMemories: currentMemoryPreview(db, chatId, selectedIds), beforeStates: currentStatePreview(db, chatId), targetBatchIds: selectedIds, targetFingerprint: rangeTargetFingerprint(db, chatId, selectedIds),
       canonicalStateFingerprint: canonicalStateFingerprint(db, chatId),
+      itemTargetFingerprint: regenerationItemsFingerprint(db, chatId),
     }), runId);
   })();
   const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(shadowChatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
@@ -378,6 +383,11 @@ function refreshCanonicalRegeneration(db: RcmDatabase, chatId: string, runId: st
     return;
   }
   const guard = JSON.parse((db.prepare("SELECT preview_json FROM regeneration_runs WHERE id=?").get(runId) as { preview_json: string }).preview_json);
+  // Compare the same canonical items the owner started with, including access and progress.
+  if (guard.itemTargetFingerprint && guard.itemTargetFingerprint !== regenerationItemsFingerprint(db, chatId)) {
+    db.prepare("UPDATE regeneration_runs SET status='stale',error='Target memories or access changed',updated_at=? WHERE id=?").run(now(), runId);
+    return;
+  }
   db.prepare("UPDATE regeneration_runs SET status='ready',preview_json=?,error=NULL,updated_at=? WHERE id=?").run(JSON.stringify({
     ...guard,
     before,
@@ -390,6 +400,7 @@ function refreshCanonicalRegeneration(db: RcmDatabase, chatId: string, runId: st
     ],
     counts: { before: sumCounts(before), after: sumCounts(after) },
     diff: regenerationDiff(before, after),
+    itemDiff: diffRegenerationItems(snapshotRegenerationItems(db, chatId), snapshotRegenerationItems(db, run.shadow_chat_id)),
     batchCount: { before: before.length, after: after.length },
     changedBatchCount: Math.max(before.length, after.length) - before.filter((item, index) => after[index] && JSON.stringify(item) === JSON.stringify(after[index])).length,
     highlights: {
@@ -399,10 +410,11 @@ function refreshCanonicalRegeneration(db: RcmDatabase, chatId: string, runId: st
   }), now(), runId);
 }
 
-export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runId: string): { batches: number; relationWarnings: string[] } {
+export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runId: string, keepLostItemIds: string[] = []): { batches: number; relationWarnings: string[]; keptItemIds: string[] } {
   refreshCanonicalRegeneration(db, chatId, runId);
   const run = db.prepare("SELECT batch_id,shadow_chat_id,source_fingerprint_json,preview_json,status FROM regeneration_runs WHERE id=? AND chat_id=? AND mode='canonical_suffix'").get(runId, chatId) as { batch_id: string; shadow_chat_id: string; source_fingerprint_json: string; preview_json: string | null; status: string } | undefined;
   if (!run || run.status !== "ready") throw Object.assign(new Error("Canonical regeneration is not ready"), { code: "RUN_NOT_READY" });
+  const keep = prepareRegenerationKeep(db, chatId, keepLostItemIds, run.preview_json ? JSON.parse(run.preview_json).itemDiff : undefined);
   validateRegenerationTarget(db, chatId, runId);
   const fingerprint = parseSourceFingerprintJson(run.source_fingerprint_json);
   if (!fingerprint || !fingerprintMatches(db, chatId, fingerprint)) {
@@ -420,6 +432,15 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
     AND (user_managed=1 OR is_initial_calibration_memory(memory_key))`).all(chatId) as Array<{ memory_key: string }>).map((row) => row.memory_key));
   const targetSuffixBatches: Array<{ id: string; result: ExtractionResult }> = [];
   const replayBatchMap = new Map(prefix.map((row) => [row.id, row.id]));
+  // Kept closed seeds replay their open atom plus its original typed closure.
+  // Resolve transient detail IDs by exact atom identity before retiring that generation.
+  const seedClosures = [...prefix.map(row => ({...row,chatId})), ...suffix.map(row => ({...row,chatId:run.shadow_chat_id}))]
+    .flatMap(row => (ExtractionResultSchema.parse(JSON.parse(row.final_json)).seedResolutions ?? [])
+      .filter(patch => JSON.parse(row.final_json).regenerationKeptSeedIds?.includes(patch.detailId)).flatMap(patch => {
+      const detail = db.prepare(`SELECT d.*,m.memory_key FROM memory_details d JOIN memories m ON m.id=d.memory_id
+        WHERE d.chat_id=? AND d.id=? AND d.active=1 AND m.active=1`).get(row.chatId,patch.detailId) as any;
+      return detail ? [{batchId:row.id,patch,memoryKey:detail.memory_key,detailKey:detail.detail_key,fingerprint:atomFingerprint(detail)}] : [];
+    }));
   const relationWarnings: string[] = [];
   db.transaction(() => {
     // Canonical replay below also deletes and re-ingests prefix atoms. Every
@@ -483,15 +504,28 @@ export function applyCanonicalRegeneration(db: RcmDatabase, chatId: string, runI
       for (const detail of db.prepare('SELECT id FROM memory_details WHERE memory_id=?').all(memory.id) as Array<{id:string}>) refreshDetailFts(db,detail.id);
     }
     relationWarnings.push(...restoreCanonicalRelations(db, chatId, relationSnapshots, replayBatchMap));
+    restoreRegenerationKeep(db, chatId, keep);
+    for (const closure of seedClosures) {
+      const detail = db.prepare(`SELECT d.* FROM memory_details d JOIN memories m ON m.id=d.memory_id
+        WHERE d.chat_id=? AND m.memory_key=? AND d.detail_key=? AND d.active=1 AND m.active=1`).get(chatId,closure.memoryKey,closure.detailKey) as any;
+      if (!detail || atomFingerprint(detail) !== closure.fingerprint) continue;
+      const patch = {...closure.patch,detailId:detail.id};
+      applySeedResolutions(db,chatId,[patch]);
+      const batchId = replayBatchMap.get(closure.batchId)!;
+      const stored = JSON.parse((db.prepare('SELECT final_json FROM extraction_batches WHERE id=?').get(batchId) as {final_json:string}).final_json);
+      stored.seedResolutions = (stored.seedResolutions ?? []).map((item:any) => item.detailId === closure.patch.detailId ? patch : item);
+      stored.regenerationKeptSeedIds = (stored.regenerationKeptSeedIds ?? []).map((id:string) => id === closure.patch.detailId ? patch.detailId : id);
+      db.prepare('UPDATE extraction_batches SET final_json=? WHERE id=?').run(JSON.stringify(stored),batchId);
+    }
     syncManualCognition(db,chatId);
     db.prepare("UPDATE regeneration_runs SET status='applied',preview_json=?,updated_at=? WHERE id=?")
-      .run(appendRelationWarnings(run.preview_json, relationWarnings), now(), runId);
+      .run(appendRelationWarnings(keep.ids.length ? JSON.stringify({ ...JSON.parse(run.preview_json!), keptItemIds: keep.ids }) : run.preview_json, relationWarnings), now(), runId);
   })();
   flushRelationshipProjectionQueue(db, chatId);
   maybeEnqueueStorySpine(db, chatId, undefined, 'regeneration');
   db.prepare("DELETE FROM server_meta WHERE key IN (?,?) AND EXISTS (SELECT 1 FROM chats WHERE id=? AND is_internal=1)").run(chatPacketBudgetKey(run.shadow_chat_id), removedAliasesKey(run.shadow_chat_id), run.shadow_chat_id);
   db.prepare("DELETE FROM chats WHERE id=? AND is_internal=1").run(run.shadow_chat_id);
-  return { batches: targetSuffixBatches.length, relationWarnings };
+  return { batches: targetSuffixBatches.length, relationWarnings, keptItemIds: keep.ids };
 }
 
 export function discardRegeneration(db: RcmDatabase, chatId: string, runId: string): void {

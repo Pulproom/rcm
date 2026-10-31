@@ -1,4 +1,4 @@
-import { ModelContentValidationError } from "@rcm/shared";
+import { ModelContentValidationError, clipLandmarkDisplayText } from "@rcm/shared";
 import { applyProgressDone, ensurePairProgress } from "./pair-progress.js";
 import { refreshDetailFts } from './memory-detail-edits.js';
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
@@ -483,7 +483,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         normalizeStoryTime(memory.storyTime) ?? null,
         JSON.stringify(memory.locations ?? []),
         memory.landmark ? 1 : 0,
-        JSON.stringify(memory.landmarkKinds ?? []),
+        JSON.stringify((memory.landmarkKinds ?? []).map(clipLandmarkDisplayText)),
         JSON.stringify(memory.evidence),
         memory.retention ?? "arc",
         memory.salience,

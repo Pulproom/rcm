@@ -1,6 +1,6 @@
 import { estimateTokens, structuredStoryTimeEnd, type MemoryContextItem } from "@rcm/shared";
 import { emptyPacketManifest } from "./packet-manifest.js";
-import { rankStateEvidence, stateKindLabel, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
+import { canAccessStateEvidence, rankStateEvidence, stateKindLabel, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
 import type { StateOutcomeCapture } from "./state-outcomes.js";
 import { EVERYONE_HOLDER } from "./item-access.js";
 import { socialKnowledgeLevelLabel } from "./social-knowledge.js";
@@ -11,10 +11,13 @@ export const sharedStateBudget = (tokens: number): number => Math.floor(Math.min
 export interface AutomaticStateRow {
   item: StateEvidence;
   line: string;
+  baseLine?: string;
+  changeNote?: string;
   perspectives: string[];
   active: boolean;
   pinned: boolean;
   promiseSlot?: "pinned" | "recent";
+  continuitySlot?: "state" | "promise";
   relevance: number;
   rank: number;
   legend: string;
@@ -50,17 +53,24 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
         }
       }
       const line = renderAutomaticStateLine(item, options.perspectives, options.latestStoryTime);
+      const change = item.previous;
+      const changeNote = change && canAccessStateEvidence(change.item, perspective)
+        ? escapeState(` (was ${change.item.automatic!.body}${change.changedAt ? ` until ${change.changedAt}` : ""})`) : undefined;
       // Keep the existing canonical deduplication policy: shortening labels or
       // eliding scope tags must not merge previously distinct records.
       // A user pin is a separate delivery slot even when its prose matches an ordinary row.
-      const key = `${renderStateLine(item)}\0${item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : ""}`;
+      const key = `${renderStateLine(item)}\0${changeNote ?? ""}\0${item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : ""}`;
       const previous = rows.get(key);
       if (previous) {
         previous.perspectives.push(perspective);
         previous.relevance = Math.max(previous.relevance, score);
-      } else rows.set(key, { item, line, perspectives: [perspective], rank: index + 1, legend: stateLegend(options.perspectives),
+      } else rows.set(key, { item, line, baseLine: line, changeNote, perspectives: [perspective], rank: index + 1, legend: stateLegend(options.perspectives),
         relevance: score,
         pinned,
+        continuitySlot: item.current && item.subjects.some(name => active.has(normalize(name)))
+          ? item.kind === "promise" && item.promiseStatus === "open" ? "promise"
+            : ["world_fact", "basic_relation", "relationship", "belief"].includes(item.kind) ? "state" : undefined
+          : undefined,
         promiseSlot: item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : undefined,
         active: item.kind === "recognition" ? sceneRecognitionIds.has(item.id)
           : [...item.holders, ...item.subjects].some(name => active.has(normalize(name))) });
@@ -89,7 +99,16 @@ export function renderStateLine(item: StateEvidence): string {
 
 export function selectAutomaticState(rows: AutomaticStateRow[], budget: number): AutomaticStateRow[] {
   const selected = rows.filter(row => row.pinned);
-  for (const row of rows) if (!row.pinned && !row.promiseSlot && renderAutomaticState([...selected, row]).tokens <= budget) selected.push(row);
+  // At most one compact current state and one open promise, inside the existing
+  // lane. Pins already count; unused capacity goes straight back to normal ranking.
+  const slotBudget = Math.min(80, Math.floor(budget * .20));
+  for (const slot of ["state", "promise"] as const) {
+    if (selected.some(row => row.continuitySlot === slot)) continue;
+    const row = rows.find(row => row.continuitySlot === slot && !row.promiseSlot
+      && estimateTokens(row.line) <= slotBudget && renderAutomaticState([...selected, row]).tokens <= budget);
+    if (row) selected.push(row);
+  }
+  for (const row of rows) if (!selected.includes(row) && !row.promiseSlot && renderAutomaticState([...selected, row]).tokens <= budget) selected.push(row);
   // Separate, bounded slots leave the ordinary/open-promise allowance intact.
   for (const slot of ["pinned", "recent"] as const) {
     const extra: AutomaticStateRow[] = [];
@@ -97,7 +116,19 @@ export function selectAutomaticState(rows: AutomaticStateRow[], budget: number):
     for (const row of rows) if (row.promiseSlot === slot && renderAutomaticState([...extra, row]).tokens <= slotBudget) extra.push(row);
     selected.push(...extra);
   }
+  // Fill current rows first; history uses only what is left in this lane.
+  for (const row of selected) if (row.changeNote && estimateTokens(row.changeNote) <= 80) {
+    row.line = row.baseLine! + row.changeNote;
+    if (renderAutomaticState(selected).tokens > budget) row.line = row.baseLine!;
+  }
   return selected;
+}
+
+export function trimAutomaticStateNote(rows: AutomaticStateRow[]): boolean {
+  const row = [...rows].reverse().find(row => row.baseLine && row.line !== row.baseLine);
+  if (!row) return false;
+  row.line = row.baseLine!;
+  return true;
 }
 
 /** Admit whole scene-linked rows after the floor. Speculative swaps are rolled
@@ -117,14 +148,20 @@ export function fundAutomaticState(options: {
   for (const row of options.candidates) {
     if (row.promiseSlot || !row.active || options.selected.includes(row)) continue;
     const previous = [...options.memories];
+    const previousLines = options.selected.map(item => item.line);
     options.selected.push(row);
     let tokens = options.renderTokens();
+    while (tokens > options.hardTokenCeiling && trimAutomaticStateNote(options.selected)) tokens = options.renderTokens();
     for (let index = options.memories.length - 1; tokens > options.hardTokenCeiling && index >= 0; index--) {
       if (reserved.has(options.memories[index]!) || !options.canYield(options.memories[index]!)) continue;
       options.memories.splice(index, 1); tokens = options.renderTokens();
     }
     if (tokens <= options.hardTokenCeiling) removed.push(...previous.filter(item => !options.memories.includes(item)).map(item => item.id));
-    else { options.selected.pop(); options.memories.splice(0, options.memories.length, ...previous); }
+    else {
+      options.selected.pop();
+      options.selected.forEach((item, index) => { item.line = previousLines[index]!; });
+      options.memories.splice(0, options.memories.length, ...previous);
+    }
   }
   return removed;
 }

@@ -1,3 +1,4 @@
+import { cleanupUnengagedChats } from "./chat-engagement.js";
 import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD } from "./chat-work.js";
 import { completeQuizJob } from "./quiz.js";
 import { inspectDraftEvidence } from "./evidence-review.js";
@@ -63,7 +64,9 @@ export class ServerExtractionWorker {
     }
     this.store.setTimingObserver((event) => this.#recordAuxiliaryTiming(event));
     this.#timer = setInterval(() => {
+      if (!this.db.open) { clearInterval(this.#timer); return; }
       this.#checkControlLease();
+      cleanupUnengagedChats(this.db, this.embeddings);
       for(const active of this.#active.values()) if(!renewJobLease(this.db,active.job.id,active.owner,this.leaseSeconds)) active.controller.abort(new Error('Lease generation changed'));
       this.wake(); // Resume due backoff within the existing control lease.
     }, Math.max(10,Math.min(2_000,this.leaseSeconds*1_000/3)));

@@ -1,3 +1,4 @@
+import { MemoryBudgetPresetSchema } from "./memory-budget.js";
 import { z } from "zod";
 
 /** Chat preferences and its owning character switch; never unrelated settings. */
@@ -15,7 +16,7 @@ export const ChatBackupSettingsSchema = z.object({
   extractionGroupTurns: z.number().int().positive().optional(),
   memoryLanguage: z.enum(["en", "ko", "ja", "zh"]).optional(),
   backfillApproved: z.boolean().optional(),
-  memoryBudget: z.union([z.literal(4000), z.literal(6000), z.literal(8000), z.literal(12000)]).optional(),
+  memoryBudget: MemoryBudgetPresetSchema.optional(),
   storyOverviewBackup: z.object({summary:z.string(),groupId:z.string(),startOrdinal:z.number(),endOrdinal:z.number(),savedAt:z.number()}).optional(),
 }).strict();
 export type ChatBackupSettings = z.infer<typeof ChatBackupSettingsSchema>;

@@ -1,3 +1,5 @@
+import { normalizeName, memoryIdOf, memoryStoryTime, arrayMatchesPair, itemMatchesPair, memoryMatchesPair, mergePromiseHistory } from "./pair-records.js";
+export { itemMatchesPair } from "./pair-records.js";
 import { formatStoryTime, compareParsedStoryTimes, parseStoryTime } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { buildAnniversaries, landmarkLabel } from "./diary.js";
@@ -51,30 +53,10 @@ const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"] as const;
 /** The weekday of a story time ("화"), when its calendar date is known. */
 export const storyWeekday = (storyTime: string | null): string | null => sceneDate(storyTime).weekday;
 const pad = (value: number): string => String(value).padStart(2, "0");
-const normalizeName = (value: unknown): string => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
-const memoryIdOf = (item: any): string | null => String(item?.sourceMemoryId ?? item?.source_memory_id ?? "").trim() || null;
 const ordinalOf = (item: any): number | null => {
   const value = item?.sourceOrdinal ?? item?.source_ordinal;
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
 };
-const memoryStoryTime = (memory: any): string | null => String(memory?.story_time_normalized ?? memory?.storyTime ?? memory?.story_time ?? "").trim() || null;
-
-const namesMatchPair = (left: unknown, right: unknown, pair: PairSummary): boolean => {
-  const expected = new Set([normalizeName(pair.a), normalizeName(pair.b)]);
-  const actual = new Set([normalizeName(left), normalizeName(right)]);
-  return expected.size === 2 && actual.size === 2 && [...expected].every((name) => actual.has(name));
-};
-const arrayMatchesPair = (value: unknown, pair: PairSummary): boolean =>
-  Array.isArray(value) && value.length === 2 && namesMatchPair(value[0], value[1], pair);
-export const itemMatchesPair = (item: any, pair: PairSummary): boolean =>
-  arrayMatchesPair(item?.pair, pair)
-  || arrayMatchesPair(item?.participants, pair)
-  || namesMatchPair(item?.from, item?.to, pair)
-  || namesMatchPair(item?.participantA, item?.participantB, pair)
-  || namesMatchPair(item?.promisor, item?.promisee, pair);
-const memoryMatchesPair = (memory: any, pair: PairSummary): boolean =>
-  arrayMatchesPair(memory?.participants, pair)
-  || (memory?.landmarkKinds ?? []).some((landmark: any) => arrayMatchesPair(landmark?.pair, pair));
 
 const chronologicalMemorySort = (left: { memory: any; index: number }, right: { memory: any; index: number }): number => {
   const leftTime = memoryStoryTime(left.memory);
@@ -223,15 +205,7 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
     }
   }
 
-  const promiseEvents = [...(data.promiseHistory ?? [])];
-  const recordedPromiseStates = new Set(promiseEvents.map((item: any) => [
-    String(item?.promise_id ?? item?.id ?? item?.promise_key ?? ""),
-    String(item?.status ?? ""),
-  ].join("#")));
-  for (const item of data.promises ?? []) {
-    const key = [String(item?.id ?? item?.promise_id ?? item?.promise_key ?? ""), String(item?.status ?? "")].join("#");
-    if (!recordedPromiseStates.has(key)) promiseEvents.push(item);
-  }
+  const promiseEvents = mergePromiseHistory(data);
   const promiseChips: Record<string, SceneChip> = {
     open: { kind: "promise_made", label: "약속 맺음" },
     kept: { kind: "promise_kept", label: "약속 지킴" },

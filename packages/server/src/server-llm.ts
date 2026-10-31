@@ -1,3 +1,5 @@
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
+import { isStructuredOutputTruncated, MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
 import { optionalSourceSelectorsOnly } from "@rcm/shared";
 import { parseExtractionAuditResponse } from "@rcm/shared";
 import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
@@ -446,8 +448,12 @@ function geminiApiUrl(endpoint: string, model: string): string {
 
 export class ProviderRequestError extends Error {
   providerMessage?: string;
+  code?: string;
   retryAfterMs?:number;
-  constructor(public readonly kind:"timeout"|"transport"|"http"|"json", public readonly status?:number, message?:string) { super(message ?? (kind === "http" ? `Provider HTTP ${status}` : `Provider ${kind} failure`)); }
+  constructor(public readonly kind:"timeout"|"transport"|"http"|"json", public readonly status?:number, message?:string) {
+    super(message ?? (kind === "http" ? `Provider HTTP ${status}` : `Provider ${kind} failure`));
+    this.code = settingsFailureCode({ kind, status, message });
+  }
 }
 
 const copilotHeaders = {
@@ -460,10 +466,10 @@ async function copilotFetchJson(url: string, init: RequestInit, signal: AbortSig
   try { return await fetchJson(url, init, signal, timeoutMs); }
   catch (error) {
     if (error instanceof ProviderRequestError) {
-      const detail = inferenceSecrets ? sanitizeDiagnosticText(error.providerMessage ?? "", inferenceSecrets) : "";
+      const detail = settingsFailureMessage(error);
       const failure = new ProviderRequestError(error.kind, error.status,
         error.kind === "http" ? `Copilot HTTP ${error.status} · ${detail || "토큰 권한, 구독 및 모델 사용 가능 여부를 확인해 주세요."}` : `Copilot ${error.kind} failure`);
-      if (detail) failure.providerMessage = detail;
+      failure.code = error.code;
       failure.retryAfterMs = error.retryAfterMs;
       throw failure;
     }
@@ -492,13 +498,16 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
       throw new ProviderRequestError("transport", response.status, `응답 수신 중 연결이 끊겼어요 (HTTP ${response.status}) · ${providerTransportFailureMessage(error)}`);
     }
     if (!response.ok) {
-      const error = new ProviderRequestError("http", response.status, providerHttpFailureMessage(response, body));
+      const error = new ProviderRequestError("http", response.status);
       const retryAfter=response.headers.get('Retry-After');
       if(retryAfter) {
         const delay=/^\d+(?:\.\d+)?$/.test(retryAfter.trim()) ? Number(retryAfter)*1000 : Date.parse(retryAfter)-Date.now();
         if(Number.isFinite(delay)) error.retryAfterMs=Math.max(0,delay);
       }
       try { const parsed = JSON.parse(body); error.providerMessage = typeof parsed?.error?.message === "string" ? parsed.error.message : typeof parsed?.message === "string" ? parsed.message : undefined; } catch { /* Unstructured response bodies are not diagnostic messages. */ }
+      error.code = settingsFailureCode({ kind: error.kind, status: error.status, providerMessage: error.providerMessage });
+      error.message = `${error.code ?? "PROVIDER_HTTP_ERROR"}: ${settingsFailureMessage(error)} · HTTP ${response.status}`;
+      error.providerMessage = undefined;
       throw error;
     }
     try { return JSON.parse(body); }
@@ -530,30 +539,6 @@ export async function groupMemoriesWithServerLlm(store: ServerLlmStore, job: Lea
   }
 }
 
-function compactProviderErrorBody(body: string): string {
-  if (!body.trim()) return "";
-  try {
-    const parsed = JSON.parse(body) as any;
-    return String(parsed?.error?.message ?? parsed?.error ?? parsed?.message ?? "").replace(/\s+/g, " ").slice(0, 240);
-  } catch {
-    return body.replace(/\s+/g, " ").slice(0, 240);
-  }
-}
-
-function providerHttpFailureMessage(response: Response, body: string): string {
-  const status = response.status;
-  const label = status === 429 ? "요청 제한"
-    : [500, 502, 503, 504].includes(status) ? "모델 서버 오류"
-      : [401, 403].includes(status) ? "인증 실패"
-        : status === 408 ? "요청 시간 초과"
-          : status === 400 ? "요청 거부"
-            : "모델 요청 실패";
-  const retryAfter = response.headers.get("retry-after")?.trim();
-  const detail = compactProviderErrorBody(body);
-  const retryCopy = retryAfter ? /^\d+$/.test(retryAfter) ? `${retryAfter}초 후 재시도` : `재시도 안내 ${retryAfter}` : "";
-  return `${label} (HTTP ${status})${retryCopy ? ` · ${retryCopy}` : ""}${detail ? ` · ${detail}` : ""}`;
-}
-
 function providerTransportFailureMessage(error: unknown): string {
   const cause = error instanceof Error ? error.cause : undefined;
   const code = String((cause as any)?.code ?? (error as any)?.code ?? "").trim().toUpperCase();
@@ -575,9 +560,11 @@ function parseServerJson(text: string, purpose: ServerLlmPurpose): unknown {
 
 export class ServerLlmOutputError extends Error {
   readonly retryable = true;
+  readonly code: string | undefined;
   constructor(readonly reason: "empty_output" | "max_tokens", message: string, readonly finishReason?:string) {
     super(message);
     this.name = "ServerLlmOutputError";
+    this.code = reason === "max_tokens" ? "MODEL_OUTPUT_TRUNCATED" : undefined;
   }
 }
 
@@ -593,8 +580,8 @@ async function callRepairProvider(call: () => Promise<string>): Promise<string> 
 function ensureCompleteOutput(content: string, finishReason: unknown): string {
   assertProviderOutputAllowed(finishReason, false);
   const normalized = String(finishReason ?? "").trim().toUpperCase();
-  if (["MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH"].includes(normalized)) {
-    throw new ServerLlmOutputError("max_tokens", `Server LLM output was truncated (${normalized})`,normalized);
+  if (["MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH"].includes(normalized) || isStructuredOutputTruncated(content)) {
+    throw new ServerLlmOutputError("max_tokens", `MODEL_OUTPUT_TRUNCATED: ${MODEL_OUTPUT_TRUNCATED_MESSAGE}`,normalized || undefined);
   }
   if (!content.trim()) throw new ServerLlmOutputError("empty_output", "Server LLM returned an empty response",normalized || undefined);
   return content;
@@ -619,7 +606,7 @@ async function callProvider(
   // model, service tier, limits or timeout without rebuilding the job.
   const config = ServerLlmConfigSchema.omit({ apiKey: true }).parse(store.config);
   const apiKey = store.apiKeyFor(config.provider);
-  if (!apiKey) throw new Error("Server LLM API key is not configured");
+  if (!apiKey) throw Object.assign(new Error(settingsFailureMessage({ code: "AUTH_FAILED" })), { code: "AUTH_FAILED" });
   const measurement = measureAuxiliaryPrompt(messages, estimateTokens, config);
   if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(measurement.maxInputTokens)}`);
   const startedAt = Date.now();

@@ -15,6 +15,7 @@
 - HAYAKU v2.4.32, AGPL-3.0 license file present
 - Flashback Memory v0.11.26, AGPL-3.0 license file present
 - WygLoreLeaf 3.0.13, author metadata “WygLore Leaf contributors”; downloaded artifact에서 명시적 배포 라이선스는 확인되지 않음
+- NMOS v0.4.0, MIT, copyright 2026 Sallos725; commit과 조사 범위는 [NMOS 리뷰](docs/memory-plugin-review/reports/07-nmos.md) 참조, 소스·문구·prompt·UI 재사용 없음
 - Mask Local Tools v0.1.2 SDK, LicenseRef-Mask-Software-Personal-1.1; 공개 authoring contract만 상호운용성 참고 자료로 사용
 
 설계 채택 범위와 원본 경로/commit은 [docs/reference-adoption.md](docs/reference-adoption.md) 및 이전된 조사 보고서에 기록한다. 특히 AGPL 및 라이선스 불명 소스는 이 코드베이스로 복사하지 않는다.

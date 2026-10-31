@@ -1262,6 +1262,32 @@ dialog.dialog--notes[open] { display: flex; flex-direction: column; max-height: 
 .org-range .row__title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .org-h { display: flex; align-items: baseline; gap: 8px; margin: 22px 0 8px; font-size: var(--t-small); font-weight: 600; color: var(--ink-2); }
 .org-h .n { color: var(--cut); font-variant-numeric: tabular-nums; }
+/* regeneration item diff: tallies, then the losses the owner may keep */
+.rdiff { margin: 4px 0 20px; }
+.rdiff__tallies { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.rdiff__tally { display: inline-flex; align-items: baseline; gap: 5px; padding: 4px 10px; border-radius: 999px; background: var(--screen-2); font-size: var(--t-meta); color: var(--ink-2); }
+.rdiff__tally b { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+.rdiff__tally--lost { background: var(--cut-dim); color: var(--cut); }
+.rdiff__tally--lost b { color: var(--cut); }
+.rdiff__tally--changed, .rdiff__tally--review { background: var(--tungsten-dim); color: var(--accent-text); }
+.rdiff__tally--changed b, .rdiff__tally--review b { color: var(--accent-text); }
+.rdiff__lead { margin: 0 0 8px; font-size: var(--t-meta); line-height: 1.5; color: var(--ink-3); }
+.rdiff__list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.rdiff__list > li { border-bottom: 1px solid var(--rule); }
+.rdiff__item { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: start; padding: 11px 2px; cursor: pointer; }
+.rdiff__item input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--tungsten); }
+.rdiff__item.is-locked { cursor: default; }
+.rdiff__item.is-locked input { opacity: .35; }
+.rdiff__item.is-locked .rdiff__text { color: var(--ink-3); }
+.rdiff__body { display: grid; gap: 3px; min-width: 0; }
+.rdiff__kind { font-size: var(--t-cap); font-weight: 600; color: var(--ink-3); }
+.rdiff__text { font-size: var(--t-ui); line-height: 1.45; color: var(--ink); overflow-wrap: anywhere; }
+.rdiff__meta { font-size: var(--t-cap); color: var(--ink-3); }
+.rdiff__pair { display: grid; gap: 6px; padding: 11px 2px; }
+.rdiff__after { grid-template-columns: 16px minmax(0, 1fr); align-items: start; }
+.rdiff__after .rdiff__text { color: var(--ink-2); }
+.rdiff__after .i { width: 14px; height: 14px; margin-top: 3px; color: var(--accent-text); }
+.rdiff .fold { margin-top: 12px; }
 .org-work { margin-bottom: 8px; }
 .org-work .org-h { margin-top: 0; }
 .org-state { font-size: var(--t-small); color: var(--ink-3); }

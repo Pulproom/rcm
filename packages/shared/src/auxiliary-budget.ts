@@ -22,7 +22,7 @@ export interface AuxiliaryPromptMeasurement {
 }
 
 export function auxiliaryInputBudgetMessage(maxInputTokens: number): string {
-  return `입력 토큰 상한(현재 ${maxInputTokens.toLocaleString("ko-KR")})보다 큰 묶음이에요. 상한을 올리거나 묶음을 나눠 주세요.`;
+  return `입력 토큰 상한(현재 ${maxInputTokens.toLocaleString("ko-KR")})보다 큰 묶음이에요. ‘호출당 최대 입력 토큰’을 늘리거나 ‘한 번에 정리할 턴’을 줄여 주세요.`;
 }
 
 /** Measure the serialized, provider-ready message contents. Callers must pass

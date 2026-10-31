@@ -1,4 +1,59 @@
 import { parseStructuredModelJson } from "./structured-json.js";
+import { MODEL_OUTPUT_TRUNCATED_MESSAGE } from "./structured-json.js";
+
+export const SETTINGS_FAILURE_GUIDANCE: Record<string, string> = {
+  AUXILIARY_INPUT_TOO_LARGE: "입력이 너무 길어요. ‘한 번에 정리할 턴’을 줄이거나 ‘호출당 최대 입력 토큰’을 늘려 주세요.",
+  ATOMIC_TURN_TOO_LARGE: "한 턴의 입력이 너무 길어요. ‘호출당 최대 입력 토큰’을 늘리거나 더 큰 문맥을 지원하는 모델 ID를 선택해 주세요.",
+  MODEL_OUTPUT_TRUNCATED: MODEL_OUTPUT_TRUNCATED_MESSAGE,
+  TIMEOUT: "응답 시간이 초과됐어요. 설정 → 대기 시간의 ‘기억 추출·정리 · 초’를 늘려 주세요.",
+  AUTH_FAILED: "인증에 실패했어요. 선택한 프로바이더의 API 키·인증정보를 확인해 주세요.",
+  AUXILIARY_AUTH_FAILED: "보조 모델 인증 실패: Risu 보조 모델 설정의 API 키를 확인해 주세요",
+  AUXILIARY_PROVIDER_REJECTED: "모델이 요청을 거절했어요. 보조 모델 또는 모델 ID를 바꿔 주세요.",
+  JSON_MODE_UNSUPPORTED: "JSON 응답 형식을 지원하지 않아요. JSON을 지원하는 모델 ID·프로바이더로 바꿔 주세요.",
+  PROVIDER_OPTION_UNSUPPORTED: "요청 옵션을 지원하지 않아요. Thinking·Temperature·처리 등급을 확인하거나 모델 ID를 바꿔 주세요.",
+  ENDPOINT_MISSING: "LLM 주소가 비어 있어요. 엔드포인트를 입력해 주세요.",
+  MODEL_NOT_FOUND: "모델을 찾지 못했어요. 모델 ID와 엔드포인트를 확인해 주세요.",
+  NETWORK_ERROR: "모델에 연결하지 못했어요. 엔드포인트와 서버 실행 상태를 확인해 주세요.",
+  INVALID_CONFIG: "연결 설정을 확인해 주세요. 프로바이더·엔드포인트·모델 ID가 서로 맞아야 해요.",
+  INVALID_RESPONSE: "응답 형식이 맞지 않아요. 보조 모델 또는 모델 ID를 바꿔 주세요.",
+  RATE_LIMITED: "요청 한도를 넘었어요. 잠시 뒤 재시도하거나 사용 가능한 모델 ID·API 키로 바꿔 주세요.",
+  UNAUTHORIZED: "서버 인증에 실패했어요. 설정 → 서버의 토큰을 확인해 주세요.",
+  FORBIDDEN: "접근이 거절됐어요. API 키·인증정보의 권한과 모델 ID를 확인해 주세요.",
+  SERVER_SETUP_REQUIRED: "설정 → 서버에서 서버 주소와 토큰을 저장해 주세요.",
+};
+
+/** Classify provider protocol/config errors only. Never return provider prose. */
+export function settingsFailureCode(error: unknown): string | undefined {
+  const value = error as { code?: string; status?: number; kind?: string; name?: string; message?: string; providerMessage?: string } | null;
+  const text = typeof error === "string" ? error : `${value?.code ?? ""} ${value?.message ?? ""} ${value?.providerMessage ?? ""}`;
+  const explicit = Object.keys(SETTINGS_FAILURE_GUIDANCE).find(code => value?.code === code || new RegExp(`\\b${code}\\b`).test(text));
+  if (explicit) return explicit;
+  if (isProviderContextLimitError(text) || value?.status === 413) return "AUXILIARY_INPUT_TOO_LARGE";
+  if (/response_format|responseMimeType|json_object|JSON mode/i.test(text)) return "JSON_MODE_UNSUPPORTED";
+  if (/unsupported.{0,40}(?:parameter|thinking|reasoning_effort|temperature|service_tier)|(?:thinking|reasoning_effort|temperature|service_tier).{0,60}(?:unsupported|not supported)/i.test(text)) return "PROVIDER_OPTION_UNSUPPORTED";
+  if (isProviderAuthenticationError(error)) return "AUTH_FAILED";
+  if (value?.status === 403) return "FORBIDDEN";
+  if (value?.status === 404) return "MODEL_NOT_FOUND";
+  if (value?.status === 429 || /HTTP 429/.test(text)) return "RATE_LIMITED";
+  if (value?.kind === "timeout" || value?.name === "TimeoutError" || /AUXILIARY_MODEL_TIMEOUT|timed?\s*out|TIMEOUT/.test(text)) return "TIMEOUT";
+  if (value?.kind === "transport" || /MODEL_CONNECTION_FAILED/.test(text)) return "NETWORK_ERROR";
+  if (value?.kind === "json" || /INVALID_REPAIR_SYNTAX|UNCHANGED_INVALID_REPAIR|AUXILIARY_STREAM_UNREADABLE|REPAIR_BUDGET_EXHAUSTED/.test(text)) return "INVALID_RESPONSE";
+  if (value?.status === 400 || value?.status === 422) return "AUXILIARY_PROVIDER_REJECTED";
+  return undefined;
+}
+
+export function settingsFailureMessage(error: unknown, purpose: "auxiliary" | "translation" = "auxiliary"): string {
+  const code = settingsFailureCode(error);
+  if (purpose === "translation") {
+    if (code === "MODEL_OUTPUT_TRUNCATED") return "번역 응답이 잘렸어요. 참고 번역의 ‘호출당 최대 출력’과 Risu 번역 모델의 최대 출력 토큰을 늘려 주세요.";
+    if (code === "RATE_LIMITED") return "번역 요청 한도를 넘었어요. 잠시 뒤 재시도하거나 참고 번역의 번역 방식을 바꿔 주세요.";
+    if (code === "TIMEOUT") return "번역 응답 시간이 초과됐어요. 참고 번역의 모델 ID·Risu 모델 슬롯을 바꾸거나 번역 방식을 바꿔 주세요.";
+    if (code === "INVALID_CONFIG") return "참고 번역의 프로바이더·모델 ID·호출당 최대 출력을 확인해 주세요.";
+    if (code === "INVALID_RESPONSE" || /TAG_SEQUENCE_CHANGED|MISSING_ITEMS|GOOGLE_TRANSLATION_FAILED/.test(String((error as any)?.code ?? error))) return "번역 응답을 읽지 못했어요. 참고 번역의 모델 ID·Risu 모델 슬롯 또는 번역 방식을 바꿔 주세요.";
+  }
+  if (purpose === "translation" && !code) return "번역에 연결하지 못했어요. 참고 번역의 모델 ID·Risu 모델 슬롯 또는 번역 방식을 확인해 주세요.";
+  return code ? SETTINGS_FAILURE_GUIDANCE[code]! : "작업을 완료하지 못했어요. 오류 자세히를 확인해 주세요.";
+}
 
 export interface ModelResponseDiagnostic {
   length: number;
@@ -132,6 +187,6 @@ export function projectRisuAuxiliaryCallDiagnostic(value: unknown): RisuAuxiliar
     hostResolutionAvailable: Boolean(model || provider || authPresent !== undefined), model, provider, authPresent };
 }
 export function connectionFailureReason(code: string, status?: number): string {
-  const label = CONNECTION_FAILURE_LABELS[code as ConnectionFailureCode] ?? "연결 확인 실패";
+  const label = SETTINGS_FAILURE_GUIDANCE[code] ?? CONNECTION_FAILURE_LABELS[code as ConnectionFailureCode] ?? "연결 확인 실패";
   return label + (status ? ` · HTTP ${status}` : "");
 }

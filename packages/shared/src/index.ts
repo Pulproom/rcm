@@ -1,3 +1,4 @@
+import { MAX_MEMORY_BUDGET, MemoryBudgetPresetSchema } from "./memory-budget.js";
 import { PairProgressPatchesSchema, SetupPairProgressSchema } from "./pair-progress.js";
 export * from "./pair-progress.js";
 export { SHARED_PAST_GUIDANCE } from "./social-memory-guidance.js";
@@ -31,6 +32,7 @@ import {
 export { describeModelResponse, type ModelResponseDiagnostic, sanitizeDiagnosticText, CONNECTION_FAILURE_LABELS, connectionFailureReason, isProviderAuthenticationError, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type ConnectionFailureCode } from "./support-diagnostics.js";
 export { isPermanentProviderError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES, type RisuAuxiliaryCallDiagnostic } from "./support-diagnostics.js";
 export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFailureMetadata } from './support-diagnostics.js';
+export { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from './support-diagnostics.js';
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
@@ -75,7 +77,7 @@ export { applySourceAccessPatch, validateSourceRecoveryPatch } from "./source-ac
 export { planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan } from "./source-access-repair.js";
 export { validateStorySpineConsolidation, type StorySpineValidationContext } from "./story-spine-validation.js";
 export { prepareAuxiliaryText, stripModelImageTags } from "./model-text.js";
-export { normalizeStructuredModelOptionals, parseStructuredModelJson, StructuredJsonSyntaxError, type StructuredJsonParseResult, type StructuredJsonRepair } from "./structured-json.js";
+export { MODEL_OUTPUT_TRUNCATED_MESSAGE, modelOutputTruncatedError, isStructuredOutputTruncated, normalizeStructuredModelOptionals, parseStructuredModelJson, StructuredJsonSyntaxError, type StructuredJsonParseResult, type StructuredJsonRepair } from "./structured-json.js";
 export {
   INITIAL_AFFECTION_LEVELS,
   INITIAL_INTENSITY_LEVELS,
@@ -101,10 +103,7 @@ export type RpProfile = z.infer<typeof RpProfileSchema>;
 export const MemoryLanguageSchema = z.enum(["en", "ko", "ja", "zh"]);
 export type MemoryLanguage = z.infer<typeof MemoryLanguageSchema>;
 
-export const MemoryBudgetPresetSchema = z.union([
-  z.literal(4_000), z.literal(6_000), z.literal(8_000), z.literal(12_000),
-]);
-export type MemoryBudgetPreset = z.infer<typeof MemoryBudgetPresetSchema>;
+export { MAX_MEMORY_BUDGET, MemoryBudgetPresetSchema, type MemoryBudgetPreset } from "./memory-budget.js";
 
 export const MessageRoleSchema = z.enum(["user", "assistant", "system"]);
 export const MessageLifecycleSchema = z.enum([
@@ -456,7 +455,7 @@ export const TurnPrepareRequestSchema = z.object({
     recentSpeakerNames: z.array(z.string().trim().min(1).max(160)).max(12).default([]),
     cachedPerspectives: z.array(z.string().trim().min(1).max(160)).max(4).default([]),
   }).optional(),
-  tokenBudget: z.number().int().min(0).max(12000),
+  tokenBudget: z.number().int().min(0).max(MAX_MEMORY_BUDGET), // Zero is the source-only/open protocol.
   memoryBudgetPreset: MemoryBudgetPresetSchema.optional(),
   staticProjection: StaticProjectionSchema.optional(),
   snapshotScope: z.enum(["full", "tail"]).optional(),
@@ -507,6 +506,25 @@ export const SeedMarkerSchema = z.object({
 });
 export type SeedMarker = z.infer<typeof SeedMarkerSchema>;
 
+/** Display text only: keep structural validation independent of presentation limits. */
+export function clipDisplayText(value: string, limit: number): string {
+  const text = value.trim();
+  if (text.length <= limit) return text;
+  const clipped = text.slice(0, limit);
+  const sentence = Math.max(clipped.lastIndexOf(". "), clipped.lastIndexOf("! "), clipped.lastIndexOf("? "));
+  if (sentence >= Math.floor(limit * .55)) return clipped.slice(0, sentence + 1).trim();
+  const word = clipped.lastIndexOf(" ", limit - 1);
+  return `${clipped.slice(0, word >= Math.floor(limit * .55) ? word : limit - 1).trimEnd()}…`;
+}
+
+export function clipLandmarkDisplayText<T extends { label?: string; pair?: [string, string]; storyTime?: string }>(value: T): T {
+  return { ...value,
+    ...(value.label === undefined ? {} : { label: clipDisplayText(value.label, 120) }),
+    ...(value.pair === undefined ? {} : { pair: value.pair.map(name => clipDisplayText(name, 160)) as [string, string] }),
+    ...(value.storyTime === undefined ? {} : { storyTime: clipDisplayText(value.storyTime, 240) }),
+  };
+}
+
 export const MemoryContextItemSchema = z.object({
   id: z.string(),
   ref: z.string().regex(/^m[0-9a-f]{16}$/).optional(),
@@ -524,9 +542,9 @@ export const MemoryContextItemSchema = z.object({
   landmark: z.boolean().default(false),
   landmarkKinds: z.array(z.object({
     kind: z.enum(["confession", "relationship_change", "first_met", "romantic_relationship_established", "engagement", "marriage", "separation", "romantic_relationship_ended", "reunion", "divorce", "anniversary_basis", "betrayal", "death", "identity_reveal", "status_change", "boundary_change", "intimacy_milestone", "other"]),
-    label: z.string().trim().min(1).max(120).optional(),
-    pair: z.tuple([z.string().trim().min(1).max(160), z.string().trim().min(1).max(160)]).optional(),
-    storyTime: z.string().trim().min(1).max(240).optional(),
+    label: z.string().trim().min(1).transform(value => clipDisplayText(value, 120)).optional(),
+    pair: z.tuple([z.string().trim().min(1), z.string().trim().min(1)]).transform(value => value.map(name => clipDisplayText(name, 160)) as [string, string]).optional(),
+    storyTime: z.string().trim().min(1).transform(value => clipDisplayText(value, 240)).optional(),
     evidence: z.array(z.object({ messageId: z.string(), quote: z.string().optional() })).max(12).optional(),
   })).default([]),
   knownBy: z.array(z.string()).default([]),

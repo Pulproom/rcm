@@ -1,3 +1,4 @@
+import { ServerConnectionError } from "./server-errors.js";
 import { readTranslationConnectionSettings } from "./translation-connection-settings.js";
 import { connectionFailureReason, type ServerLlmPublicConfig, type ConnectionFailureCode } from "@rcm/shared";
 import { providerCapability } from "./provider-settings.js";
@@ -61,10 +62,14 @@ export async function testSettingsConnection(state: RuntimeState, form: FormData
   try {
     result = await client.request("/v1/admin/connection-test", { method: "POST", body: JSON.stringify(body) }, 65_000);
   } catch (error) {
-    if (error instanceof ServerRequestError && error.status === 404) throw new ServerRequestError("서버를 업데이트하면 연결 확인을 사용할 수 있어요.", error.status, error.code);
-    if (error instanceof ServerRequestError && [401, 403].includes(error.status)) throw new ServerRequestError("RCM 서버 토큰을 확인해 주세요.", error.status, error.code);
-    if (error instanceof ServerRequestError && error.status === 409) throw new ServerRequestError("다른 연결 확인이 끝난 뒤 다시 시도해 주세요.", error.status, error.code);
-    throw new ServerRequestError(connectionFailureReason("NETWORK_ERROR"), 0, "NETWORK_ERROR");
+    if (error instanceof ServerConnectionError && error.classification === "host_json_syntax") throw error;
+    const wrap = (message: string, status: number, code?: string) => Object.assign(new ServerRequestError(message, status, code, undefined, undefined,
+      error instanceof ServerConnectionError || error instanceof ServerRequestError ? error.context : undefined,
+      error instanceof ServerRequestError ? error.serverSummary : undefined), { cause: error });
+    if (error instanceof ServerRequestError && error.status === 404) throw wrap("서버를 업데이트하면 연결 확인을 사용할 수 있어요.", error.status, error.code);
+    if (error instanceof ServerRequestError && [401, 403].includes(error.status)) throw wrap("RCM 서버 토큰을 확인해 주세요.", error.status, error.code);
+    if (error instanceof ServerRequestError && error.status === 409) throw wrap("다른 연결 확인이 끝난 뒤 다시 시도해 주세요.", error.status, error.code);
+    throw wrap(connectionFailureReason("NETWORK_ERROR"), 0, "NETWORK_ERROR");
   }
   if (!result.ok) throw Object.assign(new ServerRequestError(connectionFailureReason(result.code ?? "INVALID_RESPONSE", result.status), result.status ?? 0, result.code ?? "INVALID_RESPONSE"), { detail: result.detail });
   return result.elapsedMs;

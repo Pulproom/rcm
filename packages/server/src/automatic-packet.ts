@@ -1,8 +1,27 @@
 import { estimateTokens, renderMemoryScene, projectMemoryScene, type MemoryContextItem } from "@rcm/shared";
 import { memoryDetailAtomKey, memoryDialogueAtomKey } from "./memory-atoms.js";
-import { signatureSimilarity, type SimilaritySignature, type RetrievalSelectionRole } from "./retrieval.js";
+import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
+import type { RetrievalSelectionRole } from "./retrieval.js";
 
 export const AUTOMATIC_ROLE_SHARES = { scene: .50, continuity: .15, association: .20, longterm: .15 } as const;
+
+/** Preserve the released <=12k composition. Above it, grow capacity without
+ * changing eligibility, access, role shares or the final 115% ceiling.
+ * Deferred portfolios already admit all eligible atoms and use token shares;
+ * these caps also serve the independently budgeted retrieval path. */
+export function automaticMemoryLimit(budget: number): number {
+  const current = budget >= 10_000 ? 18 : budget >= 7_000 ? 12 : budget >= 5_000 ? 9 : 6;
+  return budget <= 12_000 ? current : Math.max(current, Math.floor(budget / 650));
+}
+
+export function automaticDetailLimit(budget: number): number {
+  const current = budget >= 10_000 ? 36 : budget >= 7_000 ? 24 : budget >= 5_000 ? 18 : 12;
+  return budget <= 12_000 ? current : Math.max(current, Math.floor(budget * 3 / 1000));
+}
+
+export function automaticHistoryLimit(budget: number, current: number): number {
+  return budget <= 12_000 ? current : Math.max(current, Math.floor(budget * .03));
+}
 export const ASSOCIATION_COOLDOWN_TURNS = 3;
 export const LONGTERM_COOLDOWN_TURNS = 6;
 export const OPEN_SEED_COOLDOWN_TURNS = 8;

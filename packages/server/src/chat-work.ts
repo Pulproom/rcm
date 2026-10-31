@@ -5,6 +5,10 @@ import { CHAT_WORK_HELD_MESSAGE as CHAT_WORK_HELD } from "@rcm/shared";
 export { CHAT_WORK_HELD_MESSAGE as CHAT_WORK_HELD } from "@rcm/shared";
 const active = new WeakMap<RcmDatabase, Map<string, Set<AbortController>>>();
 
+export function hasActiveChatWork(db: RcmDatabase, chatId: string): boolean {
+  return Boolean(active.get(db)?.get(chatId)?.size);
+}
+
 export function isChatWorkHeld(db: RcmDatabase, chatId: string): boolean {
   return (db.prepare("SELECT enabled FROM chat_work_state WHERE chat_id=?").get(chatId) as { enabled: number } | undefined)?.enabled === 0;
 }

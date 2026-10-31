@@ -1182,7 +1182,10 @@ export interface ArcLeafExpansion {
   diagnostics: Array<{ arcNodeId: string; semanticScore: number; leafId: string; outcome: "expanded" | "unsupported_kind" }>;
 }
 
-export const storyBudgetLimit = (packetBudget: number): number => Math.min(1_600, Math.floor(Math.max(0, packetBudget) * 0.18));
+export const storyBudgetLimit = (packetBudget: number): number => {
+  const current = Math.min(1_600, Math.floor(Math.max(0, packetBudget) * .18));
+  return packetBudget <= 12_000 ? current : Math.max(current, Math.min(6_000, Math.floor(packetBudget * .12)));
+};
 
 export function expandArcHits(
   db: RcmDatabase,

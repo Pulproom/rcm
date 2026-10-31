@@ -2,7 +2,7 @@ import { isEndedPromiseStatus } from "./promise-recency.js";
 import { EVERYONE_HOLDER, itemAccessKnowledge, intersectAccessKnowledge } from "./item-access.js";
 import { knownByLabels } from "./item-access.js";
 import { createHash } from "node:crypto";
-import { normalizeSearchTokens, type McpEvidence, type StateKind } from "@rcm/shared";
+import { normalizeSearchTokens, structuredStoryTimeEnd, type McpEvidence, type StateKind } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { listSocialKnowledge, type SocialKnowledgeLevel } from "./social-knowledge.js";
 import { listRelationshipProjections } from "./relationship-projections.js";
@@ -26,6 +26,7 @@ export interface StateEvidence {
   promiseRecent?: boolean;
   due?: string;
   /** Automatic presentation only; excluded from search text and the atom fingerprint. */
+  previous?: { item: StateEvidence; changedAt?: string };
   automatic?: { subject: string; body: string; tensions?: string[]; recognitionLevel?: SocialKnowledgeLevel };
 }
 const parse = (value: string | null | undefined): any[] => { try { const parsed: unknown = JSON.parse(value || "[]"); return Array.isArray(parsed) ? parsed : []; } catch { return []; } };
@@ -63,23 +64,33 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
   const pending: Array<() => void> = [];
   const sourceIds = new Set<string>();
   const sources = new Map<string, any>();
+  const correctedIds = new Set<string>();
+  const predecessors = new Map<string, Array<{ id: string; evidence: any[] }>>();
+  const link = (id: string, successor: string | undefined, evidence: any[]) => {
+    if (!successor) return;
+    predecessors.set(successor, [...(predecessors.get(successor) ?? []), { id, evidence }]);
+    for (const entry of evidence) if (typeof entry.messageId === "string") sourceIds.add(entry.messageId);
+  };
+  const validCitation = (entry: any): boolean => {
+    if (!entry.messageId) return true;
+    const source = sources.get(entry.messageId);
+    return !!source && ["committed", "client_pruned"].includes(source.lifecycle) && ["active", "all_before"].includes(source.host_visibility)
+      && (!entry.canonicalHash || entry.canonicalHash === source.canonical_hash)
+      && (!entry.transitionCanonicalHash || entry.transitionCanonicalHash === source.canonical_hash)
+      && (!entry.quote || source.canonical_content?.includes(entry.quote));
+  };
   const recordRejection = (kind: string, id: string, reason: string): void => trace?.record(perspective, { id: `${kind}:${id}`, kind }, "not_collected", { reason });
   const rejected = (kind: string, id: string, reason: string): void => { pending.push(() => recordRejection(kind, id, reason)); };
-  const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
+  const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json,story_time_normalized FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
   const add = (kind: string, row: any, text: string, holders: string[], subjects: string[], current: boolean, evidence = parse(row.evidence_json), stateKind?: StateKind, automatic?: StateEvidence["automatic"]) => {
     const corrected=row.user_edit_ordinal != null || row.userEdited===true;
+    if (corrected) correctedIds.add(`${kind}:${row.id}`);
     if (!text.trim()) { rejected(kind, row.id, "empty_text"); return; }
     if (!corrected && row.source_memory_id && !memories.get(row.source_memory_id)?.active) { rejected(kind, row.id, "inactive_memory"); return; }
     const citationScope = evidence.length ? "atom" : "parent_memory";
     if (!evidence.length && row.source_memory_id) evidence = parse(memories.get(row.source_memory_id)?.evidence_json);
     for (const entry of evidence) if (typeof entry.messageId === "string") sourceIds.add(entry.messageId);
     pending.push(() => {
-      const validCitation=(entry:any):boolean=>{
-        if(!entry.messageId) return true;
-        const source=sources.get(entry.messageId);
-        return !!source && ["committed","client_pruned"].includes(source.lifecycle) && ["active","all_before"].includes(source.host_visibility)
-          && (!entry.canonicalHash || entry.canonicalHash===source.canonical_hash) && (!entry.quote || source.canonical_content?.includes(entry.quote));
-      };
       if(corrected) evidence=evidence.filter(validCitation);
       else if(evidence.some(entry=>!validCitation(entry))) { recordRejection(kind, row.id, "invalid_source_visibility_hash_or_quote"); return; }
       const ids = evidence.flatMap((entry: any) => typeof entry.messageId === "string" ? [entry.messageId] : []);
@@ -104,6 +115,10 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
     const holders = relation ? socialRelationKnowledge(db, chatId, relation) : resolveAssertionHolders(db, chatId, row);
     if (!holders) { rejected(relation ? "basic_relation" : "world_fact", row.id, "access"); continue; }
     const current = row.valid_to_revision === null;
+    const kind = relation ? "basic_relation" : "world_fact";
+    const closure = parse(row.automatic_closure_evidence_json);
+    const successors = [...new Set(closure.map(entry => entry.successorId).filter(Boolean))];
+    if (!current && successors.length === 1) link(`${kind}:${row.id}`, `assertion:${successors[0]}`, closure);
     add(relation ? "basic_relation" : "world_fact", row, `${row.subject}: ${row.predicate} — ${row.value}${row.source && row.source !== "manual" ? ` (Source: ${row.source})` : ""}${current ? "" : " (historical; no longer current)"}`,
       holders, [row.subject, ...(relation ? [relation.target] : [])], current, evidence, relation ? "condition" : row.state_kind,
       { subject: relation ? `${row.subject} → ${relation.target}` : row.subject, body: row.value });
@@ -113,6 +128,7 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       rejected("belief", row.id, ["pending_review", "disputed"].includes(row.status) ? "review" : "inactive"); continue;
     }
     const current = row.active === 1 && row.status === "active";
+    if (!current && row.status === "superseded") link(`belief:${row.id}`, row.superseded_by ? `belief:${row.superseded_by}` : undefined, parse(row.automatic_closure_evidence_json));
     add("belief", row, `${row.holder} ${current ? row.polarity === "knows" ? "records as known" : row.polarity === "heard" ? "has heard" : row.polarity : "previously held this belief"}: ${row.subject} — ${row.predicate}: ${row.value}${row.source && row.source !== "manual" ? ` (Source: ${row.source})` : ""}${current ? "." : ` (stance: ${row.polarity}).`}`, [row.holder], [row.holder, row.subject], current, undefined, undefined,
       { subject: `${row.holder} → ${row.subject}`, body: `${row.polarity === "knows" ? "Records as known" : row.polarity === "heard" ? "Has heard" : row.polarity}: ${row.value}` });
   }
@@ -173,12 +189,39 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
     sources.set(row.message_id, row);
   }
   for (const collect of pending) collect();
+  const byId = new Map(result.map(item => [item.id, item]));
+  for (const item of result) {
+    // A manual correction no longer asserts the original transition value/date.
+    if (!item.current || correctedIds.has(item.id)) continue;
+    const key = ["world_fact", "basic_relation"].includes(item.kind) ? item.id.replace(/^[^:]+:/, "assertion:") : item.id;
+    const links = predecessors.get(key);
+    // Explicit one-to-one succession only. Missing/ambiguous history stays absent.
+    if (links?.length !== 1) continue;
+    const prior = byId.get(links[0]!.id), transition = links[0]!.evidence;
+    if (!prior || prior.current || !prior.sourceIds.length || !item.sourceIds.length
+      || !transition.some(entry => entry.messageId) || !transition.every(validCitation)
+      || !prior.automatic?.body || prior.automatic.body === item.automatic?.body) continue;
+    // A shared line must never broaden the predecessor's knowledge scope.
+    const publicState = (state: StateEvidence) => state.holders.includes(EVERYONE_HOLDER)
+      || state.kind === "world_fact" && !restrictedStateKind(state.stateKind);
+    if (!publicState(prior) && (publicState(item) || !item.holders.length
+      || !item.holders.every(holder => canAccessStateEvidence(prior, holder)))) continue;
+    const memory = item.memoryId ? memories.get(item.memoryId) : undefined;
+    const time = memory?.active ? memory.story_time_normalized : undefined;
+    item.previous = { item: prior, ...(typeof time === "string" && structuredStoryTimeEnd(time) !== undefined ? { changedAt: time } : {}) };
+  }
   return result;
 }
 const stateKindLabels: Record<string, string> = {world_fact:"World fact",basic_relation:"Basic relation",belief:"Belief",promise:"Promise",promise_history:"Earlier promise",recognition:"Recognition",recognition_history:"Earlier recognition",relationship:"Relationship",relationship_history:"Relationship change",relationship_axis:"Recorded feeling",intimacy:"Physical intimacy",landmark:"Milestone"};
 export const stateKindLabel = (kind: string, stateKind?: StateKind): string => kind === "world_fact" && stateKind === "goal" ? "Goal"
   : kind === "world_fact" && stateKind === "secret" ? "Secret"
     : stateKindLabels[kind] ?? "Recorded state";
+
+export function canAccessStateEvidence(item: StateEvidence, perspective: string): boolean {
+  return perspective === "narrator" || item.holders.includes(EVERYONE_HOLDER)
+    || item.holders.some(holder => norm(holder) === norm(perspective))
+    || item.kind === "world_fact" && !restrictedStateKind(item.stateKind);
+}
 
 /** Rank channels, not incomparable raw scores. No prose is classified as true,
  * answered, secret, or resolved by lexical matching. */
@@ -192,8 +235,7 @@ export function rankStateEvidence(items: StateEvidence[], query: string, options
     if (!(options.history || eligiblePromise(item) || item.current && item.kind !== "relationship_axis")) {
       options.trace?.record(options.perspective, item, "not_current", item.kind === "relationship_axis" ? { reason: "axis_not_in_current_ledger" } : {}); return false;
     }
-    if (!(options.archive || options.perspective === "narrator" || item.holders.includes(EVERYONE_HOLDER)
-      || item.holders.some(holder => norm(holder) === norm(options.perspective)) || item.kind === "world_fact" && !restrictedStateKind(item.stateKind))) {
+    if (!(options.archive || canAccessStateEvidence(item, options.perspective))) {
       options.trace?.record(options.perspective, item, "perspective_blocked"); return false;
     }
     return true;

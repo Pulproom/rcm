@@ -1,5 +1,35 @@
 export type StructuredJsonRepair = "bom" | "trailing_comma" | "raw_control_character" | "missing_object_key_quote" | "trailing_confidence_quote" | "key_quote_search";
 
+export const MODEL_OUTPUT_TRUNCATED_MESSAGE = "보조 모델 응답이 최대 길이에서 잘렸어요. 보조 모델의 최대 출력 토큰을 늘리거나, 설정에서 ‘한 번에 정리할 턴’을 줄여 주세요.";
+
+/** JSON framing only; escaped quotes/braces in prose are not structural tokens. */
+export function isStructuredOutputTruncated(output: string): boolean {
+  const text = output.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const start = text.search(/[\[{]/);
+  if (start < 0) return false;
+  const stack: string[] = [];
+  let quoted = false, escaped = false;
+  for (const char of text.slice(start)) {
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === "{" || char === "[") stack.push(char);
+    else if (char === "}" || char === "]") {
+      if (stack.pop() !== (char === "}" ? "{" : "[")) return false;
+      if (!stack.length) return false;
+    }
+  }
+  if (!stack.length) return false;
+  // Preserve the existing narrow local syntax repairs (e.g. missing key quotes).
+  try { JSON.parse(repairStructuredJsonCandidate(text.slice(start)).text); return false; } catch { return true; }
+}
+
+export function modelOutputTruncatedError(finishReason?: string): Error & { code: string; finishReason?: string } {
+  return Object.assign(new Error(`MODEL_OUTPUT_TRUNCATED: ${MODEL_OUTPUT_TRUNCATED_MESSAGE}`), { code: "MODEL_OUTPUT_TRUNCATED", finishReason });
+}
+
 export class StructuredJsonSyntaxError extends SyntaxError {
   constructor(message: string) {
     super(message);

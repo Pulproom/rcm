@@ -545,6 +545,9 @@ button.scene__title:hover { color: var(--accent-text); }
 .organization .org-h { margin: 24px 4px 7px; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
 .organization .org-work .org-h { margin-top: 18px; }
 .organization .org-h .n { font-weight: 600; color: var(--k-red); }
+.organization .rdiff__tallies, .organization .rdiff__lead { margin-left: 4px; margin-right: 4px; }
+.organization .rdiff__list { border: 0; border-radius: 14px; padding: 0 14px; background: var(--screen); }
+.organization .rdiff__list > li:last-child { border-bottom: 0; }
 .organization .org-work .row { border-radius: 12px; }
 .organization .tl-rows { flex: 0 1 auto; margin-top: 0; border-radius: 12px; background: var(--screen); }
 .org-range { grid-template-columns: 48px minmax(0, 1fr); background: transparent; }

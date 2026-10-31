@@ -1,3 +1,4 @@
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { risuModelSlot, runRisuModel } from "./worker.js";
 import { withAuxiliaryStoryFraming, planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
@@ -196,7 +197,7 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
     return result;
   } catch (error) {
     const code = (error as { code?: string })?.code ?? "MODEL_CONNECTION_FAILED";
-    const detail = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [state.settings.serverToken]);
+    const detail = settingsFailureMessage(error, "translation");
     stats.lastError = `${code}: ${detail}`;
     addLog(state.logs, "warn", `Reference translation failed: ${stats.lastError}`);
     throw new TranslationError(code, detail);
@@ -267,7 +268,7 @@ export async function translatePacket(state: RuntimeState, packet: string, sourc
     return translated;
   } catch (error) {
     const code = (error as { code?: string })?.code ?? (provider === "google" ? "GOOGLE_TRANSLATION_FAILED" : "MODEL_CONNECTION_FAILED");
-    const detail = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [state.settings.serverToken]);
+    const detail = settingsFailureMessage(error, "translation");
     addLog(state.logs, "warn", `Packet translation failed: ${code}: ${detail}`);
     throw new TranslationError(code, detail);
   }
@@ -304,7 +305,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
     let batchError: string | undefined;
     let model = "";
     const fail = (item: Prepared, error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = settingsFailureMessage(error, "translation");
       batchError ??= message;
       results.set(item.key, { ...item.source, translated: item.source.text, cached: false, error: message });
     };
@@ -349,7 +350,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
     if (batchError) addLog(state.logs, "warn", `Reference translation failed: ${sanitizeDiagnosticText(batchError ?? "cache request failed", [state.settings.serverToken])}`);
     return prepared.map((item) => results.get(item.key) ?? { ...item.source, translated: item.source.text, cached: false });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = settingsFailureMessage(error, "translation");
     changeActivity(state, pendingStarted ? -pendingStarted : 0, message);
     addLog(state.logs, "warn", `Reference translation failed: ${sanitizeDiagnosticText(message, [state.settings.serverToken])}`);
     return records.map((source) => ({ ...source, translated: source.text, cached: false, error: message }));

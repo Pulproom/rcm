@@ -95,7 +95,7 @@ export async function resolveOpenedChat(state: RuntimeState, client: ServerClien
     if (context.chatId !== chatId) throw new Error("Chat changed before lineage resolution");
     return client.request<LineageResult>(
       `/v1/chats/${encodeURIComponent(chatId)}/open`, {
-        method: "POST", body: JSON.stringify(makePrepareRequest(context, 0, { deferExtraction: true })),
+        method: "POST", body: JSON.stringify({ ...makePrepareRequest(context, 0, { deferExtraction: true }), workerId: state.workerId }),
       }, 60_000);
   });
   const opening: NonNullable<RuntimeState["chatOpen"]> = { key, pending };

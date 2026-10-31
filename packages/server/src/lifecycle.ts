@@ -313,6 +313,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
       timestamp,
       timestamp,
     );
+    db.prepare("UPDATE chats SET last_seen_at=?,engaged_at=CASE WHEN ? THEN COALESCE(engaged_at,?) ELSE engaged_at END WHERE id=?").run(timestamp, Number(request.forceBackfill || request.backfillApproved === true), timestamp, request.chatId);
     syncChatTitle(db,request.chatId,request.chatTitle);
     writePersonaHint(db, request.chatId, request.identityHints?.userPersonaName);
     if (existingChat) {

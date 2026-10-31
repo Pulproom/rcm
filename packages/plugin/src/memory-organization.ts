@@ -19,12 +19,13 @@ export interface AdditionView { rangeIds: string[]; startOrdinal: number; endOrd
 export interface OrganizationView {
   open: boolean; selection: string[]; focusedId: string; highlightedIds: string[]; mobileDetail: boolean;
   candidateId: string; detail?: { id: string; messages: Array<{ id: string; role: string; content: string | null; ordinal: number }> };
-  data: OrganizationData; error?: string; busy?: boolean;
+  data: OrganizationData; error?: string; errorReport?: string; busy?: boolean;
   addition?: AdditionView; search?: string; searchStatus?: string; jump?: string;
+  keepLostItemIds: Record<string, string[]>;
 }
 export type OrganizationTranslations = ReadonlyMap<string, string>;
 export const createOrganizationView = (): OrganizationView => ({ open: false, selection: [], focusedId: '', highlightedIds: [], mobileDetail: false,
-  candidateId: '', data: { ranges: [], groups: [], regenerations: [] } });
+  candidateId: '', keepLostItemIds: {}, data: { ranges: [], groups: [], regenerations: [] } });
 const html = escapeHtml;
 const number = (value: number): string => Math.round(value).toLocaleString('ko-KR');
 const action = (name: string, label: string, id = '', disabled = false, primary = false) => btn(label, { kind: primary ? 'primary' : 'secondary', action: name, data: { id }, disabled });
@@ -85,6 +86,35 @@ function canonicalStates(values: any[], sourceNumbers?: Map<string, number>, hid
     return fold(label, `<ul class="org-states">${items}</ul>`, { count: entries.length });
   }).join('');
 }
+const ITEM_KIND: Record<string, string> = {
+  memory: '장면', detail: '세부', dialogue: '대사', assertion: '사실', belief: '믿음', promise: '약속',
+  relationship_event: '관계 변화', social_knowledge: '인지', physical_milestone: '스킨십', landmark: '기념일', pair_progress: '진도',
+};
+
+/** One grounded item: kind, its own words, and where it came from. Ranges arrive 0-based. */
+function diffItemBody(item: any, view: any): string {
+  const kind = ITEM_KIND[item.kind] ?? item.kind;
+  const start = view?.source?.startOrdinal, end = view?.source?.endOrdinal;
+  const where = Number.isInteger(start) ? (start === end || !Number.isInteger(end) ? `메시지 ${start + 1}` : `메시지 ${start + 1}–${end + 1}`) : '';
+  const meta = [where, view?.manualEdited ? '직접 고친 기록' : '', item.accessChanged ? '아는 사람이 달라짐' : ''].filter(Boolean);
+  return `<span class="rdiff__kind">${html(kind)}</span><span class="rdiff__text">${html(view?.text ?? '')}</span>${meta.length ? `<span class="rdiff__meta">${meta.map(html).join(' · ')}</span>` : ''}`;
+}
+
+/** Item-level view of a canonical regeneration: what survives, what changes, and which grounded losses the owner can keep. */
+function regenerationItemDiff(run: any, selected: string[]): string {
+  const items: any[] = Array.isArray(run?.preview?.itemDiff) ? run.preview.itemDiff : [];
+  if (!items.length) return '';
+  const by = (status: string) => items.filter((item) => item.status === status);
+  const lost = by('lost'), changed = by('changed'), review = by('review'), added = by('new'), kept = by('kept');
+  const tally = [['사라짐', lost.length, 'lost'], ['바뀜', changed.length, 'changed'], ['확인 필요', review.length, 'review'], ['새로 생김', added.length, 'new'], ['그대로', kept.length, 'kept']]
+    .filter(([, n]) => Number(n) > 0).map(([label, n, tone]) => `<span class="rdiff__tally rdiff__tally--${tone}"><b>${n}</b>${label}</span>`).join('');
+  const lostList = lost.length ? `<p class="rdiff__lead">새 결과에는 없는 기록이에요. 남길 것을 고르면 원래 근거 그대로 지켜요.</p><ul class="rdiff__list">${lost.map((item) => `<li><label class="rdiff__item${item.canKeep ? '' : ' is-locked'}"><input type="checkbox" name="keep-lost" value="${html(item.id)}"${item.canKeep && selected.includes(item.id) ? ' checked' : ''}${item.canKeep ? '' : ' disabled'}><span class="rdiff__body">${diffItemBody(item, item.before)}${item.canKeep ? '' : '<span class="rdiff__meta">원문이 바뀌어 남길 수 없어요</span>'}</span></label></li>`).join('')}</ul>` : '';
+  const pair = (item: any) => `<li class="rdiff__pair"><div class="rdiff__body">${diffItemBody(item, item.before)}</div>${item.after ? `<div class="rdiff__body rdiff__after">${icon('arrow-right')}<span class="rdiff__text">${html(item.after.text ?? '')}</span></div>` : ''}</li>`;
+  const changedFold = changed.length ? fold('바뀌는 기록', `<ul class="rdiff__list">${changed.map(pair).join('')}</ul>`, { count: changed.length, preserveKey: `rdiff-changed:${run.id}` }) : '';
+  const reviewFold = review.length ? fold('짝을 찾지 못한 기록', `<p class="rdiff__lead">새 결과와 하나로 이어지지 않아 자동으로 판단하지 않았어요.</p><ul class="rdiff__list">${review.map((item) => `<li><div class="rdiff__body">${diffItemBody(item, item.before)}</div></li>`).join('')}</ul>`, { count: review.length, preserveKey: `rdiff-review:${run.id}` }) : '';
+  return `<section class="rdiff" aria-label="달라지는 기록"><h3 class="org-h">달라지는 기록</h3><div class="rdiff__tallies">${tally}</div>${lostList}${changedFold}${reviewFold}</section>`;
+}
+
 const back = (name: string, label: string) => `<button type="button" class="back hit" data-action="${name}">${icon('back')}<span>${label}</span></button>`;
 const cutNotice = (text: string) => `<div class="notice notice--cut" role="alert">${icon('alert')}<span>${html(text)}</span></div>`;
 
@@ -116,7 +146,7 @@ function candidateDetail(view: OrganizationView, memories: any[], translations: 
   const beforeColumn = () => `<div><div class="lab">현재 기억 ${before.length}개</div>${memoryList(group ? before : compared.before, translations, display)}${run?.mode === 'canonical_suffix' ? canonicalStates([run.preview.beforeStates]) : ''}</div>`;
   const afterColumn = () => `<div class="new"><div class="lab">${group ? '새 통합 에피소드' : `새 기억 ${after.length}개`}</div>${group ? groupingResult(group.candidate) : memoryList(compared.after, translations, display)}${run?.mode === 'canonical_suffix' ? canonicalStates([run.preview.afterStates]) : ''}</div>`;
   const compare = ready
-    ? `<div class="cmp org-cmp">${beforeColumn()}${afterColumn()}</div>${group ? notice('기존 세부·대사·접근 권한과 관계·사실·믿음·약속은 보존됩니다. 묶기는 표시 방식과 통합 요약을 바꿉니다.') : ''}`
+    ? `${run?.mode === 'canonical_suffix' ? regenerationItemDiff(run, view.keepLostItemIds[view.candidateId] ?? []) : ''}<div class="cmp org-cmp">${beforeColumn()}${afterColumn()}</div>${group ? notice('기존 세부·대사·접근 권한과 관계·사실·믿음·약속은 보존됩니다. 묶기는 표시 방식과 통합 요약을 바꿉니다.') : ''}`
     : `<p class="sub">${status}</p>`;
   const lead = ready ? '현재 기억은 아직 변경되지 않았습니다. 결과를 확인한 뒤 적용하세요.' : '기존 기억을 계속 사용합니다. 화면을 닫아도 작업은 유지됩니다.';
   const actions = `${action(`organization-discard-${kind}`, '후보 버리기', item.id)}${group && item.canRetry ? action('organization-retry-group', '실패 단계 다시 시도', item.id) : ''}${ready ? action(`organization-apply-${kind}`, '적용', item.id, false, true) : ''}`;
@@ -153,7 +183,7 @@ export function memoryOrganization(view: OrganizationView, memories: any[], tran
   const search = `<div class="org-find"><form id="organization-search-form" class="org-find__q"><label class="org-find__field">${icon('search')}<input name="query" type="search" enterkeyhint="search" value="${html(view.search ?? '')}" placeholder="원문 검색" maxlength="500" aria-label="원문 검색"></label>${view.search ? btn('지우기', { kind: 'quiet', action: 'organization-clear-search', data: { id: '' } }) : ''}</form><form id="organization-jump-form" class="org-find__n"><label class="org-find__field"><span aria-hidden="true">#</span><input name="ordinal" type="number" inputmode="numeric" enterkeyhint="go" min="1" step="1" value="${html(view.jump ?? '')}" placeholder="메시지" aria-label="메시지 번호로 이동"></label></form></div>${view.searchStatus ? `<p class="sub org-find__status" role="status">${html(view.searchStatus)}</p>` : ''}`;
   const list = `<div class="listcol">${search}${holds}${pending}${applied}<div class="list tl-rows" data-preserve-scroll="organization-list">${rows || empty('아직 원문 구간이 없습니다', '원문이 동기화되면 여기에 구간이 나타납니다.')}</div>${selection}</div>`;
   const busy = view.busy ? `<div class="notice" role="status">${icon('clock')}<span>처리 예상량을 확인하고 있습니다…</span></div>` : '';
-  return `<div class="organization${view.mobileDetail ? ' is-detail' : ''}">${lex().skin === 'phone' ? `<div class="intro org-intro">${back('organization-close', '타임라인')}<h1 class="pagetitle">기억 정리</h1><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p></div>` : `<div class="intro"><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p><div class="intro__acts">${btn('타임라인으로', { kind: 'quiet', icon: 'back', action: 'organization-close' })}</div></div>`}${busy}${view.error ? cutNotice(view.error) : ''}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:organization:${escapeHtml(view.candidateId)}">${view.candidateId ? candidateDetail(view, memories, translations, display) : view.addition ? additionForm(view, display) : details}</div></div></div>`;
+  return `<div class="organization${view.mobileDetail ? ' is-detail' : ''}">${lex().skin === 'phone' ? `<div class="intro org-intro">${back('organization-close', '타임라인')}<h1 class="pagetitle">기억 정리</h1><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p></div>` : `<div class="intro"><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p><div class="intro__acts">${btn('타임라인으로', { kind: 'quiet', icon: 'back', action: 'organization-close' })}</div></div>`}${busy}${view.error ? notice(view.error, { tone: 'cut', errorReport: view.errorReport }) : ''}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:organization:${escapeHtml(view.candidateId)}">${view.candidateId ? candidateDetail(view, memories, translations, display) : view.addition ? additionForm(view, display) : details}</div></div></div>`;
 }
 
 function additionForm(view: OrganizationView, display: TranslationDisplay): string {

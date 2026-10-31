@@ -1,3 +1,5 @@
+import { clipLandmarkDisplayText } from "@rcm/shared";
+import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { StateOutcomeCapture } from "./state-outcomes.js";
 import { accessibleStorySeed } from "./story-seeds.js";
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
@@ -11,7 +13,7 @@ import { orderEventContext, type EventConnection } from "./event-context.js";
 import { proposeAtomPathRoots } from "./atom-path-roots.js";
 import { compareAtomPaths, type AtomPath } from "./atom-path-search.js";
 import { searchStoredAtomPaths, type StoredAtomPathSearchStats } from "./atom-path-snapshot.js";
-import { AUTOMATIC_ROLE_SHARES, ASSOCIATION_RELATIVE_THRESHOLD, ASSOCIATION_SEMANTIC_MAX, type AutomaticAtomPriority, type AutomaticPortfolioCandidate, type AutomaticRoleReason } from "./automatic-packet.js";
+import { automaticMemoryLimit, automaticDetailLimit, automaticHistoryLimit, AUTOMATIC_ROLE_SHARES, ASSOCIATION_RELATIVE_THRESHOLD, ASSOCIATION_SEMANTIC_MAX, type AutomaticAtomPriority, type AutomaticPortfolioCandidate, type AutomaticRoleReason } from "./automatic-packet.js";
 import { extendRecallPath, startRecallPath, observeRootEvidence, type RecallPath, type RecallPathCapture, type RecallPathObservation } from "./recall-path.js";
 import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { invalidateChangedMemoryGroups } from "./memory-grouping.js";
@@ -281,7 +283,7 @@ const parseEvidence = (value: string): MemoryEvidence[] => {
 const parseLandmarkKinds = (value: string): MemoryContextItem["landmarkKinds"] => {
   try {
     const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((entry) => entry && typeof entry.kind === "string") : [];
+    return Array.isArray(parsed) ? parsed.filter((entry) => entry && typeof entry.kind === "string").map(clipLandmarkDisplayText) : [];
   } catch { return []; }
 };
 
@@ -402,10 +404,6 @@ function aspectEvidence(
   };
 }
 
-export interface SimilaritySignature {
-  all: Set<string>;
-  body: Set<string>;
-}
 
 function similaritySignature(item: Ranked): SimilaritySignature {
   return {
@@ -492,15 +490,6 @@ function contentSimilarity(left: Ranked, right: Ranked, signatures: Map<string, 
   return signatureSimilarity(leftTokens, rightTokens);
 }
 
-export function signatureSimilarity(leftTokens: SimilaritySignature, rightTokens: SimilaritySignature): number {
-  const jaccard = (a: Set<string>, b: Set<string>): number => {
-    if (a.size === 0 || b.size === 0) return 0;
-    let shared = 0;
-    for (const token of a) if (b.has(token)) shared += 1;
-    return shared / (a.size + b.size - shared);
-  };
-  return Math.max(jaccard(leftTokens.all, rightTokens.all), jaccard(leftTokens.body, rightTokens.body));
-}
 
 function mmrOrder(items: Ranked[], signatures: Map<string, SimilaritySignature>, limit = 64): Ranked[] {
   const remaining = [...items];
@@ -1127,9 +1116,7 @@ export interface RetrieveOptions {
   semanticAtomHits?: Map<string, SemanticMemoryHit[]>;
 }
 
-export function automaticMemoryLimit(tokenBudget: number): number {
-  return tokenBudget >= 10_000 ? 18 : tokenBudget >= 7_000 ? 12 : tokenBudget >= 5_000 ? 9 : 6;
-}
+export { automaticMemoryLimit } from "./automatic-packet.js";
 
 export function automaticHardMemoryLimit(tokenBudget: number): number {
   return automaticMemoryLimit(tokenBudget) + 1;
@@ -2118,11 +2105,10 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     : Math.max(options.tokenBudget, options.hardTokenCeiling ?? automaticHardTokenCeiling(options.tokenBudget));
   const memoryLimit = mcpAnswerMode ? 8 : automaticMemoryLimit(options.tokenBudget);
   const hardMemoryLimit = mcpAnswerMode ? memoryLimit : automaticHardMemoryLimit(options.tokenBudget);
-  const detailLimit = mcpAnswerMode ? 12 : options.tokenBudget >= 10_000 ? 36 : options.tokenBudget >= 7_000 ? 24 : options.tokenBudget >= 5_000 ? 18 : 12;
+  const detailLimit = mcpAnswerMode ? 12 : automaticDetailLimit(options.tokenBudget);
   const packetOverhead = 100;
   const structuredScale = options.structuredBudgetScale ?? 1;
   const anchorSceneBudget = mcpAnswerMode ? (structuredMcpAnswer ? Math.min(1_100, Math.floor(options.tokenBudget * 0.55)) : 0) : sharedStateBudget(options.tokenBudget);
-  const spineBudget = mcpAnswerMode ? 0 : Math.floor(Math.min(800, options.tokenBudget * 0.15) * structuredScale);
   const anchorManifest = emptyPacketManifest();
   const stateTrace = !mcpAnswerMode && options.collectDiagnostics ? options.stateOutcomeCapture ?? new StateOutcomeCapture() : undefined;
   if (options.memoryOnlyInjection && stateTrace && !options.deferAutomaticBudget) {
@@ -2157,9 +2143,9 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const historyBudget = options.deferAutomaticBudget ? Math.floor(options.tokenBudget * .05 * structuredScale)
     : Math.max(0, Math.floor(options.tokenBudget * .15 * structuredScale) - estimateTokens(anchors));
   const physical: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderPhysicalIntimacy(db, options.chatId, perspective, options.activePerspectives ?? [],
-    Math.min(mcpAnswerMode ? 700 : 520, mcpAnswerMode ? Math.floor(options.tokenBudget * .45) : historyBudget), physicalMcpAnswer, archiveView, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
+    Math.min(mcpAnswerMode ? 700 : automaticHistoryLimit(options.tokenBudget, 520), mcpAnswerMode ? Math.floor(options.tokenBudget * .45) : historyBudget), physicalMcpAnswer, archiveView, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
   const relationshipLandmarks: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderRelationshipLandmarks(db, options.chatId, perspective, options.activePerspectives ?? [], chat.profile,
-    Math.min(mcpAnswerMode ? 520 : 360, mcpAnswerMode ? Math.floor(options.tokenBudget * .3) : Math.max(0, historyBudget - estimateTokens(physical.xml))), coverage, mcpAnswerMode, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
+    Math.min(mcpAnswerMode ? 520 : automaticHistoryLimit(options.tokenBudget, 360), mcpAnswerMode ? Math.floor(options.tokenBudget * .3) : Math.max(0, historyBudget - estimateTokens(physical.xml))), coverage, mcpAnswerMode, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
   const spineParts = [openThreads].filter(Boolean);
   const spine = spineParts.length ? `<continuity_spine>\n${spineParts.join("\n")}\n</continuity_spine>` : "";
   const stable = [anchors, relationshipLandmarks.xml, physical.xml].filter(Boolean).join("\n");

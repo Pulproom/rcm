@@ -1,5 +1,7 @@
 import type { QuizAnswerRequest, SourceReferenceIssue } from "@rcm/shared";
 import { PickerSetupProjectionSchema, RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type QuizStatus, type QuizRegenerateResponse, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
+import { ServerConnectionError, ServerRequestError, isHostFetchSyntaxError, safeErrorText, type ServerErrorContext } from "./server-errors.js";
+export { ServerConnectionError, ServerRequestError } from "./server-errors.js";
 import type { PluginSettings } from "./types.js";
 
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 15_000;
@@ -75,17 +77,6 @@ export type MemoryDetailApiItem = import("@rcm/shared").MemoryContextItem["detai
   original_kind: string | null;
 };
 
-export class ServerRequestError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string, readonly expectedApiRevision?: number) { super(message); this.name = "ServerRequestError"; }
-}
-
-export class ServerConnectionError extends Error {
-  constructor(error: unknown) {
-    super(error instanceof Error ? error.message : String(error), { cause: error });
-    this.name = "ServerConnectionError";
-  }
-}
-
 export function isMissingServerRoute(error: unknown): boolean {
   return error instanceof ServerRequestError && error.status === 404 && error.code !== "CHAT_NOT_FOUND";
 }
@@ -98,12 +89,26 @@ export function isServerConnectionFailure(error: unknown): boolean {
 
 // Settings saves also create short-lived clients. Share only server capabilities,
 // in memory, so their edits use the same transport learned by the health reader.
-const methodOverrideServers = new Set<string>();
+const serverSummaries = new Map<string, Pick<ServerErrorContext, "serverVersion" | "serverApiRevision" | "capabilities">>();
+
+function requestContext(settings: PluginSettings, path: string, init: RequestInit, timeoutMs: number | null): ServerErrorContext {
+  const url = settings.serverUrl.replace(/\/$/, "");
+  const method = (init.method ?? "GET").toUpperCase();
+  const summary = serverSummaries.get(url);
+  const override = summary?.capabilities?.methodOverride === true && ["PATCH", "PUT", "DELETE"].includes(method);
+  let server = "unknown";
+  try { server = new URL(url).host; } catch { /* Never echo an invalid configured URL. */ }
+  return { time: new Date().toISOString(), method: override ? "POST" : method,
+    methodOverride: override ? method : undefined, path: safeErrorText(path.split(/[?#]/)[0]!, [settings.serverToken]),
+    server, timeoutMs, elapsedMs: 0, pluginVersion: RCM_PLUGIN_VERSION, apiRevision: RCM_API_REVISION, ...summary };
+}
 
 export class ServerClient {
   constructor(private readonly settings: () => PluginSettings) {}
 
   async request<T>(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<T> {
+    const startedAt = performance.now();
+    const context = requestContext(this.settings(), path, init, timeoutMs);
     const serverUrl = this.settings().serverUrl.replace(/\/$/, "");
     const controller = new AbortController();
     let active = true;
@@ -122,7 +127,7 @@ export class ServerClient {
     if (init.signal?.aborted) abort();
     else init.signal?.addEventListener("abort", abort, { once: true });
     const timer = timeoutMs === null ? undefined : setTimeout(() => {
-      const error = new Error(`Request timed out after ${timeoutMs}ms: ${(init.method ?? "GET").toUpperCase()} ${path}`);
+      const error = new Error(`Request timed out after ${timeoutMs}ms: ${(init.method ?? "GET").toUpperCase()} ${context.path}`);
       error.name = "AbortError";
       rejectDeadline(error);
       controller.abort(error);
@@ -157,8 +162,11 @@ export class ServerClient {
       try {
         const parsed = JSON.parse(body);
         if ((init.method ?? "GET").toUpperCase() === "GET" && path.split("?")[0] === "/v1/health") {
-          if (parsed?.capabilities?.methodOverride === true) methodOverrideServers.add(serverUrl);
-          else methodOverrideServers.delete(serverUrl);
+          serverSummaries.set(serverUrl, {
+            serverVersion: typeof parsed.version === "string" && /^\d+\.\d+\.\d+$/.test(parsed.version) ? parsed.version : undefined,
+            serverApiRevision: Number.isSafeInteger(parsed.apiRevision) ? parsed.apiRevision : undefined,
+            capabilities: Object.fromEntries(Object.entries(parsed.capabilities ?? {}).filter(([key, value]) => /^[a-zA-Z][a-zA-Z0-9]{0,63}$/.test(key) && typeof value === "boolean")) as Record<string, boolean>,
+          });
         }
         if (timings) timings.jsonStage = "parsed";
         return parsed as T;
@@ -168,6 +176,11 @@ export class ServerClient {
     try { return await Promise.race([read(), deadline]); }
     catch (error) {
       if (timings && (phase as string) === "bodyMs" && timings.bodyStage !== "read") timings.bodyStage = "failed";
+      if (error instanceof Error && error.name === "AbortError") {
+        const failure = new ServerConnectionError(error, { ...context, elapsedMs: Math.round(performance.now() - startedAt) });
+        failure.name = "AbortError";
+        throw failure;
+      }
       throw error;
     }
     finally {
@@ -203,6 +216,10 @@ export class ServerClient {
         throw new Error("설정 재료를 선택 화면에서 골라 주세요. 요청 캡처는 전송할 수 없어요.");
     }
     const settings = this.settings();
+    const startedAt = performance.now();
+    const context = requestContext(settings, path, init, timeoutMs);
+    const finishContext = () => ({ ...context, elapsedMs: Math.round(performance.now() - startedAt) });
+    let awaitingHost = true;
     const controller = new AbortController();
     const externalSignal = init.signal;
     const abortFromExternal = () => controller.abort(externalSignal?.reason);
@@ -219,7 +236,7 @@ export class ServerClient {
     try {
       const method = (init.method ?? "GET").toUpperCase();
       const serverUrl = settings.serverUrl.replace(/\/$/, "");
-      const override = methodOverrideServers.has(serverUrl) && ["PATCH", "PUT", "DELETE"].includes(method);
+      const override = context.methodOverride !== undefined;
       const body = init.body ?? (override || ["POST", "PUT"].includes(method) ? "{}" : undefined);
       // Frozen recovery protocol: released API90 servers reject either plugin
       // header on revision mismatch. Keep these authenticated requests unversioned.
@@ -227,7 +244,7 @@ export class ServerClient {
         || method === "POST" && ["/v1/update/stage", "/v1/update/apply"].includes(path);
       const response = await Promise.race([risuai.nativeFetch(`${serverUrl}${path}`, {
         ...init,
-        method: override ? "POST" : method,
+        method: context.method,
         ...(body === undefined ? {} : { body }),
         headers: {
           "Content-Type": "application/json",
@@ -241,31 +258,37 @@ export class ServerClient {
         },
         signal: controller.signal,
       }), deadline]);
+      awaitingHost = false;
       if (controller.signal.aborted) throw controller.signal.reason ?? new Error("Request already ended");
       if (timings) timings.responseStage = "received";
       if (!response.ok) {
         const detail = (await response.text()).trim();
-        let readable = detail.slice(0, 240);
+        let readable = "";
+        let serverSummary: string | undefined;
         let code: string | undefined;
         let expectedApiRevision: number | undefined;
+        let rejectedItems: ServerRequestError['rejectedItems'];
         try {
-          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string; expectedApiRevision?: number };
-          code = parsed.code;
+          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string; expectedApiRevision?: number; rejectedItems?: unknown };
+          code = typeof parsed.code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(parsed.code) ? parsed.code : undefined;
+          if (Array.isArray(parsed.rejectedItems)) rejectedItems = parsed.rejectedItems.filter(item => item && typeof item.id === 'string' && typeof item.reason === 'string');
           if (Number.isInteger(parsed.expectedApiRevision) && Number(parsed.expectedApiRevision) > 0) expectedApiRevision = parsed.expectedApiRevision;
           const summary = typeof parsed.summary === "string" ? parsed.summary.trim().slice(0, 240) : "";
+          serverSummary = safeErrorText(summary, [settings.serverToken]);
           const reason = serverErrorDetail(parsed.error);
           readable = [summary, reason && !summary.includes(reason) ? reason : "", parsed.code ? `(${parsed.code})` : "", parsed.existingId ? `existingId=${parsed.existingId}` : ""].filter(Boolean).join(" ");
-        } catch { /* retain a bounded non-JSON error response */ }
-        throw new ServerRequestError(`Server request failed: ${method} ${path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code, expectedApiRevision);
+        } catch { /* Unstructured response bodies are not reportable diagnostics. */ }
+        readable = safeErrorText(readable, [settings.serverToken, typeof init.body === "string" ? init.body : ""]);
+        throw new ServerRequestError(`Server request failed: ${method} ${context.path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code, expectedApiRevision, rejectedItems, finishContext(), serverSummary);
       }
       return response;
     } catch (error) {
       if (timedOut) {
-        const timeoutError = new Error(`Request timed out after ${timeoutMs}ms: ${(init.method ?? "GET").toUpperCase()} ${path}`);
+        const timeoutError = new ServerConnectionError(new Error(`Request timed out after ${timeoutMs}ms: ${(init.method ?? "GET").toUpperCase()} ${context.path}`), finishContext());
         timeoutError.name = "AbortError";
         throw timeoutError;
       }
-      throw error instanceof ServerRequestError ? error : new ServerConnectionError(error);
+      throw error instanceof ServerRequestError ? error : new ServerConnectionError(error, finishContext(), [settings.serverToken, typeof init.body === "string" ? init.body : ""], awaitingHost && isHostFetchSyntaxError(error));
     } finally {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", abortFromExternal);

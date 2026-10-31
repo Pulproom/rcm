@@ -1,4 +1,6 @@
-import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
+import { markChatEngaged, recordOpenChat, deleteUnengagedChats, recentChatCleanup } from "./chat-engagement.js";
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
+import { sharedPastPacket, withMemoryGuidance, clipLandmarkDisplayText } from "@rcm/shared";
 import { editPairProgress, listPairProgress, pairProgressResponse, renderPairProgress } from "./pair-progress.js";
 import { prepareOccasions, renderOccasions } from "./occasions.js";
 import { readSmallReviews, smallReviewView, resolveSmallReviews } from "./small-review.js";
@@ -11,7 +13,7 @@ import { Api38ExtractionDraftResultSchema, ExtractionAuditSubmissionSchema } fro
 import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { isProviderAuthenticationError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES } from "@rcm/shared";
 import { StateOutcomeCapture } from "./state-outcomes.js";
-import { automaticStateCandidates, fundAutomaticState, renderAutomaticState, selectAutomaticState, sharedStateBudget } from "./automatic-state.js";
+import { automaticStateCandidates, fundAutomaticState, renderAutomaticState, selectAutomaticState, trimAutomaticStateNote, sharedStateBudget } from "./automatic-state.js";
 import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText } from "@rcm/shared";
 import { requestStructuredProvider } from "./server-llm.js";
 import { connectionFailureReason, type ConnectionFailureCode } from "@rcm/shared";
@@ -376,6 +378,7 @@ export function createApp(dependencies: Dependencies): Hono {
     db.prepare(`INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
       WHERE server_meta.value<>excluded.value`).run(chatPacketBudgetKey(parsed.chatId), String(parsed.tokenBudget));
     if (parsed.memoryGeneration) memoryReferences.begin(parsed.chatId, parsed.memoryGeneration);
+    markChatEngaged(db, parsed.chatId);
     finishSyncPhase("snapshotMs");
     const requestedExtractionReview = parsed.postExtractionReview ?? false;
     db.prepare("UPDATE chats SET post_extraction_review=?,updated_at=? WHERE id=?").run(requestedExtractionReview ? 1 : 0, Date.now(), parsed.chatId);
@@ -478,8 +481,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const namesPresent = [...activeTurnPerspectives, ...(parsed.identityHints?.recentSpeakerNames ?? []), parsed.identityHints?.userPersonaName ?? ""];
     const namesPrompt = (db.prepare("SELECT CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END content FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal")
       .all(parsed.chatId, JSON.stringify(trustedPromptSourceMessageIds)) as Array<{ content: string }>).map(row => row.content).join("\n");
+    const namesMentioned = mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n"));
     const sceneNames = renderSceneNames(db, parsed.chatId, namesPresent, namesPresent,
-      mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n")), Math.min(200, Math.floor(parsed.tokenBudget * .1)));
+      namesMentioned, Math.min(200, Math.floor(parsed.tokenBudget * .1)));
     const maximumStoryBudget = storyBudgetLimit(parsed.tokenBudget);
     const storyProbe = compileStorySpine(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, maximumStoryBudget);
     const stateTrace = retrievalTrace.isChatEnabled(parsed.chatId) ? new StateOutcomeCapture() : undefined;
@@ -638,7 +642,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return end === undefined ? latest : latest === undefined ? end : Math.max(latest, end);
     }, undefined);
     const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives,
-      activeNames: namesPresent, query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
+      activeNames: [...new Set([...namesPresent, ...namesMentioned])], query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
       covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
       namesRecognitionIds: new Set(sceneNames.recognitionIds), sceneRecognitionIds: new Set(sceneNames.sceneRecognitionIds) });
     const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(parsed.tokenBudget);
@@ -715,6 +719,7 @@ export function createApp(dependencies: Dependencies): Hono {
       ceilingDroppedState.add(selectedState.splice(index, 1)[0]!.item.id); packet = rebuildPacket();
     };
     while (estimateTokens(packet) > hardTokenCeiling) {
+      if (trimAutomaticStateNote(selectedState)) { packet = rebuildPacket(); continue; }
       if (progress) { progress = ""; packet = rebuildPacket(); continue; }
       if (occasions.items.length) { occasions.items.pop(); packet = rebuildPacket(); continue; }
       const supplemental = lastMatchingIndex(selectedState, row => !!row.promiseSlot);
@@ -767,10 +772,15 @@ export function createApp(dependencies: Dependencies): Hono {
     let sharedBudgetUsed = Math.max(stateBudget, renderAutomaticState(selectedState).tokens);
     for (const row of stateCandidates) {
       if (row.promiseSlot || selectedState.includes(row) || ceilingDroppedState.has(row.item.id)) continue;
-      selectedState.push(row); const expanded = rebuildPacket();
+      const previousLines = selectedState.map(item => item.line);
+      selectedState.push(row); let expanded = rebuildPacket();
+      while (estimateTokens(expanded) > hardTokenCeiling && trimAutomaticStateNote(selectedState)) expanded = rebuildPacket();
       if (estimateTokens(expanded) <= hardTokenCeiling) {
         packet = expanded; sharedBudgetUsed = Math.max(sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
-      } else { selectedState.pop(); packet = rebuildPacket(); }
+      } else {
+        selectedState.pop(); selectedState.forEach((item, index) => { item.line = previousLines[index]!; });
+        packet = rebuildPacket();
+      }
     }
     // Refill whole detail/dialogue units in rounds. Already selected connection
     // scenes keep their places; omitted records must fit as readable bundles.
@@ -1099,7 +1109,7 @@ export function createApp(dependencies: Dependencies): Hono {
     } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
   });
   app.post("/v1/chats/:id/open", async (context) => {
-    const body = TurnPrepareRequestSchema.parse(await context.req.json());
+    const body = TurnPrepareRequestSchema.extend({ workerId: z.string().min(1).optional() }).parse(await context.req.json());
     if (body.chatId !== context.req.param("id")) return context.json({ error: "chatId does not match route" }, 400);
     // Opening a host chat only resolves identity and stores sources. It must not
     // capture setup, retrieve a packet, enqueue work or wake a provider.
@@ -1111,6 +1121,7 @@ export function createApp(dependencies: Dependencies): Hono {
       // A concurrent prepare may already have advanced this chat. Opening is
       // not an edit/rollback event; only fill a previously empty source ledger.
       if (!db.prepare("SELECT 1 FROM messages WHERE chat_id=? LIMIT 1").get(body.chatId)) syncSnapshot(db, request);
+      recordOpenChat(db, body.workerId ?? "legacy", body.chatId);
       writePersonaHint(db, body.chatId, body.identityHints?.userPersonaName);
       return resolved;
     })();
@@ -1606,7 +1617,7 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ ok: true });
   });
 
-  app.get("/v1/admin/chats", (context) => context.json({ items: listAdminChats(db, retrievalTrace.dashboardAvailable) }));
+  app.get("/v1/admin/chats", (context) => context.json({ items: listAdminChats(db, retrievalTrace.dashboardAvailable), recentCleanup: recentChatCleanup(db) }));
   if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) app.put("/v1/admin/chats/:id/retrieval-diagnostics", async (context) => {
     if (!retrievalTrace.dashboardAvailable) return context.json({ error: "Not found" }, 404);
     const body = await context.req.json().catch(() => undefined) as { enabled?: unknown } | undefined;
@@ -1652,7 +1663,7 @@ export function createApp(dependencies: Dependencies): Hono {
         : error instanceof ProviderRequestError && error.kind === "transport" ? "NETWORK_ERROR"
         : status ? "PROVIDER_HTTP_ERROR"
         : error instanceof ProviderRequestError && error.kind === "json" || localCode === "INVALID_RESPONSE" ? "INVALID_RESPONSE" : "INVALID_CONFIG";
-      const detail = error instanceof ProviderRequestError ? error.providerMessage : undefined;
+      const detail = settingsFailureCode(error) ? settingsFailureMessage(error) : undefined;
       return context.json({ ok: false, code, message: connectionFailureReason(code), ...(detail ? { detail } : {}), ...(status ? { status } : {}), elapsedMs: Math.round(performance.now() - started) });
     } finally { connectionTestBusy = false; }
   });
@@ -1704,7 +1715,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const code = error instanceof TranslationError ? error.code : error instanceof ProviderRequestError
         ? error.kind === "timeout" ? "TIMEOUT" : error.kind === "json" ? "INVALID_RESPONSE" : error.kind === "transport" ? "NETWORK_ERROR" : error.status === 401 || error.status === 403 ? "AUTH_FAILED" : error.status === 429 ? "RATE_LIMITED" : "PROVIDER_HTTP_ERROR"
         : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "TIMEOUT" : "INVALID_CONFIG";
-      return context.json({ code, error: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), [apiKey]) }, 502);
+      return context.json({ code, error: settingsFailureMessage(error, "translation") }, 502);
     } finally { scope.finish(); }
   });
   app.put("/v1/admin/server-llm", async (context) => {
@@ -1727,6 +1738,7 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/worker/heartbeat", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
     syncChatWork(body);
+    recordOpenChat(db, body.workerId, body.chatId);
     serverWorker.heartbeat(body.workerId);
     return context.json({ ok: true, worker: body.chatId ? serverWorker.statusForChat(body.chatId) : serverWorker.status });
   });
@@ -1842,6 +1854,12 @@ export function createApp(dependencies: Dependencies): Hono {
     } catch (error) {
       return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }
+  });
+  app.post("/v1/admin/chats/cleanup-unengaged", async (context) => {
+    const body = z.object({ chatIds: z.array(z.string().min(1)).max(10000), currentChatId: z.string().optional(), workerId: z.string().min(1) }).parse(await context.req.json());
+    recordOpenChat(db, body.workerId, body.currentChatId);
+    const deletedChats = deleteUnengagedChats(db, embeddings, body.chatIds);
+    return context.json({ ok: true, deletedChats });
   });
   app.delete("/v1/chats/:id", (context) => {
     try {
@@ -2072,15 +2090,24 @@ export function createApp(dependencies: Dependencies): Hono {
     try { return context.json(regenerationRun(db, context.req.param("id"), context.req.param("runId"))); }
     catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code }, 404); }
   });
-  app.post("/v1/chats/:id/regenerations/:runId/apply", (context) => {
+  for (const operation of ['apply', 'apply-with-keep'] as const) app.post(`/v1/chats/:id/regenerations/:runId/${operation}`, async (context) => {
     try {
+      const raw = await context.req.text();
+      let body: unknown;
+      try { body = raw.trim() ? JSON.parse(raw) : {}; }
+      catch { return context.json({ error: 'Invalid JSON body' }, 400); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return context.json({ error: 'Expected an object body' }, 400);
+      const requestedIds = (body as {keepLostItemIds?:unknown}).keepLostItemIds;
+      const keepLostItemIds = requestedIds === undefined ? [] : requestedIds;
+      if (!Array.isArray(keepLostItemIds) || keepLostItemIds.some(id => typeof id !== 'string' || !id.length)) return context.json({ error: 'keepLostItemIds must be an array of item IDs' }, 400);
       const mode = (regenerationRun(db, context.req.param("id"), context.req.param("runId")) as any).mode;
+      if (mode !== 'canonical_suffix' && keepLostItemIds.length) return context.json({ error: 'Item preservation requires canonical regeneration', code: 'KEEP_REQUIRES_CANONICAL' }, 409);
       const result = mode === "canonical_suffix"
-        ? applyCanonicalRegeneration(db, context.req.param("id"), context.req.param("runId"))
+        ? applyCanonicalRegeneration(db, context.req.param("id"), context.req.param("runId"), keepLostItemIds)
         : applyEpisodeRegeneration(db, context.req.param("id"), context.req.param("runId"));
       void embeddings.indexPending(context.req.param("id"));
       return context.json({ ok: true, ...result });
-    } catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code }, 409); }
+    } catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code, ...(error?.rejectedItems ? { rejectedItems: error.rejectedItems } : {}) }, 409); }
   });
   app.delete("/v1/chats/:id/regenerations/:runId", (context) => {
     try { discardRegeneration(db, context.req.param("id"), context.req.param("runId")); return context.json({ ok: true }); }
@@ -2173,7 +2200,9 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/chats/:id/view-preferences", (context) => context.json(readViewPreferences(db, context.req.param("id"))));
   app.put("/v1/chats/:id/view-preferences", async (context) => {
     try {
-      return context.json(writeViewPreferences(db, context.req.param("id"), await context.req.json()));
+      const result = writeViewPreferences(db, context.req.param("id"), await context.req.json());
+      markChatEngaged(db, context.req.param("id"));
+      return context.json(result);
     } catch (error) {
       if (error instanceof SyntaxError || error instanceof InvalidViewPreferencesPatchError) {
         return context.json({ error: error.message }, 400);
@@ -2298,6 +2327,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (!body.success) return context.json({ error: "Invalid character work settings" }, 400);
     const characterId = context.req.param("id");
     const chatIds = syncChatWork({ ...body.data, characterEnabled: { [characterId]: body.data.enabled } }, characterId);
+    for (const chatId of chatIds) markChatEngaged(db, chatId);
     return context.json({ ok: true, chatIds });
   });
   app.put("/v1/chats/:id/work", async context => {
@@ -2306,6 +2336,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const chatId = context.req.param("id");
     const wasHeld = isChatWorkHeld(db, chatId);
     setChatWorkEnabled(db, chatId, body.data.enabled);
+    markChatEngaged(db, chatId);
     if (body.data.enabled && wasHeld) { serverWorker.wake(); void embeddings.indexPending(chatId); }
     return context.json({ ok: true, worker: serverWorker.statusForChat(chatId) });
   });
@@ -2322,6 +2353,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const shouldBackfill = body.backfill === true && body.profile !== undefined && previous.profile === "companion" && profile === "simulation";
     if (body.profile === undefined && body.includeUserMessages === undefined && memoryLanguage === undefined) return context.json({ error: "No supported changes" }, 400);
     db.transaction(() => {
+      markChatEngaged(db, chatId);
       db.prepare("UPDATE chats SET profile=?,include_user_messages=?,updated_at=? WHERE id=?").run(profile, includeUserMessages ? 1 : 0, Date.now(), chatId);
       if (memoryLanguage !== undefined) {
         if (memoryLanguage === previous.memory_language) db.prepare("UPDATE chats SET pending_memory_language=NULL WHERE id=?").run(chatId);
@@ -2375,7 +2407,7 @@ export function createApp(dependencies: Dependencies): Hono {
     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`).run(
       id, chatId, memoryKey, parsedLandmarks.data.length ? "relationship" : "episode", title, content,
       JSON.stringify(participants), JSON.stringify(participants), null, storyTime || null, normalizeStoryTime(storyTime) ?? null, "[]",
-      parsedLandmarks.data.length ? 1 : 0, JSON.stringify(parsedLandmarks.data), "[]", .7, .7,
+      parsedLandmarks.data.length ? 1 : 0, JSON.stringify(parsedLandmarks.data.map(clipLandmarkDisplayText)), "[]", .7, .7,
       parsedLandmarks.data.length ? "durable" : "arc", 0, chat.revision, timestamp, timestamp,
     );
     refreshMemoryFts(db, id);
@@ -2464,7 +2496,7 @@ export function createApp(dependencies: Dependencies): Hono {
     let values = updates.map((key) => key === "pinned" || key === "active" || key === "landmark"
       ? (body[key] ? 1 : 0)
       : key === "participants" ? JSON.stringify(participants) : key === "locations" ? JSON.stringify(body[key])
-        : key === "landmarkKinds" ? JSON.stringify(parsedLandmarks?.data ?? [])
+        : key === "landmarkKinds" ? JSON.stringify((parsedLandmarks?.data ?? []).map(clipLandmarkDisplayText))
         : key === "storyTime" ? (body.storyTime || null)
           : key === "salience" || key === "strength" ? normalizeUnitScore(Number(body[key])) : body[key]);
     const chatId = context.req.param("id");

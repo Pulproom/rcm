@@ -1,8 +1,20 @@
+import { MAX_MEMORY_BUDGET } from "@rcm/shared";
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
+import { errorMessage, formatServerError, ServerConnectionError } from "./server-errors.js";
+import { createSetupController, createSetupView, isInitialSetupAction, setupPendingIn } from "./dashboard/setup-actions.js";
+export { filterTimelineMemories, timelineDefaultMemoryId, type TimelineViewState } from "./dashboard/organization-actions.js";
+import { createOrganizationController, createTimelineController, createTimelineView, timelineMemoryView, timelineDefaultMemoryId, type TimelineViewState } from "./dashboard/organization-actions.js";
+import { createPeopleController, createPeopleView, isPeopleManagementAction, type PeopleViewState, type PeopleManagementState, type SocialEditor } from "./dashboard/people-actions.js";
+import { createPairController, createPairView, isAnniversaryAction } from "./dashboard/pair-actions.js";
+import { readChatSettingsChange, readChatTurnLimits, readChatMemorySettings, assertChatMemoryLanguageSupported, readChatPerspectives, applyChatWorkSettings, applyCurrentChatSettings, syncChatEnabledControl, syncMemoryBudgetControls } from "./dashboard/chat-settings-actions.js";
+import { createDataController, createDataView, type DataConfirmation, type DataViewState, withExtractionReviewOverride, syncCompleteSourceLedger, requireChatMemoryEnabled, clearDeletedChatState, invalidateRestoredChatState, deletedHostChats, setRetrievalDiagnostics, transferCountSummary } from "./dashboard/data-actions.js";
+export { type HostChatInventoryItem, withExtractionReviewOverride, syncCompleteSourceLedger, requestBackupArchive, type MemoryTransferMode, type MemoryTransferConfirmation, manualMemoryLineageRequest, isMissingLineageIdentityError, type MemoryTransferPreviewResult, previewMemoryTransfer, memoryTransferConfirmation, triggerBackupDownload, clearDeletedChatState, readHostChatInventory, deletedHostChats, scanDeletedHostChats, deleteServerChatRecords, cleanupDeletedHostChats, setRetrievalDiagnostics } from "./dashboard/data-actions.js";
+import { createAttentionController, createAttentionView, isAttentionMutationAction, type AttentionFilter, type AttentionViewState } from "./dashboard/attention-actions.js";
 import { smallReviewDetail, smallReviewMark } from "./dashboard/small-review.js";
-import { birthdayMonthDays, EntityBirthdaySchema, CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
+import { birthdayMonthDays, CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { invalidateChatTranslations, retranslateChatRecords } from "./translation.js";
-import { setupPickerNeeded, claimSetupAttention, firstOpenSetupPicker, observeSetupAttention, discardSetupCapture, loadSetupPicker, readSetupHost, setupGroups, selectedSetupProjection, type SetupPicker } from "./setup-sources.js";
-import { setupEntryLoading, REREAD_NOTICE_HTML, setupSourcesPage } from "./dashboard/setup-sources.js";
+import { setupPickerNeeded, discardSetupCapture } from "./setup-sources.js";
+import { setupSourcesPage } from "./dashboard/setup-sources.js";
 import { setAvatarColors } from "./dashboard/person-colors.js";
 import { sourceRecoverySummary, operationLabel, JOB_TRIGGER_LABELS, type JobTrigger } from "@rcm/shared";
 import { AUXILIARY_CENSORSHIP_RELAXATION } from "@rcm/shared";
@@ -19,21 +31,21 @@ import { providerCapability, updateProviderFields } from "./provider-settings.js
 import { mcpSelectorSettings, readMcpSelectorSettings, updateMcpSelectorControls } from "./mcp-selector-settings.js";
 import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
 declare const __RCM_DISTRIBUTION__: boolean;
-import { ANNIVERSARY_KINDS, LANDMARK_KIND_VALUES, StoredLandmarkKindSchema as LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, compareStoryTimes, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type StoredLandmarkKind as LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type ManualLineagePreview, type ManualLineagePreviewRequest, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
+import { ANNIVERSARY_KINDS, LANDMARK_KIND_VALUES, StoredLandmarkKindSchema as LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type StoredLandmarkKind as LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
 import { SERVER_STATUS_TIMEOUT_MS, type ChatViewPreferences, type MemoryDetailAccessPatch, type MemoryDetailAccessResponse, ServerClient } from "./api-client.js";
-import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest, readHostSourceTranslations } from "./context.js";
+import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest } from "./context.js";
 import { addLog, rememberDiagnosticSecrets, defaults, isChatMemoryEnabled, normalizeMemoryOnlyInjection, supportedSettingsRevision, saveSettings, serverScopeKey, CACHE_KEY, loadStoredJson, saveStoredJson } from "./settings.js";
 import type { ActivityProgress, DashboardSkin, InitialCalibrationActivity, PluginSettings, RuntimeState, TranslationDisplay } from "./types.js";
 import { drainWorker, reconcileAutomaticServerPause } from "./worker.js";
 import { readServerModelConnection, testSettingsConnection } from "./connection-tests.js";
 import { connectionCheck } from "./dashboard/film/ui.js";
 import { manualRetryState, updateWorkerMenuButton, widgetState } from "./attention.js";
-import { createOrganizationView, memoryOrganization, toggleOrganizationRange, organizationMemoryRanges, organizationJumpRange, type AdditionView, type OrganizationData } from './memory-organization.js';
-import { stopDeletedHostChatWork, subscribeActivity } from "./activity.js";
+import { createOrganizationView, memoryOrganization } from './memory-organization.js';
+import { subscribeActivity } from "./activity-state.js";
 import { translatePacket, clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
 export { syncLineageActivity } from "./lineage-settings.js";
 import { syncLineageActivity, currentLineageOperation, runLineageOperation, inheritLineageSettings, needsOpenedChatResolution, resolveOpenedChat, lineageFailureMessage } from "./lineage-settings.js";
-import {exportChatSettings,restoreChatSettings} from "./backup-settings.js";
+import {restoreChatSettings} from "./backup-settings.js";
 import { ServerCompatibilityError, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, SERVER_RESPONSE_DELAYED, type ServerConnectionIssue } from "./connection.js";
 import { syncQuizSettings } from "./quiz-sync.js";
 import { installServerUpdate, pluginUpdateNeeded, refreshUpdateStatus } from "./updates.js";
@@ -43,9 +55,9 @@ import { buildPairs, entityForName, entityProminence, milestoneLabel, pairKey, P
 import { installRelationshipFlowScrub, layoutRelationshipFlow, renderFlowReadout, type RelationshipFlowView } from "./dashboard/relationship-flow-view.js";
 import { pairOpenPromises, pairSceneCount, renderRelationshipRow, renderPairDetail, type PairDiaryFilter, type PairDiarySort } from "./dashboard/pair-detail.js";
 import { buildSceneLog, storyWeekday } from "./dashboard/scene-log.js";
-import { landmarkLabel, remapHiddenAnniversariesAfterDelete } from "./dashboard/diary.js";
+import { landmarkLabel } from "./dashboard/diary.js";
 import { isRecognitionMemory } from "@rcm/shared";
-import { addressEditorForm, affiliationLabel, buildPersonDetail, renderPersonDetail, renderPersonColorPicker } from "./dashboard/person.js";
+import { addressEditorForm, affiliationLabel, buildPersonDetail, renderPersonDetail } from "./dashboard/person.js";
 import { buildNowPage, overduePromiseEntries, pendingAttentionCount, renderNowPage, type NowFilter, type NowSort, type NowView } from "./dashboard/now.js";
 import { POLARITY_LABELS, predicateLabel, PROMISE_STATUS_LABELS, STATE_KIND_LABELS } from "./dashboard/record-history.js";
 import { renderLockHome } from "./dashboard/phone/home.js";
@@ -60,7 +72,7 @@ import { buildCrumbs, decorateFoldSummaries, handleShellNavigationAction, icon, 
 import { FILM_CSS } from "./dashboard/film/css.js";
 import { PHONE_CSS } from "./dashboard/phone/css.js";
 import { lex, setSkin } from "./dashboard/lexicon.js";
-import { avatar, btn, contactRow, empty, field, filters, fold, frame, iconBtn, loading, menu, notice, row, statusList, secretInput, toggleSecretInput, maskSecretInputs, tabs as filmTabs, type MenuItem } from "./dashboard/film/ui.js";
+import { avatar, btn, contactRow, empty, errorDetails, field, filters, fold, frame, iconBtn, loading, menu, notice, row, statusList, secretInput, toggleSecretInput, maskSecretInputs, tabs as filmTabs, type MenuItem } from "./dashboard/film/ui.js";
 import { nameHtml } from "./dashboard/film/names.js";
 import { dayPart, sceneDate, slugline } from "./dashboard/film/scene.js";
 import { actScenes, compareStoryMemories, pickFrames, sceneLocator, sceneNumbers, storyScenes } from "./dashboard/scenes.js";
@@ -89,12 +101,9 @@ export function backupRequestBody(bytes: ArrayBuffer): ArrayBuffer {
 type NavGroupId = "home" | "memory" | "people" | "world" | "manage";
 type NavItem = { tab: Tab; label: string; count?: number };
 type NavGroup = { id: NavGroupId; label: string; icon: string; defaultTab: Tab; items: NavItem[] };
-type ActionState = { kind: "success" | "error"; message: string };
-type AttentionFilter = "all" | "duplicate" | "conflict" | "audit" | "small";
-type AttentionViewState = { selectedId: string; query: string; filter: AttentionFilter; mobileDetail: boolean };
+type ActionState = { kind: "success" | "error"; message: string; errorReport?: string };
 type WorldEditor = { promiseStatus?: string; social?: boolean; kind: "assertion" | "belief" | "promise"; id?: string; mode: "create" | "edit" | "end" | "delete"; stateKind?: string; subject?: string; target?: string; relationKind?: string; lockSubject?: boolean };
 type IntimacyEditor = { id?: string; participantA?: string; participantB?: string };
-type SocialEditor = { locked?: boolean; description?: string; holder: string; subject: string; level: string; knownAs: string; addressTerms?: string; editing: boolean; focus?: "address" };
 export function relationshipSheetEditorsAfterSwitch(
   dirty: boolean,
   discardConfirmed: boolean,
@@ -118,28 +127,6 @@ export function relationshipSheetEditorsAfterSwitch(
     worldEditorOnNow: false,
   };
 }
-type PeopleViewState = {
-  selectedId: string;
-  query: string;
-  prominence: "all" | "primary" | "supporting" | "reference";
-  editing: boolean;
-  mobileDetail: boolean;
-  management: "" | "merge" | "delete";
-};
-export type TimelineViewState = {
-  query: string;
-  landmarkOnly: boolean;
-  bookmarkedOnly: boolean;
-  pinnedOnly: boolean;
-  includeInactive: boolean;
-  editing: boolean;
-  creating: boolean;
-  mobileDetail: boolean;
-  sortOrder?: "ascending" | "descending";
-  /** Detail whose 아는 인물 is being edited in place. */
-  accessEditing?: string;
-  textEditing?: {id:string; kind:"detail"|"event"};
-};
 
 const relationshipLandmarkKinds = new Set(["first_met", "romantic_relationship_established", "engagement", "marriage", "separation", "romantic_relationship_ended", "reunion", "divorce", "anniversary_basis"]);
 
@@ -175,16 +162,6 @@ export function editableLandmarkKinds(text: string, existing: LandmarkKind[], pa
   return parsed.data;
 }
 
-const landmarkEntryIdentity = (item: any): string => JSON.stringify([
-  item?.kind ?? null, item?.label ?? null, item?.pair ?? null, item?.storyTime ?? null, item?.evidence ?? null,
-]);
-
-const landmarkEntryIndex = (items: any[], target: any, preferredIndex: number): number => {
-  const identity = landmarkEntryIdentity(target);
-  if (items[preferredIndex] && landmarkEntryIdentity(items[preferredIndex]) === identity) return preferredIndex;
-  return items.findIndex((item) => landmarkEntryIdentity(item) === identity);
-};
-
 export function resetTimelineDetailScroll(scope: ParentNode): void {
   scope.querySelector<HTMLElement>('[data-preserve-scroll="timeline-detail"]')?.scrollTo({ left: 0, top: 0 });
   scope.querySelector<HTMLElement>(".split > .readercol")?.scrollTo({ left: 0, top: 0 });
@@ -204,30 +181,6 @@ export type StoryViewState = {
 };
 
 type StoryOverviewBackup = RuntimeState["settings"]["storyOverviewBackups"][string];
-export type HostChatInventoryItem = { characterId: string; characterName: string; chatId: string; chatTitle: string; messageCount: number };
-type HostChatInventory = {
-  items: HostChatInventoryItem[];
-  characterIds: Set<string>;
-  completeCharacterIds: Set<string>;
-  charactersComplete: boolean;
-};
-type DataConfirmation = { action: "rebuild" | "delete"; chatId: string; acknowledged?: boolean };
-type DataViewState = {
-  inventoryStatus: "idle" | "loading" | "ready" | "unavailable";
-  inventory: HostChatInventoryItem[];
-  deletedChatIds?: string[];
-  inventoryPartial?: boolean;
-  inventoryError?: string;
-  cleanupConfirmation?: string[];
-  cleanupRunning?: boolean;
-  cleanupResult?: string;
-  query: string;
-  filter: "all" | "current" | "other";
-  confirmation?: DataConfirmation;
-  backupExportPhase?: "creating" | "downloading";
-  backupExportChatId?: string;
-  backupExportError?: string;
-};
 
 export function koreanTranslationEnabled(autoTranslate: boolean, display: RuntimeState["settings"]["translationDisplay"], canonicalLanguage: MemoryLanguage): boolean {
   return canonicalLanguage !== "ko" && autoTranslate && display !== "en";
@@ -243,39 +196,6 @@ export async function applyTranslationDisplay(
   state.settings.autoTranslate = display === "ko";
   await persist(state.settings);
   rerender();
-}
-
-export function filterTimelineMemories(memories: any[], view: Pick<TimelineViewState, "landmarkOnly" | "bookmarkedOnly" | "pinnedOnly" | "includeInactive">): any[] {
-  return memories.filter((memory) => !isRecognitionMemory(memory)
-    && (view.includeInactive || memory.active !== false)
-    && (!view.landmarkOnly || Boolean(memory.landmark))
-    && (!view.bookmarkedOnly || Boolean(memory.bookmarked))
-    && (!view.pinnedOnly || Boolean(memory.pinned))).sort((left, right) => {
-      const compared = compareStoryTimes(left.story_time ?? left.storyTime, right.story_time ?? right.storyTime);
-      if (compared !== null && compared !== 0) return compared;
-      const leftHasTime = Boolean(String(left.story_time ?? left.storyTime ?? "").trim());
-      const rightHasTime = Boolean(String(right.story_time ?? right.storyTime ?? "").trim());
-      if (leftHasTime !== rightHasTime) return leftHasTime ? -1 : 1;
-      return Number(left.created_revision ?? left.created_at ?? 0) - Number(right.created_revision ?? right.created_at ?? 0);
-    });
-}
-
-function timelineMemoryView(memories: any[], view: TimelineViewState): { matching: any[]; topLevel: any[] } {
-  const sort = view.sortOrder === "ascending" ? 1 : -1;
-  const undated = (memory: any): number => Number(!String(memory?.story_time ?? memory?.storyTime ?? "").trim());
-  const ordered = (items: any[]) => [...items].sort((left, right) => undated(left) - undated(right) || sort * compareStoryMemories(left, right));
-  const matching = ordered(filterTimelineMemories(memories, view));
-  const matchingIds = new Set(matching.map((memory) => memory.id));
-  const matchingParents = new Set(matching.map((memory) => memory.capsule_parent_id).filter(Boolean));
-  const topLevel = ordered(filterTimelineMemories(
-    memories.filter((memory) => !memory.capsule_parent_id && (matchingIds.has(memory.id) || matchingParents.has(memory.id))),
-    { ...view, landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false },
-  ));
-  return { matching, topLevel };
-}
-
-export function timelineDefaultMemoryId(memories: any[], view: TimelineViewState): string {
-  return String(timelineMemoryView(memories, view).topLevel[0]?.id ?? "");
 }
 
 export function dashboardThemeFromColor(value: string, prefersDark: boolean): "dark" | "light" {
@@ -350,6 +270,7 @@ export interface DashboardData {
   ingestionState?: "historical_pending" | "managed" | "cleared";
   recallLogs: any[];
   adminChats: any[];
+  recentChatCleanup?: { at: number; count: number };
   lineage?: ChatLineageStatus;
   initialCalibration?: any;
   coldStartProgress?: ActivityProgress;
@@ -357,6 +278,7 @@ export interface DashboardData {
   adminError?: string;
   contextError?: string;
   error?: string;
+  errorReport?: string;
   connectionIssue?: ServerConnectionIssue;
 }
 
@@ -405,9 +327,6 @@ const ALL_DASHBOARD_DATASETS: DashboardChatDataset[] = [
   "memories", "messages", "relationships", "world", "conflicts", "jobs", "recallLogs", "entities",
   "pairProgress", "reviews", "lineage", "socialKnowledge", "physicalIntimacy", "viewPreferences", "status", "audits", "initialCalibration", "storySpine",
 ];
-
-/** The empty placeholder starts as "unseeded"; trust the setup state only after the server answered. */
-const setupPendingIn = (data: DashboardData): boolean => Boolean(data.loadedDatasets?.includes("initialCalibration")) && setupPickerNeeded(data.initialCalibration?.status, data.lineage);
 
 export function dashboardDatasetsForTab(tab: Tab): DashboardChatDataset[] {
   const byTab: Record<Tab, DashboardChatDataset[]> = {
@@ -517,172 +436,6 @@ export async function chooseSimulationBackfill(
   } finally {
     dialog.remove();
   }
-}
-
-export function withExtractionReviewOverride<T extends Record<string, unknown>>(
-  payload: T,
-  extractionReviewOverride: boolean,
-): T & { extractionReviewOverride: boolean } {
-  return { ...payload, extractionReviewOverride };
-}
-
-export async function syncCompleteSourceLedger(
-  client: Pick<ServerClient, "request">,
-  context: Awaited<ReturnType<typeof readCurrentContext>>,
-): Promise<{ expectedSourceMessages: number; serverInstanceId: string }> {
-  if (context.snapshotScope !== "full" || context.snapshot.length !== context.sourceMessageCount) {
-    throw new Error(`전체 원문을 불러오지 못했습니다 (${context.snapshot.length}/${context.sourceMessageCount}). 다시 시도해 주세요.`);
-  }
-  await client.request(`/v1/chats/${encodeURIComponent(context.chatId)}/source-sync`, {
-    method: "POST",
-    body: JSON.stringify(makePrepareRequest(context, 0, { deferExtraction: true })),
-  }, 120_000);
-  return { expectedSourceMessages: context.sourceMessageCount, serverInstanceId: "" };
-}
-
-export async function requestBackupArchive(
-  client: Pick<ServerClient, "request" | "raw">,
-  state: RuntimeState,
-  chatId?: string,
-  contextReader: typeof readCurrentContext = readCurrentContext,
-): Promise<Response> {
-  if (chatId && state.current?.chatId === chatId) {
-    const current = await contextReader(state, { snapshotMode: "full" });
-    if (current.chatId !== chatId) throw new Error("현재 채팅이 바뀌었습니다. 다시 시도해 주세요.");
-    await syncCompleteSourceLedger(client, current);
-  }
-  const characterId = !chatId ? undefined : state.current?.chatId === chatId ? state.current.characterId
-    : (await client.request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats")).items.find(chat => chat.id === chatId)?.characterId;
-  if (chatId && !characterId) throw new Error("백업할 채팅의 캐릭터를 찾지 못했어요.");
-  return client.raw("/v1/export", { method: "POST", body: JSON.stringify(
-    chatId ? { chatId, chatSettings: exportChatSettings(state.settings, chatId, characterId!) }
-      : { pluginSettings: state.settings, serverUrl: state.settings.serverUrl },
-  ) }, 120_000);
-}
-
-export type MemoryTransferMode = "lineage" | "archive";
-export type MemoryTransferConfirmation = { message: string; title: string; confirm: string; cancel: string };
-
-/** Build the exact lightweight inventory used to recognize a normal Risu JSON import. */
-export function manualMemoryLineageRequest(
-  context: NonNullable<RuntimeState["current"]>,
-  parentChatId: string,
-): ManualLineagePreviewRequest {
-  return {
-    parentChatId,
-    targetMessageInventory: context.messageVisibility ?? [],
-    target: {
-      chatTitle: context.chatTitle,
-      characterId: context.characterId,
-      characterName: context.characterName,
-      profile: context.profile,
-      includeUserMessages: context.includeUserMessages,
-      extractionGroupTurns: context.extractionGroupTurns,
-      memoryLanguage: context.memoryLanguage,
-    },
-  };
-}
-
-/** Only the server's explicit no-shared-ID result may fall back to archive transplant. */
-export function isMissingLineageIdentityError(error: unknown): boolean {
-  return String(error).includes("At least two exact message IDs are required");
-}
-
-export type MemoryTransferPreviewResult = {
-  current: NonNullable<RuntimeState["current"]>;
-  request: ManualLineagePreviewRequest;
-  mode: MemoryTransferMode;
-  preview: ManualLineagePreview;
-};
-
-/** Preview exact lineage first, then prepare a complete source ledger for the ID-less archive fallback. */
-export async function previewMemoryTransfer(
-  client: Pick<ServerClient, "request">,
-  state: RuntimeState,
-  sourceChatId: string,
-  contextReader: typeof readCurrentContext = readCurrentContext,
-): Promise<MemoryTransferPreviewResult> {
-  let current = await contextReader(state);
-  let request = manualMemoryLineageRequest(current, sourceChatId);
-  try {
-    const preview = await client.request<ManualLineagePreview>(`/v1/chats/${encodeURIComponent(current.chatId)}/lineage/preview`, {
-      method: "POST", body: JSON.stringify(request),
-    }, 30_000);
-    return { current, request, mode: "lineage", preview };
-  } catch (error) {
-    if (!isMissingLineageIdentityError(error)) throw error;
-  }
-  if (current.snapshotScope !== "full" || current.snapshot.length !== current.sourceMessageCount) {
-    current = await contextReader(state, { snapshotMode: "full" });
-  }
-  await syncCompleteSourceLedger(client, current);
-  request = manualMemoryLineageRequest(current, sourceChatId);
-  const preview = await client.request<ManualLineagePreview>(`/v1/chats/${encodeURIComponent(current.chatId)}/memory-transplant/preview`, {
-    method: "POST", body: JSON.stringify({ sourceChatId }),
-  }, 30_000);
-  return { current, request, mode: "archive", preview };
-}
-
-function transferCountSummary(counts: Record<string, number>): string {
-  const relationships = counts.relationships === undefined ? `관계 변화 ${Number(counts.relationshipEvents ?? 0).toLocaleString()}건` : `관계 ${Number(counts.relationships).toLocaleString()}개`;
-  return `기억 ${Number(counts.memories ?? 0).toLocaleString()}개 · ${relationships} · 세계 상태 ${(Number(counts.assertions ?? 0) + Number(counts.beliefs ?? 0)).toLocaleString()}개 · 약속 ${Number(counts.promises ?? 0).toLocaleString()}개${Number(counts.translations ?? 0) > 0 ? ` · 번역 ${Number(counts.translations).toLocaleString()}개` : ""}`;
-}
-
-export function memoryTransferConfirmation(
-  preview: ManualLineagePreview,
-  mode: MemoryTransferMode,
-  targetActiveMessageCount: number,
-): MemoryTransferConfirmation {
-  const source = `${preview.parent.characterName} · ${preview.parent.chatTitle || preview.parent.chatId}`;
-  const target = `${preview.target.characterName} · ${preview.target.chatTitle || preview.target.chatId}`;
-  const lines = [source, `→ ${target}`, ""];
-  if (mode === "lineage") {
-    lines.push(
-      `동일한 대화 원문 ${preview.commonMessages.toLocaleString()}/${Math.max(0, targetActiveMessageCount).toLocaleString()}개를 확인했어요.`,
-      transferCountSummary(preview.inheritedCounts),
-      "현재 채팅과 새 봇 설정은 유지하며, 확인한 원문은 다시 처리하지 않아요.",
-      "아직 정리되지 않은 원문은 현재 채팅의 수정 보호·기억 묶음 설정에 따라 처리돼요. 가져오기 자체는 모델을 호출하지 않아요.",
-    );
-    if (preview.clientPrunedMessages > 0) lines.push(`현재 JSON에 없는 이전 원문 ${preview.clientPrunedMessages.toLocaleString()}개도 서버 기록에서 이어받아요.`);
-  } else {
-    lines.push(
-      "메시지 ID로 같은 대화임을 확인하지 못했어요.",
-      transferCountSummary(preview.inheritedCounts),
-      "원본 기억을 독립 기록으로 가져오며, 현재 채팅 원문은 별도의 이어진 대화로 처리될 수 있어요.",
-      "현재 채팅 원문은 수정 보호·기억 묶음 설정에 따라 처리돼요. 가져오기 자체는 모델을 호출하지 않아요.",
-    );
-  }
-  if (preview.requiresReplacement) {
-    lines.push("", `현재 채팅의 기존 기록(${transferCountSummary(preview.targetDerivedCounts)})은 가져올 기록으로 교체돼요.`);
-  }
-  if (preview.targetQueuedJobs) lines.push("", `현재 채팅의 대기 작업 ${preview.targetQueuedJobs.toLocaleString()}개를 취소하고 기억을 가져와요.`);
-  return {
-    message: lines.join("\n"),
-    title: "기억 가져오기 확인",
-    confirm: preview.requiresReplacement ? "기존 기억 교체하고 가져오기" : mode === "lineage" ? "기억 가져오기" : "독립 기록으로 가져오기",
-    cancel: "취소",
-  };
-}
-
-/** Start a browser download and retain the object URL until Chromium consumes it. */
-export function triggerBackupDownload(
-  blob: Blob,
-  filename: string,
-  documentRef: Pick<Document, "createElement" | "body"> = document,
-  urlApi: Pick<typeof URL, "createObjectURL" | "revokeObjectURL"> = URL,
-  scheduleCleanup: (callback: () => void) => unknown = (callback) => setTimeout(callback, 10_000),
-): void {
-  const url = urlApi.createObjectURL(blob);
-  const anchor = documentRef.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.hidden = true;
-  documentRef.body.append(anchor);
-  anchor.click();
-  scheduleCleanup(() => {
-    anchor.remove();
-    urlApi.revokeObjectURL(url);
-  });
 }
 
 /** Shared themed messages; native dialog supplies focus trapping and Escape. */
@@ -1052,37 +805,6 @@ function managedBackfillSource(state: RuntimeState, data: DashboardData): { coun
     turns: Number(data.bufferedTurns ?? 0) + Number(data.protectedTurns ?? 0) + Math.ceil(unsynced / 2) };
 }
 
-function requireChatMemoryEnabled(state: RuntimeState, chatId: string, characterId = state.current?.chatId === chatId ? state.current.characterId : undefined): void {
-  if (!isChatMemoryEnabled(state.settings, chatId, characterId)) {
-    throw new Error("현재 채팅에서 RCM이 꺼져 있어 새 기억 작업을 만들 수 없습니다. Settings에서 이 채팅의 RCM을 먼저 켜세요.");
-  }
-}
-
-export function clearDeletedChatState(state: RuntimeState, chatId: string, clearActivation = true): void {
-  if (state.lastTurnSearches?.chatId === chatId) state.lastTurnSearches = undefined;
-  for (const scope of Object.keys(state.settings.backfillApproved)) if (scope.endsWith(`:${chatId}`)) delete state.settings.backfillApproved[scope];
-  if (clearActivation) {
-    delete state.settings.chatEnabled[chatId];
-    delete state.settings.chatCatchUpPending[chatId];
-    delete state.settings.memoryLanguages[chatId];
-    delete state.settings.storyOverviewBackups[chatId];
-  }
-  invalidateRestoredChatState(state,chatId);
-  if(state.current?.chatId===chatId)state.current.backfillApproved=false;
-}
-
-function invalidateRestoredChatState(state: RuntimeState,chatId:string):void {
-  delete state.cache[chatId];
-  if (state.current?.chatId === chatId) {
-    state.lastPrepare = undefined;
-    state.lastInjection = undefined;
-    state.automaticTurnPacket = undefined;
-    state.activeModelRequest = undefined;
-    state.lastPromptValidation = undefined;
-    state.statusSummary = { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 };
-  }
-}
-
 
 export function syncReviewActivity(state: RuntimeState, data: Pick<DashboardData, "reconciliationReviews"> & Partial<Pick<DashboardData, "conflicts" | "pendingReviews">> & { extractionAudits?: any[] }): void {
   const pendingReconciliations = data.reconciliationReviews.filter((item) => item.status === "pending").length;
@@ -1141,7 +863,8 @@ export async function retryFailedEmbeddings(client: ServerClient, chatId: string
     if (!retried) throw new Error("다시 시도할 임베딩 작업이 없어요. 처리 상태를 확인해 주세요.");
     publish(false, { kind: "success", message: `임베딩 ${retried}건을 대기열에 넣었어요.` });
   } catch (error) {
-    publish(false, { kind: "error", message: String(error).replace(/^Error:\s*/, "") });
+    const errorReport = formatServerError(error);
+    publish(false, { kind: "error", ...(errorReport ? { errorReport } : {}), message: String(error).replace(/^Error:\s*/, "") });
   }
 }
 
@@ -1441,7 +1164,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const blockingTitle = "기억 추출이 멈췄어요";
   const budgetFailure = data.jobs.find(job => job.status === "failed" && job.type === "extract" && isProviderContextLimitError(job.last_error));
   // Strip only product-owned error markers; keep the cause ahead of the phone card's line clamp.
-  const budgetFailureCopy = budgetFailure?.last_error?.replace(/^AUXILIARY_INPUT_(?:TOO_LARGE|BUDGET_EXCEEDED):\s*/u, "");
+  const budgetFailureCopy = budgetFailure ? settingsFailureMessage(budgetFailure.last_error) : undefined;
   const blockingCopy = data.jobs.some(job => job.status === "failed" && isProviderAuthenticationError(job.last_error)) ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : budgetFailureCopy || (queued > 0 ? `실패한 작업 ${blockingFailed}건 때문에 뒤의 ${queued}건이 기다리고 있어요.` : `실패한 작업 ${blockingFailed}건을 다시 시도해 주세요.`);
   const backfillPending = shouldOfferBackfill(state, data);
   const hasDerivedData = data.memories.length + data.relationships.length + data.assertions.length + data.promises.length > 0;
@@ -3236,7 +2959,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
       const input = Number(call.usage?.promptTokens ?? call.usage?.inputTokens), output = Number(call.usage?.completionTokens ?? call.usage?.outputTokens);
       const cached = Number(call.usage?.cachedInputTokens ?? call.usage?.cachedTokens ?? call.usage?.cacheReadInputTokens);
       const usageLine = [Number.isFinite(input) ? `입력 ${input.toLocaleString()}` : "", Number.isFinite(output) ? `출력 ${output.toLocaleString()}` : "", Number.isFinite(cached) && cached > 0 ? `캐시 ${cached.toLocaleString()}` : ""].filter(Boolean).join(" · ");
-      const detail = call.error ? `<p class="step__err">${escapeHtml(call.error)}</p>` : call.outcome === "interrupted" ? '<p class="sub">완료 응답 없이 작업이 다시 시작됐습니다.</p>' : "";
+      const detail = call.error ? `<p class="step__err">${escapeHtml(settingsFailureMessage(call.error))}</p>` : call.outcome === "interrupted" ? '<p class="sub">완료 응답 없이 작업이 다시 시작됐습니다.</p>' : "";
       return step(call.outcome, label, `${stateLabel}${callDuration(call) ? ` · ${callDuration(call)}` : ""}`, detail + (call.risuCall ? `<p class="sub">${escapeHtml(JSON.stringify(call.risuCall))}</p>` : ""), usageLine || "토큰 사용량 미제공");
     }).join("");
   };
@@ -3261,7 +2984,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const statusKey = held ? "paused" : job.status === "leased" && stage === "retrying" ? "retrying" : job.status;
     const statusLabel = held ? "일시정지" : statusKey === "retrying" ? "재시도" : operationLabel(job.status);
     const terminalState = ["cancelled", "superseded"].includes(job.status);
-    const fallbackStep = (!calls.length || terminalState) ? step(job.status === "failed" ? "failed" : ["done", "completed"].includes(job.status) ? "succeeded" : "running", stageLabel ?? title, statusLabel, job.status === "failed" && job.last_error ? `<p class="step__err">${escapeHtml(job.last_error)}</p>` : "") : "";
+    const fallbackStep = (!calls.length || terminalState) ? step(job.status === "failed" ? "failed" : ["done", "completed"].includes(job.status) ? "succeeded" : "running", stageLabel ?? title, statusLabel, job.status === "failed" && job.last_error ? `<p class="step__err">${escapeHtml(settingsFailureMessage(job.last_error))}</p>` : "") : "";
     const stored = job.type === 'memory_addition' ? (job.status === 'done'
       ? payload.candidateStatus === 'applied' ? step('succeeded', '기억 저장', '추가 결과 반영 완료')
         : payload.candidateStatus === 'stale' ? step('failed', '후보 만료', '원문과 연결된 기억을 다시 선택해 주세요')
@@ -3269,7 +2992,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
       : ["done", "completed"].includes(job.status) && (stage === "complete" || ["extract", "extract_episode", "episode", "audit_retry"].includes(job.type))
       ? step("succeeded", "기억 저장", "정리 결과 반영 완료") : "";
     const recentNote = totalCalls > calls.length && calls.length ? `<p class="sub">전체 ${totalCalls}회 중 최근 ${calls.length}회의 세부 기록을 표시합니다.</p>` : "";
-    const errorCopy = job.status === "failed" && job.last_error && calls.every((call) => call.error !== job.last_error) ? `<p class="step__err">${escapeHtml(job.last_error)}</p>` : "";
+    const errorCopy = job.status === "failed" && job.last_error && calls.every((call) => call.error !== job.last_error) ? `<p class="step__err">${escapeHtml(settingsFailureMessage(job.last_error))}</p>` : "";
     const active = ["queued", "leased", "failed"].includes(job.status);
     const jobIcon = held ? "pause" : job.status === "failed" ? "error" : job.status === "queued" ? "ring" : "clock";
     const triggerLabel = typeof payload.trigger === 'string' && Object.hasOwn(JOB_TRIGGER_LABELS,payload.trigger) ? JOB_TRIGGER_LABELS[payload.trigger as JobTrigger] : undefined;
@@ -3293,11 +3016,11 @@ export function operations(state: RuntimeState, data: DashboardData): string {
       const what = String(item.what ?? "").trim() || "인식 기록";
       return `<li><b>${escapeHtml(holder)}</b><span>${escapeHtml(what)}</span></li>`;
     }).join("")}</ul><p class="withheld__why">연결된 기억에 이 인물이 사실을 알게 된 장면이 없어 보류했어요.</p>${btn("상태에서 확인", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "reviews", attentionFilter: "small" } })}</section>` : "";
-    const rowDetail = [job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : job.status === "leased" ? stageLabel || "기억 처리 중" : "", metadata].filter(Boolean).join(' · ');
+    const rowDetail = [job.status === "failed" ? settingsFailureMessage(job.last_error) : job.status === "leased" ? stageLabel || "기억 처리 중" : "", metadata].filter(Boolean).join(' · ');
     const terminalTag = terminalState ? `<span class="job__status is-${escapeHtml(statusKey)}">${escapeHtml(statusLabel)}</span>` : "";
     // Inside a same-kind burst the kind is already the parent's title; a child names only what differs.
     const childName = child ? target || triggerLabel || title : title;
-    const childDetail = [held ? CHAT_WORK_HELD_MESSAGE : child ? (job.status === "failed" ? job.last_error || "실패 원인을 확인해 주세요" : "") : rowDetail, withheldNote].filter(Boolean).join(" · ");
+    const childDetail = [held ? CHAT_WORK_HELD_MESSAGE : child ? (job.status === "failed" ? settingsFailureMessage(job.last_error) : "") : rowDetail, withheldNote].filter(Boolean).join(" · ");
     return `<details class="fold job${active ? "" : " job--history"}${child ? " job--child" : ""} is-${escapeHtml(statusKey)}" data-preserve-open="operation-job-${escapeHtml(job.id ?? `${job.type}-${job.updated_at}`)}"><summary>${active ? `<span class="job__state" role="img" aria-label="${escapeHtml(statusLabel)}">${icon(jobIcon)}</span>` : ""}<span class="job__title"><span class="job__name">${escapeHtml(childName)}${terminalTag}</span>${childDetail ? `<small>${escapeHtml(childDetail)}</small>` : ""}</span><span class="job__time">${escapeHtml(clock ? clockTime(Number(job.updated_at)) : formatRelativeTime(job.updated_at))}</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${summary ? `<p class="sub">${escapeHtml(summary)}</p>` : ""}${Number(payload.smallReviewCount) > 0 ? `<p class="review-small__processing">후보 보류 · 추가 호출 없음</p>` : ""}${withheldFold}${auditDropNote}${progressNote}${progressTechnical}<p class="sub">단계별 기록 · ${calls.length ? `${calls.length}개 호출` : "현재 상태"}</p>${groupDetail}${recoverySummary ? `<p class="sub">${escapeHtml(recoverySummary)}</p>` : ""}${callRows(calls)}${fallbackStep}${stored}${recentNote}${errorCopy}${job.status === "failed" ? modelResponseFailureDetail(payload.modelResponseDiagnostic as import("@rcm/shared").ModelResponseDiagnostic | undefined, escapeHtml) : ""}</div></details>`;
   };
   const isUnresolvedJob = (job: any): boolean => ["queued", "leased", "failed"].includes(job.status);
@@ -3485,120 +3208,6 @@ export function acknowledgeBackfillLocally(data: DashboardData, runId: string): 
 
 const normalizeBotName = (value: unknown): string => String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
 
-export async function readHostChatInventory(): Promise<HostChatInventory> {
-  const database = await risuai.getDatabase(["characters"]);
-  if (!database || !("characters" in database)) throw new Error("Risu 채팅 목록 권한을 사용할 수 없습니다");
-  const raw = database?.characters;
-  if (!raw || typeof raw !== "object") throw new Error("Risu 캐릭터 목록을 읽지 못했습니다");
-  const characters = Array.isArray(raw) ? raw : Object.values(raw);
-  const items: HostChatInventoryItem[] = [];
-  const characterIds = new Set<string>();
-  const completeCharacterIds = new Set<string>();
-  const duplicateCharacterIds = new Set<string>();
-  let charactersComplete = true;
-  for (const [index, character] of characters.entries()) {
-    if (!character || typeof character !== "object") { charactersComplete = false; continue; }
-    const stableId = character.chaId ?? character.id;
-    const stableCharacter = typeof stableId === "string" && stableId.length > 0;
-    if (!stableCharacter) charactersComplete = false;
-    else {
-      if (characterIds.has(stableId)) { charactersComplete = false; duplicateCharacterIds.add(stableId); }
-      characterIds.add(stableId);
-    }
-    const characterId = String((character as any).chaId ?? (character as any).id ?? index);
-    const characterName = String((character as any).name ?? characterId).trim() || characterId;
-    const chats = Array.isArray((character as any).chats) ? (character as any).chats : [];
-    let complete = stableCharacter && Array.isArray(character.chats);
-    const chatIds = new Set<string>();
-    for (const [chatIndex, chat] of chats.entries()) {
-      if (!chat || typeof chat !== "object") { complete = false; continue; }
-      if (typeof chat.id !== "string" || !chat.id || chatIds.has(chat.id)) complete = false;
-      if (typeof chat.id === "string" && chat.id) chatIds.add(chat.id);
-      const chatId = String(chat.id ?? `${characterId}:${chatIndex}`);
-      let messageCount = Array.isArray((chat as any).message) ? (chat as any).message.length : 0;
-      if (!messageCount) {
-        try {
-          const full = await risuai.getChatFromIndex(index, chatIndex);
-          if (!full || full.id !== chat.id || !Array.isArray(full.message)) complete = false;
-          messageCount = Array.isArray(full?.message) ? full.message.length : 0;
-        } catch { complete = false; /* Keep counts already read, but never infer deletion from this character. */ }
-      }
-      items.push({ characterId, characterName, chatId, chatTitle: String(chat.name ?? chat.title ?? "").trim() || `채팅 ${chatIndex + 1}`, messageCount });
-    }
-    if (complete) completeCharacterIds.add(characterId);
-  }
-  for (const id of duplicateCharacterIds) completeCharacterIds.delete(id);
-  return { items, characterIds, completeCharacterIds, charactersComplete };
-}
-
-export function deletedHostChats(state: RuntimeState, data: Pick<DashboardData, "adminChats">, view: DataViewState): any[] {
-  const ids = new Set(view.deletedChatIds);
-  return data.adminChats.filter(chat => ids.has(chat.id) && chat.id !== state.current?.chatId);
-}
-
-export async function scanDeletedHostChats(state: RuntimeState, client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats">, view: DataViewState): Promise<void> {
-  view.deletedChatIds = [];
-  view.cleanupConfirmation = undefined;
-  view.cleanupResult = undefined;
-  view.inventoryError = undefined;
-  view.inventoryPartial = false;
-  view.inventoryStatus = "loading";
-  let inventory: HostChatInventory;
-  try {
-    inventory = await readHostChatInventory();
-  } catch {
-    view.inventory = [];
-    view.inventoryStatus = "unavailable";
-    return;
-  }
-  view.inventory = inventory.items;
-  view.inventoryPartial = !inventory.charactersComplete || inventory.completeCharacterIds.size !== inventory.characterIds.size;
-  const hostIds = new Set(inventory.items.map(item => item.chatId));
-  view.deletedChatIds = data.adminChats.filter(chat => chat.id !== state.current?.chatId && !hostIds.has(chat.id)
-    && (inventory.completeCharacterIds.has(chat.characterId)
-      || (inventory.charactersComplete && !inventory.characterIds.has(chat.characterId)))).map(chat => chat.id);
-  const failures: string[] = [];
-  for (const chat of deletedHostChats(state, data, view)) {
-    if (chat.id === state.current?.chatId) continue;
-    try { await stopDeletedHostChatWork(state, client, chat.id); }
-    catch (error) { failures.push(`${chat.chatTitle || chat.id}: ${sanitizeDiagnosticText(String(error))}`); }
-  }
-  view.inventoryError = failures.length ? `작업 중지 실패 ${failures.length}개 · ${failures.join(" · ")}. 다시 찾아 주세요.` : undefined;
-  view.inventoryStatus = "ready";
-}
-
-/** The per-chat delete path is shared by individual and bulk cleanup. */
-export async function deleteServerChatRecords(state: RuntimeState, client: Pick<ServerClient, "request">, chatId: string): Promise<void> {
-  await client.request(`/v1/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" }, 30_000);
-  await discardSetupCapture(state, chatId);
-  clearDeletedChatState(state, chatId);
-  await invalidateTranslationCache(state, { chatId });
-  await saveSettings(state.settings);
-}
-
-export async function cleanupDeletedHostChats(state: RuntimeState, client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats">, view: DataViewState): Promise<void> {
-  if (view.cleanupRunning || !view.cleanupConfirmation || view.inventoryStatus !== "ready") return;
-  const confirmed = new Set(view.cleanupConfirmation);
-  const chats = deletedHostChats(state, data, view).filter(chat => confirmed.has(chat.id));
-  view.cleanupRunning = true;
-  view.cleanupConfirmation = undefined;
-  let deleted = 0;
-  let skipped = 0;
-  const failures: string[] = [];
-  try {
-    for (const chat of chats) {
-      if (chat.id === state.current?.chatId) { skipped++; continue; }
-      try {
-        await deleteServerChatRecords(state, client, chat.id);
-        data.adminChats = data.adminChats.filter(item => item.id !== chat.id);
-        view.deletedChatIds = view.deletedChatIds?.filter(id => id !== chat.id);
-        deleted++;
-      } catch (error) { failures.push(`${chat.chatTitle || chat.id}: ${sanitizeDiagnosticText(String(error))}`); }
-    }
-    view.cleanupResult = `RCM 기록 ${deleted}개 정리했어요${failures.length ? ` · 실패 ${failures.length}개: ${failures.join(" · ")}` : ""}${skipped ? ` · 현재 채팅 ${skipped}개 제외` : ""}`;
-  } finally { view.cleanupRunning = false; }
-}
-
 function confirmationPanel(chat: any, confirmation?: DataConfirmation): string {
   if (!confirmation || confirmation.chatId !== chat.id) return "";
   const action = confirmation.action;
@@ -3696,7 +3305,7 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
   // Bots keep their order; inside a bot, each original chat leads its branches and copies, folded one level deep.
   // A search shows plain matching rows so a hit is never hidden inside a closed family.
   const bots: Array<[string, any[]]> = [];
-  for (const chat of filtered) {
+  for (const chat of filtered.filter(chat => chat.engagedAt !== null)) {
     const name = botOf(chat);
     const group = bots.find(([bot]) => bot === name);
     if (group) group[1].push(chat); else bots.push([name, [chat]]);
@@ -3707,6 +3316,10 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
     const open = root.id === state.current?.chatId || members.some(({ chat }) => chat.id === state.current?.chatId);
     return `<div class="fam">${chatRow(root)}<details class="fam__fold" data-preserve-open="data-family:${escapeHtml(String(root.id))}"${open ? " open" : ""}><summary><span>분기·복사 ${members.length}개</span><span class="chev" aria-hidden="true">${icon("chevron")}</span></summary>${members.map(({ chat, parent }) => chatRow(chat, { parent, rootTitle, kid: true })).join("")}</details></div>`;
   }).join("")}`).join("");
+  const openedOnly = filtered.filter(chat => chat.engagedAt === null);
+  const openedOnlyFold = openedOnly.length ? fold(`열어 보기만 한 채팅 ${openedOnly.length}개`,
+    openedOnly.map(chat => chatRow(chat)).join("") + `<form id="cleanup-opened-chats-form" data-chat-ids="${escapeHtml(JSON.stringify(openedOnly.map(chat => String(chat.id))))}"><div class="decide">${btn("한 번에 정리", { kind: "quiet", action: "submit-form", data: { formId: "cleanup-opened-chats-form" } })}</div></form>`,
+    { role: "section", preserveKey: "opened-only-chats" }) : "";
   const inventoryLabel = view.inventoryStatus === "loading" ? "Risu에서 지워진 채팅 찾는 중…" : "Risu에서 지워진 채팅 찾기";
   const scanNotice = view.inventoryStatus === "ready"
     ? notice(deletedChats.length ? `Risu에 없는 채팅 ${deletedChats.length}개 · RCM 기록만 남아 있어요`
@@ -3716,7 +3329,7 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
   const scanPartial = view.inventoryStatus === "ready" && view.inventoryPartial ? notice("일부 Risu 목록을 끝까지 읽지 못했어요. 해당 목록은 삭제 판정에서 제외했어요.") : "";
   const cleanupChats = deletedChats.filter(chat => view.cleanupConfirmation?.includes(chat.id));
   const cleanupConfirmation = view.cleanupConfirmation && cleanupChats.length ? `<div class="confirm is-danger" role="alert"><b>채팅 ${cleanupChats.length}개의 RCM 기록을 삭제할까요?</b><p class="sub">${cleanupChats.map(chat => escapeHtml(titleOf(chat))).join(" · ")}</p><p class="sub">RCM 원문 장부와 기억을 삭제해요. RCM ZIP 백업 외에는 복구할 수 없어요.</p><div class="decide">${btn("취소", { kind: "quiet", action: "cancel-deleted-chat-cleanup" })}${btn("RCM 기록 삭제", { kind: "danger-solid", action: "confirm-deleted-chat-cleanup" })}</div></div>` : "";
-  const cleanupStatus = view.cleanupRunning ? notice("RCM 기록을 정리하고 있어요…") : view.cleanupResult ? notice(view.cleanupResult) : "";
+  const cleanupStatus = view.cleanupRunning ? notice("RCM 기록을 정리하고 있어요…") : view.cleanupResult ? notice(view.cleanupResult, { errorReport: view.cleanupErrorReport }) : "";
   // Search and the bot filter earn their space only once the list is long; a typed query keeps them visible.
   const controls = visibleChats.length > 5 || query || view.filter !== "all"
     ? `<div class="tl-tools datatools"><label class="search">${icon("search")}<span class="sr-only">채팅 검색</span><input class="input" data-action="data-search" value="${escapeHtml(view.query)}" placeholder="채팅 검색"></label><label class="relperson"><span class="sr-only">봇 필터</span><select class="select" data-action="data-filter"><option value="all" ${view.filter === "all" ? "selected" : ""}>모든 봇</option><option value="current" ${view.filter === "current" ? "selected" : ""}>현재 봇</option><option value="other" ${view.filter === "other" ? "selected" : ""}>다른 봇</option></select></label></div>`
@@ -3725,30 +3338,15 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
   const pageMenu = menu({ label: "데이터 더보기", items: [{ label: inventoryLabel, icon: "refresh", action: "load-data-inventory", disabled: view.inventoryStatus === "loading" || view.cleanupRunning }] });
   const importAction = `${btn("전체 백업", { kind: "secondary", action: "export-complete-backup", disabled: backupBusy })}<label class="btn btn--secondary" for="backup-file" title="백업 불러오기">백업 불러오기</label><input class="sr-only" id="backup-file" type="file" accept=".zip,application/zip"${backupBusy ? " disabled" : ""}>${pageMenu}`;
   const backupProgress = backupBusy ? notice(`${view.backupExportPhase === "creating" ? "백업 생성" : "다운로드"} · ${view.backupExportChatId ? "선택한 채팅의 RCM 데이터와 채팅별 설정" : "모든 RCM 데이터·설정·키"}을 저장하고 있습니다.`) : "";
-  const backupError = view.backupExportError ? notice(`백업을 만들지 못했습니다. ${view.backupExportError}`, { tone: "cut" }) : "";
+  const backupError = view.backupExportError ? notice(`백업을 만들지 못했습니다. ${view.backupExportError}`, { tone: "cut", errorReport: view.backupExportErrorReport }) : "";
   return `<div class="datapage">${pageHeader("데이터", "채팅별 RCM 기록을 확인하고 백업하거나 삭제합니다.", importAction)}
     ${operationNotice}${lineagePanel(data, operation)}
     ${lineageProbeNotice(state)}
     ${backupProgress}${backupError}${controls}
-    ${scanNotice}${scanPartial}${view.inventoryError ? notice(view.inventoryError, { tone: "cut" }) : ""}${cleanupConfirmation}${cleanupStatus}
-    <section class="chats" aria-label="채팅별 RCM 데이터">${rows || empty("조건에 맞는 RCM 데이터가 없습니다", "검색어나 봇 필터를 바꿔 보세요.")}</section>
+    ${scanNotice}${scanPartial}${view.inventoryError ? notice(view.inventoryError, { tone: "cut", errorReport: view.inventoryErrorReport }) : ""}${cleanupConfirmation}${cleanupStatus}
+    <section class="chats" aria-label="채팅별 RCM 데이터">${rows || (openedOnly.length ? empty("아직 RCM을 사용한 채팅이 없어요", "열어 보기만 한 채팅은 아래에서 확인할 수 있어요.") : empty("조건에 맞는 RCM 데이터가 없습니다", "검색어나 봇 필터를 바꿔 보세요."))}</section>
+    ${openedOnlyFold}<p class="sub">최근 자동 정리 ${Number(data.recentChatCleanup?.count ?? 0).toLocaleString()}개</p>
     <p class="sub">전체 백업에는 서버 토큰과 API 키가 들어 있습니다. 개인 파일로만 보관하세요.</p></div>`;
-}
-
-export async function setRetrievalDiagnostics(client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats" | "error">, chatId: string, enabled: boolean): Promise<boolean> {
-  if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return false;
-  try {
-    const result = await client.request<{ enabled: boolean }>(`/v1/admin/chats/${encodeURIComponent(chatId)}/retrieval-diagnostics`, {
-      method: "PUT", body: JSON.stringify({ enabled }),
-    });
-    const chat = data.adminChats.find((item) => item.id === chatId);
-    if (chat) chat.retrievalDiagnosticsEnabled = result.enabled;
-    data.error = undefined;
-    return result.enabled;
-  } catch (error) {
-    data.error = String(error);
-    throw error;
-  }
 }
 
 const SETTINGS_SECTIONS = ["chat", "memory", "display", "model", "server"] as const;
@@ -3891,6 +3489,12 @@ export function settingsV2(
   const check = (name: string, label: string, checked: boolean, note = "", disabled = false) => `<label class="field field--check"><span><input name="${name}" type="checkbox" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}> ${label}</span>${hint(note)}</label>`;
   const chatOff = hasCurrentChat ? "" : "disabled";
   const perspectivePlaceholder = detectedPerspectives.length ? `자동: ${detectedPerspectives.join(" · ")}` : "비워두면 자동 감지";
+  const budgetControl = (name: string, label: string, value: number | undefined, disabled = false) => {
+    const presets = [4_000, 6_000, 8_000, 12_000];
+    const custom = value !== undefined && !presets.includes(value);
+    return `<label class="field" data-memory-budget><span>${label}</span><select name="${name}"${disabled ? " disabled" : ""}>${name === "chatMemoryBudget" ? `<option value="inherit"${value === undefined ? " selected" : ""}>공통값 · ${settings.defaultMemoryBudget.toLocaleString()}</option>` : ""}${presets.map(preset => `<option value="${preset}"${value === preset ? " selected" : ""}>${preset.toLocaleString()} tokens</option>`).join("")}<option value="custom"${custom ? " selected" : ""}>직접 입력</option></select><input aria-label="${label} 직접 입력" name="${name}Custom" type="number" min="1" max="${MAX_MEMORY_BUDGET}" step="1" required value="${value ?? settings.defaultMemoryBudget}"${custom ? "" : " hidden"}${disabled || !custom ? " disabled" : ""}><small class="sub"${(value ?? settings.defaultMemoryBudget) > 12_000 ? "" : " hidden"}>큰 값은 메인 모델의 문맥을 더 많이 사용해요.</small></label>`;
+  };
+
 
   const currentChat = pane("chat", "현재 채팅", `
     ${group("사용", `<div class="form__row">
@@ -3902,7 +3506,7 @@ export function settingsV2(
     ${group("정리 방식", `<div class="form__row">
       <label class="field"><span>한 번에 정리할 턴</span><input name="extractionGroupTurns" type="number" min="1" max="50" step="1" value="${extractionGroupTurns}" ${chatOff}>${hint("보호가 끝난 턴을 몇 개씩 모아 기억으로 만듭니다.")}</label>
       <label class="field"><span>기억 정본 언어</span><select name="memoryLanguage" ${chatOff}><option value="en" ${desiredMemoryLanguage === "en" ? "selected" : ""}>English</option><option value="ko" ${desiredMemoryLanguage === "ko" ? "selected" : ""}>한국어</option><option value="ja" ${desiredMemoryLanguage === "ja" ? "selected" : ""}>日本語</option><option value="zh" ${desiredMemoryLanguage === "zh" ? "selected" : ""}>中文</option></select>${hint(pendingMemoryLanguage ? `다음 재생성부터 ${escapeHtml(pendingMemoryLanguage.toUpperCase())}` : activeMemoryLanguage !== desiredMemoryLanguage ? `지금은 ${escapeHtml(activeMemoryLanguage.toUpperCase())}` : "")}</label>
-      <label class="field"><span>기억 주입량</span><select name="chatMemoryBudget" ${chatOff}><option value="inherit" ${currentMemoryBudget === undefined ? "selected" : ""}>공통값 · ${settings.defaultMemoryBudget.toLocaleString()}</option>${[4_000, 6_000, 8_000, 12_000].map((value) => `<option value="${value}" ${currentMemoryBudget === value ? "selected" : ""}>${value.toLocaleString()} tokens</option>`).join("")}</select></label>
+      ${budgetControl("chatMemoryBudget", "기억 주입량", currentMemoryBudget, !hasCurrentChat)}
       ${check("memoryOnlyInjection", "기억만 보내기", memoryOnlyInjection, "인물·현재 탭은 계속 기록하지만 상태 장부는 보내지 않습니다. 다가오는 날은 아래 설정을 따릅니다.", !hasCurrentChat)}
       ${check("pairProgress", "진도 알리기", state.current ? (settings.pairProgress[state.current.chatId] ?? false) : false, "아직 기록되지 않은 두 사람의 경험을 메인 모델에게 알려 줍니다.", !hasCurrentChat)}
       ${check("upcomingOccasions", "다가오는 날 알리기", upcomingOccasions, "생일·기념일이 2주 안으로 다가오면 메인 모델에게 한 줄로 알려 줍니다. 날짜를 자주 건너뛰는 이야기라면 꺼 두세요.", !hasCurrentChat)}
@@ -3913,7 +3517,7 @@ export function settingsV2(
 
   const memory = pane("memory", "기억", `
     ${group("기억 주입", `<div class="form__row">
-      <label class="field"><span>공통 기억 주입량</span><select name="defaultMemoryBudget">${[4_000, 6_000, 8_000, 12_000].map((value) => `<option value="${value}" ${settings.defaultMemoryBudget === value ? "selected" : ""}>${value.toLocaleString()} tokens</option>`).join("")}</select></label>
+      ${budgetControl("defaultMemoryBudget", "공통 기억 주입량", settings.defaultMemoryBudget)}
       ${check("memoryToolsEnabled", "메인 모델에 기억 도구 제공", settings.memoryToolsEnabled, "끄면 자동 주입만 사용합니다.")}
       <label class="field"><span>도구 호출당 최대 반환량</span><input name="mcpCap" type="number" min="1500" max="4000" step="100" value="${settings.mcpCap}"></label>
       <div class="field"><span>주입 위치</span><p class="sub">프리셋·캐릭터 설명·로어북 중 한 곳에 <code>[[RCM]]</code>을 넣으세요.</p></div>
@@ -3990,7 +3594,7 @@ export function settingsV2(
       <label class="field"><span>서버 토큰</span>${secretInput("serverToken", "서버 토큰", { value: settings.serverToken })}</label>
     </div>`)}
     ${installedVersions}${data.connectionIssue?.kind === "incompatible" ? `<p class="sub">${escapeHtml(data.connectionIssue.detail)}</p>` : ""}${manualServerUpdate}${update}`);
-  const voyage = `<div class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">검색 임베딩</h3><form id="voyage-form" class="connection-card"><label class="field"><span>Voyage API 키</span>${secretInput("voyageApiKey", "Voyage API 키", { placeholder: embedding?.configured ? "저장된 키 유지" : "키 입력", disabled: voyageBusy })}</label>${connectionCheck("voyage", embedding?.configured ? '<span class="settings-action__end"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></span>' : "")}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}</div></div>` : ""}</form></div>`;
+  const voyage = `<div class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">검색 임베딩</h3><form id="voyage-form" class="connection-card"><label class="field"><span>Voyage API 키</span>${secretInput("voyageApiKey", "Voyage API 키", { placeholder: embedding?.configured ? "저장된 키 유지" : "키 입력", disabled: voyageBusy })}</label>${connectionCheck("voyage", embedding?.configured ? '<span class="settings-action__end"><button class="btn btn--danger" type="button" data-action="remove-voyage-key">저장된 키 제거</button></span>' : "")}${voyageState ? `<div class="notice" role="${voyageState.kind === "success" ? "status" : "alert"}">${icon(voyageState.kind === "success" ? "check" : "error")}<div>${escapeHtml(voyageState.message)}${errorDetails(voyageState.errorReport)}</div></div>` : ""}</form></div>`;
   const translation = `<section class="setting-group" data-settings-model-extra ${section === "model" ? "" : "hidden"}><h3 class="model-section-title">참고 번역</h3><div class="form__row connection-card" data-translation-card>
     <label class="field"><span>번역 방식</span><select form="settings-form" name="translationProvider">${[["google", "Google 번역 (무료)"], ["risu", "Risu 보조 모델"], ["server", "RCM 서버 모델"]].map(([v, label]) => `<option value="${v}" ${settings.translationProvider === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
     <label class="field" data-translation-mode="risu" ${settings.translationProvider === "risu" ? "" : "hidden"}><span>모델 슬롯</span><select form="settings-form" name="translationSlot">${[["translate", "Risu 번역 슬롯"], ["main", "Main"], ["memory", "Memory"], ["otherAx", "Other AX"], ["static", "고정 모델 ID"]].map(([v, label]) => `<option value="${v}" ${settings.translationSlot === v ? "selected" : ""}>${label}</option>`).join("")}</select></label>
@@ -4340,6 +3944,7 @@ export async function loadDashboardData(
     ingestionState: jobsState.ingestionState,
     recallLogs: value("recallLogs", { items: previous.recallLogs }).items,
     adminChats,
+    recentChatCleanup: adminCall.status === "fulfilled" ? adminCall.value.recentCleanup : previous.recentChatCleanup,
     lineage,
     jobsError: requested.has("jobs")
       ? chatCalls.get("jobs")?.status === "rejected" ? String((chatCalls.get("jobs") as PromiseRejectedResult).reason) : undefined
@@ -4347,6 +3952,7 @@ export async function loadDashboardData(
     adminError: adminCall.status === "rejected" ? String(adminCall.reason) : undefined,
     contextError: optionalContext.error,
     error: healthCall.status === "rejected" ? String(healthCall.reason) : undefined,
+    errorReport: formatServerError(healthCall.status === "rejected" ? healthCall.reason : adminCall.status === "rejected" ? adminCall.reason : [...chatCalls.values()].find(call => call.status === "rejected")?.reason),
     connectionIssue: healthCall.status === "rejected" ? describeServerConnectionIssue(state.settings, healthCall.reason) : undefined,
   };
 }
@@ -4417,17 +4023,21 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const snow = createHomeSnow(document, () => state.settings.christmasSnow !== false, previewSnow);
   let focusSettings = state.dashboardFocusSettings;
   state.dashboardFocusSettings = undefined;
-  let setupPicker: (SetupPicker & { rebuild?: { expectedSourceMessages?: number; extractionReviewOverride: boolean } }) | undefined;
-  let setupLoading = false;
-  const setupOpenChecked = new Set<string>();
+  const setupView = createSetupView();
+  const setupActions = createSetupController(setupView, root, state, client, {
+    getData: () => data, getActiveTab: () => activeTab, setActiveTab: tab => { activeTab = tab; },
+    clearEditor: () => { formDirty = false; },
+    render: invalidate => render(invalidate), refresh: () => refresh({ forceApply: true }),
+    confirm: confirmDashboard, drainWorker: () => { void drainWorker(state, client); },
+  });
   let activeTab: Tab = focusSettings ? "settings" : "overview";
   let nowFilter: NowFilter = "all";
   let nowSort: NowSort = "recent";
   const nowView: NowView = { mode: "now", selected: "", mobileDetail: false, listOnly: false };
   const sentView: SentView = { open: false, more: new Set() };
   const promiseStatusInFlight = new Set<string>();
-  const landmarkPatchQueue = new MemoryLandmarkPatchQueue<any>();
-  const currentMemoryLandmarks = (memoryId: string): any[] => {
+  const landmarkPatchQueue = new MemoryLandmarkPatchQueue<LandmarkKind>();
+  const currentMemoryLandmarks = (memoryId: string): LandmarkKind[] => {
     const memory = data.memories.find((item) => item.id === memoryId);
     if (!memory) return [];
     if (!Array.isArray(memory.landmarkKinds)) memory.landmarkKinds = [];
@@ -4438,14 +4048,33 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   let worldEditorOnNow = false;
   let selectedMemory = "";
   const organizationView = createOrganizationView();
-  let organizationChatId = state.current?.chatId;
-  const timelineView: TimelineViewState = { query: "", landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false, includeInactive: false, editing: false, creating: false, mobileDetail: false };
+  const organizationActions = createOrganizationController(organizationView, root, state, client, {
+    render: invalidate => render(invalidate), refresh: () => refresh({ forceApply: true }),
+    openTimeline: () => { activeTab = "timeline"; },
+    discardReadyOrganizationCandidate: () => discardReadyOrganizationCandidate(),
+    drainWorker: () => { void drainWorker(state, client); },
+    chooseExtractionReviewOverride,
+    renderSourceNavigationCompletion: () => renderSourceNavigationCompletion(root, complete => render(true, complete)),
+    isDashboardOpen: () => dashboardOpen,
+    regenerationFailed: () => { addLog(state.logs, "error", "Regeneration preparation failed: [오류 원문 제외]"); },
+  });
+
+  const timelineView = createTimelineView();
+  const timelineActions = createTimelineController(timelineView, root);
   // The chip's quiz opens the dashboard on the scene a question came from.
   const focusMemoryId = state.dashboardFocusMemoryId;
   state.dashboardFocusMemoryId = undefined;
   if (focusMemoryId) { activeTab = "timeline"; selectedMemory = focusMemoryId; timelineView.mobileDetail = true; }
   const storyView: StoryViewState = { selectedGroupId: "", query: "", indexOpen: false, expandedMemoryId: "", editingOverview: false };
-  const peopleView: PeopleViewState = { selectedId: "", query: "", prominence: "all", editing: false, mobileDetail: false, management: "" };
+  const peopleView = createPeopleView();
+  const peopleManagement: PeopleManagementState = {};
+  const peopleActions = createPeopleController(peopleView, peopleManagement, root, client, {
+    getData: () => data, getChatId: () => state.current?.chatId, render: invalidate => render(invalidate),
+    prepareEditor: action => {
+      if (action === "select-person") navigation.supersede();
+      formDirty = false;
+    },
+  });
   const navigationStack = new NavigationStack();
   let selectedRelationship = "";
   let relationshipSection = "state";
@@ -4457,15 +4086,19 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   let relationshipQuery = "";
   const pairFlowViews = new Map<string, RelationshipFlowView>();
   let pairEmotionMode: "now" | "flow" = "now";
-  let pairDiaryFilter: PairDiaryFilter = "all";
-  let pairDiarySort: PairDiarySort = "newest";
-  let anniversaryEditorEntryId = "";
+  const pairView = createPairView();
+  const pairActions = createPairController(pairView, root, client, {
+    render: () => render(),
+    openEditor: kind => {
+      if (kind === "new") { intimacyEditor = undefined; relationshipEditing = false; socialEditor = undefined; }
+      formDirty = false;
+    },
+  });
   let intimacyEditor: IntimacyEditor | undefined;
   let socialEditor: SocialEditor | undefined;
-  let entityMergePreview: any | undefined;
-  let entityDeletePreview: any | undefined;
   let voyageSaveState: ActionState | undefined;
   let actionSaveState: ActionState | undefined;
+  let actionError: ActionState | undefined;
   let retryBusy = false;
   let retryFeedback: (ActionState & { chatId: string; embedding?: boolean }) | undefined;
   let retryOffer: { chatId: string; count: number } | undefined;
@@ -4474,7 +4107,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   let quizActionBusy = false;
   let connectionCheckBusy = false;
   let voyageSaveBusy = false;
-  const attentionView: AttentionViewState = { selectedId: "", query: "", filter: "all", mobileDetail: false };
+  const attentionView = createAttentionView();
+  const attention = createAttentionController(attentionView, root, () => render(false), client);
   let settingsSection: SettingsSection = focusSettings ? "model" : "chat";
   /** Phone skin on a phone: a settings section shows as its own screen over the section list. */
   let settingsSectionOpen = Boolean(focusSettings);
@@ -4496,7 +4130,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   let renderedPageTab: Tab | undefined;
   let renderedPageContent = "";
   let deferredPageRender = false;
-  const dataView: DataViewState = { inventoryStatus: "idle", inventory: [], query: "", filter: "all" };
+  const dataView = createDataView();
+  const dataActions = createDataController(state, dataView, root, () => render(), client);
   let cacheStats: TranslationCacheStats = { items: 0, bytes: 0, maxItems: 50_000, maxBytes: 128 * 1024 * 1024 };
   const translations: TranslationView = new Map();
   const translationRequested = new Set<string>();
@@ -4505,65 +4140,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   let translationObserver: IntersectionObserver | undefined;
   let unsubscribeActivity: (() => void) | undefined;
   const activeCanonicalLanguage = (chatId = state.current?.chatId): MemoryLanguage => dashboardCanonicalLanguage(state, chatId, data.adminChats);
-
-  const applyTimelineSearch = () => {
-    const query = timelineView.query.trim().toLocaleLowerCase();
-    let visible = 0;
-    root.querySelectorAll<HTMLElement>("#memory-rows > .row").forEach((row) => {
-      const match = !query || Boolean(row.textContent?.toLocaleLowerCase().includes(query));
-      row.hidden = !match;
-      if (match) visible += 1;
-    });
-    let visibleChildren = 0;
-    root.querySelectorAll<HTMLDetailsElement>("#memory-rows > .capsule-children").forEach((group) => {
-      let childVisible = 0;
-      group.querySelectorAll<HTMLElement>(".row").forEach((row) => {
-        const match = !query || Boolean(row.textContent?.toLocaleLowerCase().includes(query));
-        row.hidden = !match;
-        if (match) childVisible += 1;
-      });
-      group.hidden = childVisible === 0;
-      visibleChildren += childVisible;
-    });
-    const count = root.querySelector<HTMLElement>("[data-timeline-count]");
-    if (count) count.textContent = `기억 ${visible}개`;
-    const searchEmptyNote = root.querySelector<HTMLElement>("[data-timeline-search-empty]");
-    if (searchEmptyNote) searchEmptyNote.hidden = !query || visible + visibleChildren > 0;
-    const reader = root.querySelector<HTMLElement>(".timeline .readercol");
-    const searchEmpty = Boolean(query) && visible + visibleChildren === 0;
-    // The reader keeps its content; a no-match search only swaps which child is shown, so no re-render is needed.
-    const showReaderEmpty = !timelineView.creating && data.memories.length > 0 && searchEmpty;
-    reader?.querySelectorAll<HTMLElement>(":scope > *").forEach((child) => {
-      child.style.display = child.hasAttribute("data-timeline-reader-empty") === showReaderEmpty ? "" : "none";
-    });
-    root.querySelectorAll<HTMLElement>("#memory-rows > [data-day-header]").forEach((header) => {
-      const day = header.dataset.dayHeader;
-      header.hidden = !Array.from(root.querySelectorAll<HTMLElement>("#memory-rows > .row")).some((row) => row.dataset.day === day && !row.hidden);
-    });
-  };
-
-  const applyPeopleSearch = () => {
-    const query = peopleView.query.trim().toLocaleLowerCase();
-    let visible = 0;
-    root.querySelectorAll<HTMLElement>("[data-people-group]").forEach((group) => {
-      let groupVisible = 0;
-      group.querySelectorAll<HTMLElement>("[data-person-row]").forEach((row) => {
-        const match = !query || Boolean((row.dataset.search ?? row.textContent)?.toLocaleLowerCase().includes(query));
-        row.hidden = !match;
-        if (match) groupVisible += 1;
-      });
-      group.hidden = groupVisible === 0;
-      if (query && groupVisible) {
-        if (group instanceof HTMLDetailsElement) group.open = true;
-        group.querySelectorAll<HTMLDetailsElement>("details.fold--more").forEach((more) => { more.open = true; });
-      }
-      visible += groupVisible;
-    });
-    const count = root.querySelector<HTMLElement>("[data-people-count]");
-    if (count) count.textContent = `${visible}명`;
-    const empty = root.querySelector<HTMLElement>("[data-people-search-empty]");
-    if (empty) empty.hidden = visible > 0;
-  };
 
 
   const applyStorySearch = () => {
@@ -4603,18 +4179,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (count) count.textContent = `${visible}개`;
     const empty = root.querySelector<HTMLElement>("[data-relationship-search-empty]");
     if (empty) empty.hidden = visible > 0;
-  };
-
-  const applyAttentionSearch = () => {
-    const query = attentionView.query.trim().toLocaleLowerCase();
-    let visible = 0;
-    root.querySelectorAll<HTMLElement>("[data-attention-row]").forEach((row) => {
-      const match = !query || Boolean(row.textContent?.toLocaleLowerCase().includes(query));
-      row.hidden = !match;
-      if (match) visible += 1;
-    });
-    const empty = root.querySelector<HTMLElement>("[data-attention-search-empty]");
-    if (empty) empty.hidden = !query || visible > 0;
   };
 
   const hasActiveSelection = (): boolean => {
@@ -4662,7 +4226,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const reset = relationshipSheetEditorsAfterSwitch(formDirty,
       !formDirty || await confirmDashboard("저장하지 않은 관계 변경을 버릴까요?"));
     if (!reset) return false;
-    ({ intimacyEditor, relationshipEditing, relationshipEditingDirection, anniversaryEditorEntryId, socialEditor, worldEditor, worldEditorOnNow } = reset);
+    ({ intimacyEditor, relationshipEditing, relationshipEditingDirection, anniversaryEditorEntryId: pairView.anniversaryEditorEntryId, socialEditor, worldEditor, worldEditorOnNow } = reset);
     formDirty = false;
     return true;
   };
@@ -4683,32 +4247,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     const nextTranslation=formData.has("translationServerProvider")?readTranslationConnectionSettings(formData):undefined;
     const nextMcp=formData.has("mcpModel")?readMcpSelectorSettings(formData):undefined;
-    const includeUserMessages = formData.has("includeUserMessages");
-    const characterEnabled = formData.has("characterEnabled");
-    // Disabled controls are absent from FormData; keep the chat's own checked value.
-    const chatEnabled = form.querySelector<HTMLInputElement>('[name="chatEnabled"]')?.checked ?? false;
-    const effectiveEnabled = characterEnabled && chatEnabled;
-    const characterEnabledById = { ...state.settings.characterEnabled };
-    const chatEnabledById = { ...state.settings.chatEnabled };
-    const catchUpPending = { ...state.settings.chatCatchUpPending };
-    const chatWasEnabled = state.current ? isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId) : false;
-    if (state.current) {
-      characterEnabledById[state.current.characterId] = characterEnabled;
-      chatEnabledById[state.current.chatId] = chatEnabled;
-      if (!chatWasEnabled && effectiveEnabled) catchUpPending[state.current.chatId] = true;
-      if (!effectiveEnabled) delete catchUpPending[state.current.chatId];
-    }
-    const perChat = { ...state.settings.includeUserMessages };
-    if (state.current) perChat[state.current.chatId] = includeUserMessages;
-    const progressByChat = { ...state.settings.pairProgress };
-    if (state.current) progressByChat[state.current.chatId] = formData.has("pairProgress");
-    const occasionsByChat = { ...state.settings.upcomingOccasions };
-    if (state.current) occasionsByChat[state.current.chatId] = formData.has("upcomingOccasions");
-    const memoryOnlyByChat = { ...state.settings.memoryOnlyInjection };
-    if (state.current) memoryOnlyByChat[state.current.chatId] = formData.has("memoryOnlyInjection");
-    const extractionGroupTurns = Math.min(50, Math.max(1, Math.round(Number(values.extractionGroupTurns ?? 6))));
-    const sourceProtectionTurns = Math.min(20, Math.max(1, Math.round(Number(values.sourceProtectionTurns ?? 10))));
-    const editProtectionTurns = Math.min(5, Math.max(1, Math.round(Number(values.editProtectionTurns ?? 2))));
+    const chatSettings = readChatSettingsChange(state, form, formData);
+    const { chatWasEnabled } = chatSettings;
+    const turnLimits = readChatTurnLimits(values);
+    const { extractionGroupTurns, sourceProtectionTurns, editProtectionTurns } = turnLimits;
     const customRules: CanonicalRemovalRule[] = Array.from(form.querySelectorAll<HTMLElement>("[data-regex-rule]")).map((row) => ({
       name: row.querySelector<HTMLInputElement>('input[name="customRuleName"]')?.value.trim() ?? "",
       enabled: row.querySelector<HTMLInputElement>('input[name="customRuleEnabled"]')?.checked === true,
@@ -4720,20 +4262,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const error = validateCanonicalRemovalRule(rule);
       if (error) throw new Error(`추가 제외 규칙 ${index + 1}: ${error}`);
     }
-    const perChatGroupTurns = { ...state.settings.extractionGroupTurns };
-    if (state.current) perChatGroupTurns[state.current.chatId] = extractionGroupTurns;
-    const memoryLanguage = ["en", "ko", "ja", "zh"].includes(String(values.memoryLanguage)) ? String(values.memoryLanguage) as "en" | "ko" | "ja" | "zh" : "en";
-    const memoryLanguages = { ...state.settings.memoryLanguages };
-    if (state.current) memoryLanguages[state.current.chatId] = memoryLanguage;
-    const allowedMemoryBudgets = new Set([4_000, 6_000, 8_000, 12_000]);
-    const defaultMemoryBudget = allowedMemoryBudgets.has(Number(values.defaultMemoryBudget))
-      ? Number(values.defaultMemoryBudget) as 4000 | 6000 | 8000 | 12000
-      : 6000;
-    const memoryBudgets = { ...state.settings.memoryBudgets };
-    if (state.current) {
-      if (values.chatMemoryBudget === "inherit") delete memoryBudgets[state.current.chatId];
-      else if (allowedMemoryBudgets.has(Number(values.chatMemoryBudget))) memoryBudgets[state.current.chatId] = Number(values.chatMemoryBudget) as 4000 | 6000 | 8000 | 12000;
-    }
+    const { perChatGroupTurns, memoryLanguage, memoryLanguages, defaultMemoryBudget, memoryBudgets } = readChatMemorySettings(state, values, extractionGroupTurns);
     const nextServerConnection = {
       serverUrl: String(values.serverUrl).trim().replace(/\/$/, ""),
       serverToken: String(values.serverToken).trim(),
@@ -4753,13 +4282,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (verifiedHealth?.ok && Number(verifiedHealth.apiRevision ?? 0) !== RCM_API_REVISION) {
       throw new Error(`RCM API revision mismatch: expected ${RCM_API_REVISION}, received ${String(verifiedHealth.apiRevision ?? "unknown")}`);
     }
-    if (state.current && memoryLanguage !== (state.settings.memoryLanguages[state.current.chatId] ?? "en")
-      && (Number(verifiedHealth?.apiRevision ?? 0) !== RCM_API_REVISION || !verifiedHealth?.capabilities?.multilingualCanonicalMemory)) {
-      throw new Error("현재 RCM 서버 계약에서만 기억 정본 언어를 변경할 수 있습니다.");
-    }
-    const perspectives = { ...state.settings.perspectives };
-    const perspectiveNames = String(values.perspectives ?? "").split(/[,\n]/).map((name) => name.trim()).filter(Boolean);
-    if (state.current) perspectives[state.current.chatId] = [...new Set(perspectiveNames)].slice(0, 4);
+    assertChatMemoryLanguageSupported(state, memoryLanguage, verifiedHealth);
+    const perspectives = readChatPerspectives(state, values);
     const extractionEngine: ServerLlmPublicConfig["engine"] = values.extractionEngine === "server" ? "server" : "risu";
     if (extractionEngine === "server" && (Number(verifiedHealth?.apiRevision ?? 0) !== RCM_API_REVISION || !verifiedHealth?.serverLlm || !verifiedHealth?.capabilities?.serverServiceTier)) {
       throw new Error("RCM 서버 계약이 맞지 않습니다. 현재 빌드로 업데이트하고 재시작한 뒤 다시 저장하세요.");
@@ -4772,45 +4296,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const reviewChanged = state.settings.postExtractionReview !== formData.has("postExtractionReview");
     const memoryToolsWereEnabled = state.settings.memoryToolsEnabled;
     const quizWasEnabled = state.settings.quizEnabled === true;
-    if (state.current) {
-      const workClient = new ServerClient(() => ({ ...state.settings, ...nextServerConnection }));
-      const characterChanged = (state.settings.characterEnabled[state.current.characterId] !== false) !== characterEnabled;
-      if (characterChanged) {
-        const result = await workClient.request<{ chatIds: string[] }>(`/v1/characters/${encodeURIComponent(state.current.characterId)}/work`, {
-          method: "PUT", body: JSON.stringify({ enabled: characterEnabled, chatEnabled: chatEnabledById, defaultChatEnabled: state.settings.defaultChatEnabled }),
-        });
-        for (const id of new Set([...result.chatIds, state.current.chatId])) {
-          invalidateChatTranslations(id);
-          if (characterEnabled && (chatEnabledById[id] ?? state.settings.defaultChatEnabled)) catchUpPending[id] = true;
-          else delete catchUpPending[id];
-        }
-        state.serverWorker = undefined;
-      } else {
-        const result = await workClient.request<{ worker: ServerWorkerStatus }>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/work`, {
-          method: "PUT", body: JSON.stringify({ enabled: effectiveEnabled }),
-        });
-        state.serverWorker = result.worker;
-      }
-      if (chatWasEnabled !== effectiveEnabled || characterChanged) { invalidateChatTranslations(state.current.chatId); translations.clear(); translationRequested.clear(); }
-    }
+    if (state.current) await applyChatWorkSettings(state, chatSettings, nextServerConnection, () => { translations.clear(); translationRequested.clear(); });
     if (reviewChanged) await applyQueuedExtractionReview(new ServerClient(() => ({ ...state.settings, ...nextServerConnection })), formData.has("postExtractionReview"));
-    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", christmasSnow: formData.has("christmasSnow"), defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), characterEnabled: characterEnabledById, chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending, includeUserMessages: perChat, memoryOnlyInjection: memoryOnlyByChat, upcomingOccasions: occasionsByChat, pairProgress: progressByChat, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
-    if (state.current) {
-      state.current.includeUserMessages = includeUserMessages;
-      state.current.pairProgress = progressByChat[state.current.chatId] ?? false;
-      state.current.upcomingOccasions = occasionsByChat[state.current.chatId] ?? true;
-      state.current.memoryOnlyInjection = memoryOnlyByChat[state.current.chatId] ?? false;
-      state.current.sourceProtectionTurns = sourceProtectionTurns;
-      state.current.editProtectionTurns = editProtectionTurns;
-      state.current.canonicalizationPolicy = state.settings.canonicalizationPolicy;
-      state.current.extractionGroupTurns = extractionGroupTurns;
-      state.current.memoryLanguage = memoryLanguage;
-      state.lastPromptValidation = effectiveEnabled ? undefined : { chatId: state.current.chatId, status: "disabled", at: Date.now() };
-      if (!effectiveEnabled) {
-        await discardSetupCapture(state, state.current.chatId);
-        state.automaticTurnPacket = undefined;
-        state.activeModelRequest = undefined;
-      }
+    state.settings = { ...state.settings, ...nextServerConnection, extractionEngine, postExtractionReview: formData.has("postExtractionReview"), auxiliaryMode: String(values.auxiliaryMode) as any, staticModel: String(values.staticModel), ...translationSettings(values), translationDisplay: values.translationDisplay === "en" ? "en" : "ko", autoTranslate: values.translationDisplay !== "en", statusWidgetVisible: formData.has("statusWidgetVisible"), quizEnabled: formData.has("quizEnabled"), dashboardTheme: values.dashboardTheme === "light" ? "light" : "dark", dashboardSkin: values.dashboardSkin === "phone" ? "phone" : "film", christmasSnow: formData.has("christmasSnow"), defaultMemoryBudget, memoryBudgets, mcpCap: Number(values.mcpCap), memoryToolsEnabled: formData.has("memoryToolsEnabled"), ...chatSettings.settings, sourceProtectionTurns, editProtectionTurns, canonicalizationPolicy: { useLightboard: formData.has("useLightboard"), useGigaTrans: true, customRules }, extractionGroupTurns: perChatGroupTurns, memoryLanguages, perspectives };
+    const disabledChatId = applyCurrentChatSettings(state, chatSettings, turnLimits, memoryLanguage);
+    if (disabledChatId !== undefined) {
+      await discardSetupCapture(state, disabledChatId);
+      state.automaticTurnPacket = undefined;
+      state.activeModelRequest = undefined;
     }
     await saveSettings(state.settings);
     if (verifiedHealth?.ok) data.health = verifiedHealth;
@@ -4890,31 +4383,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (serverConfigured && !state.settings.workerPaused) void drainWorker(state, client);
   };
 
-  const loadDataInventory = async () => {
-    if (dataView.inventoryStatus === "loading" || dataView.cleanupRunning) return;
-    const scan = scanDeletedHostChats(state, client, data, dataView);
-    render();
-    await scan;
-    if (activeTab === "data") render();
-  };
-
-  const exportCompleteBackup = async (chatId?:string) => {
-    if (dataView.backupExportPhase) return;
-    try {
-      dataView.backupExportError = undefined;
-      dataView.backupExportChatId=chatId;
-      dataView.backupExportPhase = "creating"; render();
-      const response = await requestBackupArchive(client, state, chatId);
-      const blob = await response.blob();
-      dataView.backupExportPhase = "downloading"; render();
-      triggerBackupDownload(blob, `rcm-${chatId?`chat-${chatId.replace(/[^a-zA-Z0-9_-]/g,"_")}`:"complete"}-backup-${new Date().toISOString().slice(0, 10)}.zip`);
-    } finally {
-      dataView.backupExportPhase = undefined;
-      dataView.backupExportChatId = undefined;
-      render();
-    }
-  };
-
   const restoreChatBackup = async (bytes: ArrayBuffer) => {
     const response=await client.raw("/v1/import/chat",{method:"POST",headers:{"Content-Type":"application/zip"},body:backupRequestBody(bytes)},180_000);
     const restored=await response.json() as any;
@@ -4956,12 +4424,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
 
   const activeDisplay = (): TranslationDisplay => activeCanonicalLanguage() === "ko" ? "en" : state.settings.translationDisplay;
   const datasetsLoaded = (tab: Tab): boolean => dashboardDatasetsForTab(tab).every((dataset) => data.loadedDatasets?.includes(dataset));
-  const activeContent = () => setupPicker ? setupSourcesPage(setupPicker) : !state.current && !["data", "settings"].includes(activeTab) ? noActiveChat(data, activeTab, state)
+  const activeContent = () => setupView.picker ? setupSourcesPage(setupView.picker) : !state.current && !["data", "settings"].includes(activeTab) ? noActiveChat(data, activeTab, state)
     : activeTab === "overview" ? overview(state, data, translations, datasetsLoaded("overview"), sentView, dailyMemoryView)
-    : activeTab === "initial" ? initialCalibrationPage(data, peopleView, translations, activeDisplay(), entityMergePreview, socialEditor, entityDeletePreview)
+    : activeTab === "initial" ? initialCalibrationPage(data, peopleView, translations, activeDisplay(), peopleManagement.mergePreview, socialEditor, peopleManagement.deletePreview)
     : activeTab === "story" ? storySpinePage(data, translations, storyView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.current ? state.settings.storyOverviewBackups[state.current.chatId] : undefined, datasetsLoaded("story"))
     : activeTab === "timeline" ? organizationView.open ? memoryOrganization(organizationView, data.memories, translations, organizationView.addition ? state.settings.translationDisplay : activeDisplay()) : timeline(data, selectedMemory, translations, timelineView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.translationActivity?.error)
-      : activeTab === "relationships" ? relationshipsV2(state, data, selectedRelationship, translations, activeDisplay(), entityMergePreview, intimacyEditor, relationshipSection, relationshipEditing, relationshipTier, relationshipMobileDetail, relationshipQuery, socialEditor, worldEditor, relationshipEditingDirection, pairDiaryFilter, pairDiarySort, anniversaryEditorEntryId, { mode: pairEmotionMode, ...pairFlowViews.get(selectedRelationship) })
+      : activeTab === "relationships" ? relationshipsV2(state, data, selectedRelationship, translations, activeDisplay(), peopleManagement.mergePreview, intimacyEditor, relationshipSection, relationshipEditing, relationshipTier, relationshipMobileDetail, relationshipQuery, socialEditor, worldEditor, relationshipEditingDirection, pairView.diaryFilter, pairView.diarySort, pairView.anniversaryEditorEntryId, { mode: pairEmotionMode, ...pairFlowViews.get(selectedRelationship) })
         : activeTab === "world" ? worldEditor && worldEditorOnNow ? `<div class="now-edit">${worldEditorPanel(data, worldEditor, "현재")}</div>`
             : renderNowPage(data, data.personaEntity, nowFilter, nowSort, promiseStatusInFlight, translations, activeDisplay(), nowView)
           : activeTab === "reviews" ? attentionPage(data, translations, activeDisplay(), attentionView)
@@ -5132,12 +4600,23 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     setHtmlIfChanged(topbar, currentShell().bar);
     const statusElement = topbar.querySelector<HTMLElement>(".bar__state");
     if (statusElement) statusElement.innerHTML = currentStatus;
+    const errorRegion = root.querySelector<HTMLElement>(".dashboard-error");
+    if (errorRegion) {
+      const failure = actionError ?? { message: data.error || "요청을 완료하지 못했어요.", errorReport: data.errorReport };
+      const report = failure.errorReport;
+      const markup = report ? notice(failure.message, { tone: "cut", errorReport: report }) : "";
+      if (errorRegion.dataset.report !== markup) {
+        errorRegion.innerHTML = markup;
+        errorRegion.dataset.report = markup;
+      }
+    }
     const refreshButton = topbar.querySelector<HTMLButtonElement>('[data-action="refresh"]');
     if (refreshButton) refreshButton.disabled = refreshing;
   };
 
   const showActionSaveState = (next: ActionState) => {
     actionSaveState = next;
+    actionError = next.kind === "error" ? next : undefined;
     if (actionSaveTimer) clearTimeout(actionSaveTimer);
     updateTopbar();
     actionSaveTimer = setTimeout(() => {
@@ -5234,11 +4713,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       ? state.statusSummary?.embeddingError ? { last_error: state.statusSummary.embeddingError } : undefined
       : data.jobs.find(job => job.status === "failed" && parseJson<Record<string, unknown>>(job.payload_json, {}).pipelineManualRetry === true) : undefined;
     const retryNotice = retryFeedback && retryFeedback.chatId === state.current?.chatId
-      ? notice(retryFailure?.last_error || retryFeedback.message, { tone: retryFailure || retryFeedback.kind === "error" ? "cut" : "plain" }) : "";
+      ? notice(retryFailure?.last_error || retryFeedback.message, { tone: retryFailure || retryFeedback.kind === "error" ? "cut" : "plain", errorReport: retryFeedback.errorReport }) : "";
     const retrySuggestion = retryOffer?.chatId === state.current?.chatId && state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)
       ? notice(`새 설정을 저장했어요. 실패한 작업 ${retryOffer!.count}건을 다시 시도할 수 있어요.`, { action: btn("새 설정으로 다시 시도", { kind: "primary", action: "retry-failed", disabled: retryBusy }) }) : "";
     const content = retryNotice + retrySuggestion + activeContent();
-    if (!root.querySelector(".topbar")) root.innerHTML = '<header class="topbar"></header><main class="main" id="main-content"><div class="subnav"></div><div class="page"></div></main><nav class="nav" aria-label="RCM 메뉴"></nav>';
+    if (!root.querySelector(".topbar")) root.innerHTML = '<header class="topbar"></header><main class="main" id="main-content"><div class="subnav"></div><div class="dashboard-error"></div><div class="page"></div></main><nav class="nav" aria-label="RCM 메뉴"></nav>';
     const nav = root.querySelector<HTMLElement>(".nav")!;
     const secondaryNav = root.querySelector<HTMLElement>(".subnav")!;
     const page = root.querySelector<HTMLElement>(".page")!;
@@ -5247,7 +4726,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const activeGroupId = dashboardNavGroup(activeTab);
     const activeGroup = groups.find((group) => group.id === activeGroupId) ?? groups[0]!;
     setHtmlIfChanged(secondaryNav, dashboardSecondaryNavigation(activeGroup, activeTab));
-    secondaryNav.hidden = activeGroup.items.length === 0 || Boolean(setupPicker);
+    secondaryNav.hidden = activeGroup.items.length === 0 || Boolean(setupView.picker);
     const activeElement = document.activeElement as HTMLElement | null;
     const protectFocusedControl = page.dataset.tab === activeTab && !organizationView.busy && Boolean(activeElement && page.contains(activeElement)
       && !(completeSourceNavigation && activeElement.closest('#organization-search-form input, #organization-jump-form input'))
@@ -5300,12 +4779,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       root.querySelector<HTMLDetailsElement>(`[data-preserve-open="${focusDisclosureKey}"]`)?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
     }
     layoutRelationshipFlow(root);
-    if (activeTab === "timeline") applyTimelineSearch();
+    if (activeTab === "timeline") timelineActions.applySearch(data.memories.length);
     if (activeTab === "story") applyStorySearch();
     if (activeTab === "story") presentSceneSheet();
-    if (activeTab === "initial") applyPeopleSearch();
+    if (activeTab === "initial") peopleActions.applySearch();
     if (activeTab === "relationships" && relationshipSection !== "acquaintances") applyRelationshipSearch();
-    if (activeTab === "reviews") applyAttentionSearch();
+    if (activeTab === "reviews") attention.applySearch();
     if (replacedPage) setEditorBaselines(page);
     root.setAttribute("aria-busy", "false");
     // Move only each horizontal control, preserving the page and reader positions.
@@ -5355,13 +4834,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     try {
       const refreshed = await loadDashboardData(state, client, { tab: requestedTab, previous: data });
       if (refreshed.chatId === state.current?.chatId) data.quizStatus = refreshed.quizStatus;
-      if (organizationChatId !== state.current?.chatId) {
-        Object.assign(organizationView, createOrganizationView());
-        organizationChatId = state.current?.chatId;
-      }
-      if (organizationView.open && state.current) {
-        organizationView.data = await client.request<OrganizationData>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/memory-organization`);
-      }
+      await organizationActions.refreshData();
       const previousIssue = state.serverConnectionIssue;
       if (refreshed.connectionIssue) {
         const confirmed = noteServerConnectionFailure(state, state.settings, refreshed.connectionIssue.kind === "incompatible" ? new ServerCompatibilityError(Number(refreshed.health?.apiRevision)) : new Error(refreshed.error ?? refreshed.connectionIssue.technical ?? refreshed.connectionIssue.detail));
@@ -5410,22 +4883,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           if (state.current) state.current = await readCurrentContext(state);
         }
       }
-      if (refreshed.initialCalibration?.status === "awaiting_confirmation"
-        && ["overview", "data", "operations"].includes(activeTab)) activeTab = "initial";
-      const setupChatId = refreshed.chatId;
-      if (setupChatId && setupChatId === state.current?.chatId && !currentLineageOperation(state)) {
-        observeSetupAttention(state, setupChatId, refreshed.initialCalibration?.status, refreshed.lineage);
-        if (!setupOpenChecked.has(setupChatId)) {
-          setupOpenChecked.add(setupChatId);
-          if (!setupPicker && activeTab === "overview") {
-            const picker = await firstOpenSetupPicker(state, setupChatId, refreshed.initialCalibration?.status, refreshed.lineage);
-            if (picker && dashboardOpen && generation === refreshGeneration && state.current?.chatId === setupChatId && activeTab === "overview") {
-              setupPicker = picker;
-              activeTab = "initial";
-            }
-          }
-        }
-      }
+      await setupActions.observeRefresh(refreshed, () => dashboardOpen && generation === refreshGeneration);
       const timelineMemories = timelineMemoryView(data.memories, timelineView);
       const visibleTimelineIds = new Set([...timelineMemories.matching, ...timelineMemories.topLevel].map((memory) => String(memory.id)));
       if (!visibleTimelineIds.has(selectedMemory)) selectedMemory = timelineDefaultMemoryId(data.memories, timelineView);
@@ -5439,7 +4897,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     } catch (error) {
       console.error("[RCM dashboard] initial data load failed", error);
       const confirmed = noteServerConnectionFailure(state, state.settings, error);
-      if (confirmed) data = { ...data, error: String(error), connectionIssue: confirmed };
+      if (confirmed) data = { ...data, error: String(error), errorReport: formatServerError(error), connectionIssue: confirmed };
     } finally {
       if (generation === refreshGeneration) {
         refreshing = false;
@@ -5554,7 +5012,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       await refresh();
       return true;
     } catch (error) {
-      voyageSaveState = { kind: "error", message: String(error) };
+      voyageSaveState = { kind: "error", message: String(error), errorReport: formatServerError(error) };
       addLog(state.logs, "error", `Voyage API key save failed: [오류 원문 제외]`, supportFailure("voyage_save", error));
       return false;
     } finally {
@@ -5565,7 +5023,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
 
   const changeChatProfile = async (profile: RpProfile): Promise<boolean> => {
     if (!state.current || !["companion", "simulation"].includes(profile)) return false;
-    if (profile === state.current.profile) { data.error = undefined; return false; }
+    if (profile === state.current.profile) { data.error = undefined; data.errorReport = undefined; return false; }
     const sourceContext = await readCurrentContext(state);
     const transitioningToSimulation = state.current.profile === "companion" && profile === "simulation";
     const backfill = transitioningToSimulation
@@ -5611,25 +5069,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     return true;
   };
 
-  const savePersonColor = async (form: HTMLFormElement, color: string | null) => {
-    const chatId = form.dataset.chatId;
-    if (!chatId || state.current?.chatId !== chatId || form.dataset.busy === "true") return;
-    form.dataset.busy = "true";
-    const errorLine = form.querySelector<HTMLElement>("[data-color-error]")!;
-    errorLine.hidden = true;
-    form.querySelectorAll<HTMLButtonElement>("button").forEach(button => { button.disabled = true; });
-    try {
-      await client.request(`/v1/chats/${encodeURIComponent(chatId)}/entities/${encodeURIComponent(form.dataset.entityId!)}/color`, { method: "PATCH", body: JSON.stringify({ color }) });
-      form.closest<HTMLDialogElement>("dialog")?.close();
-      if (state.current?.chatId === chatId) await refresh({ forceApply: true });
-    } catch (error) {
-      errorLine.textContent = error instanceof Error ? error.message : "색상을 저장하지 못했어요. 다시 시도해 주세요.";
-      errorLine.hidden = false;
-    } finally {
-      form.dataset.busy = "false";
-      form.querySelectorAll<HTMLButtonElement>("button").forEach(button => { button.disabled = false; });
-    }
-  };
+  const savePersonColor = (form: HTMLFormElement, color: string | null) =>
+    peopleActions.saveColor(form, color, () => refresh({ forceApply: true }));
 
   installRelationshipFlowScrub(root);
 
@@ -5672,70 +5113,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
   }, true);
 
-  let additionEstimateEpoch = 0;
-  let additionEstimateTimer: ReturnType<typeof setTimeout> | undefined;
-  const updateAdditionEstimate = async (): Promise<void> => {
-    const addition = organizationView.addition;
-    if (!addition || !state.current) return;
-    const epoch = ++additionEstimateEpoch;
-    addition.estimate = undefined;
-    addition.estimating = Boolean(addition.selectedIds.length);
-    const paintEstimate = () => {
-      const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
-      if (line) line.textContent = addition.estimating ? '예상량을 확인하고 있어요…' : addition.estimate
-        ? `원문 약 ${addition.estimate.rawTokens.toLocaleString()}토큰 · 보조 호출 약 ${addition.estimate.initialCalls}회 · ${addition.estimate.note}` : '사용할 메시지를 선택해 주세요.';
-      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form [data-action="submit-form"]');
-      if (button) button.disabled = Boolean(organizationView.busy || addition.estimating || !addition.estimate);
-    };
-    paintEstimate();
-    if (!addition.selectedIds.length) return;
-    const chatId = state.current.chatId;
-    try {
-      const estimate = await client.request<NonNullable<AdditionView['estimate']>>(`/v1/chats/${encodeURIComponent(chatId)}/memory-additions/preview`, {
-        method: 'POST', body: JSON.stringify({ rangeIds: addition.rangeIds, messageIds: addition.selectedIds, request: addition.request, postExtractionReview: state.settings.postExtractionReview }),
-      });
-      if (epoch !== additionEstimateEpoch || organizationView.addition !== addition || state.current?.chatId !== chatId) return;
-      addition.estimate = estimate;
-      organizationView.error = undefined;
-    } catch (error) {
-      if (epoch !== additionEstimateEpoch || organizationView.addition !== addition) return;
-      organizationView.error = error instanceof Error ? error.message : String(error);
-      const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
-      if (line) line.textContent = organizationView.error;
-    } finally {
-      if (epoch === additionEstimateEpoch && organizationView.addition === addition) {
-        addition.estimating = false;
-        paintEstimate();
-        if (!addition.estimate && organizationView.error) {
-          const line = root.querySelector<HTMLElement>('[data-addition-estimate]');
-          if (line) line.textContent = organizationView.error;
-        }
-      }
-    }
-  };
-  const openMemoryAddition = async (rangeIds: string[]): Promise<void> => {
-    if (!state.current) return;
-    const chatId = state.current.chatId;
-    const sources = await client.request<Omit<AdditionView, 'selectedIds' | 'request'>>(`/v1/chats/${encodeURIComponent(chatId)}/memory-additions/sources`, {
-      method: 'POST', body: JSON.stringify({ rangeIds }),
-    });
-    if (state.current?.chatId !== chatId || !organizationView.open) return;
-    const addition: AdditionView = { ...sources, selectedIds: sources.messages.filter(message => !message.additionReason).map(message => message.id), request: '' };
-    organizationView.addition = addition;
-    organizationView.candidateId = '';
-    organizationView.mobileDetail = true;
-    render();
-    await Promise.all([updateAdditionEstimate(), readHostSourceTranslations(chatId, addition.messages, state.settings.canonicalizationPolicy).then(found => {
-      if (state.current?.chatId !== chatId || organizationView.addition !== addition) return;
-      for (const message of addition.messages) message.translatedContent = found.get(message.id);
-      render();
-    })]);
-  };
-  const scrollOrganizationRange = (id: string) => {
-    const target = Array.from(root.querySelectorAll<HTMLElement>('[data-range-id]')).find(element => element.dataset.rangeId === id);
-    target?.scrollIntoView({ block: 'center' });
-  };
-
   const discardReadyOrganizationCandidate = async (): Promise<boolean> => {
     const candidateId = organizationView.candidateId;
     const item = candidateId.startsWith("group:")
@@ -5760,7 +5137,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       await refresh({ forceApply: true });
       return true;
     } catch (error) {
-      organizationView.error = error instanceof Error ? error.message : String(error);
+      organizationView.error = error instanceof Error ? error.message : String(error); organizationView.errorReport = formatServerError(error);
       render();
       return false;
     }
@@ -5772,78 +5149,15 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (!target) return;
     const action = target.dataset.action;
     if (action === "open-setup-sources" || action === "initial-retry") {
-      if (currentLineageOperation(state)) return;
-      if (!state.current || setupLoading) return;
-      if (["choice_required", "ambiguous"].includes(data.lineage?.status ?? "")) return;
-      if (action === "open-setup-sources" && !setupPendingIn(data)) return;
-      if (action === "initial-retry" && ["ready", "inherited", "skipped"].includes(data.initialCalibration?.status ?? "")
-        && !await confirmDashboard("", false, { title: "초기 설정 다시 읽기", bodyHtml: REREAD_NOTICE_HTML, confirm: "재료 고르기", cancel: "취소", className: "reread-dialog" })) return;
-      setupLoading = true;
-      const restoreLoading = setupEntryLoading(target);
-      const chatId = state.current.chatId;
-      try {
-        const loaded = await loadSetupPicker(state, chatId);
-        if (state.current?.chatId !== chatId) return;
-        loaded.reread = action === "initial-retry" && ["ready", "inherited", "skipped"].includes(data.initialCalibration?.status ?? "");
-        setupPicker = loaded;
-        void claimSetupAttention(chatId, "opened").catch(() => undefined);
-        activeTab = "initial";
-        formDirty = false;
-        render(false);
-      } finally { setupLoading = false; restoreLoading(); }
+      await setupActions.open(action, target);
       return;
     }
-    if (action?.startsWith("setup-") && setupPicker) {
+    if (action?.startsWith("setup-") && setupView.picker) {
       event.preventDefault();
-      const view = setupPicker;
-      if (view.busy) return;
-      const id = target.dataset.id ?? "";
-      if (action === "setup-close") { setupPicker = undefined; activeTab = "overview"; render(false); return; }
-      if (action === "setup-tab") view.tab = id === "all" ? "all" : "recommended";
-      if (action === "setup-clear") view.selected.clear();
-      if (action === "setup-reset") view.selected = new Set(view.items.filter(item => item.defaultSelected).map(item => item.id));
-      if (action === "setup-preview") { view.peek = view.peek === id ? undefined : id; view.preview = id; }
-      if (action === "setup-toggle") { view.selected.has(id) ? view.selected.delete(id) : view.selected.add(id); }
-      if (action === "setup-group") {
-        const items = setupGroups(view.items).find(group => group.key === id)?.items.filter(item => item.parsed.trim()) ?? [];
-        const all = items.every(item => view.selected.has(item.id));
-        items.forEach(item => all ? view.selected.delete(item.id) : view.selected.add(item.id));
-      }
-      if (action === "setup-submit" || action === "setup-skip") {
-        if (state.current?.chatId !== view.chatId) { view.error = "대시보드의 채팅이 바뀌었어요. 재료를 다시 열어 주세요."; render(); return; }
-        if (action === "setup-skip" && !await confirmDashboard("설정 읽기를 건너뛸까요? 직접 정리한 인물과 관계값은 유지해요.")) return;
-        if (action === "setup-skip" && ["ready", "inherited", "skipped"].includes(data.initialCalibration?.status)) { setupPicker = undefined; render(); return; }
-        view.busy = true; view.error = undefined; render();
-        try {
-          const lineage = await client.request<ChatLineageStatus>(`/v1/chats/${encodeURIComponent(view.chatId)}/lineage`);
-          if (["choice_required", "ambiguous"].includes(lineage.status) || (lineage.status === "inherited" && !view.reread)) {
-            setupPicker = undefined;
-            await refresh({ forceApply: true });
-            return;
-          }
-          if (action === "setup-submit" && !view.fallback && (await readSetupHost()).chatId !== view.chatId) throw new Error("Risu에서 이 채팅을 다시 열고 재료를 선택해 주세요.");
-          const projection = action === "setup-submit" ? await selectedSetupProjection(view) : undefined;
-          if (action === "setup-submit" && !projection) throw new Error("읽을 재료를 하나 이상 골라 주세요.");
-          const rebuilding = action === "setup-submit" && view.rebuild;
-          const result = await client.request<{ calibration: InitialCalibrationActivity }>(`/v1/chats/${encodeURIComponent(view.chatId)}/${rebuilding ? "reprocess" : `initial-calibration/${action === "setup-submit" ? "retry" : "skip"}`}`, {
-            method: "POST", ...(projection ? { body: JSON.stringify({
-              ...(rebuilding ? { ...rebuilding, activatePendingMemoryLanguage: true } : {}),
-              resolvedSetup: projection, identityHints: state.current.identityHints,
-            }) } : {}),
-          }, 120_000);
-          state.statusSummary = { ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }), initialCalibration: result.calibration };
-          data.initialCalibration = { ...data.initialCalibration, ...result.calibration };
-          observeSetupAttention(state, view.chatId, result.calibration.status);
-          state.publishStatusSummary?.();
-          setupPicker = undefined;
-          void drainWorker(state, client);
-          await refresh({ forceApply: true });
-        } catch (error) { view.error = error instanceof Error ? error.message : "설정을 읽지 못했어요. 다시 시도해 주세요."; }
-        finally { view.busy = false; }
-      }
-      render(); return;
+      await setupActions.handlePickerAction(action, target);
+      return;
     }
-    if (action === "tab") setupPicker = undefined;
+    if (action === "tab") setupView.picker = undefined;
     if (action === "test-connection") {
       const status = target.closest("[data-connection-check]")?.querySelector<HTMLElement>("[data-connection-result]");
       const form = root.querySelector<HTMLFormElement>("#settings-form");
@@ -5867,7 +5181,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (status.isConnected) { status.classList.remove("is-error"); status.innerHTML = `${icon("check")}<span>응답 ${(elapsed / 1000).toFixed(1)}초</span>`; }
         addLog(state.logs, "info", `Connection check succeeded (${target.dataset.target})`);
       } catch (error) {
-        if (status.isConnected) { status.classList.add("is-error"); status.innerHTML = `${icon("error")}<span>${escapeHtml(error instanceof Error ? error.message : "연결 확인 실패")}</span>`; }
+        if (status.isConnected) { status.classList.add("is-error"); status.innerHTML = `${icon("error")}<span>${escapeHtml(error instanceof Error ? error.message : "연결 확인 실패")}</span>${errorDetails(formatServerError(error))}`; }
         addLog(state.logs, "warn", `Connection check failed (${target.dataset.target})`, supportFailure("connection_test", error, { target: target.dataset.target }), (error as { detail?: string }).detail);
       } finally {
         connectionCheckBusy = false;
@@ -5884,6 +5198,21 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       state.logs.length = 0;
       render();
       showActionSaveState({ kind: "success", message: "기록을 비웠습니다." });
+      return;
+    }
+    if (action === "copy-error-details") {
+      const block = target.closest(".fold")?.querySelector<HTMLElement>(".error-report");
+      if (!block) return;
+      try {
+        try { await navigator.clipboard.writeText(block.textContent ?? ""); }
+        catch {
+          const selection = document.getSelection();
+          const range = document.createRange(); range.selectNodeContents(block);
+          selection?.removeAllRanges(); selection?.addRange(range);
+          if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+        }
+        target.textContent = "복사됨";
+      } catch { target.textContent = "텍스트를 선택해 복사해 주세요"; block.focus(); }
       return;
     }
     if (action === "copy-plugin-diagnostics") {
@@ -5914,7 +5243,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       && activeTab === "relationships") {
       if (editorHasChanges() && !await confirmDashboard("저장하지 않은 변경을 버릴까요?")) return;
       formDirty = false;
-      if (!["new-anniversary", "new-first-met", "designate-anniversary"].includes(action ?? "")) anniversaryEditorEntryId = "";
+      if (!["new-anniversary", "new-first-met", "designate-anniversary"].includes(action ?? "")) pairView.anniversaryEditorEntryId = "";
     }
     if (action === "restore-crumb") {
       const crumbs = screenCrumbs();
@@ -5972,13 +5301,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         settingsSection = target.dataset.settingsSection as SettingsSection;
         settingsSectionOpen = true;
       } else if (nextTab === "settings") settingsSectionOpen = false;
-      const requestedAttentionFilter = target.dataset.attentionFilter as AttentionFilter | undefined;
-      if (nextTab === "reviews" && requestedAttentionFilter && ["all", "duplicate", "conflict", "audit", "small"].includes(requestedAttentionFilter)) {
-        attentionView.filter = requestedAttentionFilter;
-        attentionView.selectedId = "";
-        attentionView.query = "";
-        attentionView.mobileDetail = false;
-      }
+      if (nextTab === "reviews") attention.applyTabFilter(target.dataset.attentionFilter);
       if (await navigate({
         tab: nextTab, scrollTop: 0, selectedMemory: "", timelineMobileDetail: false,
         selectedRelationship: "", relationshipPerson: "", relationshipMobileDetail: false,
@@ -6059,42 +5382,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       documentScroller(root)?.scrollTo({ top: 0 });
       return;
     }
-    if (action === "attention-filter") {
-      const next = target.dataset.filter as AttentionFilter;
-      if (!["all", "duplicate", "conflict", "audit", "small"].includes(next)) return;
-      attentionView.filter = next;
-      attentionView.selectedId = "";
-      attentionView.mobileDetail = false;
-      render(false);
-      return;
-    }
-    if (action === "select-attention") {
-      attentionView.selectedId = target.dataset.id ?? "";
-      attentionView.mobileDetail = Boolean(attentionView.selectedId);
-      render(false);
-      return;
-    }
-    if (action === "attention-back") {
-      attentionView.mobileDetail = false;
-      render(false);
-      return;
-    }
+    if (attention.handleViewAction(action, target)) return;
     if (action === "load-data-inventory") {
-      void loadDataInventory();
+      void dataActions.loadInventory(data, () => activeTab === "data");
       return;
     }
-    if (action === "open-deleted-chat-cleanup") {
-      if (dataView.inventoryStatus !== "ready" || dataView.cleanupRunning) return;
-      dataView.confirmation = undefined;
-      dataView.cleanupConfirmation = deletedHostChats(state, data, dataView).map(chat => chat.id);
-      render(); return;
-    }
-    if (action === "cancel-deleted-chat-cleanup") { dataView.cleanupConfirmation = undefined; render(); return; }
+    if (dataActions.handleViewAction(action, target, data)) return;
     if (action === "confirm-deleted-chat-cleanup") {
-      if (dataView.cleanupRunning) return;
-      const cleanup = cleanupDeletedHostChats(state, client, data, dataView);
-      render();
-      await cleanup;
+      if (!await dataActions.cleanup(data)) return;
       ++refreshGeneration;
       pendingData = undefined;
       newDataAvailable = false;
@@ -6119,7 +5414,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } catch (error) {
         const failedProbe = state.lineageProbe;
         if (failedProbe) state.lineageProbe = { key: failedProbe.key, status: "failed", result: failedProbe.result, selectedParentId: parentChatId, error: lineageFailureMessage(error) };
-        data.error = lineageFailureMessage(error);
+        data.error = lineageFailureMessage(error); data.errorReport = formatServerError(error);
         render();
       }
       return;
@@ -6128,7 +5423,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (action === "check-update") {
       try {
         await refreshUpdateStatus(state, client, { remote: true, force: true });
-      } catch (error) { data.error = error instanceof Error ? error.message : String(error); }
+      } catch (error) { data.error = error instanceof Error ? error.message : String(error); data.errorReport = formatServerError(error); }
       render();
       await showCompletedProductReleaseNotice(state);
       return;
@@ -6144,7 +5439,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           await showCompletedProductReleaseNotice(state);
         }
         else if (result.status === "failed") data.error = result.message ?? "서버 업데이트를 완료하지 못했습니다.";
-      } catch (error) { data.error = error instanceof Error ? error.message : String(error); }
+      } catch (error) { data.error = error instanceof Error ? error.message : String(error); data.errorReport = formatServerError(error); }
       render();
       return;
     }
@@ -6287,19 +5582,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         && element.dataset.value === identity.value && element.dataset.axis === identity.axis)?.focus({ preventScroll: true });
       return;
     }
-    if (action === "pair-diary-filter") {
-      const next = target.dataset.value as PairDiaryFilter;
-      if (["all", "key", "intimacy", "heart", "promise", "bookmark"].includes(next)) pairDiaryFilter = next;
-      render();
-      return;
-    }
-    if (action === "anniversary-pick") {
-      // The scene log grows a 지정 button on each scene until one is chosen or the pick is cancelled.
-      anniversaryEditorEntryId = `pick:${target.dataset.key ?? ""}`;
-      render();
-      root.querySelector<HTMLElement>('[data-pair-section="diary"]')?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-      return;
-    }
+    if (pairActions.handleViewAction(action, target)) return;
     if (action === "open-sent-now") {
       nowFilter = "all";
       await handleSentNowNavigation(target, { navigation, getData: () => data, view: nowView, render });
@@ -6312,23 +5595,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (!await navigate({ tab: "world" }, { push: true })) return;
       Object.assign(nowView, { mode: "now", selected: key, mobileDetail: Boolean(key), listOnly: false });
       render();
-      return;
-    }
-    if (action === "designate-anniversary") {
-      anniversaryEditorEntryId = target.dataset.entryId ?? "";
-      formDirty = false;
-      render();
-      root.querySelector<HTMLInputElement>('#anniversary-form input[name="label"]')?.focus();
-      return;
-    }
-    if (action === "new-anniversary" || action === "new-first-met") {
-      anniversaryEditorEntryId = action === "new-first-met" ? `new:first-met:${target.dataset.key ?? ""}` : `new:${target.dataset.key ?? ""}`;
-      intimacyEditor = undefined;
-      relationshipEditing = false;
-      socialEditor = undefined;
-      formDirty = false;
-      render();
-      root.querySelector<HTMLInputElement>('#anniversary-new-form input[name="label"]')?.focus();
       return;
     }
     if (action === "add-access-holder") {
@@ -6362,7 +5628,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       try {
         await saveMemoryLine(target.dataset.memoryId ?? "",id ?? "",kind,{hidden});
         timelineView.textEditing=undefined; formDirty=false; render();
-      } catch(error) { showActionSaveState({kind:"error",message:error instanceof Error ? error.message : String(error)}); }
+      } catch(error) { showActionSaveState({kind:"error",errorReport: formatServerError(error), message:error instanceof Error ? error.message : String(error)}); }
       return;
     }
     if (action === "edit-detail-access") {
@@ -6385,21 +5651,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       render();
       return;
     }
-    if (action === "cancel-anniversary") {
-      anniversaryEditorEntryId = "";
-      formDirty = false;
-      render();
-      return;
-    }
     if (action?.startsWith("progress-") && state.current) {
       target.setAttribute("disabled","true");
       try {
-        const kind=action.slice("progress-".length);
-        const body={persona:target.dataset.persona,character:target.dataset.character,action:{kind,itemId:target.dataset.itemId,...(kind==="cell"?{side:target.dataset.side,state:target.dataset.state}:{})}};
-        await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/pair-progress`,{method:"POST",body:JSON.stringify(body)});
+        await pairActions.changeProgress(action, target, state.current.chatId);
         state.automaticTurnPacket=undefined;
         await refresh({forceApply:true});
-      } catch(error) { showActionSaveState({kind:"error",message:error instanceof Error?error.message:String(error)}); }
+      } catch(error) { showActionSaveState({kind:"error",errorReport: formatServerError(error), message:error instanceof Error?error.message:String(error)}); }
       finally { target.removeAttribute("disabled"); }
       return;
     }
@@ -6413,55 +5671,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       return;
     }
     if (action === "inherit-from-chat") {
-      if (!state.current) return;
-      if (currentLineageOperation(state)?.status === 'running') return;
-      const sourceChatId = target.dataset.chatId ?? "";
-      if (!sourceChatId) return;
-      const button = target as HTMLButtonElement;
-      const originalLabel = button.textContent ?? "현재 채팅으로 기억 가져오기";
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-      button.textContent = "같은 대화인지 확인 중…";
-      try {
-        const { current, request, mode, preview } = await previewMemoryTransfer(client, state, sourceChatId);
-        const eligibleMessages = (request.targetMessageInventory ?? []).filter((item) => item.visibility === "active" && item.role && item.contentHash).length;
-        const copy = memoryTransferConfirmation(preview, mode, eligibleMessages);
-        const confirmed = await confirmDashboard(copy.message, false, copy);
-        if (!confirmed) return;
-        if (state.current?.chatId !== current.chatId) throw new Error('Chat changed before lineage resolution');
-        button.textContent = "기억 가져오는 중…";
-        await runLineageOperation(state,current.chatId,'transfer',async () => {
-          if (mode === "lineage") {
-            const result = await client.request<{lineage:ChatLineageStatus}>(`/v1/chats/${encodeURIComponent(current.chatId)}/lineage/inherit`, {
-              method: "POST",
-              body: JSON.stringify({ ...request, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
-            }, 120_000);
-            addLog(state.logs, "info", `동일한 대화 원문 ${preview.commonMessages}개를 확인해 현재 채팅으로 기억을 가져왔습니다.`);
-            return result;
-          } else {
-            const result = await client.request<{lineage:ChatLineageStatus}>(`/v1/chats/${encodeURIComponent(current.chatId)}/memory-transplant`, {
-              method: "POST",
-              body: JSON.stringify({ sourceChatId, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
-            }, null);
-            addLog(state.logs, "info", "메시지 ID 연결이 없어 보관된 기억을 현재 채팅의 독립 기록으로 가져왔습니다.");
-            return result;
-          }
-        },mode === 'lineage' ? sourceChatId : undefined);
-        await refresh({ forceApply: true });
-        await alertDashboard(mode === "lineage"
-          ? "같은 대화 원문을 연결하고 기억을 가져왔어요. 확인된 원문은 다시 처리하지 않습니다."
-          : "보관된 기억을 독립 기록으로 가져왔어요. 현재 채팅 원문은 별도로 처리될 수 있습니다.");
-      } catch (error) {
-        addLog(state.logs, "error", `Memory transfer failed: ${String(error)}`);
-        if (currentLineageOperation(state)) render();
-        else await alertDashboard(lineageFailureMessage(error));
-      } finally {
-        if (button.isConnected) {
-          button.disabled = false;
-          button.removeAttribute("aria-busy");
-          button.textContent = originalLabel;
-        }
-      }
+      await dataActions.inheritFromChat(target, confirmDashboard, alertDashboard, refresh);
       return;
     }
     if ((typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) && action === "toggle-retrieval-diagnostics") {
@@ -6470,82 +5680,27 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const enabled = await setRetrievalDiagnostics(client, data, chatId, target.dataset.enabled !== "true");
         addLog(state.logs, "info", `Retrieval diagnostics ${enabled ? "enabled" : "disabled"} for chat ${chatId}`);
         render();
-      } catch (error) { data.error = String(error); render(); }
+      } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
       return;
     }
-    if (action === "export-complete-backup" || action === "export-chat-backup") { try { const chatId=action==="export-chat-backup"?(target.dataset.chatId||state.current?.chatId):undefined;if(action==="export-chat-backup"&&!chatId)throw new Error("백업할 채팅을 선택해주세요.");await exportCompleteBackup(chatId); } catch (error) { dataView.backupExportError = error instanceof Error ? error.message : String(error); render(); } return; }
-    if (action === "open-data-operation") {
-      if (dataView.cleanupRunning) return;
-      dataView.cleanupConfirmation = undefined;
-      dataView.confirmation = { action: target.dataset.operation as DataConfirmation["action"], chatId: target.dataset.chatId ?? "" };
-      render(); return;
-    }
-    if (action === "cancel-data-operation") { dataView.confirmation = undefined; render(); return; }
+    if (action === "export-complete-backup" || action === "export-chat-backup") { try { const chatId=action==="export-chat-backup"?(target.dataset.chatId||state.current?.chatId):undefined;if(action==="export-chat-backup"&&!chatId)throw new Error("백업할 채팅을 선택해주세요.");await dataActions.exportBackup(chatId); } catch (error) { dataView.backupExportError = error instanceof Error ? error.message : String(error); dataView.backupExportErrorReport = formatServerError(error); render(); } return; }
     if (action === "confirm-data-operation" && dataView.confirmation) {
       if (dataView.cleanupRunning) return;
-      const { action: operation, chatId } = dataView.confirmation;
       try {
-        if (operation === "rebuild") requireChatMemoryEnabled(state, chatId, data.adminChats.find(chat => chat.id === chatId)?.characterId);
-        const extractionReviewOverride = operation === "rebuild"
-          ? await chooseExtractionReviewOverride(
-            "전체 기억을 재검수할까요?",
-            "전체 원문을 다시 추출한 뒤 보조 모델이 각 그룹의 결과를 한 번 더 검토할 수 있습니다. 정확도는 높아질 수 있지만 호출량과 비용이 늘어납니다.",
-            state.settings.postExtractionReview,
-          )
-          : undefined;
-        if (operation === "rebuild" && extractionReviewOverride === undefined) return;
-        let rebuildContext: Awaited<ReturnType<typeof readCurrentContext>> | undefined;
-        let expectedSourceMessages: number | undefined;
-        if (operation === "rebuild" && state.current?.chatId === chatId) {
-          rebuildContext = await readCurrentContext(state, { snapshotMode: "full" });
-          const synced = await syncCompleteSourceLedger(client, rebuildContext);
-          expectedSourceMessages = synced.expectedSourceMessages;
-          const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
-          state.settings.serverInstances[serverUrl] = synced.serverInstanceId;
-          await saveSettings(state.settings);
-        }
-        let result: any = {};
-        if (operation === "delete") await deleteServerChatRecords(state, client, chatId);
-        else result = await client.request<any>(`/v1/chats/${encodeURIComponent(chatId)}/reprocess`, {
-          method: "POST",
-          body: JSON.stringify(withExtractionReviewOverride({
-            activatePendingMemoryLanguage: true,
-            identityHints: rebuildContext?.identityHints,
-            expectedSourceMessages,
-          }, extractionReviewOverride as boolean)),
-        }, 120_000).catch(async (error) => {
-          if (operation === "rebuild" && error?.code === "INITIAL_SETUP_REQUIRED" && state.current?.chatId === chatId) {
-            setupPicker = { ...await loadSetupPicker(state, chatId), rebuild: { expectedSourceMessages, extractionReviewOverride: extractionReviewOverride as boolean } };
-            dataView.confirmation = undefined;
-            activeTab = "initial";
-            return { setupRequired: true };
-          }
-          throw error;
-        });
-        if (result.setupRequired) { render(); return; }
-        if (operation === "rebuild" && state.current?.chatId === chatId && !state.settings.workerPaused) void drainWorker(state, client);
-        if (operation === "delete") {
-          data.adminChats = data.adminChats.filter(item => item.id !== chatId);
-          dataView.deletedChatIds = dataView.deletedChatIds?.filter(id => id !== chatId);
-          if (data.chatId === chatId) {
+        const result = await dataActions.confirmOperation(() => data, chooseExtractionReviewOverride,
+          picker => { if (picker) setupView.picker = picker; activeTab = "initial"; },
+          chatId => {
             ++refreshGeneration; // Ignore reads started before the deletion.
             data = { ...emptyData(), chatId, health: data.health, adminChats: data.adminChats.filter(item => item.id !== chatId) };
             pendingData = undefined;
             newDataAvailable = false;
-            Object.assign(organizationView, createOrganizationView());
+            organizationActions.reset();
             render();
-          }
-        }
-        addLog(state.logs, "info", operation === "rebuild"
-          ? result.awaitingCalibration
-            ? "Initial setup analysis queued; confirm the setup ledger before transcript extraction starts"
-            : `Ledger rebuild queued: ${Number(result.queuedJobs ?? 0)} job(s)`
-          : `Data operation completed: ${operation}`);
-        if (operation === "rebuild" && result.awaitingCalibration) activeTab = "initial";
-        dataView.confirmation = undefined;
-        await refresh({ forceApply: operation === "delete" });
+          });
+        if (result) await refresh(result);
       } catch (error) {
         const message = String(error);
+        data.errorReport = formatServerError(error);
         data.error = message.includes("(INITIAL_SETUP_REQUIRED)")
           ? "Risu에서 이 채팅을 열고 설정 재료를 골라 주세요. 기존 기억은 삭제되지 않았어요."
           : message;
@@ -6609,11 +5764,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       formDirty = false;
       navigation.supersede();
       selectedMemory = target.dataset.id ?? "";
-      timelineView.textEditing=undefined;
       const memory = data.memories.find((item) => item.id === selectedMemory);
-      timelineView.editing = false;
-      timelineView.creating = false;
-      timelineView.mobileDetail = true;
+      timelineActions.select("select-memory");
       render(false);
       resetTimelineDetailScroll(root);
       if (memory) void queueMemoryTranslation(memory);
@@ -6624,26 +5776,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (!choice) return;
       if (choice === 'source') {
         if (!state.current) return;
-        organizationView.open = true;
-        activeTab = 'timeline';
-        const chat = encodeURIComponent(state.current.chatId);
-        try {
-          organizationView.data = await client.request<OrganizationData>(`/v1/chats/${chat}/memory-organization`);
-          const memoryOpen = !timelineView.creating && (!window.matchMedia('(max-width: 899px)').matches || timelineView.mobileDetail);
-          const rangeIds = organizationMemoryRanges(organizationView.data.ranges, memoryOpen ? selectedMemory : '');
-          organizationView.highlightedIds = rangeIds;
-          organizationView.selection = rangeIds;
-          organizationView.focusedId = rangeIds[0] ?? '';
-          organizationView.candidateId = '';
-          if (rangeIds.length) await openMemoryAddition(rangeIds);
-          else { organizationView.mobileDetail = false; organizationView.addition = undefined; render(); }
-        } catch (error) { organizationView.error = error instanceof Error ? error.message : String(error); render(); }
+        await organizationActions.openAdditionFromMemory(() => ({ selectedMemory,
+          memoryOpen: !timelineView.creating && (!window.matchMedia('(max-width: 899px)').matches || timelineView.mobileDetail) }));
         return;
       }
       formDirty = false;
-      timelineView.editing = false;
-      timelineView.creating = true;
-      timelineView.mobileDetail = true;
+      timelineActions.beginManual();
       render(false);
       return;
     }
@@ -6651,32 +5789,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       formDirty = editorHasChanges();
       if (formDirty && !await confirmDashboard("저장하지 않은 기억을 버리고 목록으로 돌아갈까요?")) return;
       formDirty = false;
-      timelineView.creating = false;
-      timelineView.mobileDetail = false;
+      timelineActions.closeDetail();
       render(false);
       return;
     }
-    if (action === "timeline-filter") {
-      timelineView.creating = false;
-      const filter = target.dataset.filter;
-      if (filter === "bookmark") timelineView.bookmarkedOnly = !timelineView.bookmarkedOnly;
-      if (filter === "landmark") timelineView.landmarkOnly = !timelineView.landmarkOnly;
-      if (filter === "pinned") timelineView.pinnedOnly = !timelineView.pinnedOnly;
-      if (filter === "inactive") timelineView.includeInactive = !timelineView.includeInactive;
-      const visible = timelineMemoryView(data.memories, timelineView);
-      const visibleIds = new Set([...visible.matching, ...visible.topLevel].map((memory) => String(memory.id)));
-      if (!visibleIds.has(selectedMemory)) selectedMemory = timelineDefaultMemoryId(data.memories, timelineView);
-      timelineView.editing = false;
-      render(false);
-      return;
-    }
-    if (action === "timeline-order") {
-      timelineView.sortOrder = timelineView.sortOrder !== "ascending" ? "ascending" : "descending";
-      render(false);
-      return;
-    }
-    if (action === "edit-memory") {
-      timelineView.editing = true;
+    if (action === "timeline-filter" || action === "timeline-order" || action === "edit-memory") {
+      selectedMemory = timelineActions.handleViewAction(action, target, data.memories, selectedMemory);
       render(false);
       return;
     }
@@ -6699,8 +5817,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (formDirty && !await confirmDashboard("저장하지 않은 정본 변경을 버리고 다른 기억을 열까요?")) return;
       formDirty = false;
       selectedMemory = target.dataset.id;
-      timelineView.editing = false;
-      timelineView.mobileDetail = true;
+      timelineActions.select("timeline-adjacent");
       render(false);
       resetTimelineDetailScroll(root);
       const memory = data.memories.find((item) => item.id === selectedMemory);
@@ -6761,24 +5878,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await state.refreshQuizWidget?.();
         await refresh();
       } catch (error) {
-        showActionSaveState({ kind: "error", message: `퀴즈 작업을 완료하지 못했어요. ${String(error)}` });
+        showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: `퀴즈 작업을 완료하지 못했어요. ${String(error)}` });
       } finally {
         quizActionBusy = false;
         updateTopbar();
       }
       return;
     }
-    if (action === "select-person") {
-      navigation.supersede();
-      const id = target.dataset.id ?? "";
-      peopleView.selectedId = peopleView.selectedId === id ? "" : id;
-      peopleView.editing = false;
-      peopleView.mobileDetail = Boolean(peopleView.selectedId);
-      peopleView.management = "";
-      formDirty = false;
-      render(false);
-      return;
-    }
+    if (peopleActions.handleViewAction(action, target)) return;
     if (action === "relationship-filter") {
       if (!await prepareRelationshipSheetSwitch()) return;
       const value = target.dataset.value ?? "all";
@@ -6787,75 +5894,22 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       render(false);
       return;
     }
-    if (action === "people-filter") {
-      const value = target.dataset.value as PeopleViewState["prominence"];
-      if (["all", "primary", "supporting", "reference"].includes(value)) peopleView.prominence = value;
-      peopleView.selectedId = "";
-      peopleView.editing = false;
-      peopleView.mobileDetail = false;
-      peopleView.management = "";
-      render(false);
-      return;
-    }
-    if (action === "new-person") {
-      peopleView.selectedId = "__new__";
-      peopleView.editing = true;
-      peopleView.mobileDetail = true;
-      peopleView.management = "";
-      formDirty = false;
-      render(false);
-      return;
-    }
-    if (action === "open-person-color") {
-      if (lex().skin !== "phone" || !state.current) return;
-      const entity = data.entities.find(item => item.id === target.dataset.entityId);
-      if (!entity) return;
-      const dialog = document.createElement("dialog");
-      dialog.className = "dialog person-color-dialog";
-      dialog.setAttribute("aria-label", `${entity.name} 색상`);
-      dialog.innerHTML = renderPersonColorPicker(entity, state.current.chatId);
-      root.append(dialog);
-      dialog.addEventListener("close", () => { dialog.remove(); root.querySelector<HTMLElement>('[data-action="open-person-color"]')?.focus({ preventScroll: true }); }, { once: true });
-      dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
-      dialog.showModal();
-      return;
-    }
-    if (action === "close-person-color") { target.closest<HTMLDialogElement>("dialog")?.close(); return; }
     if (action === "reset-person-color") {
       const form = target.closest<HTMLFormElement>("form");
       if (form) await savePersonColor(form, null);
       return;
     }
-    if (action === "edit-person") {
-      peopleView.editing = true;
-      peopleView.management = "";
-      formDirty = false;
-      render(false);
-      return;
-    }
-    if (action === "close-people-management") {
-      peopleView.management = "";
-      peopleView.mobileDetail = false;
-      entityMergePreview = undefined;
-      entityDeletePreview = undefined;
-      render(false);
-      return;
-    }
     if (action === "close-person" || action === "close-person-editor") {
-      formDirty = editorHasChanges();
-      if (formDirty && !await confirmDashboard("저장하지 않은 인물 변경을 버릴까요?")) return;
-      const adding = peopleView.selectedId === "__new__";
-      formDirty = false;
-      peopleView.editing = false;
-      if (action === "close-person" && navigationStack.size) {
+      await peopleActions.closePerson(action, async () => {
+        formDirty = editorHasChanges();
+        if (formDirty && !await confirmDashboard("저장하지 않은 인물 변경을 버릴까요?")) return false;
+        formDirty = false;
+        return true;
+      }, async () => {
+        if (!navigationStack.size) return false;
         await navigation.back(() => undefined);
-        return;
-      }
-      if (action === "close-person" || adding) {
-        peopleView.selectedId = "";
-        peopleView.mobileDetail = false;
-      }
-      render(false);
+        return true;
+      });
       return;
     }
     if (action === "open-person-relations") {
@@ -6955,7 +6009,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (dashboardOpen && sentView.packetTranslation === packet) { packet.translated = translated; packet.showing = true; }
       } catch (error) {
         const code = (error as { code?: string })?.code ?? "MODEL_CONNECTION_FAILED";
-        packet.error = ({ TAG_SEQUENCE_CHANGED: "태그 변경", MISSING_ITEMS: "번역 항목 누락", TIMEOUT: "응답 시간 초과", ABORTED_OR_TIMEOUT: "번역 취소", INVALID_CONFIG: "번역 설정 확인 필요", INVALID_RESPONSE: "응답 형식 오류", MODEL_OUTPUT_TRUNCATED: "번역 응답 잘림", GOOGLE_TRANSLATION_FAILED: "Google 응답 실패", MODEL_CONNECTION_FAILED: "모델 연결 실패" } as Record<string, string>)[code] ?? code;
+        packet.error = settingsFailureMessage({ code }, "translation");
       } finally { packet.pending = false; if (dashboardOpen) render(); }
       return;
     }
@@ -7047,7 +6101,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         settingsSaving = false;
         addLog(state.logs, "error", `Settings save failed: [오류 원문 제외]`, supportFailure("settings_save", error));
         const attempted = new FormData(form);
-        showActionSaveState({ kind: "error", message: settingsSaveFailureMessage(error, {
+        showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: settingsSaveFailureMessage(error, {
           serverUrl: String(attempted.get("serverUrl") ?? state.settings.serverUrl).trim(),
           serverToken: String(attempted.get("serverToken") ?? state.settings.serverToken).trim(),
         }) });
@@ -7069,7 +6123,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await client.request("/v1/admin/voyage-key", { method: "DELETE" });
         addLog(state.logs, "info", "Voyage API key removed from the server");
         await refresh();
-      } catch (error) { data.error = String(error); render(); }
+      } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
       return;
     }
     if(action === "remove-translation-key") {
@@ -7077,7 +6131,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const response=await client.request<{config:TranslationConnectionPublicConfig}>("/v1/admin/translation-key",{method:"DELETE"});
         if(data.health)data.health.translationConnection=response.config;
         render();
-      }catch(error){showActionSaveState({kind:"error",message:`번역 인증정보 제거 실패 · ${String(error)}`});}
+      }catch(error){showActionSaveState({kind:"error",errorReport: formatServerError(error), message:`번역 인증정보 제거 실패 · ${errorMessage(error)}`});}
       return;
     }
     if(action === "remove-mcp-key") {
@@ -7085,7 +6139,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const response=await client.request<{config:McpSelectorPublicConfig}>("/v1/admin/mcp-selector-key",{method:"DELETE"});
         if(data.health)data.health.mcpSelector=response.config;
         render();
-      }catch(error){showActionSaveState({kind:"error",message:`MCP 인증정보 제거 실패 · ${String(error)}`});}
+      }catch(error){showActionSaveState({kind:"error",errorReport: formatServerError(error), message:`MCP 인증정보 제거 실패 · ${errorMessage(error)}`});}
       return;
     }
     if (action === "remove-server-llm-key") {
@@ -7097,224 +6151,48 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await saveSettings(state.settings);
         addLog(state.logs, "info", "Server LLM API key removed; worker paused");
         await refresh();
-      } catch (error) { data.error = String(error); render(); }
+      } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
       return;
     }
     if (!state.current) return;
     const chat = encodeURIComponent(state.current.chatId);
     try {
-      if (action?.startsWith('organization-') || action === 'related-source') {
-        organizationView.error = undefined;
-        try {
-          const id = target.dataset.id ?? '';
-          const leavesCandidate = ['organization-close', 'organization-list', 'organization-back-detail', 'organization-detail', 'organization-select', 'organization-candidate', 'organization-add-memory'].includes(action ?? '');
-          if (leavesCandidate && !await discardReadyOrganizationCandidate()) return;
-          if (action === 'organization-close') organizationView.open = false;
-          else if (action === 'organization-list') { organizationView.mobileDetail = false; organizationView.candidateId = ''; organizationView.addition = undefined; }
-          else if (action === 'organization-back-detail') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = Boolean(organizationView.focusedId); }
-          else if (action === 'organization-add-memory') {
-            if (!organizationView.open) {
-              organizationView.open = true;
-              activeTab = 'timeline';
-              organizationView.data = await client.request<OrganizationData>(`/v1/chats/${chat}/memory-organization`);
-            }
-            if (!id) organizationView.focusedId = '';
-            await openMemoryAddition(id ? [id] : organizationView.selection);
-            if (organizationView.addition) organizationView.addition.origin = id ? 'detail' : 'selection';
-          } else if (action === 'organization-addition-message' || action === 'organization-addition-toggle-all') {
-            const addition = organizationView.addition;
-            if (!addition || organizationView.busy) return;
-            const eligibleIds = addition.messages.filter(message => !message.additionReason).map(message => message.id);
-            if (action === 'organization-addition-toggle-all') addition.selectedIds = eligibleIds.every(id => addition.selectedIds.includes(id)) ? [] : eligibleIds;
-            else if (eligibleIds.includes(id)) addition.selectedIds = addition.selectedIds.includes(id) ? addition.selectedIds.filter(item => item !== id) : eligibleIds.filter(item => item === id || addition.selectedIds.includes(item));
-            addition.estimate = undefined;
-            render();
-            await updateAdditionEstimate();
-          } else if (action === 'organization-clear-search') {
-            organizationView.search = ''; organizationView.searchStatus = ''; organizationView.highlightedIds = [];
-          } else if (['organization-apply-addition', 'organization-discard-addition', 'organization-retry-addition'].includes(action ?? '')) {
-            if (organizationView.busy) return;
-            const operation = action!.split('-')[1];
-            organizationView.busy = true; render();
-            try {
-              await client.request(`/v1/chats/${chat}/memory-additions/${encodeURIComponent(id)}/${operation}`, { method: 'POST' });
-              if (operation !== 'retry') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = false; }
-              else void drainWorker(state, client);
-              await refresh({ forceApply: true });
-            } finally { organizationView.busy = false; render(); }
-            return;
-          }
-          else if (action === 'organization-open' || action === 'related-source') {
-            organizationView.open = true; activeTab = 'timeline';
-            organizationView.data = await client.request<OrganizationData>(`/v1/chats/${chat}/memory-organization`);
-            if (action === 'related-source') {
-              organizationView.highlightedIds = organizationView.data.ranges.filter((row) => row.memoryIds.includes(id)).map((row) => row.id);
-              organizationView.focusedId = organizationView.highlightedIds[0] ?? '';
-              organizationView.candidateId = '';
-              if (organizationView.focusedId) {
-                organizationView.detail = await client.request(`/v1/chats/${chat}/source-ranges/${encodeURIComponent(organizationView.focusedId)}`);
-                organizationView.mobileDetail = true;
-              } else organizationView.error = '이 기억에 연결된 처리 원문 묶음이 없어.';
-            }
-          } else if (action === 'organization-select') {
-            organizationView.selection = toggleOrganizationRange(organizationView.data.ranges, organizationView.selection, id);
-          } else if (action === 'organization-detail') {
-            organizationView.focusedId = id; organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = true;
-            organizationView.detail = await client.request(`/v1/chats/${chat}/source-ranges/${encodeURIComponent(id)}`);
-          } else if (action === 'organization-candidate') { organizationView.candidateId = id; organizationView.mobileDetail = true; }
-          else if (action === 'organization-memory-exclusion') {
-            const range = organizationView.data.ranges.find(row => row.id === id);
-            if (!range || range.sourceMessageIds.length !== 1 || organizationView.busy) return;
-            organizationView.busy = true; render();
-            try {
-              await client.request(`/v1/chats/${chat}/messages/${encodeURIComponent(range.sourceMessageIds[0]!)}/memory-exclusion`, {
-                method: 'PUT', body: JSON.stringify({ excluded: !range.memoryExcluded }),
-              });
-              organizationView.selection = organizationView.selection.filter(selected => selected !== id);
-            } finally {
-              organizationView.busy = false;
-              organizationView.data = await client.request(`/v1/chats/${chat}/memory-organization`);
-            }
-            await refresh({ forceApply: true }); return;
-          } else if (action === 'organization-create-group') {
-            requireChatMemoryEnabled(state, state.current.chatId);
-            const estimate = await client.request<any>(`/v1/chats/${chat}/memory-groups/preview`, { method: 'POST', body: JSON.stringify({ batchIds: organizationView.selection, postExtractionReview: state.settings.postExtractionReview }) });
-            const review = await chooseExtractionReviewOverride('선택한 원문 구간을 묶을까요?',
-              `원문 묶음 ${estimate.sourceBatchIds.length}개 · 메시지 ${estimate.messageCount}개\n원문 약 ${estimate.rawTokens.toLocaleString()}토큰 · 전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰\n처음 ${estimate.initialCalls}회${estimate.mergeRequired ? ' + 단계별 통합' : ''}로 처리합니다. 재검수를 사용하면 검수 단계가 추가됩니다. 이 수치는 실제 청구량이 아닙니다.\n기존 세부·대사·상태는 보존되며, 결과를 확인한 뒤 적용할 수 있습니다.${estimate.partialIds.length ? ` 범위 밖 근거도 가진 기억 ${estimate.partialIds.length}개는 원래 위치에 남습니다.` : ''}`,
-              state.settings.postExtractionReview);
-            if (review === undefined) return;
-            const created = await client.request<{ runId: string }>(`/v1/chats/${chat}/memory-groups/create`, { method: 'POST', body: JSON.stringify({ batchIds: organizationView.selection, postExtractionReview: review }) });
-            organizationView.candidateId = `group:${created.runId}`; organizationView.mobileDetail = true;
-            void drainWorker(state, client);
-            await refresh({ forceApply: true }); return;
-          } else if (action === 'organization-release-hold') {
-            const result = await client.request<any>(`/v1/chats/${chat}/episodes/${encodeURIComponent(id)}/release`, { method: 'POST' });
-            state.episodeActivity = result.active ?? null;
-            await refresh({ forceApply: true }); return;
-          } else if (action === 'organization-discard-group' || action === 'organization-discard-regeneration') {
-            await discardReadyOrganizationCandidate();
-            return;
-          } else if (action === 'organization-ungroup' || action.endsWith('-group')) {
-            const operation = action === 'organization-ungroup' ? 'ungroup' : action.includes('-apply-') ? 'apply' : action.includes('-discard-') ? 'discard' : 'retry';
-            await client.request(`/v1/chats/${chat}/memory-groups/${encodeURIComponent(id)}/${operation}`, { method: 'POST' });
-            if (operation !== 'retry') { organizationView.candidateId = ''; organizationView.selection = []; organizationView.mobileDetail = false; }
-            else void drainWorker(state, client);
-            await refresh({ forceApply: true }); return;
-          } else if (action === 'organization-apply-regeneration') {
-            await client.request(`/v1/chats/${chat}/regenerations/${encodeURIComponent(id)}/apply`, { method: 'POST' }, 120_000);
-            organizationView.candidateId = ''; organizationView.selection = []; organizationView.mobileDetail = false;
-            await refresh({ forceApply: true }); return;
-          }
-        } catch (error) { organizationView.error = error instanceof Error ? error.message : String(error); }
-        render();
-        if (action === 'organization-select') {
-          const control = [...root.querySelectorAll<HTMLInputElement>('[data-action="organization-select"]')].find((input) => input.dataset.id === target.dataset.id);
-          control?.focus({ preventScroll: true });
-        } else if (action === 'organization-candidate' || action === 'organization-detail') {
-          const heading = root.querySelector<HTMLElement>('.organization .reader__title');
-          if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+      if (isAttentionMutationAction(action)) {
+        const result = await attention.mutate(action, target, chat, data,
+          message => showActionSaveState({ kind: "success", message }),
+          (message, options) => confirmDashboard(message, false, options));
+        if (!result) return;
+        if (result.kind === "reconciliation") {
+          await invalidateTranslationCache(state, { chatId: state.current.chatId, itemIdPrefix: `reconciliation:${result.reviewId}:` });
+          formDirty = false;
+          addLog(state.logs, "info", `Duplicate review resolved: ${result.resolution}`);
+        } else if (result.kind === "audit") {
+          addLog(state.logs, "info", "Extraction audit queued again with its preserved source and first draft");
         }
+      } else if (action?.startsWith('organization-') || action === 'related-source') {
+        await organizationActions.handleAction(action, target, chat);
         return;
       }
-      if (action === "toggle-anniversary-always" || action === "delete-anniversary" || action === "hide-anniversary") {
-        if (action === "hide-anniversary") {
-          const hideKey = target.dataset.hideKey ?? "";
-          if (!hideKey) return;
-          const hiddenAnniversaries = [...new Set([...(data.viewPreferences?.hiddenAnniversaries ?? []), hideKey])];
-          data.viewPreferences = await client.putViewPreferences(state.current.chatId, { hiddenAnniversaries });
-          render();
-          showActionSaveState({ kind: "success", message: "기념일 숨김" });
-          return;
-        }
-        const memoryId = target.dataset.memoryId ?? "";
-        const index = Number(target.dataset.landmarkIndex);
-        const memory = data.memories.find((item) => item.id === memoryId);
-        const landmark = Number.isInteger(index) && Array.isArray(memory?.landmarkKinds) ? memory.landmarkKinds[index] : undefined;
-        if (!memory || !landmark) throw new Error("변경할 기념일을 찾지 못했습니다.");
-        const deleting = action === "delete-anniversary";
-        let appliedIndex = index;
-        if (deleting) {
-          if (landmark.kind !== "anniversary_basis" && !landmark.userDefined) throw new Error("사용자가 지정한 기념일만 삭제할 수 있습니다.");
-          if (!await confirmDashboard(`기념일 '${String(landmark.label ?? "")}'을 삭제할까요?`, false, { confirm: "기념일 삭제", danger: true })) return;
-        }
-        await landmarkPatchQueue.enqueue(memoryId,
-          () => currentMemoryLandmarks(memoryId),
-          (latest) => {
-            const next = [...latest];
-            appliedIndex = landmarkEntryIndex(next, landmark, index);
-            const current = appliedIndex >= 0 ? next[appliedIndex] : undefined;
-            if (!current) throw new Error("변경할 기념일을 찾지 못했습니다.");
-            if (deleting) next.splice(appliedIndex, 1);
-            else next[appliedIndex] = { ...current, alwaysInject: target.dataset.value === "true" };
-            return next;
-          },
-          async (landmarkKinds) => {
-            const result = await client.patchMemory(state.current!.chatId, memoryId, { landmarkKinds });
-            if (!result.ok) throw new Error("기념일 변경을 저장하지 못했습니다.");
-          });
-        if (deleting) {
-          const hiddenAnniversaries = remapHiddenAnniversariesAfterDelete(
-            data.viewPreferences?.hiddenAnniversaries ?? [], memoryId, appliedIndex,
-          );
-          data.viewPreferences = await client.putViewPreferences(state.current.chatId, { hiddenAnniversaries });
-        }
-        await refresh({ forceApply: true });
-        showActionSaveState({ kind: "success", message: action === "delete-anniversary" ? "기념일 삭제됨" : "항상 전달 설정 저장됨" });
+      if (isAnniversaryAction(action)) {
+        const result = await pairActions.mutateAnniversary(action, target, {
+          getData: () => data, getChatId: () => state.current!.chatId,
+          queue: landmarkPatchQueue, currentLandmarks: currentMemoryLandmarks,
+          confirmDelete: message => confirmDashboard(message, false, { confirm: "기념일 삭제", danger: true }),
+        });
+        if (!result) return;
+        if (result.refresh) await refresh({ forceApply: true });
+        else render();
+        showActionSaveState({ kind: "success", message: result.message });
         return;
       }
-      if (action === "initial-confirm" || action === "initial-skip") {
-        if (currentLineageOperation(state)) return;
-        if (action === "initial-skip" && !await confirmDashboard(data.initialCalibration?.status === "failed"
-          ? "초기 분석 없이 원문 기억 생성을 계속할까요? 이름과 별칭은 나중에 인물 설정에서 직접 추가할 수 있습니다."
-          : "분석된 초기 이름·관계축을 사용하지 않고 원문 기억 생성을 시작할까요?")) return;
-        const result = await client.request<{ calibration: InitialCalibrationActivity }>(`/v1/chats/${chat}/initial-calibration/${action === "initial-confirm" ? "confirm" : "skip"}`, { method: "POST" }, 120_000);
-        state.statusSummary = {
-          ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }),
-          initialCalibration: result.calibration,
-        };
-        data.initialCalibration = { ...data.initialCalibration, ...result.calibration };
-        observeSetupAttention(state, state.current.chatId, result.calibration.status);
-        state.publishStatusSummary?.();
-        void drainWorker(state, client);
-        await refresh({ forceApply: true });
-      } else if (action === "save-initial-entity" || action === "add-initial-entity") {
-        const form = target.closest<HTMLFormElement>("form");
-        if (!form?.reportValidity()) return;
-        const values = new FormData(form);
-        const month = Number(values.get("birthdayMonth")), day = Number(values.get("birthdayDay"));
-        const year = String(values.get("birthdayYear") ?? "").trim();
-        const birthday = month && day ? EntityBirthdaySchema.parse({ month, day, ...(year ? { year: Number(year) } : {}) }) : null;
-        const payload = { birthday, displayName: String(values.get("displayName") ?? "").trim(), aliases: String(values.get("aliases") ?? "").split(",").map((item) => item.trim()).filter(Boolean), prominence: String(values.get("prominence") ?? "supporting") };
-        const id = action === "save-initial-entity" ? encodeURIComponent(target.dataset.id ?? "") : "";
-        await client.request(`/v1/chats/${chat}/initial-calibration/entities${id ? `/${id}` : ""}`, { method: id ? "PATCH" : "POST", body: JSON.stringify(payload) });
-        formDirty = false;
-        peopleView.editing = false;
-        if (!id) { peopleView.selectedId = ""; peopleView.mobileDetail = false; }
-        await refresh({ forceApply: true });
-      } else if (action === "delete-initial-entity") {
-        const name = target.dataset.name ?? "이 인물";
-        if (!await confirmDashboard(`${name}을(를) 초기 이름 장부에서 삭제할까요? 연결된 초기 관계축도 함께 제거됩니다.`, false, { confirm: "인물 삭제", danger: true })) return;
-        await client.request(`/v1/chats/${chat}/initial-calibration/entities/${encodeURIComponent(target.dataset.id ?? "")}`, { method: "DELETE" });
-        formDirty = false;
-        peopleView.selectedId = "";
-        peopleView.editing = false;
-        peopleView.mobileDetail = false;
-        await refresh({ forceApply: true });
-      } else if (action === "save-initial-relationship") {
-        const form = target.closest<HTMLFormElement>("form");
-        if (!form) return;
-        const values = new FormData(form);
-        const axes = Object.fromEntries(["affection", "trust", "intimacy", "fear", "jealousy", "hostility"].map((axis) => [axis, String(values.get(axis) ?? "unknown")]));
-        await client.request(`/v1/chats/${chat}/initial-calibration/relationships/${encodeURIComponent(target.dataset.id ?? "")}`, { method: "PATCH", body: JSON.stringify({ axes, summary: String(values.get("summary") ?? "") }) });
-        formDirty = false;
+      if (isInitialSetupAction(action)) {
+        const result = await setupActions.mutateInitial(action, target, chat, peopleActions);
+        if (!result) return;
+        if (result.clearEditor) formDirty = false;
         await refresh({ forceApply: true });
       } else if (action === "go-entity-merge") {
         activeTab = "initial";
-        peopleView.selectedId = "";
-        peopleView.editing = false;
-        peopleView.mobileDetail = true;
-        peopleView.management = "merge";
-        render(false);
+        peopleActions.enterMerge();
       } else if (action === "delete-intimacy") {
         await client.request(`/v1/chats/${chat}/physical-intimacy/${encodeURIComponent(target.dataset.id ?? "")}`, { method: "DELETE" });
         intimacyEditor = undefined;
@@ -7334,37 +6212,6 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         nowView.mobileDetail = false;
         if (pendingData) { data = pendingData; pendingData = undefined; newDataAvailable = false; }
         addLog(state.logs, "info", `${kind} ${mode === "end" ? "ended" : "deleted"} in the ledger`);
-      } else if (action === "resolve-reconciliation") {
-        const reviewId = target.dataset.id ?? "";
-        const resolution = target.dataset.resolution as "merge" | "distinct" | "update" | "discard";
-        const review = data.reconciliationReviews.find((item) => item.id === reviewId);
-        if (!review) return;
-        const form = root.querySelector<HTMLFormElement>(`.reconciliation-edit[data-review-id="${CSS.escape(reviewId)}"]`);
-        const values = form ? new FormData(form) : undefined;
-        const editedItem = { ...review.incoming };
-        if (values) {
-          if (review.itemKind === "memory") { editedItem.title = String(values.get("canonicalTitle") ?? editedItem.title); editedItem.content = String(values.get("canonicalContent") ?? editedItem.content); }
-          else if ("value" in editedItem) editedItem.value = String(values.get("canonicalValue") ?? editedItem.value);
-          else editedItem.content = String(values.get("canonicalValue") ?? editedItem.content);
-        }
-        await client.request(`/v1/chats/${chat}/reconciliation-reviews/${encodeURIComponent(reviewId)}`, { method: "PATCH", body: JSON.stringify({ action: resolution, targetId: target.dataset.targetId || undefined, editedItem }) });
-        await invalidateTranslationCache(state, { chatId: state.current.chatId, itemIdPrefix: `reconciliation:${reviewId}:` });
-        formDirty = false;
-        addLog(state.logs, "info", `Duplicate review resolved: ${resolution}`);
-      } else if (action === "resolve-small-review" || action === "resolve-small-review-bulk") {
-        const visibleIds = new Set([...root.querySelectorAll<HTMLElement>("[data-attention-row]")].filter(row => !row.hidden).map(row => row.dataset.id));
-        const items = action === "resolve-small-review-bulk"
-          ? data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending" && visibleIds.has(`small:${audit.id}:${item.id}`)).map((item: any) => ({auditId: audit.id, candidateId: item.id})))
-          : [{auditId: target.dataset.auditId, candidateId: target.dataset.id}];
-        if (!items.length) return;
-        const response = await client.request<{items: Array<{message: string}>}>(`/v1/chats/${chat}/small-reviews/resolve`, {method: "POST", body: JSON.stringify({items, action: target.dataset.resolution})});
-        showActionSaveState({kind: "success", message: response.items[0]?.message ?? "후보를 처리했어요."});
-        attentionView.mobileDetail = false;
-        attentionView.selectedId = "";
-      } else if (action === "retry-extraction-audit") {
-        const auditId = target.dataset.id ?? "";
-        await client.request(`/v1/chats/${chat}/extraction-audits/${encodeURIComponent(auditId)}/retry`, { method: "POST" });
-        addLog(state.logs, "info", "Extraction audit queued again with its preserved source and first draft");
       } else if (action === "approve-backfill") {
         requireChatMemoryEnabled(state, state.current.chatId);
         const extractionReviewOverride = await chooseExtractionReviewOverride(
@@ -7387,7 +6234,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
         state.settings.serverInstances[serverUrl] = prepared.serverInstanceId;
         if (setupPickerNeeded(prepared.initialCalibration?.status, prepared.lineage)) {
-          setupPicker = await loadSetupPicker(state, fullContext.chatId);
+          await setupActions.loadPicker(fullContext.chatId);
           activeTab = "initial";
         }
         state.settings.backfillApproved[`${prepared.serverInstanceId}:${fullContext.chatId}`] = true;
@@ -7396,41 +6243,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } else if (action === "set-profile") {
         await changeChatProfile(target.dataset.profile as RpProfile);
       } else if (action === "regenerate-episode" || action === "regenerate-canonical") {
-        if (organizationView.busy) return;
-        requireChatMemoryEnabled(state, state.current.chatId);
-        const batchId = target.dataset.id ?? "";
-        const range = organizationView.data.ranges.find((row) => row.id === batchId);
-        if (!range?.eligible) throw new Error(range?.reason ?? "원문 구간을 다시 선택해 주세요.");
-        const canonical = action === "regenerate-canonical";
-        organizationView.busy = true;
-        organizationView.error = undefined;
-        render();
-        try {
-          const estimate = await client.request<any>(`/v1/chats/${chat}/extraction-batches/${encodeURIComponent(batchId)}/preview-regeneration`, { method: 'POST', body: JSON.stringify({ canonical }) });
-          // A read may finish after the user has left this chat or screen.
-          if (!organizationView.open || encodeURIComponent(state.current?.chatId ?? '') !== chat
-            || organizationView.selection.length !== 1 || organizationView.selection[0] !== batchId) return;
-          organizationView.busy = false;
-          render();
-          const review = await chooseExtractionReviewOverride(
-            canonical ? "여기부터 기억 후보를 다시 만들까요?" : "이 구간의 기억 후보를 다시 만들까요?",
-            `${canonical ? "선택한 지점부터 최신 원문까지 기억과 상태를 다시 계산합니다." : "선택한 원문 묶음의 기억·세부·대사만 다시 만들고 상태 장부는 유지합니다."} 결과는 자동으로 적용되지 않습니다.\n묶음 ${estimate.batchCount}개 · 메시지 ${estimate.messageCount}개 · 원문 약 ${estimate.rawTokens.toLocaleString()}토큰\n전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰, 기본 추출 약 ${estimate.estimatedExtractionCalls}회입니다.${canonical && estimate.estimatedStoryCalls ? `\n적용하면 줄거리 약 ${estimate.estimatedStoryCalls.total}회(구간 ${estimate.estimatedStoryCalls.segment} · 줄거리 묶음 ${estimate.estimatedStoryCalls.arc} · 전체 개요 ${estimate.estimatedStoryCalls.overview})와 관계 약 ${estimate.estimatedRelationshipCalls}회가 이어집니다.` : ''} 재검수·보정에 따라 호출이 늘 수 있고, 실제 청구량과는 다릅니다.`,
-            state.settings.postExtractionReview,
-          );
-          if (review === undefined) return;
-          const started = await client.request<{ runId: string }>(`/v1/chats/${chat}/extraction-batches/${encodeURIComponent(batchId)}/${action}`, { method: "POST", body: JSON.stringify({ postExtractionReview: review }) }, 120_000);
-          organizationView.candidateId = `regeneration:${started.runId}`;
-          organizationView.mobileDetail = true;
-          void drainWorker(state, client);
-          await refresh({ forceApply: true });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          organizationView.error = `기억 후보 생성을 준비하지 못했습니다. ${message}`;
-          addLog(state.logs, "error", `Regeneration preparation failed: [오류 원문 제외]`);
-        } finally {
-          organizationView.busy = false;
-          if (dashboardOpen) render();
-        }
+        await organizationActions.regenerate(action, target, chat);
         return;
       } else if (action === "toggle-bookmark" || action === "toggle-pin" || action === "toggle-memory") {
         const memory = data.memories.find((item) => item.id === target.dataset.id);
@@ -7444,97 +6257,23 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await client.request(`/v1/chats/${chat}/memories/${encodeURIComponent(id)}`, { method: "DELETE" });
         await invalidateTranslationCache(state, { chatId: state.current.chatId, itemIdPrefix: `${id}:` });
         selectedMemory = "";
-      } else if (action === "resolve-conflict") {
-        await client.request(`/v1/chats/${chat}/conflicts/${encodeURIComponent(target.dataset.id ?? "")}`, { method: "PATCH", body: JSON.stringify({ resolution: target.dataset.resolution }) });
-      } else if (action === "delete-conflict") {
-        if (!await confirmDashboard("확인 완료한 충돌 기록을 삭제할까요?", false, { confirm: "충돌 기록 삭제", danger: true })) return;
-        await client.request(`/v1/chats/${chat}/conflicts/${encodeURIComponent(target.dataset.id ?? "")}`, { method: "DELETE" });
-      } else if (action === "preview-entity-merge") {
-        const form = root.querySelector<HTMLFormElement>("#entity-merge-form");
-        if (!form) return;
-        const values = new FormData(form);
-        const sourceId = String(values.get("sourceId") ?? "");
-        const targetId = String(values.get("targetId") ?? "");
-        if (!sourceId || !targetId || sourceId === targetId) throw new Error("서로 다른 두 인물을 선택하세요.");
-        entityMergePreview = await client.request(`/v1/chats/${chat}/entities/merge-preview`, { method: "POST", body: JSON.stringify({ sourceId, targetId }) });
-        render();
-        return;
-      } else if (action === "cancel-entity-merge") {
-        entityMergePreview = undefined;
-        render();
-        return;
-      } else if (action === "merge-entities-final") {
-        await client.request(`/v1/chats/${chat}/entities/merge`, { method: "POST", body: JSON.stringify({ sourceId: target.dataset.sourceId, targetId: target.dataset.targetId, revision: Number(target.dataset.revision) }) });
-        entityMergePreview = undefined;
-        peopleView.management = "";
-        peopleView.mobileDetail = false;
-        selectedRelationship = "";
-        relationshipPerson = "";
-        relationshipMobileDetail = false;
-      } else if (action === "open-entity-delete") {
-        const normalize = (value: unknown) => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
-        const name = normalize(target.dataset.personName);
-        const entity: any = data.entities.find((item: any) => [item.name, item.displayName].some((value) => normalize(value) === name));
-        if (!entity) throw new Error("삭제할 인물을 찾지 못했습니다.");
-        entityDeletePreview = undefined;
-        peopleView.management = "delete";
-        peopleView.mobileDetail = true;
-        render(false);
-        const preview: any = await client.request(`/v1/chats/${chat}/entities/${encodeURIComponent(String(entity.id))}/delete-preview`, { method: "POST", body: "{}" });
-        // The panel names the person the way the list does.
-        entityDeletePreview = { ...preview, entity: { ...preview?.entity, id: preview?.entity?.id ?? entity.id, name: entity.displayName || entity.name || preview?.entity?.name } };
-        render(false);
-        return;
-      } else if (action === "confirm-entity-delete") {
-        entityDeletePreview = { ...entityDeletePreview, busy: true };
-        render(false);
-        try {
-          await client.request(`/v1/chats/${chat}/entities/${encodeURIComponent(target.dataset.id ?? "")}?revision=${encodeURIComponent(target.dataset.revision ?? "")}`, { method: "DELETE" });
-        } catch (error) {
-          entityDeletePreview = { ...entityDeletePreview, busy: false };
-          const text = String(error);
-          throw new Error(text.includes("ENTITY_DELETE_BUSY") ? "기억 정리가 진행 중이라 지금은 삭제할 수 없습니다. 잠시 후 다시 시도하세요."
-            : text.includes("ENTITY_DELETE_STALE") ? "확인한 뒤 기록이 바뀌었습니다. 인물 삭제를 다시 열어 확인해 주세요."
-              : text.includes("ENTITY_IS_PERSONA") ? "페르소나는 삭제할 수 없습니다. 먼저 페르소나 지정을 해제하세요." : text);
-        }
-        const deletedName = String(entityDeletePreview?.entity?.name ?? "");
-        entityDeletePreview = undefined;
-        peopleView.management = "";
-        peopleView.selectedId = "";
-        peopleView.mobileDetail = false;
-        selectedRelationship = "";
-        relationshipPerson = "";
-        relationshipMobileDetail = false;
-        showActionSaveState({ kind: "success", message: deletedName ? `${deletedName} 삭제됨` : "인물 삭제됨" });
+      } else if (isPeopleManagementAction(action)) {
+        const result = await peopleActions.manage(action, target, chat);
+        if (!result || !result.refresh) return;
+        if (result.resetRelationship) { selectedRelationship = ""; relationshipPerson = ""; relationshipMobileDetail = false; }
+        if (result.message) showActionSaveState({ kind: "success", message: result.message });
       } else if (action === "set-persona") {
-        const personaEntity = target.dataset.personaEntity?.trim() || null;
-        await client.putViewPreferences(state.current.chatId, { personaEntity });
-        showActionSaveState({ kind: "success", message: personaEntity ? `${personaEntity} 페르소나 지정됨` : "페르소나 지정 해제됨" });
+        const message = await peopleActions.setPersona(target, state.current.chatId);
+        showActionSaveState({ kind: "success", message });
       } else if (action === "new-social" || action === "edit-social") {
-        socialEditor = {
-          holder: action === "edit-social" ? target.dataset.holder ?? "" : "",
-          subject: action === "edit-social" ? target.dataset.subject ?? "" : "",
-          level: action === "edit-social" ? target.dataset.level ?? "aware_of" : "aware_of",
-          knownAs: action === "edit-social" ? target.dataset.knownAs ?? "" : "",
-          addressTerms: action === "edit-social" ? (data.socialKnowledge.find(item => item.holder === target.dataset.holder && item.subject === target.dataset.subject)?.addressTerms ?? []).join(", ") : "",
-          description: action === "edit-social" ? (data.socialKnowledge.find(item => item.holder === target.dataset.holder && item.subject === target.dataset.subject)?.cognition ?? []).map((item: any) => item.text).join("\n") : "",
-          locked:action === "edit-social" ? data.socialKnowledge.find(item=>item.holder===target.dataset.holder && item.subject===target.dataset.subject)?.locked ?? false : false,
-          editing: action === "edit-social",
-        };
+        socialEditor = peopleActions.socialEditor(action, target);
         render();
         root.querySelector<HTMLInputElement>('#social-form input[name="holder"]')?.focus();
         return;
       } else if (action === "edit-address") {
-        // The record may not exist yet: two people who share a scene have met, so a new one starts as 직접 교류.
-        const holder = target.dataset.holder ?? "", subject = target.dataset.subject ?? "";
-        const existing: any = data.socialKnowledge.find((item) => item.holder === holder && item.subject === subject);
         intimacyEditor = undefined;
         relationshipEditing = false;
-        socialEditor = {
-          holder, subject, focus: "address", editing: Boolean(existing), locked:existing?.locked ?? false,
-          level: String(existing?.level ?? "interacted"), knownAs: (existing?.knownAs ?? []).join(", "),
-          addressTerms: (existing?.addressTerms ?? []).join(", "),
-        };
+        socialEditor = peopleActions.socialEditor(action, target);
         formDirty = false;
         render();
         root.querySelector<HTMLInputElement>('#social-form input[name="addressTerms"]')?.focus();
@@ -7545,7 +6284,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         render();
         return;
       } else if (action === "delete-social") {
-        await client.request(`/v1/chats/${chat}/social-knowledge`, { method: "DELETE", body: JSON.stringify({ holder: target.dataset.holder, subject: target.dataset.subject }) });
+        await peopleActions.deleteSocial(target, chat);
       } else if (action === "backfill-social") {
         requireChatMemoryEnabled(state, state.current.chatId);
         const preview = await client.request<{ sourceGroups: number; postExtractionReview: boolean; busy: boolean }>(`/v1/chats/${chat}/social-knowledge/backfill/preview`);
@@ -7607,7 +6346,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           activeTab = "operations";
           await refresh({ forceApply: true });
         } catch (error) {
-          retryFeedback = { chatId, kind: "error", message: String(error).replace(/^Error:\s*/, "") };
+          retryFeedback = { chatId, kind: "error", errorReport: formatServerError(error), message: String(error).replace(/^Error:\s*/, "") };
         } finally {
           retryBusy = false;
           render();
@@ -7652,7 +6391,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     } catch (error) {
       const message = String(error).replace(/^Error:\s*/, "");
       addLog(state.logs, "error", `Dashboard action failed: [오류 원문 제외]`, supportFailure("dashboard_action", error));
-      showActionSaveState({ kind: "error", message: action?.startsWith("resolve-small-review") ? message : "작업 실패 · 관리 → 처리 상태에서 확인" });
+      showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: error instanceof ServerConnectionError && error.classification === "host_json_syntax" ? error.message : action?.startsWith("resolve-small-review") ? message : "작업 실패 · 관리 → 처리 상태에서 확인" });
     }
   });
 
@@ -7677,7 +6416,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   });
 
   root.addEventListener("keydown", event => {
-    if(event.key!=="Enter" || !(event.target instanceof HTMLInputElement) || !event.target.closest("#pair-progress-form"))return;
+    if(event.key!=="Enter" || !(event.target instanceof HTMLInputElement) || !event.target.closest("#pair-progress-form, [data-memory-budget]"))return;
     event.preventDefault();event.target.closest("form")?.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));
   });
   root.addEventListener("submit", async (event) => {
@@ -7686,54 +6425,25 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const values = Object.fromEntries(new FormData(form));
     if (form.id === "person-color-form") { await savePersonColor(form, String(values.color ?? "")); return; }
     if (form.id === 'organization-search-form' || form.id === 'organization-jump-form' || form.id === 'organization-addition-form') {
-      if (!state.current || organizationView.busy) return;
-      const chatId = state.current.chatId, chat = encodeURIComponent(chatId);
-      organizationView.error = undefined;
-      try {
-        if (form.id === 'organization-addition-form') {
-          const addition = organizationView.addition;
-          if (!addition || organizationView.busy || addition.estimating || !addition.estimate) return;
-          requireChatMemoryEnabled(state, chatId);
-          const body={rangeIds:addition.rangeIds,messageIds:addition.selectedIds,request:addition.request,postExtractionReview:state.settings.postExtractionReview};
-          const serialized=JSON.stringify(body);
-          if(addition.submission?.body!==serialized) addition.submission={key:crypto.randomUUID(),body:serialized};
-          organizationView.busy = true; render();
-          const created = await client.request<{ runId: string }>(`/v1/chats/${chat}/memory-additions/create`, {
-            method: 'POST', body: JSON.stringify({...body,idempotencyKey:addition.submission!.key}),
-          });
-          if (state.current?.chatId !== chatId) return;
-          organizationView.candidateId = `addition:${created.runId}`;
-          organizationView.addition = undefined;
-          void drainWorker(state, client);
-          await refresh({ forceApply: true });
-        } else {
-          const jumping = form.id === 'organization-jump-form';
-          const query = jumping ? `ordinal=${encodeURIComponent(String(values.ordinal))}` : `q=${encodeURIComponent(String(values.query))}`;
-          if (jumping) organizationView.jump = String(values.ordinal); else organizationView.search = String(values.query);
-          const found = await client.request<{ ranges: OrganizationData['ranges']; messageNumbers: number[]; truncated: boolean }>(`/v1/chats/${chat}/source-ranges/search?${query}`);
-          if (state.current?.chatId !== chatId) return;
-          organizationView.highlightedIds = found.ranges.map(range => range.id);
-          organizationView.searchStatus = found.ranges.length ? `${found.ranges.length}개 구간을 찾았어요${found.truncated ? ' · 처음 200개 메시지만 표시해요' : ''}` : '일치하는 원문 구간이 없어요.';
-          organizationView.mobileDetail = false;
-          renderSourceNavigationCompletion(root, complete => render(true, complete));
-          const id = jumping ? organizationJumpRange(found.ranges, Number(values.ordinal)) : found.ranges[0]?.id;
-          if (id) scrollOrganizationRange(id);
-        }
-      } catch (error) { organizationView.error = error instanceof Error ? error.message : String(error); }
-      finally {
-        organizationView.busy = false;
-        if (form.id === 'organization-addition-form') render();
-        else renderSourceNavigationCompletion(root, complete => render(true, complete));
-      }
+      await organizationActions.submit(form, values);
       return;
     }
-    const mutationForm = ["pair-progress-form", "memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form", "memory-line-form"].includes(form.id);
+    const mutationForm = ["cleanup-opened-chats-form", "pair-progress-form", "memory-form", "manual-memory-form", "story-overview-form", "relationship-form", "social-form", "world-state-form", "intimacy-form", "anniversary-form", "anniversary-new-form", "detail-access-form", "memory-line-form"].includes(form.id);
     const submitButton = form.querySelector<HTMLButtonElement>('button[type="submit"], button[data-action="submit-form"]')
       ?? root.querySelector<HTMLButtonElement>(`button[data-action="submit-form"][data-form-id="${form.id}"]`);
     if (mutationForm) { form.setAttribute("aria-busy", "true"); if (submitButton) submitButton.disabled = true; }
     let successMessage = "";
     try {
-      if (form.id === "settings-form") {
+      if (form.id === "cleanup-opened-chats-form") {
+        const chatIds = JSON.parse(form.dataset.chatIds ?? "[]") as string[];
+        if (!chatIds.length || !await confirmDashboard("열어 보기만 한 채팅의 RCM 기록을 정리할까요?\nRisu 채팅은 그대로이며, 다시 열면 원문이 동기화돼요.")) return;
+        const result = await client.request<{ deletedChats: number }>("/v1/admin/chats/cleanup-unengaged", {
+          method: "POST", body: JSON.stringify({ chatIds, workerId: state.workerId, currentChatId: state.current?.chatId }),
+        });
+        await refresh();
+        showActionSaveState({ kind: "success", message: `${result.deletedChats}개를 정리했어요. 사용 중인 채팅과 연결된 기록은 유지해요.` });
+        return;
+      } else if (form.id === "settings-form") {
         settingsSaving = true;
         updateTopbar();
         await persistSettingsForm(form);
@@ -7748,7 +6458,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } else if (!state.current) {
         throw new Error("현재 채팅 정보를 아직 불러오는 중입니다.");
       } else if (form.id === "pair-progress-form") {
-        await client.request(`/v1/chats/${encodeURIComponent(state.current.chatId)}/pair-progress`,{method:"POST",body:JSON.stringify({persona:form.dataset.persona,character:form.dataset.character,action:{kind:"add",label:String(values.label??""),mode:values.mode}})});
+        await pairActions.addProgress(form, values, state.current.chatId);
         state.automaticTurnPacket=undefined;
       } else if (form.id === "story-overview-form") {
         const overview = data.storySpine?.overview;
@@ -7805,7 +6515,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           landmarkKinds: dateAnniversaryLandmarks(label, [a, b], storyTime, kind),
         }) });
         if (!result.ok || !result.id) throw new Error("기념일을 저장하지 못했습니다.");
-        anniversaryEditorEntryId = "";
+        pairView.anniversaryEditorEntryId = "";
         formDirty = false;
         pendingData = undefined; newDataAvailable = false;
         successMessage = "기념일 추가됨";
@@ -7823,7 +6533,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
             const result = await client.patchMemory(state.current!.chatId, memoryId, { landmarkKinds });
             if (!result.ok) throw new Error("기념일을 저장하지 못했습니다.");
           });
-        anniversaryEditorEntryId = "";
+        pairView.anniversaryEditorEntryId = "";
         formDirty = false;
         successMessage = "기념일로 지정됨";
       } else if (form.id === "manual-memory-form") {
@@ -7890,11 +6600,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const nextSummary = String(values.summary ?? "").trim();
         const initialBaselineId = form.dataset.initialBaselineId;
         if (initialBaselineId && data.initialCalibration?.status === "awaiting_confirmation") {
-          const axes = Object.fromEntries(Object.keys(relationshipLevels).map((axis) => [axis, String(values[`${axis}Level`] ?? "unknown")]));
-          const result = await client.request<{ ok: boolean }>(`/v1/chats/${chat}/initial-calibration/relationships/${encodeURIComponent(initialBaselineId)}`, {
-            method: "PATCH", body: JSON.stringify({ axes, summary: nextSummary }),
-          });
-          if (!result.ok) throw new Error("초기 관계를 저장하지 못했습니다.");
+          await setupActions.saveRelationshipBaseline(initialBaselineId, chat, values, Object.keys(relationshipLevels), nextSummary);
           changes = 1;
         } else {
           const endpoint = `/v1/chats/${chat}/relationships`;
@@ -8045,13 +6751,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         settingsSaving = false;
         addLog(state.logs, "error", `Settings save failed: [오류 원문 제외]`, supportFailure("settings_save", error));
         const attempted = new FormData(form);
-        showActionSaveState({ kind: "error", message: settingsSaveFailureMessage(error, {
+        showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: settingsSaveFailureMessage(error, {
           serverUrl: String(attempted.get("serverUrl") ?? state.settings.serverUrl).trim(),
           serverToken: String(attempted.get("serverToken") ?? state.settings.serverToken).trim(),
         }) });
       } else {
-        data.error = String(error);
-        if (mutationForm) showActionSaveState({ kind: "error", message: `저장 실패 · ${String(error)}` });
+        data.error = String(error); data.errorReport = formatServerError(error);
+        if (mutationForm) showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: `저장 실패 · ${errorMessage(error)}` });
       }
       if (form.id !== "settings-form") render();
     } finally {
@@ -8070,13 +6776,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const relationForm = (event.target as HTMLElement).closest<HTMLFormElement>('#world-state-form[data-social="true"]');
     if (relationForm) syncRelationForm(relationForm);
     const input = event.target as HTMLInputElement;
-    if (input.hasAttribute("data-setup-search") && setupPicker) {
-      setupPicker.query = input.value;
-      const template = document.createElement("template"); template.innerHTML = setupSourcesPage(setupPicker);
-      const list = root.querySelector("[data-setup-list]");
-      if (list) list.innerHTML = template.content.querySelector("[data-setup-list]")?.innerHTML ?? "";
-      return;
-    }
+    if (input.closest("[data-memory-budget]")) syncMemoryBudgetControls(root);
+    if (setupActions.handleSearch(input)) return;
 
     // The colour sheet's preview face follows the picker live; saving still goes through submit-form.
     if (input.name === "birthdayMonth" && input.closest(".person-editor")) {
@@ -8087,23 +6788,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       }
     }
     if (input.name === "color" && input.closest("#person-color-form")) input.closest("#person-color-form")?.querySelector<HTMLElement>(".person-color-preview")?.style.setProperty("--pick", input.value);
-    if (input.closest('#organization-addition-form') && organizationView.addition) {
-      organizationView.addition.request = input.value;
-      organizationView.addition.estimate = undefined;
-      additionEstimateEpoch++;
-      if (additionEstimateTimer) clearTimeout(additionEstimateTimer);
-      const button = root.querySelector<HTMLButtonElement>('#organization-addition-form [data-action="submit-form"]');
-      if (button) button.disabled = true;
-      additionEstimateTimer = setTimeout(() => void updateAdditionEstimate(), 400);
-      return;
-    }
+    if (organizationActions.handleInput(input)) return;
     if (input.matches('#memory-line-form textarea')) { input.style.height="auto"; input.style.height=`${input.scrollHeight}px`; }
-    if (input.closest('#organization-search-form')) { organizationView.search = input.value; return; }
-    if (input.closest('#organization-jump-form')) { organizationView.jump = input.value; return; }
     if (input.closest("#pair-progress-form") || input.closest("#memory-form") || input.closest("#manual-memory-form") || input.closest("#story-overview-form") || input.closest("#intimacy-form") || input.closest("#social-form") || input.closest("#world-state-form") || input.closest("#relationship-form") || input.closest("#anniversary-form") || input.closest("#anniversary-new-form") || input.closest("#detail-access-form") || input.closest("#memory-line-form") || input.closest(".person-editor") || input.closest(".initial-relationship-editor")) syncEditorDirtyState();
     if (input.dataset.action === "people-search") {
       peopleView.query = input.value;
-      applyPeopleSearch();
+      peopleActions.applySearch();
       return;
     }
     if (input.dataset.action === "relationship-search") {
@@ -8112,14 +6802,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       return;
     }
     if (input.dataset.action === "data-search") {
-      dataView.query = input.value;
-      const query = input.value.trim().toLocaleLowerCase();
-      root.querySelectorAll<HTMLElement>("[data-data-row]").forEach((row) => { row.hidden = Boolean(query) && !row.textContent?.toLocaleLowerCase().includes(query); });
+      dataActions.applySearch(input.value);
       return;
     }
     if (input.dataset.action === "attention-search") {
       attentionView.query = input.value;
-      applyAttentionSearch();
+      attention.applySearch();
       return;
     }
     if (input.dataset.action === "social-search") {
@@ -8159,19 +6847,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (input.id !== "memory-search") return;
     timelineView.query = input.value;
-    applyTimelineSearch();
+    timelineActions.applySearch(data.memories.length);
   });
 
   root.addEventListener("change", async (event) => {
     const input = event.target as HTMLInputElement;
-    if (input.name === "characterEnabled") {
-      const chat = root.querySelector<HTMLInputElement>('[name="chatEnabled"]');
-      if (chat) chat.disabled = !input.checked;
-      const note = root.querySelector<HTMLElement>("[data-character-disabled]");
-      if (note) note.hidden = input.checked;
-      const usual = root.querySelector<HTMLElement>("[data-character-enabled-note]");
-      if (usual) usual.hidden = !input.checked;
-    }
+    if (input.closest("[data-memory-budget]")) syncMemoryBudgetControls(root);
+    if (input.name === "characterEnabled") syncChatEnabledControl(root, input.checked);
     if (input.name === "landmarkKind" && input.value === "other") {
       const other = input.closest("form")?.querySelector<HTMLElement>("[data-landmark-other]");
       if (other) other.hidden = !input.checked;
@@ -8191,7 +6873,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const changed = await changeChatProfile(input.value as RpProfile);
         if (!changed) input.value = state.current?.profile ?? state.settings.defaultProfile;
       } catch (error) {
-        data.error = String(error);
+        data.error = String(error); data.errorReport = formatServerError(error);
         input.value = state.current?.profile ?? state.settings.defaultProfile;
       }
       render(false);
@@ -8211,22 +6893,15 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       return;
     }
     if (input.dataset.action === "pair-diary-sort") {
-      pairDiarySort = input.value === "oldest" ? "oldest" : "newest";
-      render();
+      pairActions.applyDiarySort(input.value);
       return;
     }
-    if (input.dataset.action === "data-filter") { dataView.filter = input.value as DataViewState["filter"]; render(); return; }
+    if (input.dataset.action === "data-filter") { dataActions.applyFilter(input.value); return; }
     if (input.dataset.action === "select-probe-source" && state.lineageProbe) {
       state.lineageProbe.selectedParentId = input.value || undefined;
       render(); return;
     }
-    const confirmation = dataView.confirmation;
-    if (input.dataset.action === "ack-delete" && confirmation && confirmation.chatId === input.dataset.chatId) {
-      confirmation.acknowledged = input.checked;
-      const confirm = root.querySelector<HTMLButtonElement>('[data-action="confirm-data-operation"][data-operation="delete"]');
-      if (confirm) confirm.disabled = !input.checked;
-      return;
-    }
+    if (dataActions.acknowledgeDelete(input)) return;
     if (["translationProvider", "translationSlot", "translationServerProvider", "translationServerEndpoint", "translationServerCredentialSource"].includes(input.name)) {
       updateTranslationConnectionControls(root,input.name);return;
     }
@@ -8278,7 +6953,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const choice = await chooseChatBackupImport(canTransplant);
       if (choice === "original") await restoreChatBackup(bytes);
       else if (choice === "current") await transplantChatBackup(bytes, sourceChatId);
-    } catch (error) { data.error = String(error); render(); }
+    } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
   });
 
   root.addEventListener("focusout", () => {
