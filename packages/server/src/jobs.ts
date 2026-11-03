@@ -1,3 +1,4 @@
+import { editProtectedMessageIds } from "./turn-clock.js";
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
 import { pendingProgress } from "./pair-progress.js";
@@ -127,7 +128,7 @@ export function extractionUnits(messages: PendingMessage[], includeUserMessages:
   if (messages.length && messages.every(message => message.turn_key !== undefined)) {
     const turns: PendingMessage[][] = [];
     for (const message of messages) {
-      if (turns.at(-1)?.[0]?.turn_key !== message.turn_key) turns.push([]);
+      if (turns.at(-1)?.[0]?.turn_key !== message.turn_key || turns.at(-1)?.some(row => row.role === 'assistant')) turns.push([]);
       turns.at(-1)!.push(message);
     }
     return turns;
@@ -161,6 +162,7 @@ function originalExtractionUnits(db: RcmDatabase, chatId: string, ledger: boolea
     ${originalTurnKeySql} AS turn_key
     FROM messages m WHERE m.chat_id=? AND m.${lifecycleClause} AND m.host_visibility IN ('active','all_before')
       AND m.memory_excluded=0 AND m.extraction_state IN (SELECT value FROM json_each(?)) AND m.content IS NOT NULL
+      AND NOT EXISTS(SELECT 1 FROM gap_recovery_messages g WHERE g.chat_id=m.chat_id AND g.message_id=m.message_id)
       AND m.role IN ('user','assistant') AND turn_key IS NOT NULL ORDER BY m.ordinal,m.message_id`)
     .all(chatId,JSON.stringify(states)) as PendingMessage[];
   return extractionUnits(rows,true);
@@ -190,27 +192,7 @@ export function adaptiveExtractionGroups(units: PendingMessage[][], targetTurns:
   return groups;
 }
 
-export function editProtectedMessageIds(db: RcmDatabase, chatId: string, editProtectionTurns: number): Set<string> {
-  const rows = db.prepare(`SELECT message_id,completed_turn_seq FROM messages
-    WHERE chat_id=? AND completed_turn_seq IS NOT NULL AND lifecycle='committed' AND host_visibility IN ('active','all_before')
-    ORDER BY ordinal DESC,message_id DESC`).all(chatId) as Array<{ message_id: string; completed_turn_seq: number }>;
-  const turnLimit = Math.min(5, Math.max(1, editProtectionTurns));
-  const protectedIds = new Set<string>();
-  let turnOccurrences = 0;
-  let previousSequence: number | undefined;
-  for (const row of rows) {
-    // A repaired or restored ledger can contain a later occurrence of an old
-    // sequence number. Ordinal-adjacent runs, rather than the number itself,
-    // identify the current transcript's turn occurrence.
-    if (row.completed_turn_seq !== previousSequence) {
-      if (turnOccurrences === turnLimit) break;
-      turnOccurrences += 1;
-      previousSequence = row.completed_turn_seq;
-    }
-    protectedIds.add(row.message_id);
-  }
-  return protectedIds;
-}
+export { editProtectedMessageIds } from "./turn-clock.js";
 
 type LlmCallOutcome = "succeeded" | "failed";
 interface LlmCallDiagnostic { purpose: string; attempt: number; outcome: "started" | LlmCallOutcome; at: number; error?: string; code?: string; httpStatus?: number; risuCall?: RisuAuxiliaryCallDiagnostic; usage?: Record<string, number>; }
@@ -686,6 +668,7 @@ export function enqueueExtractionJobs(
   const pending = actionablePending.filter((message) => message.role === "assistant" || (includeUserMessages && message.role === "user"));
   const skipped = (db.prepare(`SELECT message_id FROM messages WHERE chat_id=? AND ${sourceMode === 'ledger' ? "lifecycle IN ('committed','client_pruned')" : "lifecycle='committed'"}
     AND memory_excluded=0 AND host_visibility IN ('active','all_before') AND extraction_state='pending' AND content IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM gap_recovery_messages g WHERE g.chat_id=messages.chat_id AND g.message_id=messages.message_id)
     AND role<>'assistant' AND (?=0 OR role<>'user')`).all(chatId,Number(includeUserMessages)) as Array<{message_id:string}>)
     .filter(message => !protectedMessageIds.has(message.message_id) && (!sourceMessageIdSet || sourceMessageIdSet.has(message.message_id)));
   if (skipped.length > 0) {
@@ -861,7 +844,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
         AND COALESCE(json_extract(j.payload_json,'$.nextAttemptAt'),0) <= ?
         AND (?=0 OR j.type='story_consolidation')
         AND j.id NOT IN (SELECT value FROM json_each(?))
-        AND (j.type='audit_retry' OR NOT EXISTS (
+        AND (j.type='audit_retry' OR json_extract(j.payload_json,'$.mode')='gap_recovery' OR NOT EXISTS (
           SELECT 1 FROM jobs blocked WHERE blocked.chat_id=j.chat_id AND blocked.status='failed'
             AND blocked.type IN ('extract','episode','social_backfill','initial_calibration')
             AND COALESCE(json_extract(blocked.payload_json,'$.sourceRecovery'),0)=0
@@ -1328,10 +1311,12 @@ export function resplitFailedExtractionJob(db: RcmDatabase, chatId: string, jobI
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE id=?").run(now(), payload.batchId);
     const reset = db.prepare("UPDATE messages SET extraction_state='pending',updated_at=? WHERE chat_id=? AND message_id=? AND host_visibility IN ('active','all_before') AND lifecycle='committed'");
     for (const id of ids) reset.run(now(), chatId, id);
+    const previousJobIds = new Set((db.prepare("SELECT id FROM jobs WHERE chat_id=?").all(chatId) as Array<{id:string}>).map(row=>row.id));
     const queued = enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages === 1,
       Math.min(chat.extraction_group_turns, Math.ceil(turns / 2)), payload.backfillRunId ? "ledger" : "current", payload.postExtractionReview, ids, payload.backfillRunId);
     if (!queued) throw new Error("Extraction sources changed before replanning");
-    db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.plannedParts',?) WHERE id=?").run(queued, jobId);
+    const resplitJobIds = (db.prepare("SELECT id FROM jobs WHERE chat_id=? AND type='extract'").all(chatId) as Array<{id:string}>).filter(row=>!previousJobIds.has(row.id)).map(row=>row.id);
+    db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.plannedParts',?,'$.resplitJobIds',json(?)) WHERE id=?").run(queued, JSON.stringify(resplitJobIds), jobId);
     return {
       queued,
       turns,

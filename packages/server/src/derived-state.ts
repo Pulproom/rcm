@@ -38,7 +38,7 @@ export function deleteDerivedRows(db: RcmDatabase, chatId: string, options: { pr
   db.prepare("DELETE FROM memory_fts WHERE chat_id=?").run(chatId);
   db.prepare("DELETE FROM memory_detail_fts WHERE chat_id=?").run(chatId);
   for (const table of [
-    "source_passages", "extraction_audits", "item_access", "atom_relations", "recall_logs", "conflicts", "jobs", "reconciliation_items", "memory_recall_events",
+    "gap_recovery_messages", "source_passages", "extraction_audits", "item_access", "atom_relations", "recall_logs", "conflicts", "jobs", "reconciliation_items", "memory_recall_events",
     "relationship_projection_queue", "relationship_projections", "relationship_events",
     "physical_intimacy_milestones", "promise_events", "promises", "social_knowledge_events",
     "entity_scene_presence", "entity_prominence", "beliefs", "assertions", "memory_edges",

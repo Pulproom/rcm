@@ -1,6 +1,6 @@
 import { MAX_MEMORY_BUDGET } from "@rcm/shared";
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
-import { errorMessage, formatServerError, ServerConnectionError } from "./server-errors.js";
+import { errorMessage, formatServerError, ServerConnectionError, ServerRequestError } from "./server-errors.js";
 import { createSetupController, createSetupView, isInitialSetupAction, setupPendingIn } from "./dashboard/setup-actions.js";
 export { filterTimelineMemories, timelineDefaultMemoryId, type TimelineViewState } from "./dashboard/organization-actions.js";
 import { createOrganizationController, createTimelineController, createTimelineView, timelineMemoryView, timelineDefaultMemoryId, type TimelineViewState } from "./dashboard/organization-actions.js";
@@ -48,7 +48,7 @@ import { syncLineageActivity, currentLineageOperation, runLineageOperation, inhe
 import {restoreChatSettings} from "./backup-settings.js";
 import { ServerCompatibilityError, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, SERVER_RESPONSE_DELAYED, type ServerConnectionIssue } from "./connection.js";
 import { syncQuizSettings } from "./quiz-sync.js";
-import { installServerUpdate, pluginUpdateNeeded, refreshUpdateStatus } from "./updates.js";
+import { installServerUpdate, observeServerUpdateVersion, pluginUpdateNeeded, refreshUpdateStatus } from "./updates.js";
 import { createDashboardNavigationController, dashboardScrollOwner, documentScroller, handleDashboardNavigationAction, handleSentNowNavigation, NavigationStack, type DashboardNavigationRefresh, type ViewSnapshot } from "./dashboard/navigation.js";
 import { matchPersonaEntity } from "./persona.js";
 import { buildPairs, entityForName, entityProminence, milestoneLabel, pairKey, PERSON_PROMINENCE_OPTIONS, relationshipLabelTranslationKey, relationshipSummaryLabel } from "./dashboard/pairs.js";
@@ -82,6 +82,9 @@ import { chatFamilies, familyShortTitle } from "./dashboard/chat-families.js";
 import { buildHomePairs, homePencilCounts, homeRecentMemories, homeTranslationRecords, injectedStateRows, type InjectionManifest } from "./dashboard/home.js";
 import { sentPage, sentWidget, type SentData, type SentPerson, type SentScene, type SentView } from "./dashboard/sent.js";
 
+import { recoveryCard, recoverySheet, recoveryProgress } from './dashboard/gap-recovery.js';
+import { deliverySwitches, memoryDeliveryTokens, toggleAlwaysInject, ALWAYS_INJECT_LIMIT_MESSAGE } from './dashboard/memory-delivery.js';
+
 export type Tab = "overview" | "initial" | "story" | "timeline" | "relationships" | "world" | "reviews" | "conflicts" | "operations" | "data" | "settings";
 
 export function mergeCompleteBackupSettings(current: PluginSettings, restored: unknown): PluginSettings {
@@ -101,7 +104,15 @@ export function backupRequestBody(bytes: ArrayBuffer): ArrayBuffer {
 type NavGroupId = "home" | "memory" | "people" | "world" | "manage";
 type NavItem = { tab: Tab; label: string; count?: number };
 type NavGroup = { id: NavGroupId; label: string; icon: string; defaultTab: Tab; items: NavItem[] };
-type ActionState = { kind: "success" | "error"; message: string; errorReport?: string };
+type ActionState = { kind: "success" | "error" | "info"; message: string; errorReport?: string };
+type ScopedActionError = ActionState & { tab: Tab; chatId?: string; action?: string };
+export function currentDashboardActionError(error: ScopedActionError | undefined, tab: Tab, chatId?: string, succeededAction?: string): ScopedActionError | undefined {
+  return error && error.tab === tab && error.chatId === chatId && (!succeededAction || error.action !== succeededAction) ? error : undefined;
+}
+export function isBenignDashboardActionError(action: string | undefined, error: unknown): boolean {
+  return (error instanceof Error && ["AbortError", "CanceledError", "CancelledError"].includes(error.name))
+    || (error instanceof ServerRequestError && error.status === 409 && (action === "initial-confirm" || action === "initial-skip"));
+}
 type WorldEditor = { promiseStatus?: string; social?: boolean; kind: "assertion" | "belief" | "promise"; id?: string; mode: "create" | "edit" | "end" | "delete"; stateKind?: string; subject?: string; target?: string; relationKind?: string; lockSubject?: boolean };
 type IntimacyEditor = { id?: string; participantA?: string; participantB?: string };
 export function relationshipSheetEditorsAfterSwitch(
@@ -213,6 +224,9 @@ export function dashboardThemeFromColor(value: string, prefersDark: boolean): "d
 }
 
 export interface DashboardData {
+  gapRecovery?: import('@rcm/shared').GapRecoveryStatus;
+  gapRecoveryDismissed?: boolean;
+  alwaysInject?: import('@rcm/shared').AlwaysInjectEstimate;
   pairProgress?: import("@rcm/shared").PairProgress[];
   pairProgressUnavailableReason?: import("@rcm/shared").PairProgressUnavailableReason;
   quizStatus?: import("@rcm/shared").QuizStatus;
@@ -321,16 +335,16 @@ export function availableNavigationSnapshot(snapshot: ViewSnapshot, data: Dashbo
 export const EDITOR_FORM_SELECTOR = "#pair-progress-form, #memory-form, #manual-memory-form, #story-overview-form, #intimacy-form, #social-form, #world-state-form, #relationship-form, #anniversary-form, #anniversary-new-form, #detail-access-form, #memory-line-form, .person-editor, .initial-relationship-editor, .reconciliation-edit";
 const EDITABLE_DASHBOARD_TABS: readonly Tab[] = ["initial", "story", "timeline", "relationships", "world", "reviews"];
 
-type DashboardChatDataset = "pairProgress" | "memories" | "messages" | "relationships" | "world" | "conflicts" | "jobs" | "recallLogs" | "entities" | "reviews" | "lineage" | "socialKnowledge" | "physicalIntimacy" | "viewPreferences" | "status" | "audits" | "initialCalibration" | "storySpine";
+type DashboardChatDataset = "gapRecovery" | "pairProgress" | "memories" | "messages" | "relationships" | "world" | "conflicts" | "jobs" | "recallLogs" | "entities" | "reviews" | "lineage" | "socialKnowledge" | "physicalIntimacy" | "viewPreferences" | "status" | "audits" | "initialCalibration" | "storySpine";
 
 const ALL_DASHBOARD_DATASETS: DashboardChatDataset[] = [
-  "memories", "messages", "relationships", "world", "conflicts", "jobs", "recallLogs", "entities",
+  "gapRecovery", "memories", "messages", "relationships", "world", "conflicts", "jobs", "recallLogs", "entities",
   "pairProgress", "reviews", "lineage", "socialKnowledge", "physicalIntimacy", "viewPreferences", "status", "audits", "initialCalibration", "storySpine",
 ];
 
 export function dashboardDatasetsForTab(tab: Tab): DashboardChatDataset[] {
   const byTab: Record<Tab, DashboardChatDataset[]> = {
-    overview: ["memories", "relationships", "entities", "viewPreferences", "world", "conflicts", "jobs", "lineage", "status", "initialCalibration", "storySpine", "socialKnowledge"],
+    overview: ["gapRecovery", "memories", "relationships", "entities", "viewPreferences", "world", "conflicts", "jobs", "lineage", "status", "initialCalibration", "storySpine", "socialKnowledge"],
     initial: ["memories", "relationships", "entities", "world", "socialKnowledge", "physicalIntimacy", "viewPreferences", "initialCalibration", "status"],
     story: ["memories", "storySpine", "entities", "relationships", "viewPreferences", "status"],
     timeline: ["memories", "messages", "status"],
@@ -711,6 +725,7 @@ export function updateNotice(state: RuntimeState): string {
     title: state.updateApplying.error ? "서버 업데이트를 확인해 주세요" : `RCM ${state.updateApplying.targetVersion} 업데이트 중`,
     bodyHtml: `<p>${escapeHtml(state.updateApplying.error ?? "새 서버를 적용하고 다시 연결하고 있습니다. 잠시만 기다려 주세요.")}</p>`,
     tone: state.updateApplying.error ? "warning" : "neutral",
+    actionsHtml: state.updateApplying.error ? btn("상태 다시 확인", { action: "check-update", kind: "quiet" }) : undefined,
   });
   const update = state.updateStatus;
   const pluginUpdate = pluginUpdateNeeded(update);
@@ -1161,11 +1176,28 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const pendingConflicts = data.conflicts.filter((item) => item.status === "pending").length;
   const needsAttention = Boolean(data.connectionIssue) || !data.health?.ok || failed > 0 || validation?.status === "marker_missing" || state.settings.workerPaused || pendingConflicts > 0;
   const blockingAlert = blockingFailed > 0 && !data.connectionIssue;
-  const blockingTitle = "기억 추출이 멈췄어요";
+  const blockingTitle = "기억 정리가 멈췄어요";
+  const failedJob = data.jobs.find(job => job.status === 'failed' && job.type === 'extract');
+  const failedPayload = parseJson<any>(failedJob?.payload_json, {});
+  const failedRange = failedJob?.failedRange;
+  const refusal = failedPayload.providerFailure?.refusal === true || failedPayload.providerFailure?.code === 'AUXILIARY_PROVIDER_REJECTED'
+    || (failedPayload.llmCallDiagnostics ?? []).some((call: any) => call.code === 'AUXILIARY_PROVIDER_REJECTED');
+  const splitAvailable = failedRange?.canResplit === true;
+  const blockingActions = [
+    ...(refusal && splitAvailable ? [{ label: '잘게 나눠서 다시', kind: 'primary' as const, action: 'resplit-extraction', data: { jobId: String(failedJob.id) } }] : []),
+    { label: refusal ? '그대로 다시 시도' : '다시 시도', kind: refusal && splitAvailable ? 'quiet' as const : 'primary' as const, action: 'retry-extraction', data: { jobId: String(failedJob?.id ?? '') } },
+    ...(!refusal && splitAvailable ? [{ label: '잘게 나눠서 다시', kind: 'quiet' as const, action: 'resplit-extraction', data: { jobId: String(failedJob.id) } }] : []),
+  ];
+  const splitParent = data.jobs.find(job => job.status === 'superseded' && parseJson<any>(job.payload_json, {}).resplitJobIds?.length);
+  const splitIds: string[] = parseJson<any>(splitParent?.payload_json, {}).resplitJobIds ?? [];
+  const splitJobs = data.jobs.filter(job => splitIds.includes(job.id));
+  const splitDone = splitJobs.filter(job => job.status === 'done').length;
+  const splitting = splitJobs.some(job => ['queued', 'leased'].includes(job.status));
+  const splitNotice = splitting ? `<section class="gap-card notice"><div><strong>나눠서 다시 정리하는 중 · ${splitDone}/${splitIds.length}</strong><p>이 구간이 끝나야 다음 기억을 만들 수 있어요.</p>${recoveryProgress(splitDone, splitIds.length)}</div></section>` : '';
   const budgetFailure = data.jobs.find(job => job.status === "failed" && job.type === "extract" && isProviderContextLimitError(job.last_error));
   // Strip only product-owned error markers; keep the cause ahead of the phone card's line clamp.
   const budgetFailureCopy = budgetFailure ? settingsFailureMessage(budgetFailure.last_error) : undefined;
-  const blockingCopy = data.jobs.some(job => job.status === "failed" && isProviderAuthenticationError(job.last_error)) ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : budgetFailureCopy || (queued > 0 ? `실패한 작업 ${blockingFailed}건 때문에 뒤의 ${queued}건이 기다리고 있어요.` : `실패한 작업 ${blockingFailed}건을 다시 시도해 주세요.`);
+  const blockingCopy = data.jobs.some(job => job.status === "failed" && isProviderAuthenticationError(job.last_error)) ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : budgetFailureCopy || `${failedRange ? `${failedRange.startTurn ?? failedRange.startOrdinal}–${failedRange.endTurn ?? failedRange.endOrdinal}턴 · ` : ""}${refusal ? "보조 모델이 요청을 거절했어요" : failedRange?.reason || "기억 정리를 마치지 못했어요"}. 이 구간이 끝나야 다음 기억을 만들 수 있어요.`;
   const backfillPending = shouldOfferBackfill(state, data);
   const hasDerivedData = data.memories.length + data.relationships.length + data.assertions.length + data.promises.length > 0;
   const processing = queued > 0 || state.workerBusy;
@@ -1202,11 +1234,12 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const sceneSlug = (memory: any): string => slugline(numbers.get(String(memory.id)) ?? 0, memoryPlace(memory), memory.story_time ?? memory.storyTime ?? null);
 
   const latest = recent[0];
+  const emptySceneTitle = state.current?.chatTitle?.trim() || state.current?.characterName || "새 이야기";
   const latestSubtitle = latest ? sceneSubtitle(latest, translations, translationDisplay) : undefined;
   const latestDate = latest ? sceneDate(latest.story_time ?? latest.storyTime ?? null) : null;
   const poster = latest
     ? `<section class="poster" aria-label="${lex().nowShowing}"><div class="frame__slug"><b>${escapeHtml(sceneSlug(latest))}</b>${latestDate ? `<span class="tc">${escapeHtml(latestDate)}</span>` : ""}</div><h2><button type="button" data-action="open-timeline-memory" data-memory-id="${escapeHtml(latest.id)}">${sceneTitle(latest)}</button></h2>${latestSubtitle ? `<p class="subtitle"><span>${latestSubtitle.html}</span><small>${escapeHtml(latestSubtitle.speaker)}</small></p>` : ""}</section>`
-    : `<section class="poster is-empty">${empty(lex().emptyScenes, backfillPending ? "과거 대화로 기억을 만들면 여기에 첫 씬이 걸립니다." : "대화가 몇 턴 쌓이면 첫 씬이 정리됩니다.")}</section>`;
+    : `<section class="poster is-empty"><h2>${escapeHtml(emptySceneTitle)}</h2><p class="sub">첫 장면을 기다리고 있어요</p></section>`;
   const recentFrames = recent.slice(1).map((memory) => {
     const date = sceneDate(memory.story_time ?? memory.storyTime ?? null);
     return frame({ slug: sceneSlug(memory), date: date ?? undefined, title: "", titleHtml: sceneTitle(memory), subtitle: sceneSubtitle(memory, translations, translationDisplay), action: "open-timeline-memory", data: { memoryId: String(memory.id) } });
@@ -1216,7 +1249,9 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const pencil = homePencilCounts(data);
   const notices = [
     data.connectionIssue ? notice(`${healthTitle} · ${healthDetail}`, { tone: "cut", action: btn("서버 설정 열기", { kind: "quiet", action: "tab", data: { tab: "settings", settingsSection: "server" }, hit: true }) }) : "",
-    blockingAlert ? notice(`${blockingTitle} · ${blockingCopy}`, { tone: "cut", action: `<span class="notice__acts">${btn("다시 시도", { kind: "primary", action: "retry-failed" })}${btn("처리 상태", { kind: "quiet", action: "tab", data: { tab: "operations" } })}</span>` }) : "",
+    splitNotice,
+    recoveryCard(data.gapRecovery, data.memories, false, data.gapRecoveryDismissed),
+    blockingAlert ? `<section class="gap-card notice notice--cut is-bad"><div><strong>${escapeHtml(blockingTitle)}</strong><p>${escapeHtml(blockingCopy)}</p><div class="notice__acts">${blockingActions.map(({ label, ...opts }) => btn(label, opts)).join('')}</div></div></section>` : "",
     retry && !blockingAlert && !data.connectionIssue ? notice(`${retry.label} · ${retry.detail}`, { tone: "plain", action: btn("처리 상태", { kind: "quiet", action: "tab", data: { tab: "operations" } }) }) : "",
     pendingConflicts ? notice(`확인이 필요한 충돌 ${pendingConflicts}건`, { tone: "cut", action: btn("관리로", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "reviews", attentionFilter: "conflict" }, hit: true }) }) : "",
     pencil.overdue ? notice(`기한 지난 약속 ${pencil.overdue}개`, { tone: "cut", action: btn("확인하기", { kind: "quiet", iconEnd: "chevron", action: "tab", data: { tab: "world" }, hit: true }) }) : "",
@@ -1242,7 +1277,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
     if (!memory || isRecognitionMemory(memory)) return null;
     const summary = injectedScenes.get(id);
     return { memoryId: id, no: numbers.get(id) ?? 0, titleHtml: sceneTitle(memory), when: sceneDate(memory.story_time ?? memory.storyTime ?? null) ?? "",
-      clarity: summary?.clarity, details: summary?.details, dialogues: summary?.dialogues };
+      alwaysInject: Boolean(manifest?.alwaysInjectMemoryIds?.includes(id)), clarity: summary?.clarity, details: summary?.details, dialogues: summary?.dialogues };
   };
   const sentPairs = new Map<string, { a: string; b: string }>();
   for (const pair of manifest?.relationshipPairs ?? []) if (!sentPairs.has(pairKey(pair.from, pair.to))) sentPairs.set(pairKey(pair.from, pair.to), { a: pair.from, b: pair.to });
@@ -1321,6 +1356,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
     const running = storyGroups(data.storySpine).at(-1);
     const runningPlace = running ? storyActPlaces(data.storySpine).get(running.key) : undefined;
     return renderLockHome({
+      title: emptySceneTitle,
       place: latest ? memoryPlace(latest) : null,
       date: latestDate,
       dayLine: [weekday ? `${weekday}요일${part ? ` ${part}` : ""}` : part ?? "", latest ? `${numbers.get(String(latest.id)) ?? 0}번째 장면` : ""].filter(Boolean).join(" · "),
@@ -1342,17 +1378,14 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
       alerts: [
         ...(setupPending ? [{ tone: "cut" as const, text: "설정 재료를 골라 주세요", body: "초기 인물과 관계를 정할 내용이에요", action: "open-setup-sources" }] : []),
         ...(data.connectionIssue ? [{ tone: "cut" as const, text: healthTitle, action: "tab", data: { tab: "settings", settingsSection: "server" } }] : []),
-        ...(blockingAlert ? [{ tone: "cut" as const, text: blockingTitle, body: blockingCopy, actions: [
-          { label: "다시 시도", kind: "primary" as const, action: "retry-failed" },
-          { label: "처리 상태", kind: "quiet" as const, action: "tab", data: { tab: "operations" } },
-        ] }] : []),
+        ...(blockingAlert ? [{ tone: "cut" as const, text: blockingTitle, body: blockingCopy, actions: blockingActions }] : []),
         ...(retry && !blockingAlert && !data.connectionIssue ? [{ tone: "wait" as const, text: retry.label, body: retry.detail, action: "tab", data: { tab: "operations" } }] : []),
         ...(pendingConflicts ? [{ tone: "cut" as const, text: `확인이 필요한 충돌 ${pendingConflicts}건`, action: "tab", data: { tab: "reviews", attentionFilter: "conflict" } }] : []),
         ...(pencil.overdue ? [{ tone: "wait" as const, text: `기한 지난 약속 ${pencil.overdue}개`, action: "tab", data: { tab: "world" } }] : []),
         ...(pencil.attention ? [{ tone: "wait" as const, text: `확인할 기록 ${pencil.attention}개`, action: "tab", data: { tab: "reviews" } }] : []),
         ...(phoneAdvisoryAlert ? [{ tone: "wait" as const, text: healthTitle, action: "tab", data: { tab: "operations" } }] : []),
       ],
-      noticesHtml: alerts,
+      noticesHtml: alerts + splitNotice + recoveryCard(data.gapRecovery, data.memories, true, data.gapRecoveryDismissed),
       emptyTitle: lex().emptyScenes,
     });
   }
@@ -1470,7 +1503,7 @@ function socialEditorForm(editor: SocialEditor): string {
   return `<form id="social-form" class="form" ${original}><div class="form__row">${field({ id: "social-holder", label: "알고 있는 사람", control: `<input id="social-holder" class="input" name="holder" value="${escapeHtml(editor.holder)}" required>` })}${field({ id: "social-subject", label: "대상 인물", control: `<input id="social-subject" class="input" name="subject" value="${escapeHtml(editor.subject)}" required>` })}</div>${field({ id: "social-level", label: "상태", control: `<select id="social-level" class="select" name="level"><option value="aware_of" ${editor.level === "aware_of" ? "selected" : ""}>존재를 알고 있음</option><option value="interacted" ${editor.level === "interacted" ? "selected" : ""}>직접 교류한 기록 있음</option></select>` })}${field({ id: "social-known-as", label: "알고 있는 이름·직함", control: `<input id="social-known-as" class="input" name="knownAs" value="${escapeHtml(editor.knownAs)}" placeholder="쉼표로 구분">` })}${field({ id: "social-address-terms", label: "부르는 이름", control: `<input id="social-address-terms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">` })}${field({ id: "social-description", label: "기록", control: `<textarea id="social-description" class="textarea" name="description">${escapeHtml(editor.description ?? "")}</textarea>` })}${autoLockCheckbox(editor.locked)}<div class="form__bar">${btn("저장", { kind: "primary", action: "submit-form" })}${btn("취소", { kind: "quiet", action: "cancel-social" })}</div></form>`;
 }
 
-export function initialCalibrationPage(data: DashboardData, view: PeopleViewState, translations: TranslationView = new Map(), display: RuntimeState["settings"]["translationDisplay"] = "en", mergePreview?: any, socialEditor?: SocialEditor, deletePreview?: any): string {
+export function initialCalibrationPage(data: DashboardData, view: PeopleViewState, translations: TranslationView = new Map(), display: RuntimeState["settings"]["translationDisplay"] = "en", mergePreview?: any, socialEditor?: SocialEditor, deletePreview?: any, confirming?: "initial-confirm" | "initial-skip"): string {
   const calibration = data.initialCalibration ?? { status: "unseeded", entities: [], relationships: [], locked: false };
   const calibrationById = new Map((calibration.entities ?? []).map((item: any) => [String(item.id), item]));
   const calibrationByName = new Map((calibration.entities ?? []).flatMap((item: any) => [item.internalName, item.displayName]
@@ -1507,19 +1540,12 @@ export function initialCalibrationPage(data: DashboardData, view: PeopleViewStat
     return personPairs.filter((pair) => names.has(normalize(pair.a)) || names.has(normalize(pair.b))).length;
   };
   const statusControls = calibration.status === "awaiting_confirmation"
-    ? `${btn("기억 생성 시작", { kind: "primary", action: "initial-confirm" })}${btn("다시 분석", { kind: "quiet", action: "initial-retry" })}${btn("건너뛰기", { kind: "quiet", action: "initial-skip" })}`
-    : setupPendingIn(data) ? `${btn("설정 재료 고르기", { kind: "primary", action: "open-setup-sources" })}${btn("건너뛰기", { kind: "quiet", action: "initial-skip" })}` : calibration.status === "failed" ? `${btn("다시 분석", { kind: "primary", action: "initial-retry" })}${btn("건너뛰기", { kind: "quiet", action: "initial-skip" })}` : "";
+    ? `${btn(confirming === "initial-confirm" ? "시작하는 중…" : "기억 생성 시작", { kind: "primary", action: "initial-confirm", disabled: Boolean(confirming), busy: confirming === "initial-confirm" })}${btn("다시 분석", { kind: "quiet", action: "initial-retry", disabled: Boolean(confirming) })}${btn(confirming === "initial-skip" ? "건너뛰는 중…" : "건너뛰기", { kind: "quiet", action: "initial-skip", disabled: Boolean(confirming), busy: confirming === "initial-skip" })}`
+    : setupPendingIn(data) ? `${btn("설정 재료 고르기", { kind: "primary", action: "open-setup-sources" })}${btn(confirming === "initial-skip" ? "건너뛰는 중…" : "건너뛰기", { kind: "quiet", action: "initial-skip", disabled: Boolean(confirming), busy: confirming === "initial-skip" })}` : calibration.status === "failed" ? `${btn("다시 분석", { kind: "primary", action: "initial-retry", disabled: Boolean(confirming) })}${btn(confirming === "initial-skip" ? "건너뛰는 중…" : "건너뛰기", { kind: "quiet", action: "initial-skip", disabled: Boolean(confirming), busy: confirming === "initial-skip" })}` : "";
   const setupNotice = setupPendingIn(data) ? notice("설정 재료를 골라 주세요. 가져온 설정이 있으면 기본 선택에 반영해요.", { action: `<span class="notice__acts">${statusControls}</span>` })
     : calibration.status === "queued" ? notice("초기 인물을 정리하고 있습니다.")
       : calibration.status === "awaiting_confirmation" ? notice("인물과 초기 관계를 확인해 주세요.", { action: `<span class="notice__acts">${statusControls}</span>` })
         : calibration.status === "failed" ? notice(`초기 인물을 정리하지 못했습니다. ${calibration.lastError ?? "잠시 후 다시 시도해 주세요."}`, { tone: "cut", action: `<span class="notice__acts">${statusControls}</span>` }) : "";
-  const setupHolders = new Map<string, any[]>();
-  for (const item of calibration.status === "awaiting_confirmation" ? calibration.socialKnowledge ?? [] : []) {
-    const holder = String(item?.holder ?? "");
-    setupHolders.set(holder, [...(setupHolders.get(holder) ?? []), item]);
-  }
-  const setupReview = setupHolders.size
-    ? `<section class="setup-review" aria-label="시작 시점 설정표"><h2 class="sec">시작 시점 설정표 <span class="n">${calibration.socialKnowledge.length}</span></h2><p class="sub">대화가 시작될 때 각 인물이 상대를 어떻게 알고 있는지입니다. 확정한 뒤 인물 시트의 아는 사이에서 고칠 수 있습니다.</p><table class="table"><thead><tr><th scope="col">인물</th><th scope="col">아는 인물</th><th scope="col">수준</th><th scope="col">설명</th></tr></thead>${[...setupHolders.entries()].map(([holder, items]) => `<tbody>${items.map((item: any, index: number) => `<tr>${index === 0 ? `<th scope="rowgroup" rowspan="${items.length}">${nameHtml(holder)}</th>` : ""}<td data-label="아는 인물">${nameHtml(String(item.subject ?? ""))}</td><td data-label="수준">${item.level === "interacted" ? "직접 교류" : "존재만 앎"}</td><td data-label="설명">${displayText(String(item.description ?? ""), translations.get(`initial-social:${item.holder}|${item.subject}`), display)}</td></tr>`).join("")}</tbody>`).join("")}</table></section>` : "";
   const personRow = (person: any) => {
     const names = namesFor(person);
     const count = relationCount(person);
@@ -1550,7 +1576,7 @@ export function initialCalibrationPage(data: DashboardData, view: PeopleViewStat
     return `<article class="reader is-editing"><div class="reader__bar"><button type="button" class="back hit" data-action="close-person-editor">${icon("back")}<span>인물</span></button></div><h2 class="reader__title">${isNew ? "인물 추가" : "프로필 수정"}</h2><form class="form person-editor" data-entity-id="${escapeHtml(selected.id)}">${field({ id: "person-displayName", label: "표시 이름", control: `<input id="person-displayName" class="input" name="displayName" value="${escapeHtml(selected.displayName)}" required>` })}${field({ id: "person-aliases", label: "별칭", control: `<input id="person-aliases" class="input notranslate" translate="no" name="aliases" value="${escapeHtml((selected.aliases ?? []).join(", "))}" placeholder="쉼표로 구분">` })}${birthdayField}<div class="field"><span class="label">중요도</span>${prominenceSeg}</div><div class="form__bar">${isNew || calibration.locked ? "" : btn("목록에서 삭제", { kind: "danger", icon: "delete", action: "delete-initial-entity", data: { id: String(selected.id), name: String(selected.displayName ?? "") } })}<span class="sp"></span>${btn("취소", { kind: "quiet", action: "close-person-editor" })}${btn("저장", { kind: "primary", icon: "save", action: isNew ? "add-initial-entity" : "save-initial-entity", data: { id: String(selected.id) } })}</div></form></article>`;
   })() : "";
   const reader = selected && !view.editing ? renderPersonDetail(
-    buildPersonDetail({ ...data, entities: people }, String(selected.displayName || selected.internalName || selected.name || ""), data.personaEntity ?? null),
+    buildPersonDetail({ ...data, entities: people, socialKnowledge: calibration.status === "awaiting_confirmation" ? [...(calibration.socialKnowledge ?? []), ...(data.socialKnowledge ?? []).filter((item: any) => !(calibration.socialKnowledge ?? []).some((setup: any) => setup.holder === item.holder && setup.subject === item.subject))] : data.socialKnowledge }, String(selected.displayName || selected.internalName || selected.name || ""), data.personaEntity ?? null),
     {
       translations,
       display,
@@ -1569,7 +1595,7 @@ export function initialCalibrationPage(data: DashboardData, view: PeopleViewStat
   const detail = view.management === "merge" ? entityMergePanel(data, mergePreview) : view.management === "delete" ? entityDeletePanel(deletePreview) : editor || reader;
   const hasDetail = Boolean(selected || view.management);
   const list = `<div class="listcol">${tools}${filterBar}<div class="tl-rows" data-preserve-scroll="people-list">${groupHtml || empty("조건에 맞는 인물이 없습니다", "필터를 바꿔 보세요.")}<div data-people-search-empty hidden>${empty("검색 결과가 없습니다", "다른 이름이나 별칭으로 찾아보세요.")}</div></div></div>`;
-  return `<div class="people${view.mobileDetail ? " is-detail" : ""}${hasDetail ? " has-detail" : ""}">${setupNotice}${setupReview}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:people:${escapeHtml(view.selectedId)}:${escapeHtml(view.management ?? "")}">${hasDetail ? detail : empty("인물을 고르세요", "목록에서 인물을 고르면 인물 시트가 열립니다.")}</div></div></div>`;
+  return `<div class="people${view.mobileDetail ? " is-detail" : ""}${hasDetail ? " has-detail" : ""}">${setupNotice}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:people:${escapeHtml(view.selectedId)}:${escapeHtml(view.management ?? "")}">${hasDetail ? detail : empty("인물을 고르세요", "목록에서 인물을 고르면 인물 시트가 열립니다.")}</div></div></div>`;
 }
 
 type TranslationView = Map<string, string>;
@@ -1670,7 +1696,7 @@ const memoryDay = (memory: any): { key: string; label: string } => {
 
 function memorySignals(memory: any): string {
   const signal = (on: boolean, name: string, label: string) => on ? `<span class="signal" role="img" aria-label="${label}" title="${label}">${icon(name)}</span>` : "";
-  const html = `${signal(Boolean(memory.bookmarked), "bookmark", "북마크")}${signal(Boolean(memory.landmark), "landmark", "랜드마크")}${signal(Boolean(memory.pinned), "pin", "검색 우선 고정")}${signal(memory.active === false, "inactive", "비활성")}`;
+  const html = `${signal(Boolean(memory.bookmarked), "bookmark", "북마크")}${signal(Boolean(memory.landmark), "landmark", "랜드마크")}${signal(Boolean(memory.pinned), "pin", "검색 우선 고정")}${signal(Boolean(memory.alwaysInject), "arrow-right", "항상 전달")}${signal(memory.active === false, "inactive", "비활성")}`;
   return html ? `<span class="row__signals">${html}</span>` : "";
 }
 
@@ -1715,11 +1741,15 @@ function memoryRow(memory: any, selectedId: string, translations: TranslationVie
   return `<button type="button" class="row${memory.active === false ? " is-off" : ""}"${memory.id === selectedId ? ' aria-current="true"' : ""} data-action="select-memory" data-translate-memory="${escapeHtml(memory.id)}" data-id="${escapeHtml(memory.id)}" data-day="${escapeHtml(memoryDay(memory).key)}" data-landmark="${memory.landmark === true}" data-bookmarked="${memory.bookmarked === true}" data-pinned="${memory.pinned === true}" data-active="${memory.active !== false}"><div class="row__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><div class="row__title">${title}</div><div class="row__sub">${content}</div></button>`;
 }
 
-function memoryActionMenu(memory: any): string {
+function memoryActionMenu(memory: any, count: number): string {
   const id = { id: String(memory.id) };
   return menu({ label: "기억 더보기", items: [
     { label: memory.bookmarked ? "북마크 해제" : "북마크", icon: "bookmark", action: "toggle-bookmark", data: id },
-    { label: memory.pinned ? "검색 우선 해제" : "검색 우선 고정", icon: "pin", action: "toggle-pin", data: id },
+    ...(lex().skin === 'phone' ? [] : [
+      { label: memory.pinned ? "검색 우선 해제" : "검색 우선 고정", icon: "pin", action: "toggle-pin", data: id },
+      { label: memory.alwaysInject ? '항상 전달 해제' : '항상 전달', icon: 'arrow-right', action: 'toggle-always-inject', data: id,
+        count: `${count}/5`, hint: !memory.alwaysInject && count >= 5 ? ALWAYS_INJECT_LIMIT_MESSAGE : `매 턴 꼭 넣어요 · 약 ${memoryDeliveryTokens(memory)}토큰`, disabled: !memory.alwaysInject && count >= 5 },
+    ]),
     { label: memory.active === false ? "다시 사용" : "비활성화", icon: "inactive", action: "toggle-memory", data: id },
     { label: "관련 원문 보기", icon: "search", action: "related-source", data: id },
     { label: "기억 삭제", icon: "delete", action: "delete-memory", data: id, danger: true },
@@ -1760,7 +1790,7 @@ export function detailAccessLine(memoryId: string, detail: any, editing: boolean
   return `<p class="detail-know"><span class="detail-know__k">아는 인물</span><span class="detail-know__v notranslate" translate="no">${label}</span><button type="button" class="linkbtn hit" data-action="edit-detail-access" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}">수정</button></p>`;
 }
 
-function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set(), lineEditingAvailable = false): string {
+function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set(), lineEditingAvailable = false, alwaysCount = 0): string {
   if (!memory) return empty("표시할 기억이 없습니다", "검색이나 필터를 바꿔 보세요.");
   const evidence = parseJson<Array<{ messageId?: string; quote?: string }>>(memory.evidence_json, []);
   const displayedDialogues = joinDialogueSpans(Array.isArray(memory.keyDialogues) ? memory.keyDialogues : []);
@@ -1891,11 +1921,11 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
     ? intimacyLandmarkMarks(key, entry, intimacyMilestones)
     : `<span class="mark is-key">${icon("landmark")}${escapeHtml(landmarkLabel(entry))}</span>`).join("")}</div>` : "";
   const pager = `<nav class="pager" aria-label="기억 이동">${btn("이전", { kind: "quiet", icon: "back", action: "timeline-adjacent", data: { id: adjacent.previous?.id ?? "" }, disabled: !adjacent.previous, hit: true })}${btn("다음", { kind: "quiet", iconEnd: "chevron", action: "timeline-adjacent", data: { id: adjacent.next?.id ?? "" }, disabled: !adjacent.next, hit: true })}</nav>`;
-  const actions = `<div class="reader__acts">${iconBtn("edit", "기억 수정", { action: "edit-memory" })}${memoryActionMenu(memory)}</div>`;
+  const actions = `<div class="reader__acts">${iconBtn("edit", "기억 수정", { action: "edit-memory" })}${memoryActionMenu(memory, alwaysCount)}</div>`;
   const content = phone
     ? `<div data-preserve-scroll="timeline-detail">${record}${lines ? labelledBlock("주요 대사", displayedDialogues.length, lines) : ""}${detailsFold}${hiddenFold}${structure}${evidenceFold}${info}</div>`
     : `${lines}<div data-preserve-scroll="timeline-detail">${expandableLongContent("기억 본문", record, Math.max(String(memory.content ?? "").length, String(translatedContent ?? "").length))}${info}${structure}${detailsFold}${hiddenFold}${evidenceFold}</div>`;
-  return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${people}${landmarkMarks}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억입니다.") : ""}${translationState}${content}${pager}</article>`;
+  return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${people}${landmarkMarks}${memory.alwaysInject ? `<div class="marks"><span class="mark">${icon("arrow-right")}항상 전달 · 약 ${memoryDeliveryTokens(memory)}토큰</span></div>` : ""}${phone ? deliverySwitches(memory, alwaysCount) : ""}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억입니다.") : ""}${translationState}${content}${pager}</article>`;
 }
 
 /** Labels for picking a landmark kind; 기념일 기준 is set from a pair's scene log, so it is kept but never offered here. */
@@ -2009,7 +2039,7 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
     : filteredListEmpty
       ? empty("선택된 기억이 없습니다", "목록에서 기억을 고르거나 필터를 바꿔 보세요.")
     : selected
-      ? memoryDetail(selected, messages, translations, view, translationEnabled, sourceLanguage, adjacent, numbers, translationError, personaNameSet(data), data.health?.capabilities?.memoryLineEditing === true)
+      ? memoryDetail(selected, messages, translations, view, translationEnabled, sourceLanguage, adjacent, numbers, translationError, personaNameSet(data), data.health?.capabilities?.memoryLineEditing === true, data.alwaysInject?.items.length ?? data.memories.filter(item => item.alwaysInject).length)
       : empty("아직 기억이 없습니다", "대화가 쌓이면 장면이 여기에 정리됩니다.");
   return `<div class="timeline${view.mobileDetail ? " is-detail" : ""}"><div class="split">${list}<div class="readercol" data-preserve-scroll="reader:timeline:${escapeHtml(view.creating ? "new" : selected?.id ?? "")}"><div data-timeline-reader-empty style="display:none">${empty("선택된 기억이 없습니다", "목록에서 기억을 고르거나 필터를 바꿔 보세요.")}</div>${reader}</div></div></div>`;
 }
@@ -3807,7 +3837,7 @@ export async function loadDashboardData(
   const endpoint = (dataset: DashboardChatDataset): string => {
     const chat = encodeURIComponent(context!.chatId);
     const paths: Record<DashboardChatDataset, string> = {
-      memories: "memories", messages: "messages", relationships: "relationships", world: "world-state?includeHistory=true",
+      gapRecovery: "gap-recovery", memories: "memories", messages: "messages", relationships: "relationships", world: "world-state?includeHistory=true",
       conflicts: "conflicts", jobs: "jobs", recallLogs: "recall-logs", entities: "entities", reviews: "reconciliation-reviews",
       lineage: "lineage", socialKnowledge: "social-knowledge", physicalIntimacy: "physical-intimacy", status: "status",
       pairProgress: "pair-progress", viewPreferences: "view-preferences", audits: "extraction-audits", initialCalibration: "initial-calibration", storySpine: "story-spine",
@@ -3900,6 +3930,9 @@ export async function loadDashboardData(
     loadedDatasets: [...loadedDatasets],
     failedDatasets,
     health: healthCall.status === "fulfilled" ? healthCall.value : previous.health,
+    gapRecovery: value("gapRecovery", previous.gapRecovery),
+    gapRecoveryDismissed: value("gapRecovery", previous.gapRecovery)?.results?.some((row: any) => row.status === "done") && await loadStoredJson<boolean>(`rcm:gap-dismissed:${serverScopeKey(state.settings, context?.chatId ?? "")}`) === true,
+    alwaysInject: value("memories", { alwaysInject: previous.alwaysInject }).alwaysInject,
     memories: value("memories", { items: previous.memories }).items,
     storySpine: value("storySpine", previous.storySpine),
     messages: value("messages", { items: previous.messages }).items,
@@ -4098,9 +4131,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   let socialEditor: SocialEditor | undefined;
   let voyageSaveState: ActionState | undefined;
   let actionSaveState: ActionState | undefined;
-  let actionError: ActionState | undefined;
+  let actionError: ScopedActionError | undefined;
+  let dismissedDataError: string | undefined;
   let retryBusy = false;
-  let retryFeedback: (ActionState & { chatId: string; embedding?: boolean }) | undefined;
+  let retryFeedback: (ActionState & { chatId: string; embedding?: boolean; jobIds?: string[] }) | undefined;
   let retryOffer: { chatId: string; count: number } | undefined;
   let actionSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsSaving = false;
@@ -4426,7 +4460,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const datasetsLoaded = (tab: Tab): boolean => dashboardDatasetsForTab(tab).every((dataset) => data.loadedDatasets?.includes(dataset));
   const activeContent = () => setupView.picker ? setupSourcesPage(setupView.picker) : !state.current && !["data", "settings"].includes(activeTab) ? noActiveChat(data, activeTab, state)
     : activeTab === "overview" ? overview(state, data, translations, datasetsLoaded("overview"), sentView, dailyMemoryView)
-    : activeTab === "initial" ? initialCalibrationPage(data, peopleView, translations, activeDisplay(), peopleManagement.mergePreview, socialEditor, peopleManagement.deletePreview)
+    : activeTab === "initial" ? initialCalibrationPage(data, peopleView, translations, activeDisplay(), peopleManagement.mergePreview, socialEditor, peopleManagement.deletePreview, setupView.confirming)
     : activeTab === "story" ? storySpinePage(data, translations, storyView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.current ? state.settings.storyOverviewBackups[state.current.chatId] : undefined, datasetsLoaded("story"))
     : activeTab === "timeline" ? organizationView.open ? memoryOrganization(organizationView, data.memories, translations, organizationView.addition ? state.settings.translationDisplay : activeDisplay()) : timeline(data, selectedMemory, translations, timelineView, koreanTranslationEnabled(state.settings.autoTranslate, state.settings.translationDisplay, activeCanonicalLanguage()), activeCanonicalLanguage(), state.translationActivity?.error)
       : activeTab === "relationships" ? relationshipsV2(state, data, selectedRelationship, translations, activeDisplay(), peopleManagement.mergePreview, intimacyEditor, relationshipSection, relationshipEditing, relationshipTier, relationshipMobileDetail, relationshipQuery, socialEditor, worldEditor, relationshipEditingDirection, pairView.diaryFilter, pairView.diarySort, pairView.anniversaryEditorEntryId, { mode: pairEmotionMode, ...pairFlowViews.get(selectedRelationship) })
@@ -4590,23 +4624,31 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const reconciling = state.currentJob?.phase === "state_reconciliation" || state.serverWorker?.phase === "state_reconciliation";
     const activity = refreshing ? "정보 갱신 중" : state.episodeActivity?.status === "holding" ? `에피소드 보류 중 · ${state.episodeActivity.turnCount}턴` : ["queued", "processing"].includes(state.episodeActivity?.status ?? "") ? "에피소드 정리 중" : sourceRecovery ? "원문 발췌 보완 중" : auditing ? "추출 재검수 중" : reconciling ? "상태 장부 대조 중" : (state.currentJob && state.currentJob.kind !== "quiz") || (state.serverWorker?.activeCalls ?? 0) > 0 ? "기억 추출 중" : (summary?.pendingEmbeddings ?? 0) > 0 ? "검색 인덱싱 중" : (state.translationActivity?.pending ?? 0) > 0 ? "번역 중" : quizActivity;
     const workState = dashboardTopbarWorkState(activity && activity === quizActivity ? "" : activity, state.serverConnectionIssue ?? data.connectionIssue);
+    actionError = currentDashboardActionError(actionError, activeTab, state.current?.chatId);
     const currentStatus = retryBusy ? status("warn", "재시도 요청 중…") : settingsSaving
       ? status("warn", "저장 중…")
       : actionSaveState
-      ? status(actionSaveState.kind === "success" ? "ok" : "error", actionSaveState.message)
+      ? status(actionSaveState.kind === "success" ? "ok" : actionSaveState.kind === "info" ? "neutral" : "error", actionSaveState.message)
       : workState ? status(workState.kind, workState.text)
       : state.activityStatusError === SERVER_RESPONSE_DELAYED ? status("warn", "서버 응답 지연")
       : data.error ? status("error", "서버 확인 필요") : data.contextError ? status("warn", "채팅 확인 필요") : !state.current ? status("warn", "활성 채팅 없음") : quizActivity ? status("neutral", quizActivity) : status("ok", "동기화됨");
     setHtmlIfChanged(topbar, currentShell().bar);
     const statusElement = topbar.querySelector<HTMLElement>(".bar__state");
     if (statusElement) statusElement.innerHTML = currentStatus;
-    const errorRegion = root.querySelector<HTMLElement>(".dashboard-error");
+    let errorRegion = root.querySelector<HTMLElement>(".dashboard-error");
+    const page = root.querySelector<HTMLElement>(".page");
+    if (!errorRegion && page) {
+      errorRegion = document.createElement("div");
+      errorRegion.className = "dashboard-error";
+      (page.querySelector(".lock__notes, .home__side") ?? page).prepend(errorRegion);
+    }
     if (errorRegion) {
       const failure = actionError ?? { message: data.error || "요청을 완료하지 못했어요.", errorReport: data.errorReport };
       const report = failure.errorReport;
-      const markup = report ? notice(failure.message, { tone: "cut", errorReport: report }) : "";
+      const markup = actionError || (report && report !== dismissedDataError) ? notice(failure.message, { tone: "cut", errorReport: report, action: iconBtn("close", "닫기", { action: "dismiss-action-error" }) }) : "";
       if (errorRegion.dataset.report !== markup) {
         errorRegion.innerHTML = markup;
+        errorRegion.hidden = !markup;
         errorRegion.dataset.report = markup;
       }
     }
@@ -4614,9 +4656,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (refreshButton) refreshButton.disabled = refreshing;
   };
 
-  const showActionSaveState = (next: ActionState) => {
+  const showActionSaveState = (next: ActionState, action?: string) => {
     actionSaveState = next;
-    actionError = next.kind === "error" ? next : undefined;
+    actionError = next.kind === "error" ? { ...next, tab: activeTab, chatId: state.current?.chatId, action } : undefined;
     if (actionSaveTimer) clearTimeout(actionSaveTimer);
     updateTopbar();
     actionSaveTimer = setTimeout(() => {
@@ -4685,7 +4727,19 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (again && body) body.scrollTop = sheetShown.top;
     else sheetShown = { scene: sheet.dataset.scene ?? "", top: 0 };
   };
+  let gapDialog: HTMLDialogElement | undefined;
   const render = (preservePageScroll = true, completeSourceNavigation = false) => {
+    if (gapDialog?.open && gapDialog.dataset.chatId !== data.chatId) gapDialog.close();
+    if (gapDialog?.open && data.gapRecovery) {
+      const html = recoverySheet(data.gapRecovery, data.memories);
+      if (gapDialog.dataset.rendered !== html) {
+        const focused = document.activeElement instanceof HTMLButtonElement && gapDialog.contains(document.activeElement) ? { ...document.activeElement.dataset } : undefined;
+        gapDialog.innerHTML = html;
+        gapDialog.dataset.rendered = html;
+        if (focused) ([...gapDialog.querySelectorAll<HTMLButtonElement>('button')].find(button => button.dataset.action === focused.action && button.dataset.jobIds === focused.jobIds)
+          ?? gapDialog.querySelector<HTMLButtonElement>('[data-action="gap-close"]'))?.focus({ preventScroll: true });
+      }
+    }
     renderedDailyMemoryKey = dailyMemoryKey(data.chatId ?? state.current?.chatId ?? "", new Date());
     setAvatarColors(data.entities ?? []);
     const previousSidebar = root.querySelector<HTMLElement>(".nav");
@@ -4717,7 +4771,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const retrySuggestion = retryOffer?.chatId === state.current?.chatId && state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)
       ? notice(`새 설정을 저장했어요. 실패한 작업 ${retryOffer!.count}건을 다시 시도할 수 있어요.`, { action: btn("새 설정으로 다시 시도", { kind: "primary", action: "retry-failed", disabled: retryBusy }) }) : "";
     const content = retryNotice + retrySuggestion + activeContent();
-    if (!root.querySelector(".topbar")) root.innerHTML = '<header class="topbar"></header><main class="main" id="main-content"><div class="subnav"></div><div class="dashboard-error"></div><div class="page"></div></main><nav class="nav" aria-label="RCM 메뉴"></nav>';
+    if (!root.querySelector(".topbar")) root.innerHTML = '<header class="topbar"></header><main class="main" id="main-content"><div class="subnav"></div><div class="page"></div></main><nav class="nav" aria-label="RCM 메뉴"></nav>';
     const nav = root.querySelector<HTMLElement>(".nav")!;
     const secondaryNav = root.querySelector<HTMLElement>(".subnav")!;
     const page = root.querySelector<HTMLElement>(".page")!;
@@ -4859,6 +4913,10 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       });
       if (recovered && refreshed.health && state.serverWorker) refreshed.health.serverWorker = state.serverWorker;
       if (generation !== refreshGeneration || !dashboardOpen) return;
+      if (refreshed.health?.ok) observeServerUpdateVersion(state, refreshed.health.version);
+      if (retryFeedback && (retryFeedback.chatId !== state.current?.chatId || (refreshed.chatId === retryFeedback.chatId && !refreshed.jobsError && refreshed.loadedDatasets?.includes("jobs") && (retryFeedback.embedding
+        ? state.statusSummary?.failedEmbeddings === 0
+        : !refreshed.jobs.some(job => job.status === "failed" && retryFeedback!.jobIds?.includes(String(job.id))))))) retryFeedback = undefined;
       syncPendingReviewCount(state, refreshed.pendingReviews);
       if (activeTab === "reviews") syncReviewActivity(state, refreshed);
       await hydrateCachedMemoryTranslations(refreshed);
@@ -5143,7 +5201,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
   };
 
-  root.addEventListener("click", async (event) => {
+  const onDashboardClick = async (event: MouseEvent) => {
     const clickedElement = event.target as HTMLElement;
     const target = clickedElement.closest<HTMLElement>("[data-action]");
     if (!target) return;
@@ -5156,6 +5214,26 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       event.preventDefault();
       await setupActions.handlePickerAction(action, target);
       return;
+    }
+    if (action === 'gap-close') { gapDialog?.close(); return; }
+    if (action === 'gap-sheet' && data.gapRecovery) {
+      gapDialog?.remove();
+      gapDialog = document.createElement('dialog');
+      gapDialog.className = 'dialog film gap-sheet';
+      gapDialog.dataset.chatId = data.chatId;
+      gapDialog.setAttribute('aria-labelledby', 'gap-title');
+      gapDialog.innerHTML = recoverySheet(data.gapRecovery, data.memories);
+      gapDialog.dataset.rendered = gapDialog.innerHTML;
+      document.body.append(gapDialog);
+      gapDialog.addEventListener("click", onDashboardClick);
+      gapDialog.addEventListener('click', event => { if (event.target === gapDialog) gapDialog?.close(); });
+      gapDialog.showModal();
+      return;
+    }
+    if (action === 'gap-dismiss') {
+      data.gapRecoveryDismissed = true;
+      await saveStoredJson(`rcm:gap-dismissed:${serverScopeKey(state.settings, state.current?.chatId ?? '')}`, true);
+      render(); return;
     }
     if (action === "tab") setupView.picker = undefined;
     if (action === "test-connection") {
@@ -5280,6 +5358,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (actionSaveTimer) clearTimeout(actionSaveTimer);
       dashboardRetryCancel?.();
       dashboardRetryCancel = undefined;
+      gapDialog?.remove();
       await closeDashboardContainer(state);
       return;
     }
@@ -5414,16 +5493,23 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } catch (error) {
         const failedProbe = state.lineageProbe;
         if (failedProbe) state.lineageProbe = { key: failedProbe.key, status: "failed", result: failedProbe.result, selectedParentId: parentChatId, error: lineageFailureMessage(error) };
-        data.error = lineageFailureMessage(error); data.errorReport = formatServerError(error);
+        showActionSaveState({ kind: "error", message: lineageFailureMessage(error), errorReport: formatServerError(error) });
         render();
       }
+      return;
+    }
+    if (action === "dismiss-action-error") {
+      actionError = undefined;
+      actionSaveState = undefined;
+      dismissedDataError = data.errorReport;
+      updateTopbar();
       return;
     }
     if (action === "refresh") { await refresh(); return; }
     if (action === "check-update") {
       try {
         await refreshUpdateStatus(state, client, { remote: true, force: true });
-      } catch (error) { data.error = error instanceof Error ? error.message : String(error); data.errorReport = formatServerError(error); }
+      } catch (error) { showActionSaveState({ kind: "error", message: error instanceof Error ? error.message : String(error), errorReport: formatServerError(error) }); }
       render();
       await showCompletedProductReleaseNotice(state);
       return;
@@ -5438,8 +5524,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           await refresh({ forceApply: true });
           await showCompletedProductReleaseNotice(state);
         }
-        else if (result.status === "failed") data.error = result.message ?? "서버 업데이트를 완료하지 못했습니다.";
-      } catch (error) { data.error = error instanceof Error ? error.message : String(error); data.errorReport = formatServerError(error); }
+        else if (result.status === "failed" && !state.updateApplying?.error) showActionSaveState({ kind: "error", message: result.message ?? "서버 업데이트를 완료하지 못했습니다." });
+      } catch (error) { showActionSaveState({ kind: "error", message: error instanceof Error ? error.message : String(error), errorReport: formatServerError(error) }); }
       render();
       return;
     }
@@ -5680,7 +5766,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const enabled = await setRetrievalDiagnostics(client, data, chatId, target.dataset.enabled !== "true");
         addLog(state.logs, "info", `Retrieval diagnostics ${enabled ? "enabled" : "disabled"} for chat ${chatId}`);
         render();
-      } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
+      } catch (error) { showActionSaveState({ kind: "error", message: String(error), errorReport: formatServerError(error) }); render(); }
       return;
     }
     if (action === "export-complete-backup" || action === "export-chat-backup") { try { const chatId=action==="export-chat-backup"?(target.dataset.chatId||state.current?.chatId):undefined;if(action==="export-chat-backup"&&!chatId)throw new Error("백업할 채팅을 선택해주세요.");await dataActions.exportBackup(chatId); } catch (error) { dataView.backupExportError = error instanceof Error ? error.message : String(error); dataView.backupExportErrorReport = formatServerError(error); render(); } return; }
@@ -5700,10 +5786,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (result) await refresh(result);
       } catch (error) {
         const message = String(error);
-        data.errorReport = formatServerError(error);
-        data.error = message.includes("(INITIAL_SETUP_REQUIRED)")
+        showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: message.includes("(INITIAL_SETUP_REQUIRED)")
           ? "Risu에서 이 채팅을 열고 설정 재료를 골라 주세요. 기존 기억은 삭제되지 않았어요."
-          : message;
+          : message });
         render();
       }
       return;
@@ -5858,7 +5943,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (state.current?.chatId !== chatId) return;
         data.quizStatus = status;
         if (status.generating) {
-          showActionSaveState({ kind: "error", message: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요." });
+          showActionSaveState({ kind: "info", message: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요." });
           return;
         }
         const regenerate = action === "quiz-regenerate";
@@ -5869,7 +5954,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (regenerate) {
           const result = await client.quizRegenerate(chatId);
           const reasons = { model_not_configured: "보조 모델을 설정하면 퀴즈를 만들 수 있어요.", no_material: "새로 낼 재료가 아직 없어요", generating: "퀴즈 만드는 중이에요. 끝난 뒤 다시 시도해 주세요.", disabled: "퀴즈 사용을 켜고 저장한 뒤 다시 시도해 주세요." };
-          showActionSaveState({ kind: result.enqueued || result.reason === "no_material" || result.reason === "model_not_configured" ? "success" : "error",
+          showActionSaveState({ kind: "info",
             message: result.enqueued ? "새 퀴즈 만들기를 시작했어요." : reasons[result.reason ?? "no_material"] });
         } else {
           await client.quizResetStats(chatId);
@@ -6123,7 +6208,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await client.request("/v1/admin/voyage-key", { method: "DELETE" });
         addLog(state.logs, "info", "Voyage API key removed from the server");
         await refresh();
-      } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
+      } catch (error) { showActionSaveState({ kind: "error", message: String(error), errorReport: formatServerError(error) }); render(); }
       return;
     }
     if(action === "remove-translation-key") {
@@ -6151,11 +6236,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await saveSettings(state.settings);
         addLog(state.logs, "info", "Server LLM API key removed; worker paused");
         await refresh();
-      } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
+      } catch (error) { showActionSaveState({ kind: "error", message: String(error), errorReport: formatServerError(error) }); render(); }
       return;
     }
     if (!state.current) return;
-    const chat = encodeURIComponent(state.current.chatId);
+    const actionChatId = state.current.chatId, actionTab = activeTab;
+    const chat = encodeURIComponent(actionChatId);
     try {
       if (isAttentionMutationAction(action)) {
         const result = await attention.mutate(action, target, chat, data,
@@ -6245,6 +6331,20 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } else if (action === "regenerate-episode" || action === "regenerate-canonical") {
         await organizationActions.regenerate(action, target, chat);
         return;
+      } else if (action === 'toggle-always-inject') {
+        const memory = data.memories.find(item => item.id === target.dataset.id);
+        if (!memory) return;
+        const message = await toggleAlwaysInject(client, state.current.chatId, memory, data.alwaysInject?.items.length ?? data.memories.filter(item => item.alwaysInject).length);
+        showActionSaveState({ kind: 'success', message });
+      } else if (action === 'gap-start' || action === 'gap-retry' || action === 'retry-extraction' || action === 'resplit-extraction') {
+        if (action === 'gap-start') await client.startGapRecovery(state.current.chatId);
+        else if (action === 'resplit-extraction') await client.request(`/v1/chats/${chat}/jobs/${encodeURIComponent(target.dataset.jobId ?? '')}/resplit`, { method: 'POST' });
+        else {
+          const jobIds = target.dataset.jobIds ? parseJson<string[]>(target.dataset.jobIds, []) : target.dataset.jobId ? [target.dataset.jobId] : data.gapRecovery?.results.filter(row => row.canRetry).map(row => row.jobId) ?? [];
+          await client.request(`/v1/chats/${chat}/jobs/retry-failed`, { method: 'POST', body: JSON.stringify({ jobIds }) });
+        }
+        gapDialog?.close();
+        void drainWorker(state, client);
       } else if (action === "toggle-bookmark" || action === "toggle-pin" || action === "toggle-memory") {
         const memory = data.memories.find((item) => item.id === target.dataset.id);
         if (!memory) return;
@@ -6332,6 +6432,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (retryBusy) return;
         requireChatMemoryEnabled(state, state.current.chatId);
         const chatId = state.current.chatId;
+        const jobIds = data.jobs.filter(job => job.status === "failed").map(job => String(job.id));
         retryBusy = true;
         retryFeedback = undefined;
         render();
@@ -6342,7 +6443,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           const count = await retryFailedJobs(state, client, chatId);
           if (!count) throw new Error("다시 시도할 실패 작업이 없어요. 처리 상태를 확인해 주세요.");
           retryOffer = undefined;
-          retryFeedback = { chatId, kind: "success", message: `${count}건을 대기열에 넣었어요.${state.settings.workerPaused || state.serverWorker?.state === "paused" ? " 처리 재개를 누르면 시작해요." : state.mainGeneration ? " 메인 응답이 끝나면 시작해요." : ""}` };
+          retryFeedback = { chatId, jobIds, kind: "success", message: `${count}건을 대기열에 넣었어요.${state.settings.workerPaused || state.serverWorker?.state === "paused" ? " 처리 재개를 누르면 시작해요." : state.mainGeneration ? " 메인 응답이 끝나면 시작해요." : ""}` };
           activeTab = "operations";
           await refresh({ forceApply: true });
         } catch (error) {
@@ -6387,13 +6488,16 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         addLog(state.logs, "info", `${result.restoredMessages} cancelled source message(s) restored to pending`);
         showActionSaveState({ kind: "success", message: `취소 원문 ${result.restoredMessages}개 복구됨 · worker 일시정지` });
       }
+      actionError = currentDashboardActionError(actionError, activeTab, state.current?.chatId, action);
       await refresh({ forceApply: true });
     } catch (error) {
+      if (state.current?.chatId !== actionChatId || activeTab !== actionTab || isBenignDashboardActionError(action, error)) { await refresh(); return; }
       const message = String(error).replace(/^Error:\s*/, "");
       addLog(state.logs, "error", `Dashboard action failed: [오류 원문 제외]`, supportFailure("dashboard_action", error));
-      showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: error instanceof ServerConnectionError && error.classification === "host_json_syntax" ? error.message : action?.startsWith("resolve-small-review") ? message : "작업 실패 · 관리 → 처리 상태에서 확인" });
+      showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: error instanceof ServerConnectionError && error.classification === "host_json_syntax" ? error.message : action?.startsWith("resolve-small-review") || action === "toggle-always-inject" ? message : "작업 실패 · 관리 → 처리 상태에서 확인" }, action);
     }
-  });
+  };
+  root.addEventListener("click", onDashboardClick);
 
   root.addEventListener("keydown", async (event) => {
     // The host blocks native form submission, so Enter in the source finders dispatches it.
@@ -6698,7 +6802,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
               worldEditor = { kind: "assertion", id: String(existing.id), mode: "edit", social: true };
               formDirty = false;
               render();
-              showActionSaveState({ kind: "error", message: `${existingText}이(가) 이미 있어 그 관계를 열었어요.` });
+              showActionSaveState({ kind: "info", message: `${existingText}이(가) 이미 있어 그 관계를 열었어요.` });
               return;
             }
             if (creating) return;
@@ -6731,7 +6835,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const duplicateId = String(error).match(/existingId=([^\s]+)/)?.[1];
       if (duplicateId && form.id === "intimacy-form") {
         intimacyEditor = { id: duplicateId };
-        showActionSaveState({ kind: "error", message: "같은 기록이 있어 기존 항목 수정 화면을 열었습니다." });
+        showActionSaveState({ kind: "info", message: "같은 기록이 있어 기존 항목 수정 화면을 열었습니다." });
         render();
         return;
       }
@@ -6743,7 +6847,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (duplicateId && form.id === "world-state-form") {
         formDirty = false;
         worldEditor = { kind: form.dataset.kind as WorldEditor["kind"], id: duplicateId, mode: "edit", social: form.dataset.social === "true" };
-        showActionSaveState({ kind: "error", message: "같은 활성 항목이 있어 기존 항목 수정 화면을 열었습니다." });
+        showActionSaveState({ kind: "info", message: "같은 활성 항목이 있어 기존 항목 수정 화면을 열었습니다." });
         render();
         return;
       }
@@ -6756,7 +6860,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           serverToken: String(attempted.get("serverToken") ?? state.settings.serverToken).trim(),
         }) });
       } else {
-        data.error = String(error); data.errorReport = formatServerError(error);
+        showActionSaveState({ kind: "error", message: String(error), errorReport: formatServerError(error) });
         if (mutationForm) showActionSaveState({ kind: "error", errorReport: formatServerError(error), message: `저장 실패 · ${errorMessage(error)}` });
       }
       if (form.id !== "settings-form") render();
@@ -6873,7 +6977,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const changed = await changeChatProfile(input.value as RpProfile);
         if (!changed) input.value = state.current?.profile ?? state.settings.defaultProfile;
       } catch (error) {
-        data.error = String(error); data.errorReport = formatServerError(error);
+        showActionSaveState({ kind: "error", message: String(error), errorReport: formatServerError(error) });
         input.value = state.current?.profile ?? state.settings.defaultProfile;
       }
       render(false);
@@ -6953,7 +7057,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const choice = await chooseChatBackupImport(canTransplant);
       if (choice === "original") await restoreChatBackup(bytes);
       else if (choice === "current") await transplantChatBackup(bytes, sourceChatId);
-    } catch (error) { data.error = String(error); data.errorReport = formatServerError(error); render(); }
+    } catch (error) { showActionSaveState({ kind: "error", message: String(error), errorReport: formatServerError(error) }); render(); }
   });
 
   root.addEventListener("focusout", () => {
@@ -7042,7 +7146,9 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (activeTab === "operations") render();
     }
     if (!serverActivityChanged && !liveDataChanged) return;
-    if (liveDataChanged || (activityWasBusy && !busy) || (activeTab === "settings" && serverActivityChanged)) void refreshFromActivity();
+    const recoveryRunning = data.gapRecovery?.results.some(row => ['queued', 'leased'].includes(row.status));
+    const resplitRunning = data.jobs.some(job => job.status === 'superseded' && (parseJson<any>(job.payload_json, {}).resplitJobIds ?? []).some((id: string) => data.jobs.some(child => child.id === id && ['queued', 'leased'].includes(child.status))));
+    if (liveDataChanged || (activityWasBusy && !busy) || (serverActivityChanged && (activeTab === "settings" || activeTab === 'overview' && (recoveryRunning || resplitRunning)))) void refreshFromActivity();
     activityWasBusy = busy;
   });
   unsubscribeActivity = () => { unsubscribeConnection(); unsubscribeStatus(); };

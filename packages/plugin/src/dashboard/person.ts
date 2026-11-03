@@ -47,6 +47,7 @@ export type AcquaintanceRow = {
   derived?: "mutual_interaction";
   derivedFrom?: string;
   cognition?: Array<{ id?: string; text?: string }>;
+  description?: string;
   [key: string]: unknown;
 };
 
@@ -311,12 +312,13 @@ const acquaintanceContacts = (person: string, selfNames: string[], items: Acquai
     const calls = (item?.addressTerms ?? []).filter(Boolean);
     const known = (item?.knownAs ?? []).filter(Boolean);
     const memo = (item?.cognition ?? []).map((detail: any) => `<p class="acq__memo">${displayText(String(detail?.text ?? ""), options.translations.get(`social-cognition:${detail?.id}`), options.display)}</p>`).join("");
+    const setupMemo = !item.cognition?.length && item.description ? `<p class="acq__memo">${displayText(item.description, options.translations.get(`initial-social:${item.holder}|${item.subject}`), options.display)}</p>` : "";
     const derivedOnly = item.derived === "mutual_interaction" && item.id === `mutual:${item.derivedFrom}`;
     const edit = menu({ label: `${data.holder} → ${data.subject} 편집`, items: [
       { label: derivedOnly ? "추가" : "수정", icon: derivedOnly ? "add" : "edit", action: "edit-social", data: { ...data, level: String(item?.level ?? ""), knownAs: (item?.knownAs ?? []).join(", ") } },
       ...(derivedOnly ? [] : [{ label: "삭제", icon: "delete" as const, action: "delete-social", data, danger: true }]),
     ], face: { html: derivedOnly ? "추가" : "편집", className: "acq__edit" } });
-    return `<div class="acq__side" data-social-row><div class="acq__h"><b>${escapeHtml(data.holder)} → ${escapeHtml(data.subject)}</b><span class="acq__lv${met ? " is-met" : ""}">${met ? "직접 교류" : "존재만 앎"}</span>${edit}</div>${tags("알고 있는 이름", known, "known")}${tags("부르는 이름", calls, "call")}${memo}</div>`;
+    return `<div class="acq__side" data-social-row><div class="acq__h"><b>${escapeHtml(data.holder)} → ${escapeHtml(data.subject)}</b><span class="acq__lv${met ? " is-met" : ""}">${met ? "직접 교류" : "존재만 앎"}</span>${edit}</div>${tags("알고 있는 이름", known, "known")}${tags("부르는 이름", calls, "call")}${memo}${setupMemo}</div>`;
   };
   const contacts = [...groups.values()].map((rows) => {
     const other = counterpart(rows[0]!);

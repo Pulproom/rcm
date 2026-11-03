@@ -2,6 +2,7 @@ import { sanitizeSetupRows } from "./setup-storage.js";
 import { syncManualCognition } from "./social-knowledge.js";
 import { memoryReferenceHighWater } from "./memory-references.js";
 import { DATABASE_SCHEMA_VERSION, type RcmDatabase } from "./db.js";
+import { migrateMemoryGaps } from './gap-recovery.js';
 import { ChatBackupSettingsSchema, type ChatBackupSettings } from "@rcm/shared";
 import { bindInheritedMemoryGroups, invalidateChangedMemoryGroups } from './memory-grouping.js';
 import { sourceFingerprint } from './source-fingerprint.js';
@@ -21,7 +22,7 @@ export class BackupValidationError extends Error {
 }
 
 const insertionOrder = [
-  "chats", "messages", "message_revisions", "entities", "aliases", "episodes", "episode_messages", "episode_sections",
+  "chats", "messages", "gap_recovery_messages", "message_revisions", "entities", "aliases", "episodes", "episode_messages", "episode_sections",
   "source_passages", "memories", "memory_details", "memory_dialogues", "evidence_spans", "memory_traces", "memory_recall_events", "memory_activation_state", "memory_edges", "item_access", "assertions", "beliefs",
   "story_spine_nodes", "story_spine_support", "story_spine_sources",
   "pair_progress", "relationship_baselines", "relationship_events", "relationship_projections", "relationship_projection_queue", "physical_intimacy_milestones", "social_knowledge_events", "entity_scene_presence", "entity_prominence", "promises", "promise_events", "conflicts", "jobs", "extraction_audits", "reconciliation_items", "recall_logs", "embedding_blocks", "initial_calibrations", "chat_lineage", "chat_lineage_items", "extraction_batches", "atom_relations",
@@ -45,7 +46,7 @@ type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
   version: 31 | 32 | 33 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | typeof DATABASE_SCHEMA_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -173,7 +174,7 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 34 && [57, 58].includes(manifest.schemaVersion) || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 34 && [57, 58, 59].includes(manifest.schemaVersion) || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
     throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or 56, or backup 34 / schema 57 or ${DATABASE_SCHEMA_VERSION})`);
   }
@@ -210,7 +211,7 @@ function archiveTables(files: Record<string, Uint8Array>): Record<string, Row[]>
 }
 
 function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): void {
-  const current = persistentTables(db).filter(table => (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state") && (manifest.schemaVersion >= 57 || table !== "pair_progress"));
+  const current = persistentTables(db).filter(table => (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state") && (manifest.schemaVersion >= 57 || table !== "pair_progress") && (manifest.schemaVersion >= 59 || table !== 'gap_recovery_messages'));
   if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError(`Backup database contract does not match schema ${manifest.schemaVersion}`);
   for (const table of current) {
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
@@ -221,7 +222,8 @@ function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): voi
         && !(manifest.schemaVersion < 55 && ["memory_details", "relationship_events"].includes(table) && ["user_edited", "user_hidden", "original_text"].includes(column))
         && !(manifest.schemaVersion < 56 && table === "entities" && column === "birthday_json")
         && !(manifest.schemaVersion < 52 && table === "entities" && column === "color")
-        && !(manifest.schemaVersion < 58 && table === "chats" && ["engaged_at", "last_seen_at"].includes(column)));
+        && !(manifest.schemaVersion < 58 && table === "chats" && ["engaged_at", "last_seen_at"].includes(column))
+        && !(manifest.schemaVersion < 59 && table === 'memories' && column === 'always_inject'));
     // Rows are inserted by column name. Physical column order is not a backup contract.
     const archived = manifest.tables[table];
     if (!Array.isArray(archived) || archived.length !== columns.length || new Set(archived).size !== columns.length
@@ -354,6 +356,7 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
       try { db.prepare("DELETE FROM embedding_vectors_v4_chat").run(); } catch { /* vector extension optional */ }
       for (const table of [...currentTables].reverse()) db.prepare(`DELETE FROM ${table}`).run();
       for (const table of currentTables) insertRows(db, table, tables[table] ?? []);
+      if (parsed.manifest.schemaVersion<59) migrateMemoryGaps(db);
       db.prepare("UPDATE chats SET engaged_at=COALESCE(engaged_at,?),last_seen_at=?").run(Date.now(), Date.now());
       preserveReferenceHighWater(db, refHighWater);
       vectorsRestored = restoreVectors(db, parsed.files);
@@ -399,6 +402,7 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
         });
         insertRows(db,table,rows);
       }
+      if (parsed.manifest.schemaVersion<59) migrateMemoryGaps(db,[chatId]);
       db.prepare("UPDATE chats SET engaged_at=COALESCE(engaged_at,?),last_seen_at=? WHERE id=?").run(Date.now(), Date.now(), chatId);
       preserveReferenceHighWater(db, refHighWater);
       if ((db.pragma("foreign_key_check") as unknown[]).length) throw new Error("Chat backup failed foreign key validation");

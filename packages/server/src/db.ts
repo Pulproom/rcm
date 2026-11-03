@@ -1,12 +1,13 @@
 import { installSetupStorageGuards, migrateSetupStorage } from "./setup-storage.js";
 import { migrateTranslationKeys } from "./translation-cache.js";
 import Database from "better-sqlite3";
+import { migrateMemoryGaps } from './gap-recovery.js';
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 58 as const;
+export const DATABASE_SCHEMA_VERSION = 59 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -96,6 +97,17 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat_ordinal ON messages(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_messages_extraction ON messages(chat_id, lifecycle, extraction_state);
+
+CREATE TABLE IF NOT EXISTS gap_recovery_messages (
+  chat_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  PRIMARY KEY(chat_id,message_id),
+  FOREIGN KEY(chat_id,message_id) REFERENCES messages(chat_id,message_id) ON DELETE CASCADE
+);
+CREATE TRIGGER IF NOT EXISTS gap_recovery_source_changed AFTER UPDATE ON messages
+WHEN NEW.content_hash<>OLD.content_hash OR NEW.canonical_hash<>OLD.canonical_hash
+  OR NEW.memory_excluded=1 OR NEW.lifecycle IN ('deleted','superseded','truncated')
+BEGIN DELETE FROM gap_recovery_messages WHERE chat_id=NEW.chat_id AND message_id=NEW.message_id; END;
 
 CREATE TABLE IF NOT EXISTS message_revisions (
   id TEXT PRIMARY KEY,
@@ -213,6 +225,7 @@ CREATE TABLE IF NOT EXISTS memories (
   recall_count INTEGER NOT NULL DEFAULT 0,
   last_recalled_revision INTEGER,
   pinned INTEGER NOT NULL DEFAULT 0,
+  always_inject INTEGER NOT NULL DEFAULT 0 CHECK(always_inject IN (0,1)),
   active INTEGER NOT NULL DEFAULT 1,
   capsule_parent_id TEXT,
   retention_class TEXT NOT NULL DEFAULT 'arc' CHECK(retention_class IN ('scene','arc','durable')),
@@ -997,7 +1010,7 @@ export function openDatabase(path: string): DatabaseHandle {
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
     }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
@@ -1030,6 +1043,11 @@ export function openDatabase(path: string): DatabaseHandle {
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update; DROP TRIGGER IF EXISTS source_fts_delete");
     }
     db.exec(schema);
+    if (hasSchemaLedger && version < 59) {
+      if (!(db.pragma('table_info(memories)') as Array<{name:string}>).some(row=>row.name==='always_inject'))
+        db.exec('ALTER TABLE memories ADD COLUMN always_inject INTEGER NOT NULL DEFAULT 0 CHECK(always_inject IN (0,1))');
+      migrateMemoryGaps(db);
+    }
     const chatColumns = new Set((db.pragma("table_info(chats)") as { name: string }[]).map(row => row.name));
     if (!chatColumns.has("engaged_at")) db.exec("ALTER TABLE chats ADD COLUMN engaged_at INTEGER");
     if (!chatColumns.has("last_seen_at")) db.exec("ALTER TABLE chats ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0");

@@ -69,6 +69,7 @@ export function completeExtractionJob(
     db.transaction(() => {
       db.prepare("UPDATE extraction_audits SET status='stale',error='Source fingerprint changed',updated_at=? WHERE job_id=?").run(Date.now(), jobId);
       db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error='Source fingerprint changed before completion',updated_at=? WHERE id=?").run(Date.now(), jobId);
+      db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE job_id=? AND status IN ('queued','processing')").run(Date.now(), jobId);
       if (payload.regenerationRunId) db.prepare("UPDATE regeneration_runs SET status='stale',error='Source fingerprint changed',updated_at=? WHERE id=?").run(Date.now(), payload.regenerationRunId);
       else for (const id of sourceMessageIds) db.prepare("UPDATE messages SET extraction_state=CASE WHEN host_visibility IN ('active','all_before') THEN 'pending' ELSE 'blocked' END,updated_at=? WHERE chat_id=? AND message_id=?").run(Date.now(), job.chat_id, id);
     })();
@@ -82,6 +83,7 @@ export function completeExtractionJob(
     if (changed) {
       db.transaction(() => {
         db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error='Source visibility changed before completion',updated_at=? WHERE id=?").run(Date.now(), jobId);
+        db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE job_id=? AND status IN ('queued','processing')").run(Date.now(), jobId);
         if (payload.regenerationRunId) db.prepare("UPDATE regeneration_runs SET status='stale',error='Source visibility changed',updated_at=? WHERE id=?").run(Date.now(), payload.regenerationRunId);
         else for (const message of current) {
           const next = !["active", "all_before"].includes(message.host_visibility) ? "blocked" : message.extraction_state === "held" ? "held" : message.extraction_state === "excluded_episode" ? "excluded_episode" : "pending";

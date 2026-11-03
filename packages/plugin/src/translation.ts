@@ -189,6 +189,7 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
     };
     // Risu's shared call deadline also owns stream cancellation and call-ID cleanup.
     const result = provider === "server" ? await Promise.race([call(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TranslationError("TIMEOUT", "참고 번역 호출이 120초를 넘었습니다.")), TRANSLATION_TIMEOUT_MS); })]) : await call();
+    stats.lastError = undefined;
     const usage = result.usage;
     const input = usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount;
     const output = usage?.completion_tokens ?? usage?.output_tokens ?? usage?.candidatesTokenCount;

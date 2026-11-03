@@ -624,6 +624,7 @@ export const TurnPrepareResponseSchema = z.object({
     source: z.enum(["fresh", "reused", "fallback", "empty"]),
     perspectives: z.array(z.string()).default([]),
     memoryIds: z.array(z.string()).default([]),
+    alwaysInjectMemoryIds: z.array(z.string()).optional(),
     detailIds: z.array(z.string()).default([]),
     sourceEvidenceIds: z.array(z.string()).optional(),
     stateEvidenceIds: z.array(z.string()).optional(),
@@ -2134,6 +2135,7 @@ export { projectMemoryScene, renderMemoryScene, type MemoryScene } from "./memor
 
 export { AUXILIARY_CENSORSHIP_RELAXATION, withAuxiliaryStoryFraming, ROLEPLAY_ARCHIVE_FRAMING, SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
 export { MEMORY_ADDITION_GUIDANCE, memoryAdditionRequestGuidance, validateMemoryAdditionRequestOutcome, memoryAdditionUserNote, memoryAdditionStopsAfterEvents } from "./memory-addition-guidance.js";
+export type { GapRecoveryHole, GapRecoveryQueue, GapRecoveryStatus, AlwaysInjectEstimate } from './memory-maintenance.js';
 
 export { ANNIVERSARY_KINDS, DEFAULT_ALWAYS_INJECT_KINDS, landmarkAlwaysInjected } from "./landmark-injection.js";
 

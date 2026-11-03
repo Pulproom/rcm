@@ -5,6 +5,7 @@ type NotificationAction = { label: string; kind: "primary" | "quiet"; action: st
 
 /** Everything the lock-screen home shows. Fields named `…Html` are already escaped or translated markup. */
 export type LockHomeInput = {
+  title: string;
   place: string | null;
   date: string | null;
   dayLine: string;
@@ -87,7 +88,7 @@ export function renderLockHome(input: LockHomeInput): string {
   const widgetPage = `${chapter}${pairs}${recent}${input.injectionHtml ? `<section class="wg wg--sent">${input.injectionHtml}</section>` : ""}${input.processingHtml ? `<section class="wg wg--film">${input.processingHtml}</section>` : ""}`;
 
   return `<div class="lock"><h1 class="sr-only">홈</h1><div class="lock__wall" aria-hidden="true"></div>
-    <section class="lock__time">${input.place ? `<p class="lock__place">${escapeHtml(input.place)}</p>` : ""}<p class="lock__date${/^\d{1,2}\.\d{1,2}$/.test(input.date ?? "") ? "" : " lock__date--free"}">${escapeHtml(input.date ?? "—")}</p><p class="lock__day">${escapeHtml(input.dayLine)}</p><div class="lock__widgets">${widgets}</div></section>
+    <section class="lock__time">${input.place ? `<p class="lock__place">${escapeHtml(input.place)}</p>` : ""}<p class="lock__date${/^\d{1,2}\.\d{1,2}$/.test(input.date ?? "") ? "" : " lock__date--free"}">${escapeHtml(input.latest ? input.date ?? "—" : input.title)}</p><p class="lock__day">${escapeHtml(input.latest ? input.dayLine : "첫 장면을 기다리고 있어요")}</p><div class="lock__widgets">${widgets}</div></section>
     <div class="lock__side"><section class="lock__notes" aria-label="알림">${input.noticesHtml}${notes}</section>
     ${widgetPage ? `<section class="lock__more" aria-label="위젯">${widgetPage}</section>` : ""}</div>
   </div>`;

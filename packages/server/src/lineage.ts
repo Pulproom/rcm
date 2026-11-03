@@ -365,6 +365,8 @@ function cloneLineage(
         row.role, row.ordinal, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, archiveEligible ? 1 : 0, row.event_time, row.generation_id, row.source_kind, row.source_record_id, row.display_content_hash, row.display_comparison_hash, hostVisibility, extractionState, row.completed_turn_seq, memoryExcluded, now, child, row.message_id,
       );
       if (extractionState === "pending") pendingReextractionIds.add(row.message_id);
+      if (extractionState === 'pending' && !memoryExcluded) prepare(`INSERT OR IGNORE INTO gap_recovery_messages(chat_id,message_id)
+        SELECT ?,? FROM gap_recovery_messages WHERE chat_id=? AND message_id=?`).run(child,row.message_id,parent,row.message_id);
       prepare("INSERT INTO message_revisions(id,chat_id,message_id,content,content_hash,canonical_content,canonical_hash,lifecycle,created_at,purge_after) VALUES(?,?,?,?,?,?,?,?,?,NULL)").run(randomUUID(), child, row.message_id, row.content, row.content_hash, row.canonical_content, row.canonical_hash, lifecycle, now);
       mapItem("message", row.message_id, row.message_id);
     }
@@ -431,6 +433,7 @@ function cloneLineage(
         id, child, row.memory_key, row.type, row.title, row.content, row.participants_json, row.known_by_json, row.perspective, row.story_time, row.story_time_normalized ?? normalizeStoryTime(row.story_time) ?? null, row.locations_json, row.landmark, row.landmark_kinds_json ?? "[]", row.evidence_json, row.salience, row.strength, row.recall_count, row.last_recalled_revision, row.pinned, row.active, null, row.retention_class, row.atom_access_version ?? 0, row.created_revision, now, now,
       );
       prepare("UPDATE memories SET user_managed=? WHERE id=?").run(row.user_managed,id);
+      prepare('UPDATE memories SET always_inject=? WHERE id=?').run(row.always_inject ?? 0,id);
       for (const dialogue of prepare("SELECT * FROM memory_dialogues WHERE memory_id=?").all(row.id) as any[]) {
         const sourceOrdinal = sourceOrdinals.get(dialogue.message_id)?.ordinal;
         if (sourceOrdinal === undefined || sourceOrdinal > fork) {

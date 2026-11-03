@@ -1,3 +1,4 @@
+import { sourceHasProcessingHistory } from "./source-processing.js";
 import { createHash } from "node:crypto";
 import { publicKnowledgeScope } from "./item-access.js";
 import { contiguousSourceRangeSelection, estimateTokens } from "@rcm/shared";
@@ -44,18 +45,7 @@ export function memoryExclusionReason(db: RcmDatabase, chatId: string, message: 
   if (isOrdinalFallbackMessageId(chatId,message.id)) return '고정 메시지 ID가 없어 기억에서 제외할 수 없어요';
   if (!['pending', 'committed'].includes(message.lifecycle) || !['active', 'all_before'].includes(message.visibility) || message.content === null) return '원문을 사용할 수 없어요';
   if (!['blocked', 'pending'].includes(message.extractionState)) return '이미 기억 처리가 시작된 메시지예요';
-  const evidenceTables = ['memories','memory_details','memory_dialogues','assertions','beliefs','promise_events',
-    'relationship_events','physical_intimacy_milestones','social_knowledge_events','atom_relations'];
-  if (db.prepare(`SELECT 1 FROM extraction_batches b,json_each(b.source_message_ids_json) s WHERE b.chat_id=? AND s.value=?
-    UNION ALL SELECT 1 FROM jobs j,json_each(j.payload_json,'$.sourceMessageIds') s WHERE j.chat_id=? AND s.value=?
-    UNION ALL SELECT 1 FROM episode_messages WHERE chat_id=? AND message_id=?
-    UNION ALL SELECT 1 FROM evidence_spans WHERE chat_id=? AND message_id=?
-    UNION ALL SELECT 1 FROM source_passages WHERE chat_id=? AND message_id=?
-    UNION ALL SELECT 1 FROM source_passages p,json_each(p.access_json) g,json_each(g.value,'$.evidence') e
-      WHERE p.chat_id=? AND json_extract(e.value,'$.messageId')=?
-    UNION ALL SELECT 1 FROM memory_recall_events r,json_each(r.evidence_json) e WHERE r.chat_id=? AND e.value=?
-    ${evidenceTables.map(table => `UNION ALL SELECT 1 FROM ${table} t,json_each(t.evidence_json) e WHERE t.chat_id=? AND json_extract(e.value,'$.messageId')=?`).join('\n')}
-    LIMIT 1`).get(...Array.from({length:7+evidenceTables.length},()=>[chatId,message.id]).flat())) return '이미 기억 처리가 시작된 메시지예요';
+  if (sourceHasProcessingHistory(db,chatId,message.id,false)) return '이미 기억 처리가 시작된 메시지예요';
   return null;
 }
 

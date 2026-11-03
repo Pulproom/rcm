@@ -9,6 +9,10 @@ export function pluginUpdateNeeded(status: RuntimeState["updateStatus"], current
   return Boolean(status?.latestPluginVersion && compareNumericVersions(status.latestPluginVersion, currentVersion) > 0);
 }
 
+export function observeServerUpdateVersion(state: RuntimeState, version?: string): void {
+  if (state.updateApplying && version === state.updateApplying.targetVersion) state.updateApplying = undefined;
+}
+
 export async function refreshUpdateStatus(
   state: RuntimeState,
   client: Pick<ServerClient, "request">,
@@ -23,6 +27,7 @@ export async function refreshUpdateStatus(
   const pending = client.request<NonNullable<RuntimeState["updateStatus"]>>(path, {}, 20_000)
     .then((update) => {
       state.updateStatus = update;
+      observeServerUpdateVersion(state, update.currentServerVersion);
       state.publishActivity?.();
       return update;
     })

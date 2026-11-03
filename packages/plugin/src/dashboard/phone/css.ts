@@ -694,6 +694,11 @@ button.scene__title:hover { color: var(--accent-text); }
 .noti__acts { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .noti__acts .btn { height: auto; min-height: 36px; padding: 0 14px; border-radius: 18px; font-size: var(--t-meta); }
 .noti__acts .btn--quiet { background: var(--tungsten-dim); color: var(--accent-text); }
+.dashboard-error:empty { display: none; }
+.dashboard-error > .notice { border-radius: 18px; align-items: flex-start; }
+.lock__notes > .dashboard-error { color: var(--lock-ink); background: var(--lock-glass); border-radius: 18px; box-shadow: inset 0 0 0 .5px var(--lock-edge); }
+.lock__notes > .dashboard-error > .notice { margin: 0; background: none; color: inherit; }
+.lock__notes > .dashboard-error > .fold { margin: 0; }
 .lock__notes > .notice, .lock__notes > .msg { border-radius: 18px; }
 /* Notification body never outranks its title: both sit at the UI size, the title carries the weight. */
 .msg__body p { font-size: var(--t-ui); line-height: 1.5; }
@@ -1798,10 +1803,10 @@ button.say:hover .say__bub { filter: brightness(.97); }
 .review-small__source { margin: 6px 0 0; padding-left: 10px; border-left: 2px solid var(--sep); font-size: var(--t-ui); line-height: 1.55; color: var(--ink-2); }
 .review-small__missing { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: var(--t-meta); color: var(--ink-3); }
 .review-small__missing .i { flex: none; width: 16px; height: 16px; }
-.review-small__acts { display: grid; gap: 8px; margin-top: 22px; }
-.review-small__acts .btn { min-height: 50px; border-radius: 14px; font-size: var(--t-body); font-weight: 600; }
-.review-small__acts .btn--secondary { background: var(--screen); color: var(--accent-text); }
-.review-small__acts .btn--danger { background: var(--screen); color: var(--k-red); }
+.attention .reader > .decide, .review-small__acts { display: grid; gap: 8px; margin-top: 22px; }
+.attention .reader > .decide .btn, .review-small__acts .btn { width: 100%; justify-content: center; min-height: 50px; border-radius: 14px; font-size: var(--t-body); font-weight: 600; }
+.attention .reader > .decide :is(.btn--secondary, .btn--quiet), .review-small__acts .btn--secondary { background: var(--screen); color: var(--accent-text); }
+.attention .reader > .decide .btn--danger, .review-small__acts .btn--danger { background: var(--screen); color: var(--k-red); }
 .review-small__retry { display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%; min-height: 44px; margin-top: 6px; border: 0; background: none; font: inherit; font-size: var(--t-meta); color: var(--ink-3); cursor: pointer; }
 .review-small__retry b { font-weight: 600; color: var(--accent-text); }
 .review-small__retry .i { width: 13px; height: 13px; color: var(--accent-text); }
@@ -1846,6 +1851,17 @@ button.say:hover .say__bub { filter: brightness(.97); }
 .lc__av[data-tone="1"] { background: linear-gradient(hsl(28 70% 62%), hsl(20 60% 48%)); }
 .lc__tx small, .lc__chev { color: var(--lock-ink-2, var(--ink-3)); }
 .lc__fresh { font-size: var(--t-meta); }
+
+.noti:has([data-action="retry-extraction"]) .noti__bd { display: block; overflow: visible; -webkit-line-clamp: unset; }
+.gap-card.noti { display: grid; }
+.gap-card .noti__bd { display: block; overflow: visible; -webkit-line-clamp: unset; }
+.gap-card .noti__hd b { white-space: normal; overflow: visible; }
+.gap-card .noti__acts { width: auto; min-width: 0; }
+.gap-card .gap-progress { flex-basis: 100%; }
+.gap-open { display: block; padding: 0; border: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; }
+.delivery-switch > i { background: var(--fill); }
+.delivery-switch > i::after { background: #fff; }
+.delivery-switch[aria-checked="true"] > i { background: var(--k-green); }
 `;
 
 export const PHONE_CSS: string = FILM_CSS + PHONE_SKIN_CSS;

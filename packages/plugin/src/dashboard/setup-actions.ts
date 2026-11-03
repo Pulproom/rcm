@@ -1,4 +1,3 @@
-import { formatServerError } from "../server-errors.js";
 import type { ChatLineageStatus } from "@rcm/shared";
 import type { ServerClient } from "../api-client.js";
 import type { DashboardData, Tab, confirmDashboard } from "../dashboard.js";
@@ -15,6 +14,7 @@ export interface DashboardSetupPicker extends SetupPicker {
 export interface SetupViewState {
   picker?: DashboardSetupPicker;
   loading: boolean;
+  confirming?: "initial-confirm" | "initial-skip";
   openChecked: Set<string>;
 }
 
@@ -57,7 +57,7 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
   return {
     async open(action, target) {
       if (currentLineageOperation(state)) return;
-      if (!state.current || setupView.loading) return;
+      if (!state.current || setupView.loading || setupView.confirming) return;
       if (["choice_required", "ambiguous"].includes(host.getData().lineage?.status ?? "")) return;
       if (action === "open-setup-sources" && !setupPendingIn(host.getData())) return;
       if (action === "initial-retry" && ["ready", "inherited", "skipped"].includes(host.getData().initialCalibration?.status ?? "")
@@ -123,8 +123,6 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
           await host.refresh();
         } catch (error) {
           view.error = error instanceof Error ? error.message : "설정을 읽지 못했어요. 다시 시도해 주세요.";
-          host.getData().error = view.error;
-          host.getData().errorReport = formatServerError(error);
         }
         finally { view.busy = false; }
       }
@@ -150,20 +148,26 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
     },
     async mutateInitial(action, target, chat, people) {
       if (action === "initial-confirm" || action === "initial-skip") {
-        if (currentLineageOperation(state)) return;
-        if (action === "initial-skip" && !await host.confirm(host.getData().initialCalibration?.status === "failed"
-          ? "초기 분석 없이 원문 기억 생성을 계속할까요? 이름과 별칭은 나중에 인물 설정에서 직접 추가할 수 있습니다."
-          : "분석된 초기 이름·관계축을 사용하지 않고 원문 기억 생성을 시작할까요?")) return;
-        const result = await client.request<{ calibration: InitialCalibrationActivity }>(`/v1/chats/${chat}/initial-calibration/${action === "initial-confirm" ? "confirm" : "skip"}`, { method: "POST" }, 120_000);
-        state.statusSummary = {
-          ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }),
-          initialCalibration: result.calibration,
-        };
-        host.getData().initialCalibration = { ...host.getData().initialCalibration, ...result.calibration };
-        observeSetupAttention(state, state.current!.chatId, result.calibration.status);
-        state.publishStatusSummary?.();
-        host.drainWorker();
-        return { clearEditor: false };
+        if (currentLineageOperation(state) || setupView.confirming) return;
+        setupView.confirming = action;
+        render(false);
+        const chatId = state.current?.chatId;
+        try {
+          if (action === "initial-skip" && !await host.confirm(host.getData().initialCalibration?.status === "failed"
+            ? "초기 분석 없이 원문 기억 생성을 계속할까요? 이름과 별칭은 나중에 인물 설정에서 직접 추가할 수 있습니다."
+            : "분석된 초기 이름·관계축을 사용하지 않고 원문 기억 생성을 시작할까요?")) return;
+          const result = await client.request<{ calibration: InitialCalibrationActivity }>(`/v1/chats/${chat}/initial-calibration/${action === "initial-confirm" ? "confirm" : "skip"}`, { method: "POST" }, 120_000);
+          if (state.current?.chatId !== chatId) return;
+          state.statusSummary = {
+            ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }),
+            initialCalibration: result.calibration,
+          };
+          host.getData().initialCalibration = { ...host.getData().initialCalibration, ...result.calibration };
+          observeSetupAttention(state, state.current!.chatId, result.calibration.status);
+          state.publishStatusSummary?.();
+          host.drainWorker();
+          return { clearEditor: false };
+        } finally { setupView.confirming = undefined; render(false); }
       } else if (action === "save-initial-entity" || action === "add-initial-entity") {
         if (!await people.savePerson(action, target, chat)) return;
         return { clearEditor: true };

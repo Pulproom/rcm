@@ -113,6 +113,7 @@ export interface TurnAnalysis {
     mcpDeliverySearchRequestIds: string[];
   };
   budget: { packetTokens?: number; preparedPacketTokens?: number; targetTokens: number; hardTokenCeiling: number;
+    alwaysInject?: Array<{memoryId:string;lane:string;outcome:string;estimatedTokens:number;delivered?:boolean}>;
     overflowTokens: number; estimatorHeadroomTokens: number; processedThrough?: number | null; latestProcessed?: number | null;
     refillAdded?: number; unusedTokens?: number; unusedReason?: string; sectionTokens?: Record<string,number>; stateKinds?: Record<string,number>; stateInventory?: Record<string,number>; stateSearch?: {available:boolean;canonical:number;indexed:number;oversized:number}; sceneDelivery?: Array<{ref?:string;memoryId:string;details:number;dialogues:number}> };
   tools: { opportunities: number; exposures: number; exposureEvents: number; unknownExposure: number; acknowledged: number; plannedEmpty: number; confirmedAbsent: number; calls: number; errors: number; registrations: Array<{ outcome?: string; diagnostics?: unknown }> };
@@ -392,6 +393,8 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
       mcpDeliverySearchRequestIds: deliveries.flatMap((event) => event.searchRequestId ? [event.searchRequestId] : []),
     },
     budget: { packetTokens, preparedPacketTokens, targetTokens, hardTokenCeiling,
+      alwaysInject: Array.isArray(search?.budget?.alwaysInject) ? search.budget.alwaysInject.map((item:any)=>({...item,
+        delivered:item.outcome==='prepared' && Array.isArray(injection?.manifest?.memoryIds) ? injection.manifest.memoryIds.includes(item.memoryId) : undefined})) : undefined,
       processedThrough: ordinal(search?.budget?.processedThrough), latestProcessed: ordinal(search?.budget?.latestProcessed),
       sectionTokens: search?.budget?.sectionTokens, stateKinds: search?.budget?.stateKinds, stateInventory: search?.budget?.stateInventory, stateSearch: search?.budget?.stateSearch, sceneDelivery: search?.budget?.sceneDelivery,
       refillAdded: nonnegativeNumber(search?.budget?.refillAdded), unusedTokens: nonnegativeNumber(search?.budget?.unusedTokens),
@@ -502,6 +505,8 @@ function assemblySummary(budget: TurnAnalysis["budget"]): string[] {
     ? "적격 장면 또는 온전한 근거 단위의 수용 한계 (세부 원인은 구분되지 않음)"
     : budget.unusedReason ? escapeCell(budget.unusedReason) : budget.unusedTokens === 0 ? "해당 없음" : "미기록";
   return [
+    ...(budget.alwaysInject?.length ? [`- always_inject lane: 준비 ${budget.alwaysInject.filter(item=>item.outcome==='prepared').length}개 / 실제 전달 확인 ${budget.alwaysInject.filter(item=>item.delivered===true).length}개 / 전달 미확인 ${budget.alwaysInject.filter(item=>item.outcome==='prepared' && item.delivered===undefined).length}개`,
+      ...budget.alwaysInject.map(item=>`  - ${item.memoryId}: ${item.outcome}, 약 ${item.estimatedTokens}토큰${item.delivered===undefined ? '' : item.delivered ? ', delivered' : ', not delivered'}`)] : []),
     ...(budget.sectionTokens ? [`- 구역별 추정 토큰: ${Object.entries(budget.sectionTokens).map(([key,value])=>`${key}=${value}`).join(", ")}`] : []),
     ...(budget.stateInventory ? [`- 유효한 상태 검색 원본(과거·권한 제한 포함): ${Object.entries(budget.stateInventory).map(([key,value])=>`${key}=${value}`).join(", ")}`] : []),
     ...(budget.stateSearch ? [`- 상태 의미 색인: ${budget.stateSearch.indexed}/${budget.stateSearch.canonical}, ${budget.stateSearch.available ? "사용 가능" : "장애"}, 길이 제한 제외 ${budget.stateSearch.oversized}`] : []),

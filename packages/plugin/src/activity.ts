@@ -10,7 +10,7 @@ import { reconcileAutomaticServerPause } from "./worker.js";
 import { ServerCompatibilityError, isServerApiIncompatible, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess } from "./connection.js";
 import { syncQuizEnabled } from "./quiz-sync.js";
 import { isChatMemoryEnabled, saveSettings } from "./settings.js";
-import { refreshUpdateStatus } from "./updates.js";
+import { observeServerUpdateVersion, refreshUpdateStatus } from "./updates.js";
 import { currentLineageOperation, needsOpenedChatResolution, resolveOpenedChat, reconcileLineageOperation } from "./lineage-settings.js";
 
 interface StatusResponse {
@@ -144,7 +144,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         // Release discovery is advisory and must never make the memory server look offline.
         if (!isServerApiIncompatible(state) || state.serverConnectionIssue?.requiredUpdate !== "plugin") void refreshUpdateStatus(state, client);
         if (isServerApiIncompatible(state)) {
-          const health = await client.request<{ apiRevision: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+          const health = await client.request<{ apiRevision: number; version?: string; ok?: boolean }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+        if (health.ok) observeServerUpdateVersion(state, health.version);
           const mismatch = new ServerCompatibilityError(health.apiRevision);
           if (mismatch.receivedRevision !== mismatch.expectedRevision) throw mismatch;
           state.activityReady = true;
@@ -222,7 +223,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         state.activityReady = true;
         noteServerConnectionSuccess(state);
         } else {
-        const health = await client.request<{ apiRevision?: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+        const health = await client.request<{ apiRevision?: number; version?: string; ok?: boolean }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+        if (health.ok) observeServerUpdateVersion(state, health.version);
         if (health.apiRevision !== undefined) {
           const mismatch = new ServerCompatibilityError(health.apiRevision);
           if (mismatch.receivedRevision !== mismatch.expectedRevision) throw mismatch;
@@ -231,7 +233,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         noteServerConnectionSuccess(state);
         }
         if (!isServerApiIncompatible(state) && state.settings.quizEnabled) await syncQuizEnabled(state, client);
-        if (state.updateStatus?.restartRequired && !state.updateApplying && now >= (state.updateLocalRecheckAt ?? 0)) {
+        if ((state.updateStatus?.restartRequired || state.updateApplying?.error) && (!state.updateApplying || state.updateApplying.error) && now >= (state.updateLocalRecheckAt ?? 0)) {
           state.updateLocalRecheckAt = now + 4_000;
           void refreshUpdateStatus(state, client, { remote: false, force: true });
         }
@@ -240,7 +242,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
       state.activityReady = true;
       if (!(error instanceof ServerCompatibilityError) && (error as { code?: string })?.code === "API_REVISION_MISMATCH") {
         try {
-          const health = await client.request<{ apiRevision: number }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+          const health = await client.request<{ apiRevision: number; version?: string; ok?: boolean }>("/v1/health", {}, SERVER_STATUS_TIMEOUT_MS);
+        if (health.ok) observeServerUpdateVersion(state, health.version);
           error = new ServerCompatibilityError(health.apiRevision);
         } catch { /* Keep the authenticated protocol rejection if health is unavailable. */ }
       }

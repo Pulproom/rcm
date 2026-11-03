@@ -21,6 +21,7 @@ import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "
 import { randomUUID } from "node:crypto";
 import {
   estimateTokens,
+  MemoryContextItemSchema,
   memoryGuidanceBlock,
   memoryEvidenceKind,
   joinDialogueSpans,
@@ -134,6 +135,7 @@ export interface RetrievalCandidateTrace {
 }
 
 export interface RetrievalDiagnostics {
+  alwaysInject?: ReturnType<typeof prepareAlwaysInject>['diagnostics'];
   currentState?: import("./state-outcomes.js").StateOutcomeReport;
   mcpQuestions?: Array<{question:string; candidates:Array<{memoryId:string; rankScore:number; detailIds:string[]; dialogueKeys:string[]; rawAtomHits:SemanticMemoryHit[]}>}>;
   atomPathSearch?: StoredAtomPathSearchStats;
@@ -240,6 +242,56 @@ function isFullyPromptCovered(evidenceJson: string | null | undefined, coverage?
   if (!coverage || coverage.covered.size === 0 || !evidenceJson) return false;
   const activeEvidence = parseEvidence(evidenceJson).map((item) => item.messageId).filter((id) => coverage.active.has(id));
   return activeEvidence.length > 0 && activeEvidence.every((id) => coverage.covered.has(id));
+}
+
+type AlwaysInjectRow = Pick<MemoryRow,'id'|'title'|'content'|'known_by_json'|'type'|'evidence_json'> & {active:number;capsule_parent_id:string|null};
+const compactAlwaysMemory = (row:AlwaysInjectRow):string => `<memory id="${escapeXml(row.id)}" title="${escapeXml(row.title)}" known_by="${escapeXml(parseList(row.known_by_json).map(name=>name===EVERYONE_HOLDER ? 'everyone' : name).join(', '))}">${escapeXml(row.content)}</memory>`;
+
+export function alwaysInjectEstimate(db:RcmDatabase,chatId:string):import('@rcm/shared').AlwaysInjectEstimate {
+  const rows=db.prepare('SELECT * FROM memories WHERE chat_id=? AND always_inject=1 ORDER BY id').all(chatId) as AlwaysInjectRow[];
+  const items=rows.map(row=>({memoryId:row.id,estimatedTokens:estimateTokens(compactAlwaysMemory(row))}));
+  return {items,estimatedTokens:items.length ? estimateTokens(`<always_inject>\n${rows.map(compactAlwaysMemory).join('\n')}\n</always_inject>`) : 0};
+}
+
+/** A separate automatic lane: no score, memory cap, similarity or decay gate.
+ * Access and current evidence remain mandatory even for a user-selected record. */
+export function prepareAlwaysInject(db:RcmDatabase,chatId:string,profile:RpProfile,perspectives:string[],promptSourceMessageIds:string[]=[]) {
+  const rows=db.prepare('SELECT * FROM memories WHERE chat_id=? AND always_inject=1 ORDER BY id').all(chatId) as AlwaysInjectRow[];
+  const active=new Set<string>();
+  if (rows.length && promptSourceMessageIds.length) for (const row of db.prepare("SELECT message_id FROM messages WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL").all(chatId) as Array<{message_id:string}>) active.add(row.message_id);
+  const coverage={active,covered:new Set(promptSourceMessageIds)};
+  const diagnostics:Array<{memoryId:string;lane:'always_inject';outcome:'prepared'|'inactive'|'stale'|'perspective_blocked'|'prompt_covered';estimatedTokens:number}>=[];
+  const selected=rows.filter(row=>{
+    let outcome:typeof diagnostics[number]['outcome']='prepared';
+    const evidence=JSON.parse(row.evidence_json || '[]') as Array<{messageId:string;canonicalHash?:string}>;
+    if (!row.active || row.capsule_parent_id) outcome='inactive';
+    else if (evidence.some(item=>{
+      const source=db.prepare("SELECT canonical_hash FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId,item.messageId) as {canonical_hash:string}|undefined;
+      return !source || item.canonicalHash!==undefined && item.canonicalHash!==source.canonical_hash;
+    })) outcome='stale';
+    else if (!perspectives.some(name=>{
+      const resolved=resolvePerspective(db,chatId,name);
+      return ['omniscient','omniscient narrator'].includes(name.trim().toLowerCase().replace(/[\s_-]+/g,' ')) || allowedByPerspective(row,profile,resolved);
+    })) outcome='perspective_blocked';
+    else if (isFullyPromptCovered(row.evidence_json,coverage)) outcome='prompt_covered';
+    diagnostics.push({memoryId:row.id,lane:'always_inject',outcome,estimatedTokens:estimateTokens(compactAlwaysMemory(row))});
+    return outcome==='prepared';
+  });
+  const xml=selected.length ? `<always_inject>\n${selected.map(compactAlwaysMemory).join('\n')}\n</always_inject>` : '';
+  const manifest=emptyPacketManifest();
+  manifest.memoryIds=selected.map(row=>row.id);
+  manifest.alwaysInjectMemoryIds=[...manifest.memoryIds];
+  manifest.atomKeys=selected.map(row=>memoryAtomKey('summary',row.id,`${row.title}\0${row.content}`));
+  const items=selected.map(row=>MemoryContextItemSchema.parse({id:row.id,type:row.type,title:row.title,content:row.content,knownBy:parseList(row.known_by_json),detail:'clear',score:0,
+    evidence:JSON.parse(row.evidence_json || '[]'),evidenceMessageIds:parseEvidence(row.evidence_json).map(item=>item.messageId)}));
+  return {xml,manifest,items,diagnostics,estimatedTokens:xml ? estimateTokens(xml) : 0};
+}
+
+export function prependAlwaysInject(packet:string,xml:string):string {
+  if (!xml) return packet;
+  if (packet.includes('<past_records>')) return packet.replace('<past_records>',`<past_records>\n${xml}`);
+  if (packet.includes('</rp_memory_context>')) return packet.replace('</rp_memory_context>',`${xml}\n</rp_memory_context>`);
+  return `<rp_memory_context>${xml}</rp_memory_context>`;
 }
 
 const escapeXml = (value: string): string => value
@@ -1439,6 +1491,10 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const aspectTokens = new Map(aspects.map((aspect) => [aspect, searchTokens(aspect)]));
   const intent = options.intent ?? "recall";
   const mcpAnswerMode = options.reinforce === true;
+  const directAlways = !mcpAnswerMode && !options.deferAutomaticBudget
+    ? prepareAlwaysInject(db,options.chatId,chat.profile,[options.perspective],options.promptSourceMessageIds) : undefined;
+  if (directAlways?.xml) options={...options,tokenBudget:Math.max(1,options.tokenBudget-directAlways.estimatedTokens),
+    excludeMemoryIds:[...(options.excludeMemoryIds ?? []),...directAlways.manifest.memoryIds]};
   const excludedAtomKeys = new Set([...(options.alreadyPresentAtomKeys ?? []), ...(options.excludeAtomKeys ?? [])]);
   const archiveView = mcpAnswerMode && omniscient;
   const physicalMcpAnswer = mcpAnswerMode;
@@ -2277,6 +2333,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     packet = selected.length ? consolidateMemoryPacket(db, options.chatId, false, [], selected, intent, packetMode, recentMemoryIds.filter((id) => selected.some((item) => item.id === id)), packetPerspectives) : "";
   }
 
+  packet=prependAlwaysInject(packet,directAlways?.xml ?? '');
   stateHits.push(...(physical.hits ?? []), ...(relationshipLandmarks.hits ?? []));
   const coverageItems: RecallCoverageItem[] = aspects.map((aspect) => {
     if (mcpAnswerMode) {
@@ -2345,6 +2402,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       ...(atomEvidence ? { atomEvidence } : {}) }] : [];
     });
   const deliveredAtomKeys = [...new Set([
+    ...(directAlways?.manifest.atomKeys ?? []),
     ...selected.flatMap(memoryAtomKeys),
     ...(packet.includes("<recorded_state") ? anchorManifest.atomKeys : []),
     ...(packet.includes("<physical_intimacy") ? physical.atomKeys : []),
@@ -2466,9 +2524,9 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       const via = rankedById.get(item.id)?.viaMemoryId ?? eventClusterResult.connections.get(item.id)?.parentId;
       return via ? [[item.id, via]] : [];
     })),
-    structuredManifest: perspectiveData ? mergePacketManifests([anchorManifest, openManifest, {
+    structuredManifest: mergePacketManifests([directAlways?.manifest ?? emptyPacketManifest(),...(perspectiveData ? [anchorManifest, openManifest, {
       ...emptyPacketManifest(), atomKeys: [...physical.atomKeys, ...relationshipLandmarks.atomKeys], intimacyMilestoneIds: physical.ids,
-    }]) : emptyPacketManifest(),
+    }] : [])]),
     eligibleCandidates: portfolioEligible.map(item => {
       const projected=projectPathItem({...item,...allAtoms.get(item.id)});
       const visible=publicMemoryContext(projected);
@@ -2483,7 +2541,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   };
   if (!options.collectDiagnostics) return { ...candidateEvidence,
     packet, stableAnchors: stable, perspectiveData, estimatedTokens: packet ? estimateTokens(packet) : 0,
-    selected, coverage: coverageItems, alreadyProvidedIds,
+    selected:[...(directAlways?.items ?? []),...selected], coverage: coverageItems, alreadyProvidedIds,
     recentMemoryIds: recentMemoryIds.filter((id) => selectedIdSet.has(id)),
     focusLeaderIds: focusLeaders.map((item) => item.id).filter((id) => selectedIdSet.has(id)),
     continuityBridgeIds: recentContinuity && selectedIdSet.has(recentContinuity.id) ? [recentContinuity.id] : [],
@@ -2622,5 +2680,5 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   };
   return { packet,
     ...candidateEvidence,
-    stableAnchors: stable, perspectiveData, estimatedTokens: packet ? estimateTokens(packet) : 0, selected, coverage: coverageItems, alreadyProvidedIds, recentMemoryIds: diagnostics.recentMemoryIds, focusLeaderIds: diagnostics.focusLeaderIds, continuityBridgeIds: diagnostics.continuityBridgeIds, selectedCandidateClasses, selectedRoles: selectedRoleMap, activationObservations, deliveredAtomKeys, diagnostics };
+    stableAnchors: stable, perspectiveData, estimatedTokens: packet ? estimateTokens(packet) : 0, selected:[...(directAlways?.items ?? []),...selected], coverage: coverageItems, alreadyProvidedIds, recentMemoryIds: diagnostics.recentMemoryIds, focusLeaderIds: diagnostics.focusLeaderIds, continuityBridgeIds: diagnostics.continuityBridgeIds, selectedCandidateClasses, selectedRoles: selectedRoleMap, activationObservations, deliveredAtomKeys, diagnostics:{...diagnostics,alwaysInject:directAlways?.diagnostics} };
 }

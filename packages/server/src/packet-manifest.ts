@@ -2,6 +2,7 @@ export function emptyPacketManifest() {
   return {
     stateEvidenceIds: [] as string[],
     atomKeys: [] as string[], memoryIds: [] as string[], detailIds: [] as string[],
+    alwaysInjectMemoryIds: [] as string[],
     relationshipPairs: [] as Array<{ from: string; to: string; stale: boolean }>,
     beliefIds: [] as string[], assertionIds: [] as string[], promiseIds: [] as string[], intimacyMilestoneIds: [] as string[],
   };

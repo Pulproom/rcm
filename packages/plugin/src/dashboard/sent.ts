@@ -34,6 +34,7 @@ function occasionsSection(packet: string): string {
 }
 
 export type SentScene = {
+  alwaysInject?: boolean;
   memoryId: string;
   no: number;
   titleHtml: string;
@@ -87,7 +88,7 @@ function mix(data: SentData): string {
   const cell = (value: string | number, label: string, off = false) =>
     `<div role="listitem"${off ? ' class="is-off"' : ""}><b>${value}</b><small>${label}</small></div>`;
   return `<div class="sent-mix" role="list" aria-label="종류별 개수">
-    ${cell(data.scenes.length, "장면")}
+    ${data.scenes.some(scene => scene.alwaysInject) ? cell(data.scenes.filter(scene => scene.alwaysInject).length, "항상") : ""}${cell(data.scenes.length, "장면")}
     ${data.memoryOnly ? cell("보내지 않음", "인물", true) : cell(data.peopleCount, "인물")}
     ${data.memoryOnly ? cell("보내지 않음", "현재", true) : cell(data.now.length, "현재")}
     ${cell(data.searches.length, "검색")}
@@ -103,7 +104,7 @@ function budget(data: SentData): string {
 /** The widget: counts, the three newest scenes, the budget, and the way into everything. */
 export function sentWidget(data: SentData, phone: boolean): string {
   const shown = [...data.scenes].slice(0, 3);
-  const rows = shown.map((scene) => `<button type="button" class="wg__row" data-action="open-timeline-memory" data-memory-id="${escapeHtml(scene.memoryId)}"><span class="wg__no">${sceneNo(scene)}</span><span class="wg__main">${scene.titleHtml}</span>${scene.clarity ? `<span class="wg__haze">${CLARITY_LABEL[scene.clarity]}</span>` : scene.when ? `<span class="wg__end">${escapeHtml(scene.when)}</span>` : ""}</button>`).join("");
+  const rows = shown.map((scene) => `<button type="button" class="wg__row" data-action="open-timeline-memory" data-memory-id="${escapeHtml(scene.memoryId)}"><span class="wg__no">${sceneNo(scene)}</span><span class="wg__main">${scene.alwaysInject ? '<span class="tag">항상 전달</span> ' : ""}${scene.titleHtml}</span>${scene.clarity ? `<span class="wg__haze">${CLARITY_LABEL[scene.clarity]}</span>` : scene.when ? `<span class="wg__end">${escapeHtml(scene.when)}</span>` : ""}</button>`).join("");
   const rest = sentTotal(data) - shown.length;
   const head = phone
     ? `<h2 class="wg__h">${icon("arrow-right")}이번 턴에 전달한 기억${data.at ? `<span class="wg__time">${escapeHtml(time(data.at))}</span>` : ""}</h2>`
@@ -118,7 +119,7 @@ const pill = (clarity?: "hazy" | "faint") => clarity ? `<span class="pill pill--
 function sceneMeta(scene: SentScene): string {
   const parts = [scene.when, scene.details ? `세부 ${scene.details}` : "", scene.dialogues ? `대사 ${scene.dialogues}` : ""].filter(Boolean);
   if (scene.clarity && !scene.details && !scene.dialogues) parts.push("요지만");
-  return `${pill(scene.clarity)}${escapeHtml(parts.join(" · "))}`;
+  return `${scene.alwaysInject ? '<span class="tag">항상 전달</span> ' : ""}${pill(scene.clarity)}${escapeHtml(parts.join(" · "))}`;
 }
 
 function sceneRow(scene: SentScene, extra = ""): string {

@@ -164,11 +164,12 @@ export function materializeInitialRelationshipProjections(db: RcmDatabase, chatI
   }, 0))();
 }
 
-export function resolveInitialCalibrationConfirmation(db: RcmDatabase, chatId: string, action: "confirm" | "skip"): { forceBackfill: boolean; extractionReview?: boolean; backfillRunId?: string } {
+export function resolveInitialCalibrationConfirmation(db: RcmDatabase, chatId: string, action: "confirm" | "skip"): { forceBackfill: boolean; extractionReview?: boolean; backfillRunId?: string; alreadyResolved?: boolean } {
   assertSetupLineageResolved(db, chatId);
   const row = db.prepare(`SELECT status,pending_force_backfill AS forceBackfill,pending_extraction_review AS extractionReview
     FROM initial_calibrations WHERE chat_id=?`).get(chatId) as { status: string; forceBackfill: number; extractionReview: number | null } | undefined;
   if (!row) throw new Error("Initial calibration not found");
+  if (row.status === (action === "confirm" ? "ready" : "skipped")) return { forceBackfill: false, alreadyResolved: true };
   if (action === "confirm" && row.status !== "awaiting_confirmation") throw new Error("Initial calibration is not awaiting confirmation");
   db.transaction(() => {
     if (action === "skip") {

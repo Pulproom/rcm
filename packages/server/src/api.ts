@@ -90,11 +90,11 @@ import { BackupValidationError, exportCompleteArchive, exportChatArchive, restor
 import { deleteChats, listAdminChats, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
 import { recanonicalizeSourceLedger } from "./lifecycle.js";
 import { EmbeddingRequestError, type EmbeddingService } from "./embedding.js";
-import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
+import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, extractionUnits, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot, syncChatTitle } from "./lifecycle.js";
-import { automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, mergeMemoryContextItems, processedHistoryCoverage, retrieve, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
+import { alwaysInjectEstimate, prepareAlwaysInject, prependAlwaysInject, automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, mergeMemoryContextItems, processedHistoryCoverage, retrieve, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
 import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
 import { ServerExtractionWorker } from "./server-worker.js";
@@ -124,7 +124,7 @@ import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, resetRejectedJobCache
 import { assertSetupLineageResolved, beginInitialCalibration, prepareInitialCalibrationRetry, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
 import { previewRegeneration, applyCanonicalRegeneration, applyEpisodeRegeneration, discardRegeneration, listExtractionBatches, listRegenerations, regenerationRun, startCanonicalRegeneration, startEpisodeRegeneration } from "./regeneration.js";
 import { listSourceRanges, rangeMessages, setMemoryExclusion } from "./source-ranges.js";
-import { additionSources, additionMessageReason, previewMemoryAddition, startMemoryAddition, listMemoryAdditions, applyMemoryAddition, discardMemoryAddition } from './memory-addition.js';
+import { additionSources, additionMessageReason, previewMemoryAddition, startMemoryAddition, listMemoryAdditions, applyMemoryAddition, discardMemoryAddition, startGapRecovery, listGapRecovery } from './memory-addition.js';
 import { estimateFailedJobCalls } from './cost-estimates.js';
 import { estimateStoryRebuild } from './story-spine.js';
 import { applyMemoryGroup, completeMemoryGroupJob, discardMemoryGroup, invalidateChangedMemoryGroups, listMemoryGroups, previewMemoryGroup, startMemoryGroup, ungroupMemories } from "./memory-grouping.js";
@@ -192,7 +192,7 @@ function injectionManifest(packet: string, manifest: PacketManifest, perspective
 export function buildMemoryToolOpportunity(
   candidates: MemoryContextItem[],
   injected: MemoryContextItem[],
-  manifest: ReturnType<typeof injectionManifest>,
+  manifest: Omit<ReturnType<typeof injectionManifest>,'alwaysInjectMemoryIds'> & {alwaysInjectMemoryIds?:string[]},
   promptCoveredAtoms: number,
   candidateClasses?: ReadonlyMap<string, RetrievalCandidateClass>,
 ): MemoryToolOpportunity {
@@ -318,6 +318,7 @@ export function createApp(dependencies: Dependencies): Hono {
       initialCalibration: () => initialCalibrationLedger(db, chatId),
       storySpine: () => listStorySpine(db, chatId),
       socialKnowledge: () => readDashboardSocialKnowledge(chatId),
+      gapRecovery: () => listGapRecovery(db,chatId),
     };
     // Keep partial failures isolated, just like the individual dashboard reads.
     const datasets = Object.fromEntries(Object.entries(readers).map(([key, read]) => {
@@ -502,8 +503,12 @@ export function createApp(dependencies: Dependencies): Hono {
     // Story probe here would strand that recovered space. The final compiler
     // trims the lowest-priority memories against the actual compact Story.
     const storyBudget = storyProbe.tokens;
-    const retrievalBudget = Math.max(0, parsed.tokenBudget - Math.min(320, Math.floor(parsed.tokenBudget * 0.08)));
-    const hardTokenCeiling = automaticHardTokenCeiling(parsed.tokenBudget);
+    const alwaysInject=prepareAlwaysInject(db,parsed.chatId,parsed.profile,retrievalPerspectives,trustedPromptSourceMessageIds);
+    const alwaysIds=new Set(alwaysInject.manifest.memoryIds);
+    const remainingBudget=Math.max(0,parsed.tokenBudget-alwaysInject.estimatedTokens);
+    const retrievalBudget = Math.max(0, remainingBudget - Math.min(320, Math.floor(remainingBudget * 0.08)));
+    // Mandatory compact records stay whole even when larger than the preset.
+    const hardTokenCeiling = Math.max(automaticHardTokenCeiling(parsed.tokenBudget),alwaysInject.estimatedTokens+estimateTokens(sharedPastPacket)+64);
     // Each perspective searches against the full candidate budget. The final
     // compiler performs the one global trim, so adding a second protagonist
     // cannot halve recall depth before duplicate memories are merged.
@@ -532,6 +537,7 @@ export function createApp(dependencies: Dependencies): Hono {
         tokenBudget: perPerspective,
         memoryOnlyInjection: parsed.memoryOnlyInjection,
         deferAutomaticBudget: true,
+        excludeMemoryIds:[...alwaysIds],
         automaticSupportMemoryIds: [...new Set([...(storyProbe.supportMemoryIds ?? []), ...stateCorpus.flatMap(state => state.current ? stateSources(state) : [])])],
         structuredBudgetScale: 1 / Math.max(1, retrievalPerspectives.length),
         hardTokenCeiling: automaticHardTokenCeiling(perPerspective),
@@ -555,6 +561,7 @@ export function createApp(dependencies: Dependencies): Hono {
         structuredManifests.push(result.structuredManifest);
       }
       for (const item of result.eligibleCandidates) {
+        if (alwaysIds.has(item.id)) continue;
         const existing = eligibleAtoms.get(item.id);
         eligibleAtoms.set(item.id, existing ? mergeMemoryContextItems(existing, item) : item);
       }
@@ -597,7 +604,7 @@ export function createApp(dependencies: Dependencies): Hono {
     for (const id of focusLeaderIds) selectedRoles.set(id, "focus");
     for (const [id, candidateClass] of selectedCandidateClasses) if (candidateClass === "core"
       && ["association", "serendipity"].includes(selectedRoles.get(id) ?? "")) selectedRoles.set(id, "core");
-    const selectedItems = [...eligibleAtoms.values()].sort((a,b) => Number(focusLeaderIds.includes(b.id)) - Number(focusLeaderIds.includes(a.id))
+    const selectedItems = [...eligibleAtoms.values()].filter(item=>!alwaysIds.has(item.id)).sort((a,b) => Number(focusLeaderIds.includes(b.id)) - Number(focusLeaderIds.includes(a.id))
       || (portfolioMetadata.get(b.id)?.baseDirect ?? 0) - (portfolioMetadata.get(a.id)?.baseDirect ?? 0) || a.id.localeCompare(b.id));
     for (const item of selectedItems) {
       const metadata = portfolioMetadata.get(item.id);
@@ -645,7 +652,7 @@ export function createApp(dependencies: Dependencies): Hono {
       activeNames: [...new Set([...namesPresent, ...namesMentioned])], query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
       covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
       namesRecognitionIds: new Set(sceneNames.recognitionIds), sceneRecognitionIds: new Set(sceneNames.sceneRecognitionIds) });
-    const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(parsed.tokenBudget);
+    const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(remainingBudget);
     const selectedState = selectAutomaticState(stateCandidates, stateBudget);
     const ceilingDroppedState = new Set<string>();
     let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName),namesPresent);
@@ -654,8 +661,9 @@ export function createApp(dependencies: Dependencies): Hono {
     let includeOccasions = false;
     const rebuildPacket = () => {
       const state = renderAutomaticState(selectedState);
-      emittedManifest = mergePacketManifests([...structuredManifests, state.manifest]);
+      emittedManifest = mergePacketManifests([...structuredManifests, state.manifest,alwaysInject.manifest]);
       let body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
+      body=prependAlwaysInject(body,alwaysInject.xml);
       const calendar = includeOccasions ? renderOccasions(occasions.asOf, occasions.items) : "";
       if (progress) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${progress}\n</rp_memory_context>`);
       if (calendar) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${calendar}\n</rp_memory_context>`);
@@ -822,7 +830,7 @@ export function createApp(dependencies: Dependencies): Hono {
     }
     stateTrace?.budget("shared", sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
     const assemblyFinishedAt = performance.now();
-    const finalSelectedIds = new Set(selectedItems.map((item) => item.id));
+    const finalSelectedIds = new Set([...alwaysIds,...selectedItems.map((item) => item.id)]);
     for (const retrieval of retrievalDiagnostics) for (const candidate of retrieval.candidates) if (finalSelectedIds.has(candidate.id)) {
       candidate.selectionRole = selectedRoles.get(candidate.id);
       candidate.roleReason = portfolio.reasons.get(candidate.id);
@@ -857,7 +865,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const toolOpportunity = buildMemoryToolOpportunity([...eligibleAtoms.values()], selectedItems, finalManifest, promptCoveredAtoms, selectedCandidateClasses);
     toolOpportunity.archiveSearchAvailable = accessibleArchiveExists(db, parsed.chatId, activeTurnPerspectives)
       || memoryToolReadiness(db, parsed.chatId).processedStates > 0;
-    const sectionTokens = Object.fromEntries(["story_continuity", "current_state", "occasions", "not_yet"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
+    const sectionTokens = Object.fromEntries(["always_inject", "story_continuity", "current_state", "occasions", "not_yet"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
     const sceneDelivery = selectedItems.map(item => ({memoryId:item.id,ref:requestRefs.get(item.id),details:item.details.length,dialogues:item.keyDialogues.length}));
     const stateKinds = Object.fromEntries([...new Set(finalManifest.stateEvidenceIds.map(id=>id.split(":")[0]!))].map(kind=>[kind,finalManifest.stateEvidenceIds.filter(id=>id.startsWith(kind+":")).length]));
     const stateInventory = Object.fromEntries([...new Set(stateCorpus.map(item => item.kind))].map(kind => [kind, stateCorpus.filter(item => item.kind === kind).length]));
@@ -874,7 +882,7 @@ export function createApp(dependencies: Dependencies): Hono {
       stableAnchors,
       estimatedTokens: estimateTokens(packet),
       assembly,
-      selected: selectedItems.map(publicMemoryContext),
+      selected: [...alwaysInject.items,...selectedItems.map(publicMemoryContext)],
       stateSnapshots: selectedState.filter(row => finalManifest.stateEvidenceIds.includes(row.item.id) && packet.includes(row.line))
         .map(row => ({ id: row.item.id, text: row.line })),
       injectionManifest: finalManifest,
@@ -958,7 +966,7 @@ export function createApp(dependencies: Dependencies): Hono {
       chatRevision: sync.revision,
       perspectives: retrievalPerspectives,
       promptSourceMessageIds: trustedPromptSourceMessageIds,
-      selectedIds: selectedItems.map((item) => item.id),
+      selectedIds: [...alwaysIds,...selectedItems.map((item) => item.id)],
       selection: {
         seedCounts: storySeedCounts(db,parsed.chatId),
         reasons: Object.fromEntries([...portfolio.reasons].filter(([id]) => finalSelectedIds.has(id))),
@@ -970,6 +978,7 @@ export function createApp(dependencies: Dependencies): Hono {
         continuityBridgeIds: continuityBridgeIds.filter((id) => selectedItems.some((item) => item.id === id)),
       },
       budget: {
+        alwaysInject:alwaysInject.diagnostics,
         ...assembly,
         requestedPreset: parsed.memoryBudgetPreset,
         actualTokenBudget: parsed.tokenBudget,
@@ -1039,6 +1048,7 @@ export function createApp(dependencies: Dependencies): Hono {
     try {
       const chatId = context.req.param("id");
       const pending = resolveInitialCalibrationConfirmation(db, chatId, "confirm");
+      if (pending.alreadyResolved) return context.json({ ok: true, queuedJobs: 0, calibration: initialCalibrationLedger(db, chatId) });
       const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
       const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
       if (queuedJobs) serverWorker.wake();
@@ -1050,6 +1060,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const chatId = context.req.param("id");
       if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined);
       const pending = resolveInitialCalibrationConfirmation(db, chatId, "skip");
+      if (pending.alreadyResolved) return context.json({ ok: true, queuedJobs: 0, calibration: initialCalibrationLedger(db, chatId) });
       const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
       const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
       if (queuedJobs) serverWorker.wake();
@@ -1361,6 +1372,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (!job) return context.json({ error: "Lease not found" }, 409);
     const jobPayload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
     const sourceMessageIds = jobPayload.sourceMessageIds ?? [];
+    if ((jobPayload as {memoryOnly?:boolean}).memoryOnly) return context.json({required:false});
     if (job.type === 'memory_addition' && memoryAdditionStopsAfterEvents(body.result)) return context.json({ required: false });
     const preparedResult = body.audit?.patch ? applyExtractionAuditPatch(db, job.chat_id, sourceMessageIds, body.result, body.audit.patch).result : body.result;
     if (body.audit?.patch?.keepPendingItemRefs.some((ref) => !ref.startsWith("dialogue:"))) return context.json({ required: false, blocked: true });
@@ -1990,6 +2002,16 @@ export function createApp(dependencies: Dependencies): Hono {
     const ranges = listSourceRanges(db, chatId, matches.slice(0, 200).map(row => row.id));
     return context.json({ ranges, messageNumbers: matches.slice(0, 200).map(row => row.ordinal+1), truncated: matches.length > 200 });
   });
+  app.get('/v1/chats/:id/gap-recovery', context=>context.json(listGapRecovery(db,context.req.param('id'))));
+  app.post('/v1/chats/:id/gap-recovery', context=>{
+    try {
+      const result=startGapRecovery(db,context.req.param('id'));
+      if (result.jobs.length) serverWorker.wake();
+      return context.json(result);
+    } catch (error) {
+      return context.json({error:error instanceof Error ? error.message : String(error),code:(error as {code?:string}).code},409);
+    }
+  });
   app.post('/v1/chats/:id/memory-additions/sources', async (context) => {
     const body = await context.req.json() as { rangeIds?: unknown };
     if (!Array.isArray(body.rangeIds) || !body.rangeIds.every(id => typeof id === 'string')) return context.json({ error: '원문 구간을 확인해 주세요' }, 400);
@@ -2215,8 +2237,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const bookmarks = readMemoryBookmarks(db, chatId);
     const items = db.prepare(`
       SELECT m.id,m.memory_key AS memoryKey,${recognitionOnlyMemorySql('m')} AS recognitionOnly,m.type,m.title,m.content,m.participants_json,m.known_by_json,m.perspective,m.story_time,m.story_time_normalized,m.locations_json,m.landmark,m.landmark_kinds_json,m.evidence_json,
-        m.salience,m.strength,m.recall_count,m.pinned,m.active,m.capsule_parent_id,m.source_batch_id AS sourceBatchId,m.user_managed AS userManaged,m.created_revision,m.created_at,m.updated_at,
+        m.salience,m.strength,m.recall_count,m.pinned,m.always_inject,m.active,m.capsule_parent_id,m.source_batch_id AS sourceBatchId,m.user_managed AS userManaged,m.created_revision,m.created_at,m.updated_at,
         (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal,
+        (SELECT MAX(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_end_ordinal,
         (SELECT msg.event_time FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id ORDER BY msg.ordinal LIMIT 1) AS source_event_time
       FROM memories m WHERE m.chat_id=? ORDER BY CASE WHEN source_ordinal IS NULL THEN 0 ELSE 1 END,CASE WHEN source_ordinal IS NULL THEN m.created_at END DESC,source_ordinal DESC,m.created_revision DESC
     `).all(chatId) as Array<Record<string, unknown> & { id: string }>;
@@ -2224,7 +2247,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const detailQuery = db.prepare(`SELECT id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,locations_json AS locations,
       user_edited AS userEdited,user_hidden AS hidden,epistemic,salience,retention_class AS retention,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal
       FROM memory_details WHERE memory_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`);
-    return { items: items.map((item) => {
+    const alwaysInject=alwaysInjectEstimate(db,chatId);
+    const alwaysTokens=new Map(alwaysInject.items.map(item=>[item.memoryId,item.estimatedTokens]));
+    return { alwaysInject, items: items.map((item) => {
       let locations: string[] = [];
       let participants: string[] = [];
       let knownBy: string[] = [];
@@ -2248,6 +2273,7 @@ export function createApp(dependencies: Dependencies): Hono {
       });
       const keyDialogues = (dialogueQuery.all(item.id) as Array<Record<string,any>>).map(dialogue => ({...dialogue,access:memoryDetailAccess(db,chatId,dialogue.id,"dialogue"),evidence:JSON.parse(dialogue.evidence)}));
       return { ...rest, known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
+        alwaysInject:item.always_inject===1,alwaysInjectEstimatedTokens:alwaysTokens.get(item.id) ?? 0,
         active: item.active === 1, bookmarked: bookmarks.has(item.id), keyDialogues, details, detailCount: details.filter(detail => !detail.hidden).length, episode, sections };
     }) };
   }
@@ -2471,11 +2497,12 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.patch("/v1/chats/:id/memories/:memoryId", async (context) => {
     const body = await context.req.json() as Record<string, unknown>;
-    const allowed = ["title", "content", "salience", "strength", "pinned", "active", "storyTime", "locations", "landmark", "landmarkKinds", "participants"] as const;
+    const allowed = ["title", "content", "salience", "strength", "pinned", "alwaysInject", "active", "storyTime", "locations", "landmark", "landmarkKinds", "participants"] as const;
     let updates = allowed.filter((key) => body[key] !== undefined);
     const bookmarkUpdate = body.bookmarked !== undefined;
     if (updates.length === 0 && !bookmarkUpdate) return context.json({ error: "No supported changes" }, 400);
     if (bookmarkUpdate && typeof body.bookmarked !== "boolean") return context.json({ error: "bookmarked must be boolean" }, 400);
+    if (body.alwaysInject!==undefined && typeof body.alwaysInject!=='boolean') return context.json({error:'alwaysInject must be boolean'},400);
     if (["salience", "strength"].some((key) => body[key] !== undefined && (!Number.isFinite(Number(body[key])) || Number(body[key]) < 0 || Number(body[key]) > 1))) {
       return context.json({ error: "salience and strength must be finite numbers from 0 to 1" }, 400);
     }
@@ -2492,8 +2519,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const participants = parsedParticipants?.data;
     const parsedLandmarks = body.landmarkKinds === undefined ? undefined : StoredLandmarkKindSchema.array().max(12).safeParse(body.landmarkKinds);
     if (parsedLandmarks && !parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
-    const columns: Record<(typeof allowed)[number], string> = { title: "title", content: "content", salience: "salience", strength: "strength", pinned: "pinned", active: "active", storyTime: "story_time", locations: "locations_json", landmark: "landmark", landmarkKinds: "landmark_kinds_json", participants: "participants_json" };
-    let values = updates.map((key) => key === "pinned" || key === "active" || key === "landmark"
+    const columns: Record<(typeof allowed)[number], string> = { title: "title", content: "content", salience: "salience", strength: "strength", pinned: "pinned", alwaysInject:'always_inject', active: "active", storyTime: "story_time", locations: "locations_json", landmark: "landmark", landmarkKinds: "landmark_kinds_json", participants: "participants_json" };
+    let values = updates.map((key) => key === "pinned" || key === 'alwaysInject' || key === "active" || key === "landmark"
       ? (body[key] ? 1 : 0)
       : key === "participants" ? JSON.stringify(participants) : key === "locations" ? JSON.stringify(body[key])
         : key === "landmarkKinds" ? JSON.stringify((parsedLandmarks?.data ?? []).map(clipLandmarkDisplayText))
@@ -2504,6 +2531,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const result = db.transaction(() => {
       const previous = db.prepare("SELECT * FROM memories WHERE id=? AND chat_id=?").get(memoryId, chatId) as Record<string, any> | undefined;
       if (!previous) return 0;
+      if (body.alwaysInject===true && !previous.always_inject
+        && (db.prepare('SELECT COUNT(*) n FROM memories WHERE chat_id=? AND always_inject=1').get(chatId) as {n:number}).n>=5) return 2;
       const changed = updates.map((key,index) => ({key,value:values[index]})).filter(({key,value}) => {
         const stored = previous[columns[key]];
         return value !== (columns[key].endsWith('_json') ? JSON.stringify(JSON.parse(stored)) : stored);
@@ -2535,8 +2564,9 @@ export function createApp(dependencies: Dependencies): Hono {
       if (body.active === false) embeddings.removeMemory(memoryId);
       else if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || body.active === true) void embeddings.indexPending(chatId);
     }
+    if (result===2) return context.json({error:'항상 주입할 기억은 채팅마다 5개까지 선택할 수 있어요',code:'ALWAYS_INJECT_LIMIT',limit:5},409);
     return result === 1
-      ? context.json({ ok: true })
+      ? context.json({ ok: true,alwaysInject:alwaysInjectEstimate(db,chatId) })
       : context.json({ error: "Memory not found" }, 404);
   });
   app.delete("/v1/chats/:id/memories/:memoryId", (context) => {
@@ -3204,6 +3234,12 @@ export function createApp(dependencies: Dependencies): Hono {
     const jobMetadata = (job: any): Record<string, unknown> => {
       let payload: Record<string, any> = {};
       try { payload = JSON.parse(job.payload_json || "{}"); } catch { return {}; }
+      const failureRows = job.status==='failed' && job.type==='extract' ? db.prepare(`SELECT message_id,role,ordinal,content,content_hash,completed_turn_seq
+        FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal,message_id`)
+        .all(chatId,JSON.stringify(payload.sourceMessageIds ?? [])) as Array<{message_id:string;role:string;ordinal:number;content:string;content_hash:string;completed_turn_seq:number|null}> : [];
+      const turns=extractionUnits(failureRows, (db.prepare('SELECT include_user_messages enabled FROM chats WHERE id=?').get(chatId) as {enabled:number}|undefined)?.enabled!==0).length;
+      const failureMetadata=failureRows.length ? {failedRange:{startOrdinal:failureRows[0]!.ordinal,endOrdinal:failureRows.at(-1)!.ordinal,startTurn:failureRows.find(row=>row.completed_turn_seq!==null)?.completed_turn_seq,endTurn:failureRows.filter(row=>row.completed_turn_seq!==null).at(-1)?.completed_turn_seq,turnCount:turns,
+        reason:String(job.last_error ?? '').slice(0,400),canResplit:turns>1}} : {};
       const audits = db.prepare(`SELECT draft_json AS draft,source_message_ids_json AS source_ids
         FROM extraction_audits WHERE chat_id=? AND job_id=? AND status IN ('pending_review','failed') ORDER BY updated_at DESC`).all(chatId, job.id) as Array<{ draft: string; source_ids: string }>;
       let withheld: ReturnType<typeof describeWithheldRecognitions> = [];
@@ -3215,12 +3251,13 @@ export function createApp(dependencies: Dependencies): Hono {
           if (found.length) { withheld = found; sourceMessageIds = JSON.parse(audit.source_ids || "[]"); break; }
         } catch { /* A malformed audit remains visible through the normal audit endpoint. */ }
       }
-      if (!withheld.length) return {};
+      if (!withheld.length) return failureMetadata;
       const batchId = typeof payload.batchId === "string" ? payload.batchId : undefined;
       const batch = batchId ? db.prepare("SELECT id,start_ordinal AS startOrdinal,end_ordinal AS endOrdinal FROM extraction_batches WHERE id=? AND chat_id=?").get(batchId, chatId) as { id: string; startOrdinal: number; endOrdinal: number } | undefined : undefined;
       const sourceRange = batch ?? (sourceMessageIds.length ? listSourceRanges(db, chatId, sourceMessageIds).find((range) => sourceMessageIds.every((id) => range.sourceMessageIds.includes(id))) : undefined);
       const memoriesSaved = batchId ? Number((db.prepare("SELECT count(*) AS count FROM memories WHERE chat_id=? AND source_batch_id=? AND active=1").get(chatId, batchId) as { count: number }).count) : 0;
       return {
+        ...failureMetadata,
         memoriesSaved,
         withheldRecognitions: withheld,
         ...(sourceRange ? { sourceRange: { id: sourceRange.id, startOrdinal: sourceRange.startOrdinal, endOrdinal: sourceRange.endOrdinal } } : {}),
@@ -3260,19 +3297,24 @@ export function createApp(dependencies: Dependencies): Hono {
     }
   });
   app.get('/v1/chats/:id/jobs/retry-failed/estimate',context=>context.json(estimateFailedJobCalls(db,context.req.param('id'))));
-  app.post("/v1/chats/:id/jobs/retry-failed", (context) => {
+  app.post("/v1/chats/:id/jobs/retry-failed", async (context) => {
+    const body = await context.req.json().catch(() => ({}));
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return context.json({error:'Expected a retry request object'},400);
+    if (body.jobIds !== undefined && (!Array.isArray(body.jobIds) || !body.jobIds.every((id: unknown) => typeof id === 'string'))) return context.json({error:'jobIds must be an array of IDs'},400);
+    const selectedIds: Set<string> | undefined = body.jobIds ? new Set(body.jobIds) : undefined;
     const chatId = context.req.param("id");
-    if (db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND status='failed' AND type='initial_calibration'
-      AND COALESCE(json_array_length(payload_json,'$.resolvedSetup.messages'),0)=0`).get(chatId)) {
+    if (db.prepare(`SELECT id FROM jobs WHERE chat_id=? AND status='failed' AND type='initial_calibration'
+      AND COALESCE(json_array_length(payload_json,'$.resolvedSetup.messages'),0)=0`).all(chatId).some((row:any)=>!selectedIds||selectedIds.has(row.id))) {
       return context.json({ code: "INITIAL_SETUP_REQUIRED", error: "초기 설정 입력은 보관하지 않아요. 인물 → 초기 설정에서 재료를 다시 선택해 주세요." }, 409);
     }
-    const retriedRunIds = (db.prepare(`SELECT DISTINCT json_extract(payload_json,'$.backfillRunId') runId FROM jobs
-      WHERE chat_id=? AND status='failed' AND json_extract(payload_json,'$.backfillRunId') IS NOT NULL`).all(chatId) as Array<{ runId: string }>).map((row) => row.runId);
+    const retriedRunIds = (db.prepare(`SELECT id,json_extract(payload_json,'$.backfillRunId') runId FROM jobs
+      WHERE chat_id=? AND status='failed' AND json_extract(payload_json,'$.backfillRunId') IS NOT NULL`).all(chatId) as Array<{ id:string;runId: string }>).filter(row=>!selectedIds||selectedIds.has(row.id)).map((row) => row.runId);
     const result = db.transaction(() => {
       const failed = db.prepare("SELECT id,payload_json FROM jobs WHERE chat_id=? AND status='failed'").all(chatId) as Array<{ id: string; payload_json: string }>;
       const update = db.prepare(`UPDATE jobs SET status='queued',attempts=0,payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='failed'`);
       let changes = 0;
       for (const job of failed) {
+        if (selectedIds && !selectedIds.has(job.id)) continue;
           const payload = manualRetryPayload(JSON.parse(job.payload_json || "{}"));
         changes += update.run(JSON.stringify(payload), Date.now(), job.id).changes;
       }

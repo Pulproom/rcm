@@ -90,10 +90,10 @@ export function avatar(name: string, size: "sm" | "md" | "xl" = "md"): string {
 }
 
 export function btn(label: string, opts: {
-  kind?: ButtonKind; icon?: string; iconEnd?: string; action?: string; data?: Data; disabled?: boolean; hit?: boolean; type?: "button" | "submit";
+  kind?: ButtonKind; icon?: string; iconEnd?: string; action?: string; data?: Data; disabled?: boolean; busy?: boolean; hit?: boolean; type?: "button" | "submit";
 } = {}): string {
   const cls = `btn btn--${opts.kind ?? "secondary"}${opts.hit ? " hit" : ""}`;
-  return `<button type="${opts.type ?? "button"}" class="${cls}"${actionAttrs(opts.action, opts.data)}${opts.disabled ? " disabled" : ""}>${opts.icon ? icon(opts.icon) : ""}${escapeHtml(label)}${opts.iconEnd ? icon(opts.iconEnd) : ""}</button>`;
+  return `<button type="${opts.type ?? "button"}" class="${cls}"${actionAttrs(opts.action, opts.data)}${opts.disabled ? " disabled" : ""}${opts.busy ? ' aria-busy="true"' : ""}>${opts.icon ? icon(opts.icon) : ""}${escapeHtml(label)}${opts.iconEnd ? icon(opts.iconEnd) : ""}</button>`;
 }
 
 export function iconBtn(name: string, label: string, opts: { action?: string; data?: Data; expanded?: boolean } = {}): string {
@@ -151,7 +151,7 @@ export function filters(items: Array<{ label: string; pressed: boolean; count?: 
   return `<div class="filters" role="group" aria-label="${escapeHtml(label)}">${buttons}</div>`;
 }
 
-export type MenuItem = { label: string; icon?: string; action: string; data?: Data; danger?: boolean; count?: number; disabled?: boolean };
+export type MenuItem = { label: string; icon?: string; action: string; data?: Data; danger?: boolean; count?: number | string; hint?: string; disabled?: boolean };
 
 /**
  * `trigger` swaps the ··· button for another symbol (the phone skin's reminder ring) and adds its class.
@@ -167,7 +167,7 @@ export function menu(opts: { label: string; title?: string; items: Array<MenuIte
   const body = cleaned.map((item) => {
     if (item === "sep") return '<div class="menu__sep" role="separator"></div>';
     const count = item.count === undefined ? "" : `<span class="k">${item.count}</span>`;
-    return `<button type="button" class="menu__item${item.danger ? " menu__item--danger" : ""}" role="menuitem"${actionAttrs(item.action, item.data)}${item.disabled ? " disabled" : ""}>${item.icon ? icon(item.icon) : ""}<span>${escapeHtml(item.label)}</span>${count}</button>`;
+    return `<button type="button" class="menu__item${item.danger ? " menu__item--danger" : ""}" role="menuitem"${actionAttrs(item.action, item.data)}${item.disabled ? item.hint ? ' disabled aria-disabled="true"' : " disabled" : ""}>${item.icon ? icon(item.icon) : ""}<span>${escapeHtml(item.label)}${item.hint ? `<small class="menu__hint">${escapeHtml(item.hint)}</small>` : ""}</span>${count}</button>`;
   }).join("");
   const title = `<div class="menu__title">${escapeHtml(opts.title ?? opts.label)}</div>`;
   const summary = opts.face

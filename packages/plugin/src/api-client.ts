@@ -201,11 +201,19 @@ export class ServerClient {
     });
   }
 
-  patchMemory(chatId: string, memoryId: string, patch: Record<string, unknown>): Promise<{ ok: boolean }> {
+  patchMemory(chatId: string, memoryId: string, patch: Record<string, unknown>): Promise<{ ok: boolean;alwaysInject?:import('@rcm/shared').AlwaysInjectEstimate }> {
     return this.request(`/v1/chats/${encodeURIComponent(chatId)}/memories/${encodeURIComponent(memoryId)}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
+  }
+
+  gapRecovery(chatId:string):Promise<import('@rcm/shared').GapRecoveryStatus> {
+    return this.request(`/v1/chats/${encodeURIComponent(chatId)}/gap-recovery`);
+  }
+
+  startGapRecovery(chatId:string):Promise<import('@rcm/shared').GapRecoveryQueue> {
+    return this.request(`/v1/chats/${encodeURIComponent(chatId)}/gap-recovery`,{method:'POST'});
   }
 
   async raw(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<Response> {

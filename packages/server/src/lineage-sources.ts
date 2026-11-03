@@ -24,7 +24,7 @@ export function remapInheritedSources(db: RcmDatabase, chatId: string, allIds: M
   const copy = db.prepare(`INSERT INTO messages(${columns.join(',')}) SELECT ${columns.map(column => column === 'message_id' ? '?'
     : column === 'memory_excluded' ? 'CASE WHEN ? THEN 0 ELSE memory_excluded END' : column).join(',')}
     FROM messages WHERE chat_id=? AND message_id=?`);
-  const referenceTables = ['message_revisions','memory_dialogues','evidence_spans','episode_messages','source_passages'];
+  const referenceTables = ['message_revisions','memory_dialogues','evidence_spans','episode_messages','source_passages','gap_recovery_messages'];
   for (const [oldId,newId] of ids) {
     // A choice may already have synchronized the target's raw-only shell.
     db.prepare('DELETE FROM messages WHERE chat_id=? AND message_id=?').run(chatId,newId);

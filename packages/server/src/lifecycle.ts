@@ -196,6 +196,7 @@ function staleSourceWork(db: RcmDatabase, chatId: string, messageId: string, rea
       const ids = (JSON.parse(job.payload_json) as { sourceMessageIds?: string[] }).sourceMessageIds ?? [];
       if (!ids.includes(messageId)) continue;
       db.prepare("UPDATE jobs SET status='done',last_error=?,updated_at=? WHERE id=?").run(`Source ${reason}`, timestamp, job.id);
+      db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE job_id=? AND status IN ('queued','processing')").run(timestamp, job.id);
       // A batch can contain several completed turns. Cancelling it for one
       // edited/removed source must release the still-valid peers so the next
       // scheduler pass can form a fresh canonical batch for them.
@@ -580,9 +581,12 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
 
     if (applyHostVisibilityProjection(db, request.chatId, visibilityProjection, (existingChat?.revision ?? 0) + 1) > 0) changed = true;
 
-    // Assign one monotonic sequence to each newly settled U+A unit. Raw edits,
+    // Each settled assistant response owns one monotonic turn, with preceding
+    // waiting user rows. Risu's opening greeting is injected by the host outside
+    // chat.message, so it is not a source row and needs no ordinal heuristic.
+    // Raw edits,
     // rerolls of the same message ID, /del and /cut never advance or rewind
-    // this clock. Assistant-only greetings remain outside the RP turn clock.
+    // this clock.
     const storedTurnClock = db.prepare("SELECT MAX(completed_turn_seq) AS value FROM messages WHERE chat_id=?")
       .get(request.chatId) as { value: number | null };
     let completedTurns = Math.max(existingChat?.completed_turn_count ?? 0, storedTurnClock.value ?? 0);
@@ -606,7 +610,6 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
         waitingUsers.push(row.message_id);
         continue;
       }
-      if (waitingUsers.length === 0) continue;
       completedTurns += 1;
       for (const messageId of [...waitingUsers, row.message_id]) assignTurn.run(completedTurns, request.chatId, messageId);
       waitingUsers = [];
