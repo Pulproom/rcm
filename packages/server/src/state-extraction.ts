@@ -7,12 +7,14 @@ import { estimateTokens, measureAuxiliaryPrompt, mergeStateExtraction,
   STORY_TIME_GUIDANCE, StateExtractionSchema, SOCIAL_MEMORY_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE,
   ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, buildSourceUnits, type ExtractionDraftResult, type ReconciliationSubmission } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { prepareReconciliation } from "./reconciliation.js";
+import { prepareReconciliation, hasUnsuppliedStateProperty } from "./reconciliation.js";
+import { buildEntityIdentityResolver } from './entities.js';
 import { listSocialKnowledge } from "./social-knowledge.js";
 import { inspectDraftEvidence } from "./evidence-review.js";
 import { stripThoughtBlocks } from "./source-text.js";
 import { openStorySeeds, validateSeedResolutions } from "./story-seeds.js";
 import { IDENTITY_TERM_GUIDANCE } from "./identity-guidance.js";
+import { STATE_PRIOR_CONTEXT_TOKENS, selectStatePrior, stateContextMeasurement, statePromptTokens, emptyStatePrior } from './state-context.js';
 
 export function usesStateExtraction(type: string, payload: Record<string, any>): boolean {
   return ["extract", "audit_retry", "memory_addition"].includes(type) && !payload.memoryOnly && !payload.regenerationRunId && !payload.sourceRecovery && !payload.dialogueRecovery;
@@ -38,9 +40,11 @@ export function prepareStateExtraction(db: RcmDatabase, chatId: string, sourceId
   for(const {subject} of ledgerSubjects)if(subject && sourceText.includes(subject.toLocaleLowerCase()))names.add(subject);
   const nameSet = new Set([...names].map(n => n.toLocaleLowerCase()));
   const relevant = (r: Record<string, any>) => [r.subject,r.holder,r.promisor,r.promisee,r.from_entity,r.to_entity].some(n => typeof n === "string" && nameSet.has(n.toLocaleLowerCase()));
-  const facts = (db.prepare("SELECT * FROM assertions WHERE chat_id=? AND valid_to_revision IS NULL").all(chatId) as any[]).filter(relevant);
-  const beliefs = (db.prepare("SELECT * FROM beliefs WHERE chat_id=? AND active=1 AND status='active'").all(chatId) as any[]).filter(relevant);
-  const promises = (db.prepare("SELECT * FROM promises WHERE chat_id=?").all(chatId) as any[]).filter(relevant);
+  const allFacts = db.prepare("SELECT * FROM assertions WHERE chat_id=? AND valid_to_revision IS NULL").all(chatId) as any[];
+  const allBeliefs = db.prepare("SELECT * FROM beliefs WHERE chat_id=? AND active=1 AND status='active'").all(chatId) as any[];
+  // Closed promises remain reconciliation candidates (e.g. a repeated old promise must not be recreated).
+  const allPromises = db.prepare("SELECT * FROM promises WHERE chat_id=?").all(chatId) as any[];
+  const facts=allFacts.filter(relevant),beliefs=allBeliefs.filter(relevant),promises=allPromises.filter(relevant);
   const ledger = [...facts.map(value=>({id:value.id,kind:"world_fact",immutable:!canAutomaticallyChange(db,chatId,value,sourceIds.map(messageId=>({messageId}))),value})),
     ...beliefs.map(value=>({id:value.id,kind:"character_belief",immutable:!canAutomaticallyChange(db,chatId,value,sourceIds.map(messageId=>({messageId}))),value})),
     ...promises.map(value=>({id:value.id,kind:"promise_event",immutable:!canAutomaticallyChange(db,chatId,value,sourceIds.map(messageId=>({messageId}))),value}))];
@@ -72,32 +76,75 @@ Write state descriptions in ${draft.language}; keep proper names as in source. E
   const progress = prepareProgress(db,chatId,draft);
   const context = {pairProgress:progress.cells,priorSeeds,sources:sources.map(s=>({role:s.role,number:s.ordinal+1,units:sourceUnits.filter(u=>u.messageId===s.id).map(u=>({ref:u.ref,text:u.text}))})),eventDraft:{language:draft.language,entities:draft.entities,memories:draft.memories.map(m=>({key:m.key,title:m.title,details:m.details?.map(d=>({key:d.key,kind:d.kind,text:d.text,holders:d.access?.map(a=>a.holder)}))}))},priorLedger:ledger,recognition,relationships,
     ...(addition ? { existingMemories: addition.existingMemories, userNote: memoryAdditionUserNote(addition.userRequest) } : {})};
-  let userPrompt = JSON.stringify(context);
-  const measure = () => measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0});
-  let measurement = measure();
-  const originalInputTokens = measurement.estimatedInputTokens;
+  const before=stateContextMeasurement(systemPrompt,context);
+  const originalInputTokens = before.totalTokens;
+  const fitsPrior=(value:Record<string,any>)=>{const total=statePromptTokens(systemPrompt,value);return total-statePromptTokens(systemPrompt,emptyStatePrior(value))<=STATE_PRIOR_CONTEXT_TOKENS&&total<=maxInputTokens;};
   let level = 0;
   let compactedLedger = ledger;
-  if (!measurement.fits) {
+  const oversized=before.priorTokens>STATE_PRIOR_CONTEXT_TOKENS||before.totalTokens>maxInputTokens;
+  // If other components alone overflow, no ledger compaction level can make the
+  // complete prior fit. Avoid measuring that unchanged oversized context repeatedly.
+  const othersOverflow=before.priorTokens-before.prior.priorLedger.tokens>STATE_PRIOR_CONTEXT_TOKENS
+    ||before.totalTokens-before.prior.priorLedger.tokens>maxInputTokens;
+  if (oversized && ledger.length) {
     systemPrompt += '\nPrior-ledger evidence is compacted context, never new source evidence. quoteExcerpt is only a shortened historical excerpt; original offsets refer to the stored full quote. Missing historical quotes or evidence do not invalidate or end a record. All record identities, current values and immutable flags are preserved. Ground every new claim and change in CURRENT SOURCE.';
-    for (level = 1; level <= 3; level++) {
+    for (level = othersOverflow ? 3 : 1; level <= 3; level++) {
       compactedLedger = ledger.map(entry => ({...entry,value:compactPriorEvidence(entry.value,level,sourceIds)}));
-      userPrompt = JSON.stringify({...context,priorLedger:compactedLedger});
-      measurement = measure();
-      if (measurement.fits || level === 3) break;
+      if (level === 3 || fitsPrior({...context,priorLedger:compactedLedger})) break;
     }
   }
-  const stateInput = {compactionLevel:level,ledgerRows:ledger.length,originalInputTokens,estimatedInputTokens:measurement.estimatedInputTokens,maxInputTokens};
+  let selected:Record<string,any>={...context,priorLedger:compactedLedger};
+  if(othersOverflow||oversized&&!fitsPrior(selected)||priorSeeds.length>32) {
+    systemPrompt+='\nPrior context is a selected subset. Omitted records are not evidence of absence or permission to create duplicates. Use only supplied IDs; ground new observations in CURRENT SOURCE.';
+    const required=statePromptTokens(systemPrompt,emptyStatePrior(selected));
+    selected=selectStatePrior(db,chatId,selected,systemPrompt,Math.max(0,Math.min(STATE_PRIOR_CONTEXT_TOKENS,maxInputTokens-required)),sourceIds,draft,jobId);
+  }
+  const userPrompt=JSON.stringify(selected);
+  const measurement=measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0});
+  const after=stateContextMeasurement(systemPrompt,selected);
+  const componentSizes=Object.fromEntries(Object.keys(before.prior).map(key=>{
+    const component=key as keyof typeof before.prior;
+    return [key,{beforeTokens:before.prior[component].tokens,afterTokens:after.prior[component].tokens,
+      included:after.prior[component].count,omitted:before.prior[component].count-after.prior[component].count}];
+  }));
+  const additionDetails=Object.fromEntries(['details','keyDialogues'].map(key=>{
+    const count=(rows:any[])=>rows.reduce((sum,row)=>sum+(row[key]?.length ?? 0),0);
+    const included=count(selected.existingMemories ?? []);
+    return [key,{included,omitted:count(addition?.existingMemories ?? [])-included}];
+  }));
+  const stateInput = {selectionPolicyVersion:2,compactionLevel:level,ledgerRows:ledger.length,originalInputTokens,estimatedInputTokens:measurement.estimatedInputTokens,maxInputTokens,
+    requiredTokens:after.requiredTokens,priorTokens:after.priorTokens,priorBudget:Math.max(0,Math.min(STATE_PRIOR_CONTEXT_TOKENS,maxInputTokens-after.requiredTokens)),
+    components:{...componentSizes,...Object.fromEntries(Object.entries(after.required).map(([key,tokens])=>[key,{beforeTokens:before.required[key as keyof typeof before.required],afterTokens:tokens}]))},
+    requiredComponents:after.required,...(addition ? {additionDetails} : {}),followUpCount:0,followUpLimit:0,reviewCount:0};
   if (jobId) db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateInput',json(?)) WHERE id=? AND chat_id=?")
     .run(JSON.stringify(stateInput),jobId,chatId);
-  if (!measurement.fits) throw Object.assign(new Error(`AUXILIARY_STATE_INPUT_TOO_LARGE: ledgerRows=${ledger.length} ledgerTokens=${estimateTokens(JSON.stringify(compactedLedger))} inputTokens=${measurement.estimatedInputTokens} maxInputTokens=${maxInputTokens}`), {code:"AUXILIARY_STATE_INPUT_TOO_LARGE"});
+  if (!measurement.fits) {
+    const largest=Object.entries({...after.required,...Object.fromEntries(Object.entries(after.prior).map(([key,value])=>[key,value.tokens]))}).sort((a,b)=>b[1]-a[1])[0]!;
+    throw Object.assign(new Error(`AUXILIARY_STATE_INPUT_TOO_LARGE: largestComponent=${largest[0]} componentTokens=${largest[1]} requiredTokens=${after.requiredTokens} inputTokens=${measurement.estimatedInputTokens} maxInputTokens=${maxInputTokens}`), {code:"AUXILIARY_STATE_INPUT_TOO_LARGE"});
+  }
   // Progress edits can arrive while the model runs; completion rechecks each cell's lock.
-  const {pairProgress:_advisory,...boundContext}=context;
+  const {pairProgress:_advisory,priorLedger:_ledger,...boundContext}=context;
   // Bind the full stored evidence too: shortening must not hide a concurrent edit.
   const binding=createHash("sha256").update(JSON.stringify(boundContext));
-  if (level) binding.update(JSON.stringify({level,priorLedger:compactedLedger}));
+  // Full relevant candidates (including omitted rows and identity variants), not
+  // unrelated ledger writes elsewhere in the chat. Selected IDs remain bound below.
+  const resolveIdentity=buildEntityIdentityResolver(db,chatId);
+  const candidateNames=new Set([...names,...ledger.flatMap(({value})=>[value.subject,value.holder,value.promisor,value.promisee].filter((n):n is string=>typeof n==='string'))]
+    .flatMap(name=>resolveIdentity(name).variants).map(name=>name.toLocaleLowerCase()));
+  const inPool=(name:unknown)=>typeof name==='string'&&candidateNames.has(name.toLocaleLowerCase());
+  const offered=new Map(ledger.map(entry=>[entry.id,entry]));
+  // Broaden only the binding to identity variants and the pool's subjects/holders.
+  // Keeping prompt relevance unchanged preserves small-chat byte equivalence.
+  const fullCandidates=[...allFacts.filter(r=>inPool(r.subject)),...allBeliefs.filter(r=>inPool(r.holder)&&inPool(r.subject)),
+    ...allPromises.filter(r=>inPool(r.promisor)&&inPool(r.promisee))].map(value=>offered.get(value.id) ??
+      {id:value.id,value,immutable:!canAutomaticallyChange(db,chatId,value,sourceIds.map(messageId=>({messageId})))});
+  const fullLedgerDigest=createHash('sha256').update(JSON.stringify(fullCandidates)).digest('hex');
+  const {pairProgress:_selectedProgress,...selectedContext}=selected;
+  binding.update(JSON.stringify({fullLedgerDigest,level,selectedContext}));
   const candidateSetHash=binding.digest("hex");
-  return {required:true,stateExtraction:true,stateInput,progressSent:progress.progressSent,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
+  const cells=selected.pairProgress as typeof progress.cells;
+  const progressSent={...progress.progressSent,count:cells.length,cells:cells.map(({persona,character,itemId,side})=>({persona,character,itemId,side}))};
+  return {required:true,stateExtraction:true,stateInput,progressSent,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
 }
 
 /** Prompt-only copies. Current values, locks and stored evidence are never rewritten. */
@@ -148,7 +195,13 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
     : validateSeedResolutions(db,chatId,seedResolutions,sourceIds,suppliedSeeds);
   const progressDrops: ProgressDrop[] = [];
   const patches = submission.result.pairProgress ?? [];
-  const pairProgress = validateProgressPatches(db,chatId,draft,patches,sourceIds,progressDrops);
+  const offered=jobId ? JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=? AND chat_id=?').get(jobId,chatId) as {payload_json:string}|undefined)?.payload_json ?? '{}').progressSent?.cells : undefined;
+  const progressKey=(cell:{persona:string;character:string;itemId:string;side:string})=>JSON.stringify([cell.persona,cell.character,cell.itemId,cell.side]);
+  const suppliedProgress=new Set<string>((offered ?? JSON.parse(prepared.userPrompt).pairProgress).map(progressKey));
+  const pairProgress = validateProgressPatches(db,chatId,draft,patches,sourceIds,progressDrops).filter(patch=>{
+    if(suppliedProgress.has(progressKey(patch)))return true;
+    progressDrops.push({itemId:patch.itemId,side:patch.side,reason:'cell_not_supplied'});return false;
+  });
   const progressDiagnostics = {progressReturned:patches.length,progressApplied:0,progressDrops};
   if (jobId) db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.progressReturned',?,'$.progressApplied',0,'$.progressDrops',json(?)) WHERE id=?")
     .run(patches.length,JSON.stringify(progressDrops),jobId);
@@ -163,6 +216,13 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   if(decisions.length!==expected.size||new Set(decisions.map(d=>d.itemRef)).size!==expected.size||decisions.some(d=>!expected.has(d.itemRef)))throw new ModelContentValidationError("State decisions must cover each observation exactly once");
   const observedLedger=JSON.parse(prepared.userPrompt).priorLedger as Array<{id:string}>;
   if(decisions.some(d=>d.targetIds.some(id=>!observedLedger.some(t=>t.id===id))))throw new ModelContentValidationError("State decision targets a record not supplied to the model");
+  const suppliedIds=new Set(observedLedger.map(row=>row.id));
+  // Completion performs no model calls. Reuse the existing review queue for
+  // interpretations that would create the same property without seeing its prior rows.
+  const stateReviews=narrow.items.filter(entry=>{
+    const decision=decisions.find(d=>d.itemRef===entry.itemRef)!;
+    return ['create','coexist'].includes(decision.action)&&hasUnsuppliedStateProperty(entry,suppliedIds);
+  }).map(entry=>({entry,decision:decisions.find(d=>d.itemRef===entry.itemRef)!}));
   const local=new Set(narrow.local.map(o=>`observation:${o.key}`));
   const stateObservationDrops=decisions.filter(d=>local.has(d.itemRef)&&(!["create","coexist","ignore"].includes(d.action)||d.targetIds.length))
     .map(d=>({itemRef:d.itemRef,reason:"State decision requires a target outside the observation's candidates"}));
@@ -171,7 +231,7 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   const ignored=new Set(decisions.filter(d=>local.has(d.itemRef)&&d.action==="ignore").map(d=>d.itemRef));
   // A candidate mismatch must neither block independent state nor create a conflicting new record.
   merged.stateObservations=merged.stateObservations.filter(o=>!ignored.has(`observation:${o.key}`)&&!held.has(`observation:${o.key}`));
-  return {...normalized,draft:merged,progressDiagnostics,seedResolutionDrops:validated.dropped,stateObservationDrops,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
+  return {...normalized,draft:merged,stateReviews,progressDiagnostics,seedResolutionDrops:validated.dropped,stateObservationDrops,reconciliation:{candidateSetHash:narrow.candidateSetHash,result:{decisions:decisions.filter(d=>!local.has(d.itemRef))}} as ReconciliationSubmission};
 }
 
 export type StateObservationDrop = { itemRef: string; reason: string };

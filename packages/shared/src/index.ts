@@ -2041,15 +2041,22 @@ export interface RecallCoverageItem {
   targetDetailIds?: string[];
 }
 
-export const estimateTokens = (text: string): number => {
+/** Integer units make token costs additive without accumulating rounding error. */
+export const estimateTokenUnits = (text: string): number => {
   let ascii = 0;
   let wide = 0;
-  for (const char of text) {
-    if (char.charCodeAt(0) <= 0x7f) ascii += 1;
-    else wide += 1;
+  for (let index=0;index<text.length;index++) {
+    const code=text.charCodeAt(index);
+    if (code <= 0x7f) ascii += 1;
+    else {
+      wide += 1;
+      // Count a supplementary code point once, as the previous for-of estimator did.
+      if(code>=0xd800&&code<=0xdbff&&text.charCodeAt(index+1)>=0xdc00&&text.charCodeAt(index+1)<=0xdfff)index++;
+    }
   }
-  return Math.max(1, Math.ceil(ascii / 3.5 + wide / 1.2));
+  return ascii * 12 + wide * 35;
 };
+export const estimateTokens = (text: string): number => Math.max(1, Math.ceil(estimateTokenUnits(text) / 42));
 
 export function selectTailStart(
   messageContents: string[],

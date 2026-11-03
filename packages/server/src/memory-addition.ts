@@ -17,7 +17,7 @@ import { inspectDraftEvidence } from './evidence-review.js';
 import { applyExtractionAuditPatch } from './extraction-audit.js';
 import { finishStateExtraction, recordStateObservationDrops } from './state-extraction.js';
 import { recordSeedResolutionDrops } from './story-seeds.js';
-import { additiveReconciliationResult } from './reconciliation.js';
+import { additiveReconciliationResult, recordReconciliationReview, UNSUPPLIED_STATE_REVIEW_REASON } from './reconciliation.js';
 import { scopeExtractionMemoryKeys } from './extraction-memory-keys.js';
 import { ingestExtraction, hasRelationshipEvent, validateDialogueEvidence, validateExtractionSources } from './ingest.js';
 import { sameSocialRelationScope } from './social-relations.js';
@@ -39,6 +39,7 @@ interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
   continuationDraft?: ExtractionDraftResult; auxiliaryBudget?: { maxInputTokens: number };
   smallReviewDraft?: ExtractionDraftResult;
   requestOutcome?: ExtractionDraftResult['requestOutcome'];
+  stateReviews?: ReturnType<typeof finishStateExtraction>['stateReviews'];
 }
 
 export function additionLedgerFingerprint(db: RcmDatabase, chatId: string): string {
@@ -206,7 +207,7 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     if (reviewed.pendingRefs.length) throw contentFailure('기억 근거 검수가 끝나지 않았어요');
     draft = reviewed.result;
   }
-  const completed = payload.mode === 'gap_recovery' ? {draft, reconciliation:undefined, progressDiagnostics:{},recognitionReviewDraft:undefined,seedResolutionDrops:[],stateObservationDrops:[]}
+  const completed = payload.mode === 'gap_recovery' ? {draft, reconciliation:undefined, progressDiagnostics:{},recognitionReviewDraft:undefined,seedResolutionDrops:[],stateObservationDrops:[],stateReviews:[]}
     : finishStateExtraction(db, job.chat_id, payload.sourceMessageIds, draft, reconciliation,
       payload.auxiliaryBudget?.maxInputTokens ?? 80_000, { userRequest: payload.userRequest, existingMemories: payload.existingMemories }, jobId);
   draft = completed.draft;
@@ -218,7 +219,8 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     sourcePassages: draft.sourcePassages?.filter((_, index) => !issues.some(issue => issue.path.startsWith(`sourcePassages[${index}]`))),
     memories: draft.memories.map((memory, mi) => ({...memory, keyDialogues: memory.keyDialogues?.filter((_, di) => !issues.some(issue => issue.path.startsWith(`memories[${mi}].keyDialogues[${di}]`)))})),
   };
-  const final = canonicalizeExtraction(db, job.chat_id, additiveReconciliationResult(draft, completed.reconciliation), payload.sourceMessageIds);
+  const heldState=new Set(completed.stateReviews.map(review=>review.entry.itemRef));
+  const final = canonicalizeExtraction(db, job.chat_id, additiveReconciliationResult({...draft,stateObservations:draft.stateObservations.filter(o=>!heldState.has(`observation:${o.key}`))}, completed.reconciliation), payload.sourceMessageIds);
   // Exact property identities only. Existing current state is never rewritten
   // by a late historical omission; its new memory detail remains available.
   final.assertions = final.assertions.filter(item => !(db.prepare("SELECT social_relation_json FROM assertions WHERE chat_id=? AND subject=? COLLATE NOCASE AND valid_to_revision IS NULL AND predicate=?")
@@ -248,7 +250,8 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   if (errors.length) throw contentFailure(errors.join('; '));
   db.transaction(()=>{
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
-      .run(JSON.stringify({ ...payload, candidateStatus: 'ready', candidate, smallReviewDraft, pipelineStage: 'complete' }), Date.now(), jobId);
+      .run(JSON.stringify({ ...payload, stateReviews:completed.stateReviews, stateInput:JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}).payload_json).stateInput,
+        candidateStatus: 'ready', candidate, smallReviewDraft, pipelineStage: 'complete' }), Date.now(), jobId);
     recordSeedResolutionDrops(db,jobId,completed.seedResolutionDrops);
     recordStateObservationDrops(db,jobId,completed.stateObservationDrops);
     if (payload.mode === 'gap_recovery') applyMemoryAddition(db,job.chat_id,jobId);
@@ -284,6 +287,7 @@ export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string)
     const tables = ['memories','memory_details','memory_dialogues','assertions','beliefs','promise_events','relationship_events'] as const;
     const before = tables.map(table => (db.prepare(`SELECT COALESCE(MAX(rowid),0) last FROM ${table}`).get() as {last:number}).last);
     ingestExtraction(db, chatId, candidate, id, undefined, { sourceMessageIds: payload.sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] }, 'additions');
+    for(const review of payload.stateReviews ?? []) recordReconciliationReview(db,chatId,id,payload.sourceMessageIds,review.entry,review.decision,UNSUPPLIED_STATE_REVIEW_REASON);
     if (payload.mode === 'gap_recovery') {
       storeSourcePassages(db,chatId,candidate.sourcePassages,id);
       const memories = db.prepare('SELECT id,title FROM memories WHERE chat_id=? AND source_batch_id=? ORDER BY rowid').all(chatId,id) as Array<{id:string;title:string}>;

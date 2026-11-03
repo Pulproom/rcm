@@ -5,7 +5,7 @@ import { AUXILIARY_REPAIR_TOO_LARGE_MESSAGE } from "./auxiliary-budget.js";
 export const SETTINGS_FAILURE_GUIDANCE: Record<string, string> = {
   AUXILIARY_INPUT_TOO_LARGE: "입력이 너무 길어요. ‘한 번에 정리할 턴’을 줄이거나 ‘호출당 최대 입력 토큰’을 늘려 주세요. 이미 실패한 작업의 묶음 크기를 바꾸려면 ‘잘게 나눠서 다시’를 눌러 주세요.",
   AUXILIARY_REPAIR_TOO_LARGE: AUXILIARY_REPAIR_TOO_LARGE_MESSAGE,
-  AUXILIARY_STATE_INPUT_TOO_LARGE: "기존 장부 근거를 줄여도 상태 입력이 상한을 넘어요. 더 큰 문맥을 지원하는 모델과 입력 상한이 필요해요. 부분 상태는 저장하지 않았어요.",
+  AUXILIARY_STATE_INPUT_TOO_LARGE: "상태 입력이 상한을 넘었어요. 다시 시도해 주세요.",
   ATOMIC_TURN_TOO_LARGE: "한 턴의 입력이 너무 길어요. ‘호출당 최대 입력 토큰’을 늘리거나 더 큰 문맥을 지원하는 모델 ID를 선택해 주세요.",
   MODEL_OUTPUT_TRUNCATED: MODEL_OUTPUT_TRUNCATED_MESSAGE,
   TIMEOUT: "응답 시간이 초과됐어요. 설정 → 대기 시간의 ‘기억 추출·정리 · 초’를 늘려 주세요.",
@@ -49,8 +49,14 @@ export function settingsFailureMessage(error: unknown, purpose: "auxiliary" | "t
   const code = settingsFailureCode(error);
   if (code === 'AUXILIARY_STATE_INPUT_TOO_LARGE') {
     const text = typeof error === 'string' ? error : String((error as {message?:string})?.message ?? '');
-    const sizes = /ledgerRows=(\d+) ledgerTokens=(\d+) inputTokens=(\d+) maxInputTokens=(\d+)/.exec(text);
-    return SETTINGS_FAILURE_GUIDANCE[code]! + (sizes ? ` 관련 장부 ${Number(sizes[1]).toLocaleString('ko-KR')}개·약 ${Number(sizes[2]).toLocaleString('ko-KR')}토큰, 전체 약 ${Number(sizes[3]).toLocaleString('ko-KR')} / 상한 ${Number(sizes[4]).toLocaleString('ko-KR')}토큰.` : '');
+    const largest=/largestComponent=(\w+)/.exec(text)?.[1];
+    const labels:Record<string,string>={system:'기본 지시문',sources:'현재 원문',eventDraft:'사건 초안',userNote:'추가 요청',serialization:'입력 형식',priorLedger:'상태 장부',priorSeeds:'열린 씨앗',recognition:'인물 인지',relationships:'관계 요약',pairProgress:'두 사람의 진도',existingMemories:'추가 대상 기억'};
+    const sizes=/inputTokens=(\d+) maxInputTokens=(\d+)/.exec(text);
+    const required=/requiredTokens=(\d+)/.exec(text);
+    const guidance=required&&sizes&&Number(required[1])>Number(sizes[2])
+      ? "현재 묶음이 길어 상태 입력 상한을 넘었어요. ‘잘게 나눠서 다시’를 눌러 주세요." : SETTINGS_FAILURE_GUIDANCE[code]!;
+    return guidance + (largest&&labels[largest]?` 가장 큰 항목: ${labels[largest]}.`:'')
+      + (sizes?` 약 ${Number(sizes[1]).toLocaleString('ko-KR')} / 상한 ${Number(sizes[2]).toLocaleString('ko-KR')}토큰.`:'');
   }
   if (purpose === "translation") {
     if (code === "MODEL_OUTPUT_TRUNCATED") return "번역 응답이 잘렸어요. 참고 번역의 ‘호출당 최대 출력’과 Risu 번역 모델의 최대 출력 토큰을 늘려 주세요.";

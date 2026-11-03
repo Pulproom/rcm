@@ -22,7 +22,8 @@ import { buildEntityIdentityResolver, type ResolvedEntityIdentity } from "./enti
 
 type ObservationKind = StateObservation["kind"];
 interface Candidate { id: string; kind: ObservationKind; value: Record<string, unknown>; immutable?: boolean }
-interface CandidateEntry { itemRef: string; observation: StateObservation; candidates: Candidate[] }
+export interface CandidateEntry { itemRef: string; observation: StateObservation; candidates: Candidate[] }
+export const UNSUPPLIED_STATE_REVIEW_REASON = 'Same-property prior candidates were not supplied to the state model; review before creating concurrent state';
 
 export const normalizePredicate = normalizeLedgerPredicate;
 export const normalizeText = normalizeLedgerText;
@@ -31,6 +32,16 @@ const parseEvidence = (value: unknown): unknown[] => {
   try { return Array.isArray(value) ? value : JSON.parse(String(value ?? "[]")); }
   catch { return []; }
 };
+
+/** candidatesFor already checks resolved identities and social-relation scope.
+ * Beliefs have no separate proposition key: predicate is their typed property key.
+ * Different-key semantic equivalence remains the model's responsibility. */
+export function hasUnsuppliedStateProperty(entry: CandidateEntry, suppliedIds: ReadonlySet<string>): boolean {
+  const observation = entry.observation;
+  const key = normalizePredicate(observation.kind === 'promise_event' ? observation.promiseKeyHint : observation.predicateHint);
+  return entry.candidates.some(candidate => !suppliedIds.has(candidate.id)
+    && normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key ?? '')) === key);
+}
 
 function requiresProtectedStateReview(entry: CandidateEntry, decision: ReconciliationResult['decisions'][number]): boolean {
   const predicate = normalizePredicate(entry.observation.kind === 'promise_event' ? entry.observation.promiseKeyHint : entry.observation.predicateHint);
@@ -174,10 +185,11 @@ function addObservation(result: ExtractionResult, observation: StateObservation,
   }
 }
 
-function recordReview(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], entry: CandidateEntry, decision: unknown, error: string): void {
+export function recordReconciliationReview(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], entry: CandidateEntry, decision: unknown, error: string): void {
   const revision = (db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number }).revision;
   db.prepare(`INSERT INTO reconciliation_items(id,chat_id,job_id,item_ref,item_kind,incoming_json,candidates_json,model_decision_json,model_error,source_message_ids_json,status,created_revision,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)`).run(randomUUID(), chatId, jobId, entry.itemRef, entry.observation.kind, JSON.stringify({ item: entry.observation }), JSON.stringify(entry.candidates), decision ? JSON.stringify(decision) : null, error, JSON.stringify(sourceIds), revision, Date.now());
+  if(error===UNSUPPLIED_STATE_REVIEW_REASON) db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateInput.reviewCount',COALESCE(json_extract(payload_json,'$.stateInput.reviewCount'),0)+1) WHERE id=? AND json_type(payload_json,'$.stateInput')='object'").run(jobId);
 }
 
 /** Convert new state without writing reconciliation decisions or closing rows. */
@@ -202,7 +214,7 @@ function recordAutomatic(db: RcmDatabase, chatId: string, jobId: string, sourceI
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), chatId, jobId, entry.itemRef, entry.observation.kind, JSON.stringify({ item: entry.observation }), JSON.stringify(entry.candidates), JSON.stringify(decision), JSON.stringify(sourceIds), status, JSON.stringify({ automatic: true }), revision, timestamp, timestamp);
 }
 
-export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], draft: ExtractionDraftResult, submission?: ReconciliationSubmission, validationBudget?: number): { result: ExtractionResult; pending: number; autoResolved: number } {
+export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], draft: ExtractionDraftResult, submission?: ReconciliationSubmission, validationBudget?: number, reviewItemRefs: ReadonlySet<string> = new Set()): { result: ExtractionResult; pending: number; autoResolved: number } {
   const row = db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(jobId) as { payload_json: string } | undefined;
   let maxInputTokens = 80_000;
   try { const payload = JSON.parse(row?.payload_json ?? "{}"); maxInputTokens = Number(payload.auxiliaryBudget?.maxInputTokens ?? payload.serverLlmSnapshot?.maxInputTokens ?? maxInputTokens); } catch { /* use stable default */ }
@@ -226,7 +238,7 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
   for (const observation of prepared.local) addObservation(result, observation, "create", [], observation.kind === "promise_event" ? observation.promiseKeyHint : observation.predicateHint);
   let pending = 0;
   for (const entry of prepared.deferred) {
-    recordReview(db, chatId, jobId, sourceIds, entry, undefined, `State candidate item and its required prior state exceed the configured ${maxInputTokens}-token input budget`);
+    recordReconciliationReview(db, chatId, jobId, sourceIds, entry, undefined, `State candidate item and its required prior state exceed the configured ${maxInputTokens}-token input budget`);
     pending += 1;
   }
   if (!prepared.required) return { result, pending, autoResolved: prepared.local.length };
@@ -240,8 +252,12 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
     if (needsTarget && targets.length === 0) throw new ModelContentValidationError(`${decision.action} requires a target for ${entry.itemRef}`);
     if (["create", "coexist", "ignore"].includes(decision.action) && targets.length > 0) throw new ModelContentValidationError(`${decision.action} cannot select a target for ${entry.itemRef}`);
     if (decision.compatibleWithIds?.some(id => !entry.candidates.some(candidate => candidate.id === id))) throw new ModelContentValidationError("Coexistence references an unavailable candidate");
+    if(reviewItemRefs.has(entry.itemRef)) {
+      recordReconciliationReview(db,chatId,jobId,sourceIds,entry,decision,UNSUPPLIED_STATE_REVIEW_REASON);
+      pending++;continue;
+    }
     if (requiresProtectedStateReview(entry, decision)) {
-      recordReview(db, chatId, jobId, sourceIds, entry, decision, "User-managed canonical state cannot be changed automatically");
+      recordReconciliationReview(db, chatId, jobId, sourceIds, entry, decision, "User-managed canonical state cannot be changed automatically");
       pending += 1;
       continue;
     }
