@@ -69,7 +69,7 @@ export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, share
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory, isRecognitionMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
-export { auxiliaryInputBudgetMessage, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
+export { auxiliaryInputBudgetMessage, auxiliaryRepairTooLargeError, AUXILIARY_REPAIR_TOO_LARGE_MESSAGE, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
 export { buildSourceUnits, findAtomicDisplaySpans, resolveSourceQuote, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";

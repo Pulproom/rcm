@@ -90,7 +90,7 @@ import { BackupValidationError, exportCompleteArchive, exportChatArchive, restor
 import { deleteChats, listAdminChats, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
 import { recanonicalizeSourceLedger } from "./lifecycle.js";
 import { EmbeddingRequestError, type EmbeddingService } from "./embedding.js";
-import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, extractionUnits, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
+import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failedExtractionSources, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot, syncChatTitle } from "./lifecycle.js";
@@ -1382,8 +1382,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const maxInputTokens = jobPayload.auxiliaryBudget?.maxInputTokens ?? jobPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000;
     const prepared = usesStateExtraction(job.type, jobPayload)
       ? prepareStateExtraction(db, job.chat_id, sourceMessageIds, preparedResult, maxInputTokens, job.type === 'memory_addition'
-        ? { userRequest: (jobPayload as any).userRequest, existingMemories: (jobPayload as any).existingMemories } : undefined)
+        ? { userRequest: (jobPayload as any).userRequest, existingMemories: (jobPayload as any).existingMemories } : undefined, context.req.param("id"))
       : prepareReconciliation(db, job.chat_id, preparedResult, maxInputTokens);
+    if ('stateInput' in prepared) (jobPayload as any).stateInput = prepared.stateInput;
     (jobPayload as any).auxiliaryPromptParts = prepared.parts?.map((part) => ({ purpose: "reconciliation", systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) ?? [];
     db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND lease_owner=? AND status='leased'").run(JSON.stringify(jobPayload), Date.now(), context.req.param("id"), body.workerId);
     if ("progressSent" in prepared) recordProgressSent(db, context.req.param("id"), prepared.progressSent);
@@ -2244,9 +2245,16 @@ export function createApp(dependencies: Dependencies): Hono {
       FROM memories m WHERE m.chat_id=? ORDER BY CASE WHEN source_ordinal IS NULL THEN 0 ELSE 1 END,CASE WHEN source_ordinal IS NULL THEN m.created_at END DESC,source_ordinal DESC,m.created_revision DESC
     `).all(chatId) as Array<Record<string, unknown> & { id: string }>;
     const dialogueQuery = db.prepare("SELECT id,speaker,text,message_id AS messageId,evidence_json AS evidence,kind FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal");
-    const detailQuery = db.prepare(`SELECT id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,locations_json AS locations,
+    const detailRows = db.prepare(`SELECT memory_id,id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,locations_json AS locations,
       user_edited AS userEdited,user_hidden AS hidden,epistemic,salience,retention_class AS retention,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal
-      FROM memory_details WHERE memory_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`);
+      FROM memory_details WHERE chat_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at,rowid`).all(chatId) as Array<Record<string, any>>;
+    // The old per-memory table scan resolved equal sort keys in rowid order.
+    const detailsByMemory = new Map<string, Array<Record<string, any>>>();
+    for (const { memory_id, ...detail } of detailRows) {
+      const details = detailsByMemory.get(memory_id) ?? [];
+      details.push(detail);
+      detailsByMemory.set(memory_id, details);
+    }
     const alwaysInject=alwaysInjectEstimate(db,chatId);
     const alwaysTokens=new Map(alwaysInject.items.map(item=>[item.memoryId,item.estimatedTokens]));
     return { alwaysInject, items: items.map((item) => {
@@ -2266,7 +2274,7 @@ export function createApp(dependencies: Dependencies): Hono {
         sourceMessageIds: JSON.parse(section.sourceMessageIds || "[]"),
         keyDialogues: JSON.parse(section.keyDialogues || "[]"),
       })) : [];
-      const details = (detailQuery.all(item.id) as Array<Record<string, any>>).map((detail) => {
+      const details = (detailsByMemory.get(item.id) ?? []).map((detail) => {
         const access = memoryDetailAccess(db, chatId, detail.id);
         return { ...detail, userEdited:detail.userEdited===1,hidden:detail.hidden===1, access, participants: JSON.parse(detail.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
           locations: JSON.parse(detail.locations || "[]"), evidence: JSON.parse(detail.evidence || "[]") };
@@ -3234,10 +3242,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const jobMetadata = (job: any): Record<string, unknown> => {
       let payload: Record<string, any> = {};
       try { payload = JSON.parse(job.payload_json || "{}"); } catch { return {}; }
-      const failureRows = job.status==='failed' && job.type==='extract' ? db.prepare(`SELECT message_id,role,ordinal,content,content_hash,completed_turn_seq
-        FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal,message_id`)
-        .all(chatId,JSON.stringify(payload.sourceMessageIds ?? [])) as Array<{message_id:string;role:string;ordinal:number;content:string;content_hash:string;completed_turn_seq:number|null}> : [];
-      const turns=extractionUnits(failureRows, (db.prepare('SELECT include_user_messages enabled FROM chats WHERE id=?').get(chatId) as {enabled:number}|undefined)?.enabled!==0).length;
+      const { messages: failureRows, turns } = job.status === 'failed' && job.type === 'extract'
+        ? failedExtractionSources(db, chatId, payload) : { messages: [], turns: 0 };
       const failureMetadata=failureRows.length ? {failedRange:{startOrdinal:failureRows[0]!.ordinal,endOrdinal:failureRows.at(-1)!.ordinal,startTurn:failureRows.find(row=>row.completed_turn_seq!==null)?.completed_turn_seq,endTurn:failureRows.filter(row=>row.completed_turn_seq!==null).at(-1)?.completed_turn_seq,turnCount:turns,
         reason:String(job.last_error ?? '').slice(0,400),canResplit:turns>1}} : {};
       const audits = db.prepare(`SELECT draft_json AS draft,source_message_ids_json AS source_ids

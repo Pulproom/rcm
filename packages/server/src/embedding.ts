@@ -4,6 +4,7 @@ import { StateSearchIndex } from "./state-search-index.js";
 import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { loadItemAccess, resolveItemAccess } from "./item-access.js";
 import { createHash } from "node:crypto";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { buildSourceUnits, splitAuxiliarySource, estimateTokens, queryViewAuthority, type SearchQuerySignal } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
@@ -673,6 +674,9 @@ export class EmbeddingService {
       let indexed = 0;
       const chats = chatId ? [{ id: chatId }] : this.db.prepare("SELECT id FROM chats WHERE NOT EXISTS (SELECT 1 FROM chat_work_state held WHERE held.chat_id=chats.id AND held.enabled=0)").all() as Array<{ id: string }>;
       for (const chat of chats) {
+        // Fresh indexes can complete entirely in microtasks. Let health and
+        // other sockets run before the next chat without changing work order.
+        await yieldToEventLoop();
         if (isChatWorkHeld(this.db, chat.id)) continue;
         const scope = beginChatWork(this.db, chat.id);
         this.#indexSignal = scope.controller.signal;

@@ -99,7 +99,7 @@ export function listSourceRanges(db: RcmDatabase, chatId: string, matchingMessag
   const memories = db.prepare(`SELECT m.id,m.source_batch_id,m.evidence_json FROM memories m WHERE m.chat_id=? AND m.active=1
     ${matching ? `AND (m.source_batch_id IN (SELECT value FROM json_each(?)) OR EXISTS (
       SELECT 1 FROM json_each(m.evidence_json) e WHERE json_extract(e.value,'$.messageId') IN (SELECT value FROM json_each(?))) OR EXISTS (
-      SELECT 1 FROM visible_memory_details d,json_each(d.evidence_json) e WHERE d.memory_id=m.id AND d.active=1
+      SELECT 1 FROM visible_memory_details d,json_each(d.evidence_json) e WHERE d.chat_id=m.chat_id AND d.memory_id=m.id AND d.active=1
         AND json_extract(e.value,'$.messageId') IN (SELECT value FROM json_each(?))) OR EXISTS (
       SELECT 1 FROM memory_dialogues d,json_each(d.evidence_json) e WHERE d.memory_id=m.id
         AND json_extract(e.value,'$.messageId') IN (SELECT value FROM json_each(?))))` : ''}`)

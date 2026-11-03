@@ -1263,7 +1263,7 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
     pipelineStageUpdatedAt: now(),
   };
   const settingCode = settingsFailureCode(failure);
-  const safeError = (/^AUXILIARY_INPUT_(?:TOO_LARGE|BUDGET_EXCEEDED):/.test(error) ? error
+  const safeError = (/^AUXILIARY_(?:INPUT_(?:TOO_LARGE|BUDGET_EXCEEDED)|STATE_INPUT_TOO_LARGE):/.test(error) ? error
     : settingCode ? `${settingCode}: ${settingsFailureMessage(failure)}` : error).slice(0, 4000);
   db.prepare("UPDATE jobs SET status=?,payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=?,updated_at=? WHERE id=?").run(
     status,
@@ -1288,32 +1288,39 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
   return { accepted: true, status, attempt: row.attempts, maxAttempts, retryable: status === "queued" };
 }
 
+/** The failed job owns its source policy; later chat settings do not redefine its turns. */
+export function failedExtractionSources(db: RcmDatabase, chatId: string, payload: { sourceMessageIds?: string[]; includeUserMessages?: boolean }) {
+  const includeUserMessages = payload.includeUserMessages ?? ((db.prepare('SELECT include_user_messages enabled FROM chats WHERE id=?').get(chatId) as { enabled: number } | undefined)?.enabled !== 0);
+  const messages = db.prepare(`SELECT message_id,role,ordinal,completed_turn_seq,lifecycle,
+    CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,
+    CASE WHEN canonical_hash<>'' THEN canonical_hash ELSE content_hash END AS content_hash,${originalTurnKeySql} AS turn_key
+    FROM messages m WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal,message_id`)
+    .all(chatId, JSON.stringify(payload.sourceMessageIds ?? [])) as Array<PendingMessage & { completed_turn_seq: number | null; lifecycle: string }>;
+  return { messages, includeUserMessages, turns: extractionUnits(messages, includeUserMessages).length };
+}
+
 export function resplitFailedExtractionJob(db: RcmDatabase, chatId: string, jobId: string): { queued: number; turns: number } {
   return db.transaction(() => {
     const job = db.prepare("SELECT type,status,payload_json FROM jobs WHERE id=? AND chat_id=?").get(jobId, chatId) as
       | { type: string; status: string; payload_json: string }
       | undefined;
     if (!job || job.type !== "extract" || job.status !== "failed") throw new Error("Failed extraction job not found");
-    const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; batchId?: string; backfillRunId?: string; postExtractionReview?: boolean };
+    const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; includeUserMessages?: boolean; batchId?: string; backfillRunId?: string; postExtractionReview?: boolean };
     const ids = payload.sourceMessageIds ?? [];
     if (ids.length === 0) throw new Error("Failed extraction job has no source messages");
-    const placeholders = ids.map(() => "?").join(",");
-    const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as
-      | { profile: RpProfile; include_user_messages: number; extraction_group_turns: number }
+    const chat = db.prepare("SELECT profile,extraction_group_turns FROM chats WHERE id=?").get(chatId) as
+      | { profile: RpProfile; extraction_group_turns: number }
       | undefined;
     if (!chat) throw new Error("Chat not found");
-    const messages = db.prepare(`SELECT message_id,role,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,ordinal,
-      CASE WHEN canonical_hash<>'' THEN canonical_hash ELSE content_hash END AS content_hash,${originalTurnKeySql} AS turn_key FROM messages m WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${placeholders}) ORDER BY ordinal`)
-      .all(chatId, ...ids) as PendingMessage[];
-    const turns = extractionUnits(messages, chat.include_user_messages === 1).length;
+    const { messages, includeUserMessages, turns } = failedExtractionSources(db, chatId, payload);
     if (turns <= 1) throw Object.assign(new Error("하나의 완료 턴 자체가 모델 context보다 큽니다. 더 큰 context 모델을 선택하세요."), { code: "ATOMIC_TURN_TOO_LARGE" });
     db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE id=?").run(now(), jobId);
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE id=?").run(now(), payload.batchId);
-    const reset = db.prepare("UPDATE messages SET extraction_state='pending',updated_at=? WHERE chat_id=? AND message_id=? AND host_visibility IN ('active','all_before') AND lifecycle='committed'");
+    const reset = db.prepare("UPDATE messages SET extraction_state='pending',updated_at=? WHERE chat_id=? AND message_id=? AND host_visibility IN ('active','all_before') AND lifecycle IN ('committed','client_pruned')");
     for (const id of ids) reset.run(now(), chatId, id);
     const previousJobIds = new Set((db.prepare("SELECT id FROM jobs WHERE chat_id=?").all(chatId) as Array<{id:string}>).map(row=>row.id));
-    const queued = enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages === 1,
-      Math.min(chat.extraction_group_turns, Math.ceil(turns / 2)), payload.backfillRunId ? "ledger" : "current", payload.postExtractionReview, ids, payload.backfillRunId);
+    const queued = enqueueExtractionJobs(db, chatId, chat.profile, true, includeUserMessages,
+      Math.min(chat.extraction_group_turns, Math.ceil(turns / 2)), payload.backfillRunId || messages.some(message => message.lifecycle === "client_pruned") ? "ledger" : "current", payload.postExtractionReview, ids, payload.backfillRunId);
     if (!queued) throw new Error("Extraction sources changed before replanning");
     const resplitJobIds = (db.prepare("SELECT id FROM jobs WHERE chat_id=? AND type='extract'").all(chatId) as Array<{id:string}>).filter(row=>!previousJobIds.has(row.id)).map(row=>row.id);
     db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.plannedParts',?,'$.resplitJobIds',json(?)) WHERE id=?").run(queued, JSON.stringify(resplitJobIds), jobId);
@@ -1391,6 +1398,8 @@ export function projectJobListPayload(payload: Record<string, unknown>, kind?: s
     "sourceRecovery", "sourceRecoveryMetadata", "pipelineStage", "pipelineManualRetry", "pipelineRetryAttempt", "llmCallStats", "llmUsage", "llmCallDiagnostics",
     "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops", "stateObservationDrops", "progressSent", "progressReturned", "progressApplied", "progressDrops", "cacheResetDiagnostic", "auditAdditionDrops", "smallReviewCount",
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+  if (payload.providerFailure) projected.providerFailure = providerFailureMetadata(payload.providerFailure);
+  if (payload.stateInput) projected.stateInput = payload.stateInput;
   if (JOB_TRIGGER_VALUES.includes(payload.trigger as JobTrigger)) projected.trigger = payload.trigger;
   if (kind === 'story_consolidation' && ['segment','arc','overview'].includes(payload.level as string)
     && Number.isSafeInteger(payload.startOrdinal) && Number.isSafeInteger(payload.endOrdinal)

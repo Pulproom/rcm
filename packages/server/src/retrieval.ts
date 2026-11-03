@@ -1032,8 +1032,8 @@ function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuery
       });
       const details = db.prepare(`SELECT detail_id AS id,memory_id,text,participants,locations,bm25(memory_detail_fts) AS rank FROM memory_detail_fts
         WHERE memory_detail_fts MATCH ? AND chat_id=?
-          AND detail_id IN (SELECT d.id FROM visible_memory_details d WHERE NOT ${recognitionDetailSql('d')})
-        ORDER BY rank LIMIT 120`).all(ftsQuery, chatId) as Array<{ id: string; memory_id: string; text: string; participants: string; locations: string }>;
+          AND detail_id IN (SELECT d.id FROM visible_memory_details d WHERE d.chat_id=? AND NOT ${recognitionDetailSql('d')})
+        ORDER BY rank LIMIT 120`).all(ftsQuery, chatId, chatId) as Array<{ id: string; memory_id: string; text: string; participants: string; locations: string }>;
       details.forEach((row) => {
         const { score, matched } = coverage(`${row.text} ${row.participants} ${row.locations}`);
         record(row.memory_id, score, "memory_detail", row.id);

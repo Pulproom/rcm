@@ -83,12 +83,20 @@ export function selectAutomaticPortfolio(options: {
     const take = Math.min(stateCost, budgets[lane]); budgets[lane] -= take; stateCost -= take;
   }
   const selectedIds = new Set<string>();
+  // Signatures already own the request's token sets. Keep each candidate's
+  // maximum and cursor so every candidate/selected pair is compared only once,
+  // even when sorting or trying the candidate in another portfolio lane.
+  const overlaps = new Map<string, { compared: number; maximum: number }>();
   const redundancy = (item: MemoryContextItem) => {
     const signature = metadata.get(item.id)?.similarity;
-    return signature ? Math.max(0, ...items.flatMap(selected => {
-      const other = metadata.get(selected.id)?.similarity;
-      return other ? [signatureSimilarity(signature, other)] : [];
-    })) : 0;
+    if (!signature) return 0;
+    const overlap = overlaps.get(item.id) ?? { compared: 0, maximum: 0 };
+    for (; overlap.compared < items.length; overlap.compared += 1) {
+      const other = metadata.get(items[overlap.compared]!.id)?.similarity;
+      if (other) overlap.maximum = Math.max(overlap.maximum, signatureSimilarity(signature, other));
+    }
+    overlaps.set(item.id, overlap);
+    return overlap.maximum;
   };
   const accept = (item: MemoryContextItem, role: RetrievalSelectionRole, reason: AutomaticRoleReason) => {
     items.push(item); selectedIds.add(item.id); roles.set(item.id, role); reasons.set(item.id, reason);

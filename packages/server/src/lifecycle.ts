@@ -142,7 +142,7 @@ function invalidateDerived(
   const ids = memories.map((row) => row.memory_id);
   const placeholders = ids.map(() => "?").join(",");
   storyMemorySupportIds(db,chatId,ids).forEach(id=>invalidatedSupports.add(id));
-  const detailIds = (db.prepare(`SELECT id FROM memory_details WHERE memory_id IN (${placeholders})`).all(...ids) as Array<{ id: string }>).map((row) => row.id);
+  const detailIds = (db.prepare(`SELECT id FROM memory_details WHERE chat_id=? AND memory_id IN (${placeholders}) ORDER BY rowid`).all(chatId,...ids) as Array<{ id: string }>).map((row) => row.id);
   const dialogueIds = (db.prepare(`SELECT id FROM memory_dialogues WHERE memory_id IN (${placeholders})`).all(...ids) as Array<{ id: string }>).map((row) => row.id);
   const promiseIds = (db.prepare(`SELECT id FROM promises WHERE ${UNCORRECTED_SQL} AND source_memory_id IN (${placeholders})`).all(...ids) as Array<{ id: string }>).map((row) => row.id);
   const milestoneIds = (db.prepare(`SELECT id FROM physical_intimacy_milestones WHERE manual_override=0 AND source_memory_id IN (${placeholders})`).all(...ids) as Array<{ id: string }>).map((row) => row.id);

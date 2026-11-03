@@ -286,7 +286,7 @@ export class ServerExtractionWorker {
         const grounded = !audit?.patch?.keepPendingItemRefs.length && !inspectDraftEvidence(this.db, job.chatId, job.sourceMessageIds, draft).some((issue) => issue.blocking);
         const stateExtraction = usesStateExtraction(job.kind ?? "extract", job);
         const prepared = grounded ? (stateExtraction
-          ? prepareStateExtraction(this.db, job.chatId, job.sourceMessageIds, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000)
+          ? prepareStateExtraction(this.db, job.chatId, job.sourceMessageIds, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000, undefined, job.id)
           : prepareReconciliation(this.db, job.chatId, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000)) : { required: false, candidateSetHash: "", systemPrompt: "", userPrompt: "", parts: [] };
         if ("progressSent" in prepared) recordProgressSent(this.db, job.id, prepared.progressSent);
         if (prepared.required) {

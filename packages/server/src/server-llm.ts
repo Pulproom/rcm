@@ -1,4 +1,4 @@
-import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
+import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage, auxiliaryRepairTooLargeError } from "@rcm/shared";
 import { isStructuredOutputTruncated, MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
 import { optionalSourceSelectorsOnly } from "@rcm/shared";
 import { parseExtractionAuditResponse } from "@rcm/shared";
@@ -608,7 +608,10 @@ async function callProvider(
   const apiKey = store.apiKeyFor(config.provider);
   if (!apiKey) throw Object.assign(new Error(settingsFailureMessage({ code: "AUTH_FAILED" })), { code: "AUTH_FAILED" });
   const measurement = measureAuxiliaryPrompt(messages, estimateTokens, config);
-  if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(measurement.maxInputTokens)}`);
+  if (!measurement.fits) {
+    if (purpose === "extraction_repair") throw auxiliaryRepairTooLargeError();
+    throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(measurement.maxInputTokens)}`);
+  }
   const startedAt = Date.now();
   const timingId = randomUUID();
   store.recordTiming({ id: timingId, jobId, purpose, startedAt, outcome: "running" });
@@ -834,6 +837,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
       invalidOutput: first,
       validationError: firstError,
       request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids" },
+      inputBudget: { maxInputTokens: store.config.maxInputTokens, estimate: estimateTokens, relaxed: store.config.relaxAuxiliaryCensorship },
     }), signal, "extraction_repair"));
     store.stageOutput(job.id, repaired);
     return store.cacheExtraction(job, await validateRepair(repaired));

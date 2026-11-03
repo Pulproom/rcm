@@ -202,11 +202,11 @@ function recordAutomatic(db: RcmDatabase, chatId: string, jobId: string, sourceI
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(randomUUID(), chatId, jobId, entry.itemRef, entry.observation.kind, JSON.stringify({ item: entry.observation }), JSON.stringify(entry.candidates), JSON.stringify(decision), JSON.stringify(sourceIds), status, JSON.stringify({ automatic: true }), revision, timestamp, timestamp);
 }
 
-export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], draft: ExtractionDraftResult, submission?: ReconciliationSubmission): { result: ExtractionResult; pending: number; autoResolved: number } {
+export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: string, sourceIds: string[], draft: ExtractionDraftResult, submission?: ReconciliationSubmission, validationBudget?: number): { result: ExtractionResult; pending: number; autoResolved: number } {
   const row = db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(jobId) as { payload_json: string } | undefined;
   let maxInputTokens = 80_000;
   try { const payload = JSON.parse(row?.payload_json ?? "{}"); maxInputTokens = Number(payload.auxiliaryBudget?.maxInputTokens ?? payload.serverLlmSnapshot?.maxInputTokens ?? maxInputTokens); } catch { /* use stable default */ }
-  const prepared = prepareReconciliation(db, chatId, draft, maxInputTokens);
+  const prepared = prepareReconciliation(db, chatId, draft, validationBudget ?? maxInputTokens);
   const result = emptyFinal(draft);
   let parsed: ReconciliationResult | undefined;
   if (prepared.required) {

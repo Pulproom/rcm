@@ -4,9 +4,9 @@ import { invalidateStorySupports } from './story-spine.js';
 
 /** Parents must survive automatic replacement while any of their lines is user-owned. */
 export function memoryHasLineCorrectionSql(alias='memories'):string {
-  return `EXISTS(SELECT 1 FROM memory_details corrected WHERE corrected.memory_id=${alias}.id AND (corrected.user_edited=1 OR corrected.user_hidden=1))
+  return `EXISTS(SELECT 1 FROM memory_details corrected WHERE corrected.chat_id=${alias}.chat_id AND corrected.memory_id=${alias}.id AND (corrected.user_edited=1 OR corrected.user_hidden=1))
     OR EXISTS(SELECT 1 FROM relationship_events corrected WHERE (corrected.source_memory_id=${alias}.id
-      OR corrected.source_detail_id IN (SELECT id FROM memory_details WHERE memory_id=${alias}.id)) AND (corrected.user_edited=1 OR corrected.user_hidden=1))`;
+      OR corrected.source_detail_id IN (SELECT id FROM memory_details WHERE chat_id=${alias}.chat_id AND memory_id=${alias}.id)) AND (corrected.user_edited=1 OR corrected.user_hidden=1))`;
 }
 
 export function refreshDetailFts(db:RcmDatabase, id:string):void {

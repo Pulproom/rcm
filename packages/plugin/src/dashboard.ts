@@ -1179,14 +1179,16 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const blockingTitle = "기억 정리가 멈췄어요";
   const failedJob = data.jobs.find(job => job.status === 'failed' && job.type === 'extract');
   const failedPayload = parseJson<any>(failedJob?.payload_json, {});
-  const failedRange = failedJob?.failedRange;
+  const failedRange = failedPayload.failedRange;
   const refusal = failedPayload.providerFailure?.refusal === true || failedPayload.providerFailure?.code === 'AUXILIARY_PROVIDER_REJECTED'
     || (failedPayload.llmCallDiagnostics ?? []).some((call: any) => call.code === 'AUXILIARY_PROVIDER_REJECTED');
   const splitAvailable = failedRange?.canResplit === true;
+  const repairTooLarge = settingsFailureCode(failedJob?.last_error) === 'AUXILIARY_REPAIR_TOO_LARGE';
+  const preferSplit = refusal || repairTooLarge;
   const blockingActions = [
-    ...(refusal && splitAvailable ? [{ label: '잘게 나눠서 다시', kind: 'primary' as const, action: 'resplit-extraction', data: { jobId: String(failedJob.id) } }] : []),
-    { label: refusal ? '그대로 다시 시도' : '다시 시도', kind: refusal && splitAvailable ? 'quiet' as const : 'primary' as const, action: 'retry-extraction', data: { jobId: String(failedJob?.id ?? '') } },
-    ...(!refusal && splitAvailable ? [{ label: '잘게 나눠서 다시', kind: 'quiet' as const, action: 'resplit-extraction', data: { jobId: String(failedJob.id) } }] : []),
+    ...(preferSplit && splitAvailable ? [{ label: '잘게 나눠서 다시', kind: 'primary' as const, action: 'resplit-extraction', data: { jobId: String(failedJob.id) } }] : []),
+    { label: preferSplit ? '그대로 다시 시도' : '다시 시도', kind: preferSplit && splitAvailable ? 'quiet' as const : 'primary' as const, action: 'retry-extraction', data: { jobId: String(failedJob?.id ?? '') } },
+    ...(!preferSplit && splitAvailable ? [{ label: '잘게 나눠서 다시', kind: 'quiet' as const, action: 'resplit-extraction', data: { jobId: String(failedJob.id) } }] : []),
   ];
   const splitParent = data.jobs.find(job => job.status === 'superseded' && parseJson<any>(job.payload_json, {}).resplitJobIds?.length);
   const splitIds: string[] = parseJson<any>(splitParent?.payload_json, {}).resplitJobIds ?? [];
@@ -1196,7 +1198,8 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
   const splitNotice = splitting ? `<section class="gap-card notice"><div><strong>나눠서 다시 정리하는 중 · ${splitDone}/${splitIds.length}</strong><p>이 구간이 끝나야 다음 기억을 만들 수 있어요.</p>${recoveryProgress(splitDone, splitIds.length)}</div></section>` : '';
   const budgetFailure = data.jobs.find(job => job.status === "failed" && job.type === "extract" && isProviderContextLimitError(job.last_error));
   // Strip only product-owned error markers; keep the cause ahead of the phone card's line clamp.
-  const budgetFailureCopy = budgetFailure ? settingsFailureMessage(budgetFailure.last_error) : undefined;
+  const budgetFailureCopy = repairTooLarge ? settingsFailureMessage(failedRange?.turnCount === 1
+    ? { code: 'ATOMIC_TURN_TOO_LARGE' } : failedJob.last_error) : budgetFailure ? settingsFailureMessage(budgetFailure.last_error) : undefined;
   const blockingCopy = data.jobs.some(job => job.status === "failed" && isProviderAuthenticationError(job.last_error)) ? RISU_AUXILIARY_AUTH_FAILURE_MESSAGE : budgetFailureCopy || `${failedRange ? `${failedRange.startTurn ?? failedRange.startOrdinal}–${failedRange.endTurn ?? failedRange.endOrdinal}턴 · ` : ""}${refusal ? "보조 모델이 요청을 거절했어요" : failedRange?.reason || "기억 정리를 마치지 못했어요"}. 이 구간이 끝나야 다음 기억을 만들 수 있어요.`;
   const backfillPending = shouldOfferBackfill(state, data);
   const hasDerivedData = data.memories.length + data.relationships.length + data.assertions.length + data.promises.length > 0;

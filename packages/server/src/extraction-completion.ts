@@ -108,10 +108,12 @@ export function completeExtractionJob(
   let seedResolutionDrops: SeedResolutionDrop[] = [];
   let stateObservationDrops: StateObservationDrop[] = [];
   const budgetPayload = payload as typeof payload & { auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
-  const reconciliationBudget = Number(budgetPayload.auxiliaryBudget?.maxInputTokens ?? budgetPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000);
+  let reconciliationBudget = Number(budgetPayload.auxiliaryBudget?.maxInputTokens ?? budgetPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000);
   if (usesStateExtraction(job.type, payload) && !submitted.unfinishedSource?.length && !reviewed.pendingRefs.length
     && !inspectDraftEvidence(db, job.chat_id, sourceMessageIds, submitted).some(issue => issue.blocking)) {
     const completed = finishStateExtraction(db, job.chat_id, sourceMessageIds, submitted, reconciliation, reconciliationBudget, undefined, jobId);
+    // The state call already fit its input budget; these remaining passes only validate/store full DB candidates.
+    reconciliationBudget = Number.MAX_SAFE_INTEGER;
     submitted = completed.draft;
     reconciliation = completed.reconciliation;
     recognitionReviewDraft = completed.recognitionReviewDraft;
@@ -277,7 +279,7 @@ export function completeExtractionJob(
       if (!markJobComplete(db, jobId, workerId)) throw new Error("Lease not found while staging episode regeneration");
       return;
     }
-    const reconciled = applyReconciliation(db, job.chat_id, jobId, sourceMessageIds, audited.result, reconciliation);
+    const reconciled = applyReconciliation(db, job.chat_id, jobId, sourceMessageIds, audited.result, reconciliation, reconciliationBudget);
     pendingReconciliations += reconciled.pending;
     const scoped = scopeExtractionMemoryKeys(dedupeKeyDialogues(job.type === "social_backfill" ? socialOnlyResult(reconciled.result) : reconciled.result),
       payload.batchId ?? payload.retryOfJobId ?? jobId);

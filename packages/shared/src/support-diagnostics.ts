@@ -1,8 +1,11 @@
 import { parseStructuredModelJson } from "./structured-json.js";
 import { MODEL_OUTPUT_TRUNCATED_MESSAGE } from "./structured-json.js";
+import { AUXILIARY_REPAIR_TOO_LARGE_MESSAGE } from "./auxiliary-budget.js";
 
 export const SETTINGS_FAILURE_GUIDANCE: Record<string, string> = {
-  AUXILIARY_INPUT_TOO_LARGE: "입력이 너무 길어요. ‘한 번에 정리할 턴’을 줄이거나 ‘호출당 최대 입력 토큰’을 늘려 주세요.",
+  AUXILIARY_INPUT_TOO_LARGE: "입력이 너무 길어요. ‘한 번에 정리할 턴’을 줄이거나 ‘호출당 최대 입력 토큰’을 늘려 주세요. 이미 실패한 작업의 묶음 크기를 바꾸려면 ‘잘게 나눠서 다시’를 눌러 주세요.",
+  AUXILIARY_REPAIR_TOO_LARGE: AUXILIARY_REPAIR_TOO_LARGE_MESSAGE,
+  AUXILIARY_STATE_INPUT_TOO_LARGE: "기존 장부 근거를 줄여도 상태 입력이 상한을 넘어요. 더 큰 문맥을 지원하는 모델과 입력 상한이 필요해요. 부분 상태는 저장하지 않았어요.",
   ATOMIC_TURN_TOO_LARGE: "한 턴의 입력이 너무 길어요. ‘호출당 최대 입력 토큰’을 늘리거나 더 큰 문맥을 지원하는 모델 ID를 선택해 주세요.",
   MODEL_OUTPUT_TRUNCATED: MODEL_OUTPUT_TRUNCATED_MESSAGE,
   TIMEOUT: "응답 시간이 초과됐어요. 설정 → 대기 시간의 ‘기억 추출·정리 · 초’를 늘려 주세요.",
@@ -44,6 +47,11 @@ export function settingsFailureCode(error: unknown): string | undefined {
 
 export function settingsFailureMessage(error: unknown, purpose: "auxiliary" | "translation" = "auxiliary"): string {
   const code = settingsFailureCode(error);
+  if (code === 'AUXILIARY_STATE_INPUT_TOO_LARGE') {
+    const text = typeof error === 'string' ? error : String((error as {message?:string})?.message ?? '');
+    const sizes = /ledgerRows=(\d+) ledgerTokens=(\d+) inputTokens=(\d+) maxInputTokens=(\d+)/.exec(text);
+    return SETTINGS_FAILURE_GUIDANCE[code]! + (sizes ? ` 관련 장부 ${Number(sizes[1]).toLocaleString('ko-KR')}개·약 ${Number(sizes[2]).toLocaleString('ko-KR')}토큰, 전체 약 ${Number(sizes[3]).toLocaleString('ko-KR')} / 상한 ${Number(sizes[4]).toLocaleString('ko-KR')}토큰.` : '');
+  }
   if (purpose === "translation") {
     if (code === "MODEL_OUTPUT_TRUNCATED") return "번역 응답이 잘렸어요. 참고 번역의 ‘호출당 최대 출력’과 Risu 번역 모델의 최대 출력 토큰을 늘려 주세요.";
     if (code === "RATE_LIMITED") return "번역 요청 한도를 넘었어요. 잠시 뒤 재시도하거나 참고 번역의 번역 방식을 바꿔 주세요.";
@@ -133,7 +141,7 @@ export function isPermanentProviderError(error: unknown): boolean {
   const value = error as { status?: unknown; message?: unknown; code?: unknown; finishReason?:unknown; refusal?:unknown } | null;
   const message = typeof error === "string" ? error : typeof value?.message === "string" ? value.message : "";
   // Provider/protocol markers, never natural-language story inference.
-  return isProviderAuthenticationError(error) || isProviderContextLimitError(error) || [400, 403, 404, 413, 422].includes(Number(value?.status)) || value?.code === "AUXILIARY_PROVIDER_REJECTED"
+  return isProviderAuthenticationError(error) || isProviderContextLimitError(error) || ["AUXILIARY_REPAIR_TOO_LARGE", "AUXILIARY_STATE_INPUT_TOO_LARGE"].includes(settingsFailureCode(error) ?? '') || [400, 403, 404, 413, 422].includes(Number(value?.status)) || value?.code === "AUXILIARY_PROVIDER_REJECTED"
     || value?.refusal === true || providerBlockedFinishReason(value?.finishReason)
     || /AUXILIARY_PROVIDER_REJECTED|returned\s+(?:400|401|403|404|413|422)\b|HTTP\s+(?:400|401|403|404|413|422)\b|context (?:length|window)|context_length_exceeded|(?:maximum|max|exceed(?:s|ed)?).{0,24}context|too many (?:input )?tokens|input.{0,20}too (?:large|long)|payload too large/i.test(message);
 }

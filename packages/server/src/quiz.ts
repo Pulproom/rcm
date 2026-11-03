@@ -32,7 +32,7 @@ const RICH_CAP = 3_200;
 export function quizSceneRows(db: RcmDatabase, chatId: string): QuizSceneRow[] {
   const rows = db.prepare(`SELECT m.id,m.memory_key,m.type,m.title,m.content,m.story_time,m.locations_json,m.participants_json,m.landmark,m.capsule_parent_id,m.created_revision,m.created_at,
       (SELECT json_group_array(json_object('id',id,'text',text,'hidden',user_hidden)) FROM
-        (SELECT id,text,user_hidden FROM memory_details WHERE memory_id=m.id AND (user_edited=1 OR user_hidden=1) ORDER BY id)) AS lineCorrections,
+        (SELECT id,text,user_hidden FROM memory_details WHERE chat_id=m.chat_id AND memory_id=m.id AND (user_edited=1 OR user_hidden=1) ORDER BY id)) AS lineCorrections,
       (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal
     FROM memories m WHERE m.chat_id=? AND m.active=1`).all(chatId) as QuizSceneRow[];
   return rows.filter(isScene).sort(compareStoryMemories);

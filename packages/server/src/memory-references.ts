@@ -25,7 +25,7 @@ export class MemoryReferences {
     const details = this.db.prepare("SELECT * FROM memory_details WHERE chat_id=? AND memory_id=? ORDER BY id").all(chatId, id);
     const dialogues = this.db.prepare("SELECT * FROM memory_dialogues WHERE chat_id=? AND memory_id=? ORDER BY id").all(chatId, id);
     const access = this.db.prepare(`SELECT * FROM item_access WHERE chat_id=? AND (item_id=? OR item_id IN
-      (SELECT id FROM memory_details WHERE memory_id=?) OR item_id IN (SELECT id FROM memory_dialogues WHERE memory_id=?)) ORDER BY id`).all(chatId, id, id, id);
+      (SELECT id FROM memory_details WHERE chat_id=? AND memory_id=?) OR item_id IN (SELECT id FROM memory_dialogues WHERE memory_id=?)) ORDER BY id`).all(chatId, id, chatId, id, id);
     return createHash("sha256").update(JSON.stringify([this.revision(chatId), memory, details, dialogues, access])).digest("hex");
   }
   begin(chatId: string, generation: string): void {

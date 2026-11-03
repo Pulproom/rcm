@@ -1,4 +1,6 @@
 import { withAuxiliaryStoryFraming } from "./social-memory-guidance.js";
+import { auxiliaryRepairTooLargeError, measureAuxiliaryPrompt } from "./auxiliary-budget.js";
+import { prepareAuxiliaryText } from "./model-text.js";
 import { ACCESS_BASIS_GUIDANCE } from "./state-classification.js";
 import {
   INITIAL_AFFECTION_LEVELS,
@@ -240,6 +242,7 @@ export function buildAuxiliaryRepairMessages(args: {
   invalidOutput: string;
   validationError: unknown;
   request: AuxiliaryRepairRequest;
+  inputBudget?: { maxInputTokens: number; estimate: (text: string) => number; relaxed?: boolean };
 }): AuxiliaryRepairMessage[] {
   const diagnostic = structuredValidationDiagnostic(args.validationError);
   const diagnosticLabel = args.request.kind === "extraction" && args.request.sourceMode === "message_ids"
@@ -249,9 +252,17 @@ export function buildAuxiliaryRepairMessages(args: {
   const shape = args.validationError instanceof SyntaxError ? structuredJsonShapeDiagnostic(args.invalidOutput) : undefined;
   const structure = shape ? `\nJSON structure of the previous response: ${shape}. Compare it with the required shape and move misplaced keys and brackets; the content itself may already be correct.` : "";
   const original = withAuxiliaryStoryFraming(args.originalMessages.map((message) => ({ role: repairRole(message.role), content: message.content })));
-  return [
+  const messages: AuxiliaryRepairMessage[] = [
     ...original,
     { role: "assistant", content: args.invalidOutput },
     { role: "user", content: `${commonInstruction}\n${taskInstruction(args.request)}\n${diagnosticLabel}: ${diagnostic}${structure}` },
   ];
+  if (args.inputBudget) {
+    const { maxInputTokens, estimate, relaxed } = args.inputBudget;
+    // Preflight the exact provider-ready envelope before either engine builds a
+    // model call. Keep the original messages unchanged when the repair fits.
+    const prepared = withAuxiliaryStoryFraming(messages, relaxed).map(message => ({ ...message, content: prepareAuxiliaryText(message.content) }));
+    if (!measureAuxiliaryPrompt(prepared, estimate, { maxInputTokens, maxOutputTokens: 0 }).fits) throw auxiliaryRepairTooLargeError();
+  }
+  return messages;
 }

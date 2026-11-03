@@ -446,7 +446,7 @@ function cloneLineage(
         prepare("INSERT INTO memory_dialogues(id,chat_id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(dialogueId, child, id, dialogue.speaker, dialogue.text, childMessageId, JSON.stringify(dialogueEvidence), dialogue.kind, dialogue.ordinal, now);
         mapItem("dialogue", dialogueId, dialogue.id);
       }
-      for (const detail of prepare("SELECT * FROM memory_details WHERE memory_id=? AND (active=1 OR ?=1 AND (detail_key='recognition' OR detail_key LIKE 'recognition:%'))").all(row.id,row.user_managed) as any[]) {
+      for (const detail of prepare("SELECT * FROM memory_details WHERE chat_id=? AND memory_id=? AND (active=1 OR ?=1 AND (detail_key='recognition' OR detail_key LIKE 'recognition:%')) ORDER BY rowid").all(parent,row.id,row.user_managed) as any[]) {
         if (!eligibleMemory(detail)) continue;
         const detailId = randomUUID(); detailMap.set(detail.id, detailId);
         const seed = detail.seed_json ? JSON.parse(detail.seed_json) : null;

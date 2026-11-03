@@ -10,8 +10,8 @@ export function recognitionDetailSql(alias = 'd'): string {
 /** Mixed event parents remain scenes; only standalone cognition is state-only. */
 export function recognitionOnlyMemorySql(alias = 'm'): string {
   return `(instr(COALESCE(${alias}.memory_key,''),'${INITIAL_CALIBRATION_MEMORY_KEY_PREFIX}')=1 OR (
-    EXISTS (SELECT 1 FROM memory_details cognition_detail WHERE cognition_detail.memory_id=${alias}.id AND ${recognitionDetailSql('cognition_detail')})
-    AND NOT EXISTS (SELECT 1 FROM memory_details scene_detail WHERE scene_detail.memory_id=${alias}.id AND NOT ${recognitionDetailSql('scene_detail')})
+    EXISTS (SELECT 1 FROM memory_details cognition_detail WHERE cognition_detail.chat_id=${alias}.chat_id AND cognition_detail.memory_id=${alias}.id AND ${recognitionDetailSql('cognition_detail')})
+    AND NOT EXISTS (SELECT 1 FROM memory_details scene_detail WHERE scene_detail.chat_id=${alias}.chat_id AND scene_detail.memory_id=${alias}.id AND NOT ${recognitionDetailSql('scene_detail')})
     AND NOT EXISTS (SELECT 1 FROM memory_dialogues scene_dialogue WHERE scene_dialogue.memory_id=${alias}.id)))`;
 }
 

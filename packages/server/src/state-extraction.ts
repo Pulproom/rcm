@@ -1,6 +1,6 @@
 import { ModelContentValidationError } from "@rcm/shared";
 import { prepareProgress, validateProgressPatches, type ProgressDrop } from "./pair-progress.js";
-import { PAIR_PROGRESS_GUIDANCE, auxiliaryInputBudgetMessage, ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
+import { PAIR_PROGRESS_GUIDANCE, ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
 import { canAutomaticallyChange, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, mergeStateExtraction,
@@ -18,7 +18,7 @@ export function usesStateExtraction(type: string, payload: Record<string, any>):
   return ["extract", "audit_retry", "memory_addition"].includes(type) && !payload.memoryOnly && !payload.regenerationRunId && !payload.sourceRecovery && !payload.dialogueRecovery;
 }
 
-export function prepareStateExtraction(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult, maxInputTokens = 80_000, addition?: { userRequest: string; existingMemories: unknown[] }) {
+export function prepareStateExtraction(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult, maxInputTokens = 80_000, addition?: { userRequest: string; existingMemories: unknown[] }, jobId?: string) {
   const sources = db.prepare(`SELECT message_id AS id,role,ordinal,canonical_content AS content,canonical_hash AS canonicalHash FROM messages
     WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal`).all(chatId, JSON.stringify(sourceIds)) as Array<{id:string;role:string;ordinal:number;content:string;canonicalHash:string}>;
   if (!sources.length || sources.length !== sourceIds.length || sources.some(s=>typeof s.content!=="string" || !s.canonicalHash)) throw new Error("State extraction source is unavailable");
@@ -70,14 +70,56 @@ State record JSON schema: ${JSON.stringify(stateShape())}
 Write state descriptions in ${draft.language}; keep proper names as in source. Emit one complete JSON object without markdown.`;
   if (addition) systemPrompt += `\n${MEMORY_ADDITION_GUIDANCE}`;
   const progress = prepareProgress(db,chatId,draft);
-  const userPrompt = JSON.stringify({pairProgress:progress.cells,priorSeeds,sources:sources.map(s=>({role:s.role,number:s.ordinal+1,units:sourceUnits.filter(u=>u.messageId===s.id).map(u=>({ref:u.ref,text:u.text}))})),eventDraft:{language:draft.language,entities:draft.entities,memories:draft.memories.map(m=>({key:m.key,title:m.title,details:m.details?.map(d=>({key:d.key,kind:d.kind,text:d.text,holders:d.access?.map(a=>a.holder)}))}))},priorLedger:ledger,recognition,relationships,
-    ...(addition ? { existingMemories: addition.existingMemories, userNote: memoryAdditionUserNote(addition.userRequest) } : {})});
-  const measurement = measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0});
-  if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(maxInputTokens)} 상태 추출 원문과 관련 장부: 예상 ${measurement.estimatedInputTokens.toLocaleString("ko-KR")}토큰. 부분 상태는 저장하지 않았어요.`);
+  const context = {pairProgress:progress.cells,priorSeeds,sources:sources.map(s=>({role:s.role,number:s.ordinal+1,units:sourceUnits.filter(u=>u.messageId===s.id).map(u=>({ref:u.ref,text:u.text}))})),eventDraft:{language:draft.language,entities:draft.entities,memories:draft.memories.map(m=>({key:m.key,title:m.title,details:m.details?.map(d=>({key:d.key,kind:d.kind,text:d.text,holders:d.access?.map(a=>a.holder)}))}))},priorLedger:ledger,recognition,relationships,
+    ...(addition ? { existingMemories: addition.existingMemories, userNote: memoryAdditionUserNote(addition.userRequest) } : {})};
+  let userPrompt = JSON.stringify(context);
+  const measure = () => measureAuxiliaryPrompt([{role:"system",content:systemPrompt},{role:"user",content:userPrompt}],estimateTokens,{maxInputTokens,maxOutputTokens:0});
+  let measurement = measure();
+  const originalInputTokens = measurement.estimatedInputTokens;
+  let level = 0;
+  let compactedLedger = ledger;
+  if (!measurement.fits) {
+    systemPrompt += '\nPrior-ledger evidence is compacted context, never new source evidence. quoteExcerpt is only a shortened historical excerpt; original offsets refer to the stored full quote. Missing historical quotes or evidence do not invalidate or end a record. All record identities, current values and immutable flags are preserved. Ground every new claim and change in CURRENT SOURCE.';
+    for (level = 1; level <= 3; level++) {
+      compactedLedger = ledger.map(entry => ({...entry,value:compactPriorEvidence(entry.value,level,sourceIds)}));
+      userPrompt = JSON.stringify({...context,priorLedger:compactedLedger});
+      measurement = measure();
+      if (measurement.fits || level === 3) break;
+    }
+  }
+  const stateInput = {compactionLevel:level,ledgerRows:ledger.length,originalInputTokens,estimatedInputTokens:measurement.estimatedInputTokens,maxInputTokens};
+  if (jobId) db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateInput',json(?)) WHERE id=? AND chat_id=?")
+    .run(JSON.stringify(stateInput),jobId,chatId);
+  if (!measurement.fits) throw Object.assign(new Error(`AUXILIARY_STATE_INPUT_TOO_LARGE: ledgerRows=${ledger.length} ledgerTokens=${estimateTokens(JSON.stringify(compactedLedger))} inputTokens=${measurement.estimatedInputTokens} maxInputTokens=${maxInputTokens}`), {code:"AUXILIARY_STATE_INPUT_TOO_LARGE"});
   // Progress edits can arrive while the model runs; completion rechecks each cell's lock.
-  const {pairProgress:_advisory,...boundContext}=JSON.parse(userPrompt);
-  const candidateSetHash=createHash("sha256").update(JSON.stringify(boundContext)).digest("hex");
-  return {required:true,stateExtraction:true,progressSent:progress.progressSent,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
+  const {pairProgress:_advisory,...boundContext}=context;
+  // Bind the full stored evidence too: shortening must not hide a concurrent edit.
+  const binding=createHash("sha256").update(JSON.stringify(boundContext));
+  if (level) binding.update(JSON.stringify({level,priorLedger:compactedLedger}));
+  const candidateSetHash=binding.digest("hex");
+  return {required:true,stateExtraction:true,stateInput,progressSent:progress.progressSent,candidateSetHash,systemPrompt,userPrompt,sourceUnits,parts:[{systemPrompt,userPrompt,itemRefs:[] as string[],stateExtraction:true,sourceUnits}]};
+}
+
+/** Prompt-only copies. Current values, locks and stored evidence are never rewritten. */
+function compactPriorEvidence(row: Record<string, any>, level: number, sourceIds: string[]) {
+  const value = {...row};
+  const fields = ['evidence_json','automatic_closure_evidence_json'];
+  const arrays = new Map<string, Array<Record<string, any>>>();
+  for (const field of fields) {
+    try { const parsed = JSON.parse(value[field]); if (Array.isArray(parsed) && parsed.every(item => item && typeof item === 'object')) arrays.set(field,parsed); }
+    catch { /* Unknown legacy evidence remains unchanged, never silently discarded. */ }
+  }
+  const touched = [...arrays.values()].some(items => items.some(item => sourceIds.includes(item.messageId)));
+  for (const [field,items] of arrays) {
+    if (level === 3 && !touched) { delete value[field]; continue; }
+    value[field] = JSON.stringify(items.map(item => {
+      if (level >= 2 && typeof item.messageId === 'string') return {messageId:item.messageId};
+      if (typeof item.quote !== 'string' || item.quote.length <= 160) return item;
+      const {quote,...reference} = item;
+      return {...reference,quoteExcerpt:quote.slice(0,160)};
+    }));
+  }
+  return value;
 }
 
 function stateShape() {
@@ -97,7 +139,7 @@ function stateShape() {
 }
 
 export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:string[],draft:ExtractionDraftResult,submission:ReconciliationSubmission|undefined,maxInputTokens=80_000,addition?: { userRequest: string; existingMemories: unknown[] }, jobId?: string) {
-  const prepared=prepareStateExtraction(db,chatId,sourceIds,draft,maxInputTokens,addition);
+  const prepared=prepareStateExtraction(db,chatId,sourceIds,draft,maxInputTokens,addition,jobId);
   if(submission?.error)throw new Error(submission.error);
   if(submission?.candidateSetHash!==prepared.candidateSetHash||!submission.result?.state)throw new Error("Missing or stale state extraction result");
   const seedResolutions=submission.result.seedResolutions ?? [];
@@ -114,8 +156,8 @@ export function finishStateExtraction(db:RcmDatabase,chatId:string,sourceIds:str
   const merged=normalized.draft;
   const issues=inspectDraftEvidence(db,chatId,sourceIds,merged);
   if(issues.some(i=>i.blocking))throw new ModelContentValidationError(`State extraction has unverified source evidence: ${issues.filter(i=>i.blocking).slice(0,3).map(i=>i.reason).join(", ")}`);
-  const narrow=prepareReconciliation(db,chatId,merged,maxInputTokens);
-  if(narrow.deferred.length)throw new Error("State target context exceeds input budget");
+  // No model request here: validate every original candidate after the bounded state call.
+  const narrow=prepareReconciliation(db,chatId,merged,Number.MAX_SAFE_INTEGER);
   const decisions=submission.result.decisions;
   const expected=new Set(merged.stateObservations.map(o=>`observation:${o.key}`));
   if(decisions.length!==expected.size||new Set(decisions.map(d=>d.itemRef)).size!==expected.size||decisions.some(d=>!expected.has(d.itemRef)))throw new ModelContentValidationError("State decisions must cover each observation exactly once");

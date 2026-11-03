@@ -523,7 +523,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
       for (const [savedId, item] of dialogueIdentities) if (item.memoryId === id) dialogueIdentities.delete(savedId);
       const incomingDetailKeys = new Set((memory.details ?? []).map((detail) => detail.key));
-      const previousDetails = db.prepare("SELECT id,detail_key,user_edited,user_hidden FROM memory_details WHERE memory_id=?").all(id) as Array<{ id: string; detail_key: string; user_edited:number; user_hidden:number }>;
+      const previousDetails = db.prepare("SELECT id,detail_key,user_edited,user_hidden FROM memory_details WHERE chat_id=? AND memory_id=? ORDER BY rowid").all(chatId,id) as Array<{ id: string; detail_key: string; user_edited:number; user_hidden:number }>;
       // An upsert keeps detail IDs, but its old semantic relationships were
       // extracted against the previous detail generation. Re-extraction must
       // provide fresh relations; do not let stable IDs preserve stale meaning.

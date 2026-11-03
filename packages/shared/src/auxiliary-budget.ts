@@ -22,7 +22,13 @@ export interface AuxiliaryPromptMeasurement {
 }
 
 export function auxiliaryInputBudgetMessage(maxInputTokens: number): string {
-  return `입력 토큰 상한(현재 ${maxInputTokens.toLocaleString("ko-KR")})보다 큰 묶음이에요. ‘호출당 최대 입력 토큰’을 늘리거나 ‘한 번에 정리할 턴’을 줄여 주세요.`;
+  return `입력 토큰 상한(현재 ${maxInputTokens.toLocaleString("ko-KR")})보다 큰 묶음이에요. ‘호출당 최대 입력 토큰’을 늘리거나 ‘한 번에 정리할 턴’을 줄여 주세요. 이미 실패한 작업의 묶음 크기를 바꾸려면 ‘잘게 나눠서 다시’를 눌러 주세요.`;
+}
+
+export const AUXILIARY_REPAIR_TOO_LARGE_MESSAGE = "보조 모델 응답이 너무 길어 형식 보정을 할 수 없었어요. ‘잘게 나눠서 다시’로 나눠 정리해 주세요.";
+
+export function auxiliaryRepairTooLargeError(): Error & { code: string } {
+  return Object.assign(new Error(`AUXILIARY_REPAIR_TOO_LARGE: ${AUXILIARY_REPAIR_TOO_LARGE_MESSAGE}`), { code: "AUXILIARY_REPAIR_TOO_LARGE" });
 }
 
 /** Measure the serialized, provider-ready message contents. Callers must pass

@@ -4,7 +4,7 @@ import { optionalSourceSelectorsOnly, isModelContentRejection } from "@rcm/share
 import { parseExtractionAuditResponse } from "@rcm/shared";
 import { sha256 } from './context.js';
 import { operationLabel, providerFailureMetadata, assertProviderOutputAllowed } from "@rcm/shared";
-import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming } from "@rcm/shared";
+import { auxiliaryInputBudgetMessage, auxiliaryRepairTooLargeError, withAuxiliaryStoryFraming } from "@rcm/shared";
 import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
@@ -390,7 +390,10 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     const preparedMessages = withAuxiliaryStoryFraming(messages, modelPromptRelaxation.get(state) === true).map(message => ({ ...message, content: typeof message.content === "string" ? prepareAuxiliaryText(message.content) : message.content }));
     const budget = modelJobBudgets.get(state) ?? { maxInputTokens: 80000, maxOutputTokens: 24000, llmTimeoutMs: 300000 };
     const measurement = measureAuxiliaryPrompt(preparedMessages, estimateTokens, budget);
-    if (!measurement.fits) throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
+    if (!measurement.fits) {
+      if (purpose === "extraction_repair") throw auxiliaryRepairTooLargeError();
+      throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
+    }
     await modelCallRecorders.get(state)?.(purpose, "started");
     // Main beforeRequest may arrive during progress reporting. Check again at
     // the dispatch boundary; the main path never waits for this worker.
@@ -470,6 +473,7 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
       invalidOutput: first,
       validationError: firstError,
       request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids" },
+      inputBudget: { maxInputTokens: modelJobBudgets.get(state)?.maxInputTokens ?? 80000, estimate: estimateTokens, relaxed: modelPromptRelaxation.get(state) },
     }), "extraction_repair");
     return validateRepair(repaired);
   }

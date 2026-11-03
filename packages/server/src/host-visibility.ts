@@ -11,7 +11,7 @@ export function deactivateDerivedMemories(db: RcmDatabase, chatId: string, memor
   if (memoryIds.length === 0) return;
   const supports=storyMemorySupportIds(db,chatId,memoryIds);
   const placeholders = memoryIds.map(() => "?").join(",");
-  const detailIds = (db.prepare(`SELECT id FROM memory_details WHERE memory_id IN (${placeholders})`).all(...memoryIds) as Array<{ id: string }>).map((row) => row.id);
+  const detailIds = (db.prepare(`SELECT id FROM memory_details WHERE chat_id=? AND memory_id IN (${placeholders}) ORDER BY rowid`).all(chatId,...memoryIds) as Array<{ id: string }>).map((row) => row.id);
   const dialogueIds = (db.prepare(`SELECT id FROM memory_dialogues WHERE memory_id IN (${placeholders})`).all(...memoryIds) as Array<{ id: string }>).map((row) => row.id);
   const promiseIds = (db.prepare(`SELECT id FROM promises WHERE ${UNCORRECTED_SQL} AND source_memory_id IN (${placeholders})`).all(...memoryIds) as Array<{ id: string }>).map((row) => row.id);
   const milestoneIds = (db.prepare(`SELECT id FROM physical_intimacy_milestones WHERE manual_override=0 AND source_memory_id IN (${placeholders})`).all(...memoryIds) as Array<{ id: string }>).map((row) => row.id);
