@@ -1,3 +1,4 @@
+import type { SourceMutationPolicy } from './source-snapshot.js';
 import { resetProgress } from "./pair-progress.js";
 import { staticMetadata } from "./setup-storage.js";
 import { reopenSeedsBySource } from "./story-seeds.js";
@@ -274,7 +275,7 @@ export function syncChatTitle(db: RcmDatabase, chatId: string, title?: string): 
   })();
 }
 
-export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): SyncStats {
+export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutationPolicy?: SourceMutationPolicy): SyncStats {
   return db.transaction(() => {
     const timestamp = now();
     const existingChat = db.prepare("SELECT revision,static_hash,static_json,ingestion_state,memory_language,pending_memory_language,completed_turn_count FROM chats WHERE id = ?").get(request.chatId) as
@@ -343,7 +344,16 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
       .prepare("SELECT message_id, ordinal, role, content, content_hash, canonical_content, canonical_hash, lifecycle, visible, extraction_state, source_kind,source_record_id,display_content_hash,display_comparison_hash,host_visibility FROM messages WHERE chat_id = ? ORDER BY ordinal")
       .all(request.chatId) as StoredMessage[];
     const byId = new Map(stored.map((message) => [message.message_id, message]));
-    const incoming = request.messages;
+    const appendAfter = stored.reduce((end, row) => ['committed', 'pending'].includes(row.lifecycle) ? Math.max(end, row.ordinal) : end, -1);
+    const idCounts = new Map<string, number>(), ordinalCounts = new Map<number, number>();
+    if (mutationPolicy && !mutationPolicy.allowDestructive) for (const message of request.messages) {
+      idCounts.set(message.id, (idCounts.get(message.id) ?? 0) + 1);
+      ordinalCounts.set(message.ordinal, (ordinalCounts.get(message.ordinal) ?? 0) + 1);
+    }
+    const incoming = mutationPolicy && !mutationPolicy.allowDestructive ? request.messages.filter(message => {
+      if (idCounts.get(message.id)! > 1 || ordinalCounts.get(message.ordinal)! > 1) { mutationPolicy.held = true; return false; }
+      return true;
+    }) : request.messages;
     const visibilityProjection: NonNullable<TurnPrepareRequest["messageVisibility"]> = request.messageVisibility ?? request.messages.map((message) => ({
       id: message.id,
       ordinal: message.ordinal,
@@ -374,6 +384,8 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
       if (previous.source_kind === "archive") continue;
       if (presentIds.has(previous.message_id)) continue;
       if (["client_pruned", "branch_truncated", "deleted", "hard_deleted", "superseded"].includes(previous.lifecycle)) continue;
+      if (mutationPolicy && !mutationPolicy.allowDestructive) { mutationPolicy.held = true; continue; }
+      if (mutationPolicy) mutationPolicy.destructive = true;
       const classification = classifyMissing(previous.ordinal, retainedOldOrdinals, previous.lifecycle);
       db.prepare("UPDATE messages SET lifecycle=?, visible=0, updated_at=? WHERE chat_id=? AND message_id=?").run(
         classification.lifecycle,
@@ -446,6 +458,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
         ? previous!.canonical_hash
         : sha256(`${message.role}\0${canonicalContent}`);
       if (!previous) {
+        if (mutationPolicy && !mutationPolicy.allowDestructive && message.ordinal <= appendAfter) { mutationPolicy.held = true; return; }
         const hostVisibility = visibilityById.get(message.id) ?? (message.disabled ? "disabled" : "active");
         const hostActive = archiveEligibleVisibility(hostVisibility);
         db.prepare(`
@@ -497,6 +510,10 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
         || (previous.source_kind === "yumi_model" && sourceKind === "risu_display" && !previous.display_comparison_hash)
       );
       const lifecycleChanged = previous.lifecycle !== lifecycle;
+      const destructive = contentChanged || sourceKindChanged || previous.ordinal !== message.ordinal
+        || (lifecycleChanged && !(previous.lifecycle === 'pending' && lifecycle === 'committed'));
+      if (destructive && mutationPolicy && !mutationPolicy.allowDestructive) { mutationPolicy.held = true; return; }
+      if (destructive && mutationPolicy) mutationPolicy.destructive = true;
       if (contentChanged) {
         const oldPurge = previous.lifecycle === "pending" ? timestamp + 7 * DAY : timestamp + 30 * DAY;
         db.prepare(`
@@ -579,7 +596,13 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest): Sync
       }
     }
 
-    if (applyHostVisibilityProjection(db, request.chatId, visibilityProjection, (existingChat?.revision ?? 0) + 1) > 0) changed = true;
+    const safeVisibility = mutationPolicy && !mutationPolicy.allowDestructive ? visibilityProjection.filter(item => {
+      const old = byId.get(item.id);
+      if (old && old.host_visibility !== item.visibility) { mutationPolicy.held = true; return false; }
+      return !old || old.lifecycle === 'committed' || old.lifecycle === 'pending';
+    }) : visibilityProjection;
+    if (mutationPolicy?.allowDestructive && visibilityProjection.some(item => byId.has(item.id) && byId.get(item.id)!.host_visibility !== item.visibility)) mutationPolicy.destructive = true;
+    if (applyHostVisibilityProjection(db, request.chatId, safeVisibility, (existingChat?.revision ?? 0) + 1) > 0) changed = true;
 
     // Each settled assistant response owns one monotonic turn, with preceding
     // waiting user rows. Risu's opening greeting is injected by the host outside

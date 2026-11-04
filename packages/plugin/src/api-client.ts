@@ -103,12 +103,19 @@ function requestContext(settings: PluginSettings, path: string, init: RequestIni
     server, timeoutMs, elapsedMs: 0, pluginVersion: RCM_PLUGIN_VERSION, apiRevision: RCM_API_REVISION, ...summary };
 }
 
+type SourceReceipt = { sourceRevision: number; sourceInventory?: string; sourceChangeHeld?: string; sourceNotice?: string; serverInstanceId?: string };
+const sourceReceipts = new WeakMap<PluginSettings, Map<string, SourceReceipt>>();
+export function cachedSourceReceipt(settings: PluginSettings, chatId: string): SourceReceipt | undefined {
+  return sourceReceipts.get(settings)?.get(`${settings.serverUrl.replace(/\/$/, '')}\0${chatId}`);
+}
+
 export class ServerClient {
   constructor(private readonly settings: () => PluginSettings) {}
 
   async request<T>(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<T> {
     const startedAt = performance.now();
-    const context = requestContext(this.settings(), path, init, timeoutMs);
+    const requestSettings = this.settings();
+    const context = requestContext(requestSettings, path, init, timeoutMs);
     const serverUrl = this.settings().serverUrl.replace(/\/$/, "");
     const controller = new AbortController();
     let active = true;
@@ -167,6 +174,19 @@ export class ServerClient {
             serverApiRevision: Number.isSafeInteger(parsed.apiRevision) ? parsed.apiRevision : undefined,
             capabilities: Object.fromEntries(Object.entries(parsed.capabilities ?? {}).filter(([key, value]) => /^[a-zA-Z][a-zA-Z0-9]{0,63}$/.test(key) && typeof value === "boolean")) as Record<string, boolean>,
           });
+        }
+        const sourcePath = path.match(/^\/v1\/chats\/([^/]+)\/(?:status|source-head|source-sync|open)$/);
+        const sourceChatId = sourcePath ? decodeURIComponent(sourcePath[1]!)
+          : path === '/v1/turn/prepare' && typeof init.body === 'string' ? JSON.parse(init.body).chatId : undefined;
+        if (sourceChatId && Number.isSafeInteger(parsed.sourceRevision)) {
+          let receipts = sourceReceipts.get(requestSettings);
+          if (!receipts) sourceReceipts.set(requestSettings, receipts = new Map());
+          const key = `${serverUrl}\0${sourceChatId}`, previous = receipts.get(key);
+          if (!previous || parsed.sourceRevision >= previous.sourceRevision || parsed.serverInstanceId && parsed.serverInstanceId !== previous.serverInstanceId) {
+            const keepPending = path.endsWith('/status') || path.endsWith('/open') && parsed.lineage?.status === 'none';
+            receipts.set(key, { sourceRevision: parsed.sourceRevision, sourceInventory: parsed.sourceInventory,
+              sourceChangeHeld: parsed.sourceChangeHeld ?? (keepPending ? previous?.sourceChangeHeld : undefined), sourceNotice: parsed.sourceNotice ?? (keepPending ? previous?.sourceNotice : undefined), serverInstanceId: parsed.serverInstanceId ?? previous?.serverInstanceId });
+          }
         }
         if (timings) timings.jsonStage = "parsed";
         return parsed as T;

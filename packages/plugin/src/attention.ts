@@ -1,5 +1,6 @@
+import { cachedSourceReceipt } from './api-client.js';
 import { setupPickerNeeded } from "./setup-sources.js";
-import { currentLineageOperation } from "./lineage-settings.js";
+import { currentLineageOperation, hasFreshChatStatus } from "./lineage-settings.js";
 import { sourceRecoverySummary, operationLabel } from "@rcm/shared";
 import { modelResponseFailureDetail } from "./support-diagnostics.js";
 import { RISU_AUXILIARY_AUTH_FAILURE_MESSAGE } from "@rcm/shared";
@@ -217,6 +218,9 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
   const summary = state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 };
   if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) return { kind: "disabled", label: "꺼짐", detail: state.settings.characterEnabled[state.current.characterId] === false ? "이 캐릭터에서는 RCM을 쓰지 않아요." : "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않습니다." };
   const lineageOperation = currentLineageOperation(state);
+  if (lineageOperation?.kind === 'open') return lineageOperation.status === 'running'
+    ? { kind: 'checking', label: '채팅 상태 확인 중', detail: '서버에서 현재 채팅을 확인하고 있어요.' }
+    : { kind: 'connection', label: '채팅 상태 확인 필요', detail: '연결 후 현재 채팅을 다시 확인해 주세요.' };
   if (lineageOperation) return lineageOperation.status === "running"
     ? { kind: "running", label: "기억 이어받는 중", detail: "원본을 확인하고 기억을 가져오고 있어요. 대화가 길면 조금 걸려요." }
     : { kind: "review", label: "기억 이어받기 확인 필요", detail: "완료됐는지 확인하지 못했어요. 기억 홈에서 다시 시도해 주세요." };
@@ -279,7 +283,10 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     startedAt: activeServerTiming.startedAt,
   };
   if (!state.activityReady || (state.current && (state.current.sourceMessageCount ?? 0) > 2 && !summary.lineage)) return { kind: "checking", label: "확인 중", detail: "현재 채팅의 대기열과 오류 상태를 확인하고 있습니다." };
-  const lineage = summary.lineage;
+  const sourceNotice = state.current && cachedSourceReceipt(state.settings, state.current.chatId)?.sourceNotice;
+  if (sourceNotice) return { kind: 'checking', label: '원문 변경 확인 중', detail: sourceNotice };
+  const lineage = hasFreshChatStatus(state) ? state.current?.hostIdentity && ['choice_required', 'ambiguous'].includes(summary.lineage?.status ?? '') ? { status: 'none' as const } : summary.lineage : undefined;
+  if (summary.lineage && !lineage) return { kind: 'checking', label: '채팅 상태 확인 중', detail: '서버에서 현재 채팅을 확인하고 있어요.' };
   if (lineage?.status === "choice_required" || lineage?.status === "ambiguous") return {
     kind: "review",
     label: "기억 이어받기 선택",
@@ -309,7 +316,7 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
   };
   if (state.settings.workerPaused) return { kind: "paused", label: "일시정지", detail: "기억 처리가 재개될 때까지 대기합니다." };
   const episode = state.episodeActivity;
-  if (episode?.status === "failed") return { kind: "error", label: "캡슐 오류", detail: episode.lastError ?? "에피소드 캡슐을 만들지 못했습니다. 원문과 기존 기억은 그대로입니다." };
+  if (episode?.status === "failed") return { kind: "error", label: "캡슐 오류", detail: episode.lastError ?? "에피소드 캡슐을 만들지 못했어요. 처리 상태를 다시 확인해 주세요." };
   const currentJob = state.currentJob?.kind !== "quiz" && state.currentJob?.chatId === state.current?.chatId ? state.currentJob : undefined;
   if (episode?.status === "queued" || episode?.status === "processing" || currentJob?.phase === "capsule") return { kind: "capsule", label: "에피소드 정리 중", detail: `${episode?.turnCount ?? 0}턴, 약 ${Math.max(1, Math.round((episode?.sourceTokens ?? 0) / 100) / 10)}k 토큰을 정리하고 있습니다.` };
   if (episode?.status === "holding") return { kind: "holding", label: "기억 보류 중", detail: `완료 ${episode.turnCount}턴 · 약 ${Math.max(0, Math.round(episode.sourceTokens / 100) / 10)}k 토큰` };

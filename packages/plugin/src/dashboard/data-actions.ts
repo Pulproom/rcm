@@ -284,9 +284,9 @@ export async function readHostChatInventory(): Promise<HostChatInventory> {
     const chatIds = new Set<string>();
     for (const [chatIndex, chat] of chats.entries()) {
       if (!chat || typeof chat !== "object") { complete = false; continue; }
-      if (typeof chat.id !== "string" || !chat.id || chatIds.has(chat.id)) complete = false;
-      if (typeof chat.id === "string" && chat.id) chatIds.add(chat.id);
-      const chatId = String(chat.id ?? `${characterId}:${chatIndex}`);
+      const chatId = String(chat.id || `${characterId}:${chatIndex}`);
+      if (chatIds.has(chatId)) { complete = false; continue; }
+      chatIds.add(chatId);
       let messageCount = Array.isArray((chat as any).message) ? (chat as any).message.length : 0;
       if (!messageCount) {
         try {
@@ -474,6 +474,8 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
     },
     async inheritFromChat(target, confirmDashboard, alertDashboard, refresh) {
       if (!state.current) return;
+      const serverUrl = state.settings.serverUrl;
+      const targetChatId = state.current.chatId;
       if (currentLineageOperation(state)?.status === 'running') return;
       const sourceChatId = target.dataset.chatId ?? "";
       if (!sourceChatId) return;
@@ -484,11 +486,12 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
       button.textContent = "같은 대화인지 확인 중…";
       try {
         const { current, request, mode, preview } = await previewMemoryTransfer(client, state, sourceChatId);
+        if (state.settings.serverUrl !== serverUrl || state.current?.chatId !== targetChatId) return;
         const eligibleMessages = (request.targetMessageInventory ?? []).filter((item) => item.visibility === "active" && item.role && item.contentHash).length;
         const copy = memoryTransferConfirmation(preview, mode, eligibleMessages);
         const confirmed = await confirmDashboard(copy.message, false, copy);
         if (!confirmed) return;
-        if (state.current?.chatId !== current.chatId) throw new Error('Chat changed before lineage resolution');
+        if (state.current?.chatId !== current.chatId || state.settings.serverUrl !== serverUrl) throw new Error('Chat changed before lineage resolution');
         button.textContent = "기억 가져오는 중…";
         await runLineageOperation(state,current.chatId,'transfer',async () => {
           if (mode === "lineage") {
@@ -507,6 +510,7 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
             return result;
           }
         },mode === 'lineage' ? sourceChatId : undefined);
+        if (state.settings.serverUrl !== serverUrl || state.current?.chatId !== targetChatId) return;
         await refresh({ forceApply: true });
         await alertDashboard(mode === "lineage"
           ? "같은 대화 원문을 연결하고 기억을 가져왔어요. 확인된 원문은 다시 처리하지 않습니다."

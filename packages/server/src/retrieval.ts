@@ -1,3 +1,4 @@
+import { promiseFirstMade, promiseMadeLabel } from "./promise-recency.js";
 import { clipLandmarkDisplayText } from "@rcm/shared";
 import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { StateOutcomeCapture } from "./state-outcomes.js";
@@ -888,7 +889,8 @@ function renderOpenThreads(db: RcmDatabase, chatId: string, perspective: string,
     .all(chatId) as Array<{ id: string; promisor: string; promisee: string; content: string; scheduledFor: string | null }>;
   const access = loadItemAccess(db, chatId, candidates.map((row) => ({ kind: "promise", id: row.id })));
   const promises = candidates.filter((row) => visibleTo(resolveItemAccess(access, "promise", row.id, [row.promisor, row.promisee]), perspective, perspective === "narrator")).slice(0, 3);
-  const lines = promises.map((item) => `<open_commitment promisor="${escapeXml(item.promisor)}" promisee="${escapeXml(item.promisee)}"${item.scheduledFor ? ` scheduled_for="${escapeXml(item.scheduledFor)}"` : ""}>${escapeXml(safeExcerpt(item.content, 220))}</open_commitment>`);
+  const origins=promiseFirstMade(db,chatId);
+  const lines = promises.map((item) => `<open_commitment promisor="${escapeXml(item.promisor)}" promisee="${escapeXml(item.promisee)}"${item.scheduledFor ? ` scheduled_for="${escapeXml(item.scheduledFor)}"` : ""}${origins.has(item.id) ? ` first_made="${escapeXml(promiseMadeLabel(origins.get(item.id)!))}"` : ""}>${escapeXml(safeExcerpt(item.content, 220))}</open_commitment>`);
   while (lines.length && estimateTokens(`<open_threads>\n${lines.join("\n")}\n</open_threads>`) > tokenBudget) lines.pop();
   manifest.promiseIds.push(...promises.slice(0, lines.length).map((item) => item.id));
   return lines.length ? `<open_threads>\n${lines.join("\n")}\n</open_threads>` : "";

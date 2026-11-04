@@ -152,7 +152,7 @@ export function startMemoryAddition(db: RcmDatabase, chatId: string, rangeIds: s
 function current(db: RcmDatabase, chatId: string, payload: AdditionPayload): boolean {
   if (payload.mode === 'gap_recovery') return fingerprintMatches(db,chatId,payload.sourceFingerprint)
     && payload.sourceMessageIds.every(id=>Boolean(db.prepare(`SELECT 1 FROM gap_recovery_messages g JOIN messages m ON m.chat_id=g.chat_id AND m.message_id=g.message_id
-      WHERE g.chat_id=? AND g.message_id=? AND m.memory_excluded=0 AND m.lifecycle='committed' AND m.host_visibility IN ('active','all_before') AND m.extraction_state='pending'`).get(chatId,id)));
+      WHERE g.chat_id=? AND g.message_id=? AND m.memory_excluded=0 AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.extraction_state='pending'`).get(chatId,id)));
   return fingerprintMatches(db, chatId, payload.sourceFingerprint)
     && rangeMessages(db, chatId).filter(row => payload.sourceMessageIds.includes(row.id)).every(row => !additionMessageReason(db, chatId, row))
     && memoryTargetFingerprint(db, chatId, payload.memoryIds) === payload.targetFingerprint

@@ -1,3 +1,4 @@
+import { promiseMadeLabel } from "./promise-recency.js";
 import { estimateTokens, structuredStoryTimeEnd, type MemoryContextItem } from "@rcm/shared";
 import { emptyPacketManifest } from "./packet-manifest.js";
 import { canAccessStateEvidence, rankStateEvidence, stateKindLabel, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
@@ -187,7 +188,7 @@ function renderAutomaticStateLine(item: StateEvidence, perspectives: string[], l
     if (item.promisePinned || item.promiseRecent) body = body.length > 220 ? `${body.slice(0, 219)}…` : body;
     const status = overduePromise(item, latestStoryTime) ? "overdue" : item.promiseStatus ?? "open";
     const recentStatus: Record<string, string> = { kept: "recently kept", broken: "recently broken", released: "recently released", offscreen: "recently handled offscreen" };
-    body += ` (${item.promiseRecent && !item.promisePinned ? recentStatus[status] ?? status : status}${item.due ? ` · due ${item.due}` : ""})`;
+    body += ` (${item.promiseRecent && !item.promisePinned ? recentStatus[status] ?? status : status}${item.due ? ` · due ${item.due}` : ""}${item.firstMade ? ` · ${promiseMadeLabel(item.firstMade)}` : ""})`;
   }
   if (item.kind === "relationship") {
     if (item.relationship?.stale) body += " [Last recorded relationship; update pending.]";

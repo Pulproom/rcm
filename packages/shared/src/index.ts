@@ -441,6 +441,13 @@ export const TurnPrepareRequestSchema = z.object({
   characterId: z.string().min(1),
   profile: RpProfileSchema,
   messages: z.array(ChatMessageSnapshotSchema),
+  sourceSnapshot: z.object({
+    baseRevision: z.number().int().nonnegative(),
+    baseInventory: z.string().optional(),
+    complete: z.boolean(),
+    messageCount: z.number().int().nonnegative(),
+  }).nullish(),
+  hostIdentity: z.object({ kind: z.literal('position'), listFingerprint: z.string() }).optional(),
   messageVisibility: z.array(MessageVisibilitySnapshotSchema).optional(),
   lineageHint: ChatLineageHintSchema.optional(),
   query: z.string(),
@@ -610,6 +617,10 @@ export const TurnPrepareResponseSchema = z.object({
   apiRevision: z.number().int().positive(),
   serverInstanceId: z.string(),
   chatRevision: z.number().int(),
+  sourceRevision: z.number().int().nonnegative().optional(),
+  sourceInventory: z.string().optional(),
+  sourceChangeHeld: z.enum(['proof_required', 'incomplete', 'stale', 'position_changed']).optional(),
+  sourceNotice: z.string().optional(),
   profile: RpProfileSchema,
   memoryLanguage: MemoryLanguageSchema.default("en"),
   pendingMemoryLanguage: MemoryLanguageSchema.nullable().optional(),
@@ -1186,7 +1197,14 @@ export const MemoryAdditionRequestOutcomeSchema = z.object({
   reason: z.string().trim().min(1),
   relatedMemoryIds: z.array(z.string().trim().min(1)).optional(),
 }).strict();
+export const SkippedSourceSchema = z.object({
+  messageId: z.string().min(1),
+  reason: z.enum(['trivial', 'ooc', 'no_new_information', 'merged']),
+  memoryKey: z.string().min(1).optional(),
+});
+
 export const ExtractionDraftResultSchema = z.object({
+  skippedSource: z.array(SkippedSourceSchema).optional(),
   pairProgress: PairProgressPatchesSchema,
   requestOutcome: MemoryAdditionRequestOutcomeSchema.optional(),
   seedResolutions: z.array(SeedResolutionSchema).optional(),
@@ -1238,6 +1256,7 @@ export function mergeExtractionPages(previous: ExtractionDraftResult | undefined
   for (const field of ["entities", "stateObservations", "relationshipEvents", "socialKnowledge", "relationshipBaselines", "physicalIntimacy", "memoryRecallObservations", "sourcePassages", "sourceFieldReviews", "atomRelations"] as const) {
     (result as any)[field] = unique([...(result[field] ?? []), ...(page[field] ?? [])]);
   }
+  result.skippedSource = unique([...(result.skippedSource ?? []), ...(page.skippedSource ?? [])]);
   result.unfinishedSource = page.unfinishedSource ?? [];
   // An outcome describes a completed empty request, never a later empty page
   // that follows already extracted evidence-backed memories.
@@ -2152,3 +2171,4 @@ export { sourceRecoverySummary, type SourceRecoveryMetadata } from "./source-rec
 export { JOB_KIND_VALUES, JOB_PIPELINE_STAGE_VALUES, WORKER_PHASE_VALUES, AUXILIARY_PURPOSE_VALUES, JOB_TRIGGER_VALUES, JOB_TRIGGER_LABELS, OPERATION_LABELS, operationLabel, type JobKind, type JobPipelineStage, type WorkerPhase, type AuxiliaryPurpose, type JobTrigger } from "./operation-labels.js";
 
 export * from "./occasions.js";
+export { formatPromiseTime, storedTimeOccasion, type PromiseFirstMade } from './promise-time.js';

@@ -3,6 +3,23 @@ import type { TurnPrepareRequest } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
 import { isOrdinalFallbackMessageId, sourceFingerprint } from './source-fingerprint.js';
 
+/** Scene-cache keys are owned syntax. Retain a source bound across generations,
+ * including old lineage:job keys when the ancestor still exists. */
+export function lineageSceneEnd(db:RcmDatabase,chatId:string,key:string,seen=new Set<string>()):number|undefined {
+  const encoded=/^lineage-scene:(\d+):/.exec(key);
+  if(encoded) return Number(encoded[1]);
+  if(seen.has(chatId)) return undefined;
+  seen.add(chatId);
+  const job=db.prepare('SELECT payload_json FROM jobs WHERE id=? AND chat_id=?').get(key,chatId) as {payload_json:string}|undefined;
+  if(job) {
+    const ids=JSON.parse(job.payload_json).sourceMessageIds ?? [];
+    const rows=sourceFingerprint(db,chatId,ids);
+    return ids.length && rows.length===ids.length ? Math.max(...rows.map(row=>row.ordinal)) : undefined;
+  }
+  const parent=db.prepare("SELECT parent_chat_id FROM chat_lineage WHERE child_chat_id=? AND status='inherited'").get(chatId) as {parent_chat_id:string}|undefined;
+  return key.startsWith('lineage:') && parent ? lineageSceneEnd(db,parent.parent_chat_id,key.slice('lineage:'.length),seen) : undefined;
+}
+
 /** Source references only. A quote that happens to equal an ID stays a quote. */
 function remapSourceJson(text: string, ids: Map<string,string>, list = false): string {
   const visit = (value: unknown, sourceIds = false): unknown => {
@@ -35,7 +52,7 @@ export function remapInheritedSources(db: RcmDatabase, chatId: string, allIds: M
     db.prepare('DELETE FROM messages WHERE chat_id=? AND message_id=?').run(chatId,oldId);
   }
   const fields: Record<string,string[]> = {
-    entities:['source_json'], memories:['evidence_json'], memory_details:['evidence_json','seed_json'], memory_dialogues:['evidence_json'], atom_relations:['evidence_json'],
+    entities:['source_json'], memories:['evidence_json','landmark_kinds_json'], memory_details:['evidence_json','seed_json'], memory_dialogues:['evidence_json'], atom_relations:['evidence_json'],
     assertions:['evidence_json','automatic_closure_evidence_json'], beliefs:['evidence_json','automatic_closure_evidence_json'], relationship_baselines:['evidence_json'],
     promise_events:['evidence_json'],
     relationship_events:['evidence_json'], social_knowledge_events:['evidence_json'],

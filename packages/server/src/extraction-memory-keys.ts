@@ -2,6 +2,8 @@ import { ModelContentValidationError } from "@rcm/shared";
 import { createHash } from "node:crypto";
 import type { ExtractionResult } from "@rcm/shared";
 
+export const scopeMemoryKey = (key: string, scopeId: string): string => `batch:${scopeId}:${createHash("sha256").update(key).digest("hex")}`;
+
 /** Model declarations are local to one extraction batch. Canonical keys must
  * not let another batch's common label (such as mem-1) overwrite old events.
  * Hash the local key, not its array position: audit retries can restore an
@@ -12,7 +14,7 @@ export function scopeExtractionMemoryKeys(result: ExtractionResult, scopeId: str
     throw new ModelContentValidationError("Duplicate local memory key in extraction result");
   }
   const keys = new Map(result.memories.map(memory => [memory.key,
-    `batch:${scopeId}:${createHash("sha256").update(memory.key).digest("hex")}`]));
+    scopeMemoryKey(memory.key, scopeId)]));
   const remap = (key: string): string => keys.get(key) ?? key;
   const withMemoryKey = <T extends { memoryKey?: string }>(item: T): T =>
     item.memoryKey === undefined ? item : { ...item, memoryKey: remap(item.memoryKey) };

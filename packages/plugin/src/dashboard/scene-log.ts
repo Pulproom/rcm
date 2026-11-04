@@ -1,6 +1,6 @@
 import { normalizeName, memoryIdOf, memoryStoryTime, arrayMatchesPair, itemMatchesPair, memoryMatchesPair, mergePromiseHistory } from "./pair-records.js";
 export { itemMatchesPair } from "./pair-records.js";
-import { formatStoryTime, compareParsedStoryTimes, parseStoryTime } from "@rcm/shared";
+import { formatStoryTime, parseStoryTime, storyScenes, sceneNumbers } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { buildAnniversaries, landmarkLabel } from "./diary.js";
 import { isRecognitionMemory } from "@rcm/shared";
@@ -58,23 +58,6 @@ const ordinalOf = (item: any): number | null => {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
 };
 
-const chronologicalMemorySort = (left: { memory: any; index: number }, right: { memory: any; index: number }): number => {
-  const leftTime = memoryStoryTime(left.memory);
-  const rightTime = memoryStoryTime(right.memory);
-  if (leftTime && rightTime) {
-    const compared = compareParsedStoryTimes(parseStoryTime(leftTime), parseStoryTime(rightTime));
-    if (compared !== null && compared !== 0) return compared;
-  } else if (leftTime !== rightTime) return leftTime === null ? 1 : -1;
-  const leftOrdinal = ordinalOf(left.memory);
-  const rightOrdinal = ordinalOf(right.memory);
-  if (leftOrdinal !== rightOrdinal) {
-    if (leftOrdinal === null) return 1;
-    if (rightOrdinal === null) return -1;
-    return leftOrdinal - rightOrdinal;
-  }
-  return left.index - right.index;
-};
-
 const sceneDate = (storyTime: string | null): { date: string | null; dateKey: string | null; weekday: string | null } => {
   if (!storyTime) return { date: null, dateKey: null, weekday: null };
   const parsed = parseStoryTime(storyTime);
@@ -108,18 +91,16 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
   const direction = sort === "oldest" ? 1 : -1;
   const allMemories = (data.memories ?? []).filter((memory: any) => !isRecognitionMemory(memory));
   const allMemoryById = new Map(allMemories.map((memory: any) => [String(memory?.id ?? ""), memory]));
-  const activeScenes = allMemories
-    .map((memory: any, index: number) => ({ memory, index }))
-    .filter(({ memory }) => memory?.active !== false && memory?.type === "episode")
-    .sort(chronologicalMemorySort);
+  const activeScenes = storyScenes(allMemories).filter(memory => memory.active !== false);
+  const numbers = sceneNumbers(allMemories);
   const sceneById = new Map<string, Scene>();
-  const scenes = activeScenes.map(({ memory }, index): Scene => {
+  const scenes = activeScenes.map((memory): Scene => {
     const storyTime = memoryStoryTime(memory);
     const date = sceneDate(storyTime);
     const scene: Scene = {
       memory,
       memoryId: String(memory?.id ?? ""),
-      no: index + 1,
+      no: numbers.get(String(memory.id))!,
       ordinal: ordinalOf(memory),
       storyTime,
       ...date,
@@ -270,11 +251,7 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
   }
   const orderedGroups = [...groups.values()].sort((left, right) => {
     if (left.dateKey === null || right.dateKey === null) return left.dateKey === right.dateKey ? 0 : left.dateKey === null ? 1 : -1;
-    const compared = left.storyTime && right.storyTime
-      ? compareParsedStoryTimes(parseStoryTime(left.storyTime), parseStoryTime(right.storyTime))
-      : null;
-    if (compared !== null && compared !== 0) return direction * compared;
-    return direction * ((left.ordinal ?? -1) - (right.ordinal ?? -1));
+    return direction * (Math.min(...left.scenes.map(scene => scene.no)) - Math.min(...right.scenes.map(scene => scene.no)));
   });
   return orderedGroups.map((group) => ({
     date: group.date,

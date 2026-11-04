@@ -320,7 +320,7 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
       // The pair's own label shares the list row's translation, so the hero and the row read the same.
       const text = pair.label && normalizeName(label) === normalizeName(pair.label) ? options.copy(label, relationshipLabelTranslationKey(pair)) : options.copy(label, `relation-label:${item.id}`);
       // A one-way relation (스승, 보호자…) also names its direction; a mutual one reads by its name alone.
-      const way = item?.socialRelation?.direction === "mutual" ? "" : `<small class="pair-rel__way">${escapeHtml(String(item?.subject ?? ""))} → ${escapeHtml(String(item?.socialRelation?.target ?? ""))}</small>`;
+      const way = item?.socialRelation?.direction === "mutual" ? "" : `<small class="pair-rel__way"> · ${escapeHtml(String(item?.subject ?? ""))} 쪽</small>`;
       return menu({ label, items: relationMenuItems(item), face: { className: "pair-rel", html: `<span>${text}</span>${way}` } });
     }).join("");
     const names = [lead, other].map((name) => `<button type="button" class="pair-name__who" data-action="open-relationship-person" data-person-name="${escapeHtml(name)}">${nameHtml(name)}</button>`).join('<span class="pair-name__amp">&amp;</span>');

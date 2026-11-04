@@ -1,4 +1,5 @@
 import { editProtectedMessageIds } from "./turn-clock.js";
+import { completeSourceCoverage, type StoredSourceCoverage } from './source-coverage.js';
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
 import { pendingProgress } from "./pair-progress.js";
@@ -426,7 +427,8 @@ Every memory, detail and access grant needs evidence ${evidenceShape}. Grant acc
 ${ACCESS_BASIS_GUIDANCE}
 
 SCENES
-Find coherent independently recallable events. Repeated narration of one action is one occurrence; the same setting or participants do not make separate occurrences one scene. Preserve cause, action and result; distinguish unresolved outcomes. Ordinary continuous scenes normally need zero or one episode memory. Lasting secrets, boundaries, revelations and turning points may merit separate arc/durable records. Do not fill a quota.
+Segment the source into independently recallable events BEFORE writing memories. A change of immediate goal or activity starts a separate memory, even when the participants, setting or broader narrative stay the same. Keep an event's cause, action and outcome together, including unresolved outcomes; repeated narration of that same action is not a new event. Return a separate object in memories for each event: never put independent events only in details under a single batch-wide synopsis. Each memory title names its central action, not a list of activities. Lasting secrets, boundaries, revelations and turning points may merit separate arc/durable records. Omit trivial exchanges instead of making a memory for each message.
+Choose events and details by recall value first, then attach evidence only to what each item describes; evidence accounting must not change event boundaries, add filler details or broaden citations. Declare deliberately omitted messages in skippedSource:[{messageId,reason:"trivial"|"ooc"|"no_new_information"|"merged",memoryKey?}], using [] when none. Use trivial for small talk with no recallable event, ooc for out-of-story messages, no_new_information for pure repetition, and merged for a contribution folded into that same event's memory without its own direct citation (supply that memory's key; never merge independent events for coverage). Do not manufacture details just to account for greetings or repetition; declare the skip instead. skippedSource lists only deliberate omissions, never a per-turn checklist or unfinished work.
 Write essential events as role=core details BEFORE the synopsis. Split knowledge scopes within a core event. Each detail names actor, action and limiting context; keep negation, uncertainty and secrecy. Supporting details retain useful objects, gestures, reactions, clues and sensory texture. Preserve even minor UNFULFILLED wishes/desires, deferred someday/next-time plans, noticed or admired objects/places (including a silent lingering look), passing promises and curiosity as ordinary source-backed details. Add seed:{type:"wish"|"plan"|"noticed"|"promise"|"curiosity",noticedBy:[character names],status:"open"}. noticedBy names characters actually aware of the whole moment who could later act, including a source-supported observer; it must be a subset of knownBy and explicit access holders. Private thoughts never grant an observer knowledge. Do not label the detail text as a seed or open thread. Do not tag already fulfilled/abandoned moments or invent a future obligation. Do not leave an essential event solely in title/content or repeat the synopsis in every detail.
 ${KEY_DIALOGUE_SELECTION_GUIDANCE}
 ${DIALOGUE_SOURCE_FORM_GUIDANCE}
@@ -436,7 +438,7 @@ ${FIRST_MEETING_GUIDANCE}
 ${ATOM_RELATION_GUIDANCE}
 
 Return one complete JSON object:
-{language:"${language}",entities:[{key,name,type,aliases:[string]}],memories:[],sourcePassages:[],unfinishedSource:[],memoryRecallObservations:[],atomRelations:[]}.
+{language:"${language}",entities:[{key,name,type,aliases:[string]}],memories:[],sourcePassages:[],unfinishedSource:[],skippedSource:[],memoryRecallObservations:[],atomRelations:[]}.
 entities identifies named participants and explicitly established aliases only.
 ${IDENTITY_TERM_GUIDANCE}
 A memory is {key,type,title,content,participants:[string],witnesses:[{name,kind:"participant|witness|heard|inferred"}],knownBy:[string],storyTime?,locations:[string],landmark:boolean,landmarkKinds:[{kind,label?,pair?:[string,string],storyTime?,evidence?:${evidenceShape}}],salience:0..1,associations:[memoryKey],evidence:${evidenceShape},keyDialogues:[{speaker,text,sourceRef,kind:${dialogueKindValues},access:${accessShape}}],details:[{key,role:"core"|"supporting",kind,text,participants:[string],knownBy:[string],access:${accessShape},locations:[string],epistemic:"observed"|"stated"|"inferred"|"unresolved",salience:0..1,retention:"scene"|"arc"|"durable",evidence:${evidenceShape}}],retention:"scene"|"arc"|"durable"}.
@@ -468,7 +470,7 @@ export function buildPrompt(db: RcmDatabase, chatId: string, profile: RpProfile,
       }))
       .map((unit, index) => ({ ...unit, ref: `s${index + 1}` }));
   }
-  const userPrompt = `Extract memory from these ordered source units only. referenceIndex and recallCandidates are lookup aids, never new story evidence.\n${JSON.stringify({ canonicalEntities, referenceIndex: firstPassReferenceIndex(db, chatId), recallCandidates, messages: messages.map((message) => ({ role: message.role, units: sourceUnits.filter((unit) => unit.messageId === message.message_id).map(({ ref, text }) => ({ ref, text })) })) })}`;
+  const userPrompt = `Extract memory from these ordered source units only. referenceIndex and recallCandidates are lookup aids, never new story evidence.\n${JSON.stringify({ canonicalEntities, referenceIndex: firstPassReferenceIndex(db, chatId), recallCandidates, messages: messages.map((message) => ({ messageId: message.message_id, role: message.role, units: sourceUnits.filter((unit) => unit.messageId === message.message_id).map(({ ref, text }) => ({ ref, text })) })) })}`;
   return { systemPrompt, userPrompt, prompt: `${systemPrompt}\n\n${userPrompt}`, sourceUnits, recallCandidates, recallAtomRefs };
 }
 
@@ -1376,18 +1378,21 @@ export function requeueCancelledMessages(db: RcmDatabase, chatId: string): numbe
   `).run(now(), chatId).changes;
 }
 
-export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string): string[] | null {
+export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string, stored?: StoredSourceCoverage): string[] | null {
   const row = db.prepare("SELECT chat_id,type,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(jobId, workerId) as
     | { chat_id: string; type: string; payload_json: string }
     | undefined;
   if (!row) return null;
   const payload = JSON.parse(row.payload_json) as { sourceMessageIds: string[]; regenerationRunId?: string; pipelineStage?: string; pipelineStageUpdatedAt?: number; validatedExtractionCheckpoint?: unknown; validatedPreReconciliationCheckpoint?: unknown };
   db.transaction(() => {
-    const { validatedExtractionCheckpoint: _completedExtraction, validatedPreReconciliationCheckpoint: _completedPreparation, ...retainedPayload } = payload;
+    const resolved = stored && row.type === 'extract' && !payload.regenerationRunId
+      ? completeSourceCoverage(db,row.chat_id,jobId,payload,stored) : payload.sourceMessageIds;
+    const current = JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}).payload_json);
+    const { validatedExtractionCheckpoint: _completedExtraction, validatedPreReconciliationCheckpoint: _completedPreparation, ...retainedPayload } = current;
     const completedPayload = { ...retainedPayload, pipelineStage: "complete", pipelineStageUpdatedAt: now() };
     db.prepare("UPDATE jobs SET status='done',payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(JSON.stringify(completedPayload), now(), jobId);
     const mark = db.prepare("UPDATE messages SET extraction_state=? WHERE chat_id=? AND message_id=?");
-    if (!payload.regenerationRunId && row.type !== "social_backfill" && row.type !== "audit_retry") for (const id of payload.sourceMessageIds) mark.run(row.type === "episode" ? "encapsulated" : "done", row.chat_id, id);
+    if (!payload.regenerationRunId && row.type !== "social_backfill" && row.type !== "audit_retry") for (const id of resolved) mark.run(row.type === "episode" ? "encapsulated" : "done", row.chat_id, id);
   })();
   return payload.sourceMessageIds;
 }
@@ -1395,6 +1400,7 @@ export function markJobComplete(db: RcmDatabase, jobId: string, workerId: string
 /** List consumers need progress, never extraction prompts, sources or staged output. */
 export function projectJobListPayload(payload: Record<string, unknown>, kind?: string): Record<string, unknown> {
   const projected = Object.fromEntries([
+    "sourceCoverage", "coverageRetry", "coverageParentJobId",
     "sourceRecovery", "sourceRecoveryMetadata", "pipelineStage", "pipelineManualRetry", "pipelineRetryAttempt", "llmCallStats", "llmUsage", "llmCallDiagnostics",
     "backfillRunId", "operationStage", "operationStageOrdinal", "operationStageTotal", "modelResponseDiagnostic", "candidateStatus", "seedResolutionDrops", "stateObservationDrops", "progressSent", "progressReturned", "progressApplied", "progressDrops", "cacheResetDiagnostic", "auditAdditionDrops", "smallReviewCount",
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));

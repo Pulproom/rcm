@@ -1,4 +1,4 @@
-import { isEndedPromiseStatus } from "./promise-recency.js";
+import { isEndedPromiseStatus, promiseFirstMade, type PromiseFirstMade } from "./promise-recency.js";
 import { EVERYONE_HOLDER, itemAccessKnowledge, intersectAccessKnowledge } from "./item-access.js";
 import { knownByLabels } from "./item-access.js";
 import { createHash } from "node:crypto";
@@ -22,6 +22,7 @@ export interface StateEvidence {
   updatedRevision?: number;
   updatedOrdinal?: number;
   promiseStatus?: string;
+  firstMade?: PromiseFirstMade;
   promisePinned?: boolean;
   promiseRecent?: boolean;
   due?: string;
@@ -81,6 +82,7 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
   };
   const recordRejection = (kind: string, id: string, reason: string): void => trace?.record(perspective, { id: `${kind}:${id}`, kind }, "not_collected", { reason });
   const rejected = (kind: string, id: string, reason: string): void => { pending.push(() => recordRejection(kind, id, reason)); };
+  const origins=promiseFirstMade(db,chatId);
   const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json,story_time_normalized FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
   const add = (kind: string, row: any, text: string, holders: string[], subjects: string[], current: boolean, evidence = parse(row.evidence_json), stateKind?: StateKind, automatic?: StateEvidence["automatic"]) => {
     const corrected=row.user_edit_ordinal != null || row.userEdited===true;
@@ -104,7 +106,7 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
         updatedRevision: row.updated_revision ?? row.updatedRevision ?? row.valid_from_revision ?? row.created_revision,
         updatedOrdinal: Math.max(row.user_edit_ordinal ?? row.userEditOrdinal ?? -1, row.source_end_ordinal ?? row.valid_from_ordinal ?? -1,
           ...ids.map(id => sources.get(id)?.ordinal ?? -1)),
-        ...(kind === "promise" ? { promiseStatus: row.status, promisePinned: row.pinned === 1 && (row.status === "open" || isEndedPromiseStatus(row.status)),
+        ...(kind === "promise" ? { firstMade: origins.get(row.id), promiseStatus: row.status, promisePinned: row.pinned === 1 && (row.status === "open" || isEndedPromiseStatus(row.status)),
           promiseRecent: isEndedPromiseStatus(row.status) && row.ended_at_turn != null && turn >= row.ended_at_turn && turn < row.recency_until_turn, due: row.scheduled_for ?? undefined } : {}),
         ...(accessKind?{knownByLabels:knownByLabels(db,chatId,accessKind,String(row.id),item.holders)}:{}) });
     });

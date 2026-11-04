@@ -6,6 +6,7 @@ import { makePrepareRequest, readCurrentContext } from "./context.js";
 
 export function lineageFailureMessage(error: unknown): string {
   const message = String(error);
+  if (message.includes('SOURCE_SNAPSHOT_') || message.includes('HOST_SOURCE_')) return '전체 원문을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.';
   if (message.includes("TARGET_MEMORY_WORK_ACTIVE") || message.includes("Queued or active memory work must finish first")) return "지금 이 채팅의 기억을 정리하는 중이라, 끝난 뒤에 가져올 수 있어요.";
   if (message.includes("SOURCE_MEMORY_WORK_PENDING")) return "원본 채팅의 기억을 정리하고 있어요. 작업이 끝난 뒤에 가져와 주세요.";
   if (message.includes("PREVIEW_STALE") || message.includes("LINEAGE_PROBE_STALE")) return "확인하는 동안 채팅이나 작업 상태가 바뀌었어요. 다시 기억 가져오기를 눌러 확인해 주세요.";
@@ -20,14 +21,19 @@ export function lineageFailureMessage(error: unknown): string {
 }
 
 export function needsOpenedChatResolution(state: RuntimeState, calibration: { status: string; locked?: boolean } | undefined, lineage: ChatLineageStatus | undefined): boolean {
-  return Boolean(state.current) && !calibration?.locked && lineage?.status === "none"
+  return Boolean(state.current) && !state.current?.hostIdentity && !calibration?.locked && lineage?.status === "none"
     && currentLineageOperation(state)?.status !== "failed"
     && ["unseeded", "awaiting_setup", "queued", "awaiting_confirmation", "failed", "ready", "skipped"].includes(calibration?.status ?? "")
     && (state.chatOpen?.key !== `${state.settings.serverUrl}\0${state.current!.chatId}` || !state.chatOpen.resolved);
 }
 
 export function currentLineageOperation(state: RuntimeState): RuntimeState["lineageOperation"] {
-  return state.lineageOperation?.chatId === state.current?.chatId ? state.lineageOperation : undefined;
+  return state.lineageOperation?.chatId === state.current?.chatId
+    && (!state.lineageOperation?.serverUrl || state.lineageOperation.serverUrl === state.settings.serverUrl) ? state.lineageOperation : undefined;
+}
+
+export function hasFreshChatStatus(state: RuntimeState): boolean {
+  return !state.statusStale && state.statusScope?.chatId === state.current?.chatId && state.statusScope?.serverUrl === state.settings.serverUrl;
 }
 
 type LineageResult = { lineage: ChatLineageStatus; memoryLanguage?: MemoryLanguage; initialCalibration?: NonNullable<RuntimeState["statusSummary"]>["initialCalibration"] };
@@ -37,10 +43,11 @@ export function reconcileLineageOperation(state: RuntimeState, chatId: string, l
   const operation = currentLineageOperation(state);
   if (!operation || operation.chatId !== chatId || operation.status !== 'failed' || !lineage) return;
   const previous = operation.previousLineage;
-  const completed = operation.kind === 'open' ? lineage.status !== 'none'
+  const completed = operation.kind === 'open' ? true
     : lineage.status === 'inherited' && lineage.parentChatId === operation.parentChatId
       && (previous?.status !== 'inherited' || (lineage.appliedAt ?? 0) > (previous.appliedAt ?? 0));
   if (completed) {
+    if (operation.kind === 'open') state.chatOpen = { key: `${state.settings.serverUrl}\0${chatId}`, resolved: true };
     state.lineageOperation = undefined;
     if (operation.kind !== 'transfer' && lineage.status === 'inherited' && lineage.parentChatId) {
       void inheritLineageSettings(state,chatId,lineage.parentChatId);
@@ -50,6 +57,9 @@ export function reconcileLineageOperation(state: RuntimeState, chatId: string, l
 
 export function syncLineageActivity(state: RuntimeState, chatId: string, lineage: ChatLineageStatus, initialCalibration?: LineageResult["initialCalibration"]): void {
   if (state.current?.chatId !== chatId) return;
+  state.statusScope = { chatId, serverUrl: state.settings.serverUrl };
+  state.statusStale = false;
+  if (state.current.hostIdentity && ['choice_required', 'ambiguous'].includes(lineage.status)) lineage = { status: 'none' };
   reconcileLineageOperation(state,chatId,lineage);
   state.statusSummary = {
     ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }),
@@ -63,12 +73,13 @@ export function syncLineageActivity(state: RuntimeState, chatId: string, lineage
 /** Publish the mutation itself; dashboard refresh and the next poll are observers. */
 export async function runLineageOperation(state: RuntimeState, chatId: string, kind: "open" | "select" | "transfer", action: () => Promise<LineageResult>, parentChatId?: string): Promise<void> {
   if (currentLineageOperation(state)?.status === "running") return;
-  const operation: NonNullable<RuntimeState["lineageOperation"]> = { chatId, kind, status: "running", previousLineage:state.statusSummary?.lineage, ...(parentChatId ? { parentChatId } : {}) };
+  const serverUrl = state.settings.serverUrl;
+  const operation: NonNullable<RuntimeState["lineageOperation"]> = { chatId, serverUrl, kind, status: "running", previousLineage:state.statusSummary?.lineage, ...(parentChatId ? { parentChatId } : {}) };
   state.lineageOperation = operation;
   state.publishActivity?.();
   try {
     const result = await action();
-    if (state.current?.chatId !== chatId || state.lineageOperation !== operation) return;
+    if (state.current?.chatId !== chatId || state.settings.serverUrl !== serverUrl || state.lineageOperation !== operation) return;
     state.lineageOperation = undefined;
     syncLineageActivity(state, chatId, result.lineage, result.initialCalibration);
     if (kind !== 'transfer' && result.lineage.status === "inherited" && result.lineage.parentChatId) {
@@ -76,8 +87,9 @@ export async function runLineageOperation(state: RuntimeState, chatId: string, k
     }
   } catch (error) {
     addLog(state.logs, "error", `Lineage operation failed: ${String(error)}`);
-    if (state.current?.chatId === chatId && state.lineageOperation === operation) {
-      state.lineageOperation = { ...operation, status: "failed", error: lineageFailureMessage(error) };
+    if (state.current?.chatId === chatId && state.settings.serverUrl === serverUrl && state.lineageOperation === operation) {
+      state.statusStale = true;
+      state.lineageOperation = { ...operation, status: "failed", error: kind === 'open' ? '채팅 상태를 확인하지 못했어요. 연결 후 다시 확인해 주세요.' : lineageFailureMessage(error) };
       state.publishActivity?.();
     }
     throw error;
@@ -90,17 +102,24 @@ export async function resolveOpenedChat(state: RuntimeState, client: ServerClien
   if (!chatId) return;
   const key = `${state.settings.serverUrl}\0${chatId}`;
   if (state.chatOpen?.key === key) return state.chatOpen.pending;
+  let sourceHeld = false;
   const pending = runLineageOperation(state, chatId, "open", async () => {
     const context = await readCurrentContext(state);
-    if (context.chatId !== chatId) throw new Error("Chat changed before lineage resolution");
-    return client.request<LineageResult>(
+    if (context.chatId !== chatId || key !== `${state.settings.serverUrl}\0${state.current?.chatId}`) throw new Error("Chat changed before lineage resolution");
+    const result = await client.request<LineageResult & { sourceChangeHeld?: string }>(
       `/v1/chats/${encodeURIComponent(chatId)}/open`, {
         method: "POST", body: JSON.stringify({ ...makePrepareRequest(context, 0, { deferExtraction: true }), workerId: state.workerId }),
       }, 60_000);
+    sourceHeld = Boolean(result.sourceChangeHeld);
+    return result;
   });
   const opening: NonNullable<RuntimeState["chatOpen"]> = { key, pending };
   state.chatOpen = opening;
-  try { await pending; opening.resolved = true; }
+  try {
+    await pending;
+    if (sourceHeld) { if (state.chatOpen === opening) state.chatOpen = undefined; }
+    else opening.resolved = true;
+  }
   catch (error) { if (state.chatOpen === opening) state.chatOpen = undefined; throw error; }
 }
 

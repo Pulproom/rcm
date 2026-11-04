@@ -2,6 +2,7 @@ import { installSetupStorageGuards, migrateSetupStorage } from "./setup-storage.
 import { migrateTranslationKeys } from "./translation-cache.js";
 import Database from "better-sqlite3";
 import { migrateMemoryGaps } from './gap-recovery.js';
+import { repairInheritedRevisions } from './lineage-revisions.js';
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
@@ -1095,6 +1096,7 @@ export function openDatabase(path: string): DatabaseHandle {
     db.prepare("INSERT OR IGNORE INTO server_meta(key,value) VALUES('instance_id',?)").run(randomUUID());
   }
   migrateTranslationKeys(db);
+  repairInheritedRevisions(db);
   let currentVectorEnabled = false;
   try {
     sqliteVec.load(db);

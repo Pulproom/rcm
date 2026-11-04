@@ -3,7 +3,8 @@ import { applyProgressDone, ensurePairProgress } from "./pair-progress.js";
 import { refreshDetailFts } from './memory-detail-edits.js';
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
 import { applySeedResolutions, recordSeedResolutionDrops } from "./story-seeds.js";
-import { activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope } from "./social-relations.js";
+import { activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
+import { recordReconciliationReview } from "./reconciliation.js";
 import { storeSourcePassages } from "./source-evidence.js";
 import { randomUUID } from "node:crypto";
 import { invalidateStorySupports, markStorySupportsInvalid } from "./story-spine.js";
@@ -350,7 +351,9 @@ export function validateExtractionSources(
     if (!validMemoryKey(key)) errors.push(`memory ${memory.key} has an unknown association: ${key}`);
   }));
   result.assertions.forEach((assertion) => {
-    if (!validMemoryKey(assertion.validFromMemoryKey)) errors.push(`assertion ${assertion.subject}.${assertion.predicate} has an unknown memory key`);
+    // Social support is resolved after persistence and held for review when
+    // unavailable. Do not fail the batch before that review boundary.
+    if (!validMemoryKey(assertion.validFromMemoryKey) && assertion.validFromMemoryKey !== assertion.socialRelation?.memoryKey) errors.push(`assertion ${assertion.subject}.${assertion.predicate} has an unknown memory key`);
   });
   result.promises.forEach((promise) => {
     if (!validMemoryKey(promise.memoryKey)) errors.push(`promise ${promise.key} has an unknown memory key`);
@@ -619,7 +622,21 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       // directed reverse pairs may express asymmetric facts. Claims remain reviewable.
       if (assertion.changeType !== "claim" && assertion.socialRelation
         && activeRelations.some(row => isReverseMutualSocialRelation(row, assertion.subject, assertion.socialRelation!))) continue;
-      const socialRelation = assertion.socialRelation ? JSON.stringify(resolveSocialRelation(db, chatId, assertion.socialRelation, memoryByKey)) : null;
+      const resolvedRelation = assertion.socialRelation ? resolveSocialRelation(db, chatId, assertion.socialRelation, memoryByKey) : undefined;
+      if (assertion.socialRelation && !resolvedRelation) {
+        // Validate after detail persistence: user corrections can hide or retain
+        // support under a different key even when the model's draft was valid.
+        // Explicit review application must leave the original review pending.
+        if (userInitiated) throw new Error(UNSUPPORTED_SOCIAL_RELATION);
+        recordReconciliationReview(db, chatId, sourceJobId, assertion.evidence.map(item => item.messageId), {
+          itemRef: `social-relation:${assertion.subject}:${assertion.predicate}`, candidates: [],
+          observation: { kind: "world_fact", key: assertion.predicate, subject: assertion.subject, predicateHint: assertion.predicate,
+            value: assertion.value, stateKind: "condition", confidence: assertion.confidence, evidence: assertion.evidence,
+            retention: assertion.retention ?? "arc", socialRelation: assertion.socialRelation },
+        }, undefined, UNSUPPORTED_SOCIAL_RELATION);
+        continue;
+      }
+      const socialRelation = resolvedRelation ? JSON.stringify(resolvedRelation) : null;
       const stateKind = assertion.socialRelation ? "condition" : assertion.stateKind ?? "condition";
       const firstEvidenceId = assertion.evidence[0]?.messageId;
       const evidenceMessage = firstEvidenceId

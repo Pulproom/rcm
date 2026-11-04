@@ -1,6 +1,6 @@
 import { ModelContentValidationError } from "@rcm/shared";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
-import { parseSocialRelation, sameSocialRelationScope } from "./social-relations.js";
+import { parseSocialRelation, sameSocialRelationScope, resolveSocialRelation, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
 import { transitionEvidenceJson, canAutomaticallyChange, committedEditOrdinal, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -22,7 +22,7 @@ import { buildEntityIdentityResolver, type ResolvedEntityIdentity } from "./enti
 
 type ObservationKind = StateObservation["kind"];
 interface Candidate { id: string; kind: ObservationKind; value: Record<string, unknown>; immutable?: boolean }
-export interface CandidateEntry { itemRef: string; observation: StateObservation; candidates: Candidate[] }
+export interface CandidateEntry { itemRef: string; observation: StateObservation; candidates: Candidate[]; reviewReason?: string }
 export const UNSUPPLIED_STATE_REVIEW_REASON = 'Same-property prior candidates were not supplied to the state model; review before creating concurrent state';
 
 export const normalizePredicate = normalizeLedgerPredicate;
@@ -59,7 +59,7 @@ function candidatesFor(db: RcmDatabase, chatId: string, observation: StateObserv
     const subjects = resolve(observation.subject).variants;
     return (db.prepare(`SELECT *
       FROM assertions WHERE chat_id=? AND subject COLLATE NOCASE IN (${placeholders(subjects)}) AND valid_to_revision IS NULL
-      ORDER BY valid_from_revision,created_at`).all(chatId, ...subjects) as Array<Record<string, unknown>>).filter(row => sameSocialRelationScope(row.social_relation_json, observation.socialRelation)).map((row) => ({
+      ORDER BY valid_from_revision,created_at`).all(chatId, ...subjects) as Array<Record<string, unknown>>).filter(row => sameSocialRelationScope(row.social_relation_json, observation.socialRelation, resolve)).map((row) => ({
         id: String(row.id), kind: observation.kind, value: { ...row, evidence: parseEvidence(row.evidence_json) },
         immutable: !canAutomaticallyChange(db,chatId,row,observation.evidence),
       }));
@@ -100,9 +100,30 @@ export function prepareReconciliation(db: RcmDatabase, chatId: string, draft: Ex
     if (observation.kind === "character_belief") return { ...observation, holder: resolve(observation.holder).canonical, subject: resolve(observation.subject).canonical };
     return { ...observation, promisor: resolve(observation.promisor).canonical, promisee: resolve(observation.promisee).canonical };
   };
-  const all = draft.stateObservations.map(canonicalize).map((observation) => ({ itemRef: `observation:${observation.key}`, observation, candidates: candidatesFor(db, chatId, observation, resolve) }));
-  const candidates = all.filter((entry) => entry.candidates.length > 0);
-  const local = all.filter((entry) => entry.candidates.length === 0).map((entry) => entry.observation);
+  const all: CandidateEntry[] = draft.stateObservations.map(canonicalize).map((observation) => ({ itemRef: `observation:${observation.key}`, observation, candidates: candidatesFor(db, chatId, observation, resolve) }));
+  for (const entry of all) {
+    if (entry.observation.kind !== 'world_fact' || !entry.observation.socialRelation) continue;
+    const relation=entry.observation.socialRelation;
+    const parent = draft.memories.find(memory => memory.key === relation.memoryKey);
+    const supported = parent ? relation.detailKeys.every(key => parent.details?.some(detail => detail.key === key))
+      : !!resolveSocialRelation(db, chatId, relation, new Map());
+    if (!supported) {
+      entry.reviewReason = UNSUPPORTED_SOCIAL_RELATION;
+    }
+    const subjects=resolve(entry.observation.subject).variants;
+    const rows=db.prepare(`SELECT * FROM assertions WHERE chat_id=? AND subject COLLATE NOCASE IN (${placeholders(subjects)}) AND valid_to_revision IS NULL AND social_relation_json IS NOT NULL`).all(chatId,...subjects) as Array<Record<string,unknown>>;
+    const ambiguous=resolve(relation.target).ambiguous;
+    const uncertain=rows.filter(row=>{
+      const stored=parseSocialRelation(row.social_relation_json)!;
+      return stored.kind===relation.kind && stored.direction===relation.direction && (ambiguous || resolve(stored.target).ambiguous);
+    });
+    if (ambiguous || uncertain.length) {
+      entry.reviewReason='Ambiguous social relation target; select an unambiguous entity before applying state';
+      entry.candidates=uncertain.map(row=>({id:String(row.id),kind:entry.observation.kind,value:{...row,evidence:parseEvidence(row.evidence_json)},immutable:!canAutomaticallyChange(db,chatId,row,entry.observation.evidence)}));
+    }
+  }
+  const candidates = all.filter((entry) => entry.candidates.length > 0 || entry.reviewReason);
+  const local = all.filter((entry) => entry.candidates.length === 0 && !entry.reviewReason).map((entry) => entry.observation);
   const systemPrompt = `${ROLEPLAY_ARCHIVE_FRAMING}
 
 You reconcile source-grounded roleplay state observations with a bounded canonical ledger, comparing the same property even if wording changed. Return strict JSON only as {"decisions":[{"itemRef":"observation:...","action":"create|reinforce|supersede|end|coexist|dispute|ignore","targetIds":["allowed existing id"],"reason":"short reason"}]}. Return exactly one decision for every supplied itemRef. Use only supplied target IDs. Never target immutable=true. create, coexist and ignore use no target; reinforce, supersede, end and dispute require a target. Treat each observation as a candidate interpretation. Read cited evidence and preserve statements, beliefs, attempts and completed events as different things. Ignore unsupported interpretations. A passed deadline or silence never proves a world fact, belief or promise ended. Event memories are preserved separately.\n${STATE_CLASSIFICATION_GUIDANCE}\n${STORY_TIME_GUIDANCE}\n${USER_CORRECTION_GUIDANCE}`;
@@ -246,6 +267,10 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
   let autoResolved = prepared.local.length;
   for (const entry of prepared.items) {
     const decision = decisions.get(entry.itemRef)!;
+    if (entry.reviewReason) {
+      recordReconciliationReview(db,chatId,jobId,sourceIds,entry,decision,entry.reviewReason);
+      pending++; continue;
+    }
     const targets = decision.targetIds.map((id) => entry.candidates.find((candidate) => candidate.id === id)).filter(Boolean) as Candidate[];
     if (targets.length !== decision.targetIds.length) throw new ModelContentValidationError(`Model selected a target outside the allowed candidates for ${entry.itemRef}`);
     const needsTarget = ["reinforce", "supersede", "end", "dispute"].includes(decision.action);

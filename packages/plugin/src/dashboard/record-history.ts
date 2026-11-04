@@ -55,7 +55,7 @@ const escapeHtml = (value: unknown): string => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
-export const assertionChainKey = (item: any): string => `assertion:${norm(item?.subject)}|${norm(item?.predicate)}`;
+export const assertionChainKey = (item: any): string => `assertion:${norm(item?.subject)}|${norm(item?.predicate)}${item?.socialRelation ? `|${JSON.stringify([item.socialRelation.kind, item.socialRelation.direction, norm(item.socialRelation.target)])}` : ""}`;
 export const beliefChainKey = (item: any): string => `belief:${norm(item?.holder)}|${norm(item?.subject)}|${norm(item?.predicate)}`;
 export const promiseChainKey = (item: any): string => `promise:${String(item?.promise_key || item?.promise_id || item?.id || "")}`;
 export const chainKeyFor = (kind: RecordKind, item: any): string => kind === "assertion" ? assertionChainKey(item) : kind === "belief" ? beliefChainKey(item) : promiseChainKey(item);
@@ -72,7 +72,7 @@ const stateType = (item: any): RecordType => {
 const newestFirst = (left: RecordVersion, right: RecordVersion): number =>
   (right.from ?? -1) - (left.from ?? -1) || Number(right.item?.created_at ?? 0) - Number(left.item?.created_at ?? 0);
 
-/** Every state, belief and promise chain of the chat, keyed by `chainKeyFor`. Social relations live on the relationship page. */
+/** Every state, belief and promise chain, including the facts also shown on person/pair pages. */
 export function buildRecordChains(data: Pick<DashboardData, "assertions" | "endedAssertions" | "beliefs" | "endedBeliefs" | "promises" | "promiseHistory"> & { userDeletedBeliefs?: any[] }): Map<string, RecordChain> {
   const chains = new Map<string, RecordChain>();
   const chainFor = (key: string, kind: RecordKind, type: RecordType, owner: string): RecordChain => {
@@ -116,7 +116,7 @@ export function buildRecordChains(data: Pick<DashboardData, "assertions" | "ende
     }
   };
   const liveAssertions = new Set(data.assertions ?? []);
-  addTracks("assertion", [...(data.assertions ?? []), ...(data.endedAssertions ?? [])].filter((item) => !item?.socialRelation).map((item) => {
+  addTracks("assertion", [...(data.assertions ?? []), ...(data.endedAssertions ?? [])].map((item) => {
     const live = liveAssertions.has(item);
     return { item, live, version: {
       id: String(item?.id ?? ""), item, text: String(item?.value ?? ""),

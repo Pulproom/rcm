@@ -168,7 +168,7 @@ export async function readSetupHost(): Promise<{ character: any; chat: any; chat
   const character = await risuai.getCharacter();
   const chatIndex = await risuai.getCurrentChatIndex();
   const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
-  return { character, chat, chatId: chat ? String(chat.id ?? `${character?.chaId ?? character?.id ?? characterIndex}:${chatIndex}`) : "" };
+  return { character, chat, chatId: String(chat?.id || `${character?.chaId ?? character?.id ?? characterIndex}:${chatIndex}`) };
 }
 async function readSetupSources(chatId: string, unparsed: boolean): Promise<SetupSource[]> {
   const host = await readSetupHost();

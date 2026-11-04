@@ -192,6 +192,8 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
     return result;
   };
   const walk = (input: unknown, path: string): unknown => {
+    // This product-owned metadata names messages, never source evidence.
+    if (path === 'draft.skippedSource') return structuredClone(input);
     if (Array.isArray(input)) {
       return input.flatMap((item, index) => {
       // A common structured-output slip is to copy the source-unit field name
@@ -369,6 +371,9 @@ export function inspectSourceReferences(draft: unknown, messages: Array<{ id: st
     issues.push({ path: `sourceFieldReviews[${index}]`, blocking: false, messageId: review.messageId, quote: review.quote, reason: "access_unverified" });
   }
   const inspect = (value: unknown, path: string, blocking: boolean): void => {
+    // Model-declared skips are completion metadata, not content evidence. The
+    // server drops invalid IDs/keys after storage without requesting repair.
+    if (path === 'skippedSource') return;
     if (Array.isArray(value)) { value.forEach((child, index) => inspect(child, `${path}[${index}]`, blocking)); return; }
     if (!value || typeof value !== "object") return;
     const item = value as Record<string, unknown>;

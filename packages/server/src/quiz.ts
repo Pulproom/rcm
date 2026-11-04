@@ -1,6 +1,6 @@
 import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { createHash, randomUUID } from "node:crypto";
-import { acceptQuizItems, compareStoryMemories, estimateTokens, measureAuxiliaryPrompt, isScene, sceneNumbers, QUIZ_BATCH_SIZE, quizDateLabel, QUIZ_MIX, QUIZ_REFILL_BELOW,
+import { acceptQuizItems, orderStoryMemories, estimateTokens, measureAuxiliaryPrompt, isScene, sceneNumbers, QUIZ_BATCH_SIZE, quizDateLabel, QUIZ_MIX, QUIZ_REFILL_BELOW,
   type QuizRegenerateResponse, type QuizStatus, type LeasedJob, type MemoryLanguage, type RpProfile, type QuizJobMeta, type QuizAnswerResponse, type QuizDraftItem, type QuizNextResponse, type QuizQuestion, type QuizStats } from "@rcm/shared";
 import { now, type RcmDatabase } from "./db.js";
 import { auxiliaryModelReady } from "./server-llm.js";
@@ -30,12 +30,18 @@ const PLAIN_CAP = 900;
 const RICH_CAP = 3_200;
 
 export function quizSceneRows(db: RcmDatabase, chatId: string): QuizSceneRow[] {
-  const rows = db.prepare(`SELECT m.id,m.memory_key,m.type,m.title,m.content,m.story_time,m.locations_json,m.participants_json,m.landmark,m.capsule_parent_id,m.created_revision,m.created_at,
+  return allQuizSceneRows(db, chatId).filter(row => row.active === 1);
+}
+
+// Inactive scenes still own dashboard numbers and the day's precision. Filter
+// quiz material only after ordering the same complete scene set as the UI.
+function allQuizSceneRows(db: RcmDatabase, chatId: string): Array<QuizSceneRow & { active: number }> {
+  const rows = db.prepare(`SELECT m.id,m.memory_key,m.type,m.title,m.content,m.story_time,m.locations_json,m.participants_json,m.landmark,m.capsule_parent_id,m.created_revision,m.created_at,m.active,
       (SELECT json_group_array(json_object('id',id,'text',text,'hidden',user_hidden)) FROM
         (SELECT id,text,user_hidden FROM memory_details WHERE chat_id=m.chat_id AND memory_id=m.id AND (user_edited=1 OR user_hidden=1) ORDER BY id)) AS lineCorrections,
       (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal
-    FROM memories m WHERE m.chat_id=? AND m.active=1`).all(chatId) as QuizSceneRow[];
-  return rows.filter(isScene).sort(compareStoryMemories);
+    FROM memories m WHERE m.chat_id=?`).all(chatId) as Array<QuizSceneRow & { active: number }>;
+  return orderStoryMemories(rows.filter(isScene));
 }
 
 interface QuizStateRow {
@@ -422,9 +428,9 @@ export function answerQuiz(db: RcmDatabase, chatId: string, itemId: string, chos
       item.chosen_index = chosenIndex;
       item.correct = correct;
     }
-    const memory = db.prepare("SELECT id,title,story_time,locations_json FROM memories WHERE chat_id=? AND id=?")
-      .get(chatId, item.memory_id) as Pick<QuizSceneRow, "id" | "title" | "story_time" | "locations_json"> | undefined;
-    const sceneNumber = memory ? sceneNumbers(quizSceneRows(db, chatId)).get(memory.id) : undefined;
+    const memory = db.prepare("SELECT id,title,story_time,locations_json,active FROM memories WHERE chat_id=? AND id=?")
+      .get(chatId, item.memory_id) as (Pick<QuizSceneRow, "id" | "title" | "story_time" | "locations_json"> & { active: number }) | undefined;
+    const sceneNumber = memory?.active === 1 ? sceneNumbers(allQuizSceneRows(db, chatId)).get(memory.id) : undefined;
     const location = memory ? (JSON.parse(memory.locations_json) as string[])[0] : undefined;
     return { correct: item.correct === 1, chosenIndex: item.chosen_index!, answerIndex: item.answer_index,
       explanation: item.explanation, ...(item.quote !== null ? { quote: item.quote } : {}),

@@ -1,8 +1,8 @@
-import { formatStoryTime, compareParsedStoryTimes, parseStoryTime } from "@rcm/shared";
+import { formatStoryTime, compareParsedStoryTimes, parseStoryTime, formatPromiseTime, type PromiseFirstMade } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
 import type { TranslationDisplay } from "../types.js";
-import { entityProminence } from "./pairs.js";
+import { entityProminence, pairKey } from "./pairs.js";
 import { sceneLocator, type SceneRef } from "./scenes.js";
 import { btn, empty, fold, icon, menu, type MenuItem } from "./film/ui.js";
 import { assertionChainKey, buildRecordChains, liveChainKey, renderRecordDetail, type RecordChain } from "./record-history.js";
@@ -29,12 +29,14 @@ export type NowRow = {
   type: "promise" | "belief" | "condition" | "goal" | "secret";
   text: string;
   subject?: string;
+  socialRelation?: { kind: string; target: string };
   predicate?: string;
   holder?: string;
   polarity?: string;
   promisor?: string;
   promisee?: string;
   scheduledFor?: string;
+  firstMade?: PromiseFirstMade;
   /** Promise kept in the main-model packet whatever its status ("계속 기억"). */
   pinned?: boolean;
   lastMention: { ordinal: number | null; storyTime: string | null };
@@ -143,6 +145,7 @@ export function buildNowPage(
       rows.push({
         id: chain.kind === "promise" ? String(item?.promise_id ?? item?.id ?? "") : top.id, key: chain.key, changes: chain.versions.length - 1, textKey: top.textKey, endedAt: chain.endedAt, deleted: Boolean(top.deleted),
         type: chain.type, text: top.text, subject: String(item?.subject ?? ""), predicate: String(item?.predicate ?? ""),
+        socialRelation: item?.socialRelation,
         holder: String(item?.holder ?? ""), polarity: String(item?.polarity ?? ""), promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""),
         lastMention: { ordinal: ended, storyTime: null }, overdue: false, owner: owner.owner, ownerRank: owner.ownerRank,
         pinned: chain.kind === "promise" && pinnedPromises.has(String(item?.promise_id ?? item?.id ?? "")),
@@ -155,7 +158,7 @@ export function buildNowPage(
     rows.push({
       id: String(item?.id ?? item?.promise_key ?? ""), key: liveChainKey(chains, "promise", item), changes: changes(liveChainKey(chains, "promise", item)), type: "promise", text: String(item?.content ?? ""),
       promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""),
-      scheduledFor: String(item?.scheduled_for ?? ""), pinned: Boolean(item?.pinned),
+      firstMade:item.firstMade, scheduledFor: String(item?.scheduled_for ?? ""), pinned: Boolean(item?.pinned),
       lastMention: lastMention(item), overdue: isPromiseOverdue(String(item?.scheduled_for ?? "").trim() || null, storyTime),
       owner: owner.owner, ownerRank: owner.ownerRank,
     });
@@ -169,7 +172,6 @@ export function buildNowPage(
     });
   }
   for (const item of data.assertions ?? []) {
-    if (item?.socialRelation) continue;
     const owner = ownerFor(item?.subject);
     const type = FILTERS.includes(item?.stateKind) && item.stateKind !== "all" && item.stateKind !== "promise" && item.stateKind !== "belief"
       ? item.stateKind as "condition" | "goal" | "secret"
@@ -177,6 +179,7 @@ export function buildNowPage(
     rows.push({
       id: String(item?.id ?? ""), key: liveChainKey(chains, "assertion", item), changes: changes(liveChainKey(chains, "assertion", item)), type, text: String(item?.value ?? ""),
       subject: String(item?.subject ?? ""), predicate: String(item?.predicate ?? ""),
+      socialRelation: item?.socialRelation,
       lastMention: lastMention(item), overdue: false, owner: owner.owner, ownerRank: owner.ownerRank,
     });
   }
@@ -279,13 +282,18 @@ const renderRow = (
   const endedScene = opts.past && row.endedAt !== undefined && row.endedAt !== null ? opts.sceneAt?.(row.endedAt) ?? null : null;
   const ended = !opts.past ? "" : row.deleted ? "직접 삭제함" : (endedScene?.number !== undefined ? `S#${endedScene.number}에 끝남` : "끝남");
   const changed = row.changes > 0 ? `<span class="chg-n">${icon("clock")}${row.changes}번 바뀜</span>` : "";
-  const meta = [polarity, row.scheduledFor && !opts.past ? `예정 · ${escapeHtml(formatStoryTime(row.scheduledFor))}` : "", opts.past ? escapeHtml(ended) : renderMention(opts.sceneAt?.(row.lastMention.ordinal) ?? null), row.overdue ? '<span class="is-due">예정 시각 지남</span>' : "", row.pinned ? `<span class="nr__pin">${icon("pin")}계속 기억</span>` : "", changed].filter(Boolean).join(" · ");
+  const origin=row.firstMade ? formatPromiseTime(row.firstMade,'ko') : '';
+  const made=origin ? `처음 약속 · ${escapeHtml(origin)}` : '';
+  const relation = !row.socialRelation ? "" : row.socialRelation.kind === "interpersonal"
+    ? btn("관계", { kind: "quiet", action: "open-relationship", data: { key: pairKey(row.subject ?? "", row.socialRelation.target) } })
+    : btn("관계", { kind: "quiet", action: "open-relationship-person", data: { personName: row.subject ?? "" } });
+  const meta = [polarity, made, row.scheduledFor && !opts.past ? `예정 · ${escapeHtml(formatStoryTime(row.scheduledFor))}` : "", opts.past ? escapeHtml(ended) : renderMention(opts.sceneAt?.(row.lastMention.ordinal) ?? null), row.overdue ? '<span class="is-due">예정 시각 지남</span>' : "", row.pinned ? `<span class="nr__pin">${icon("pin")}계속 기억</span>` : "", changed].filter(Boolean).join(" · ");
   // Every row reads the same: kind and who on a small line, then the text, then where it was seen.
   const lead = rowLead(row, owner, translations, display);
   const head = `<span class="nr__k"><b class="nr__kind">${TYPE_LABELS[row.type]}</b>${lead ? ` · ${lead}` : ""}</span>`;
   // A row opens its own record; selecting the open one again closes the reader.
   const what = `<button class="nr__what" type="button" data-action="select-now-record" data-key="${escapeHtml(row.key)}"${opts.selected ? ' aria-current="true"' : ""}>${head}<span class="nr__t">${rowText(row, translations, display)}</span></button>`;
-  return `<div class="nr${row.overdue ? " is-due" : ""}${opts.selected ? " is-selected" : ""}${ring ? " has-ring" : ""}" data-kind="${row.type}">${ring}${what}${meta ? `<span class="nr__m">${meta}</span>` : ""}${verbs}</div>`;
+  return `<div class="nr${row.overdue ? " is-due" : ""}${opts.selected ? " is-selected" : ""}${ring ? " has-ring" : ""}" data-kind="${row.type}">${ring}${what}${meta || relation ? `<span class="nr__m">${[relation, meta].filter(Boolean).join(" · ")}</span>` : ""}${verbs}</div>`;
 };
 
 /** Rows shown before a person's group folds; the most recent mentions come first. */
@@ -361,6 +369,7 @@ function detailActions(chain: RecordChain, data: DashboardData, busy: (row: NowR
   const id = String(live?.id ?? (chain.kind === "promise" ? top?.item?.promise_id ?? top?.item?.id : top?.id) ?? "");
   if (!id) return [];
   const kind = chain.kind;
+  const recordData = { kind, id, ...((live ?? top?.item)?.socialRelation ? { social: "true" } : {}) };
   if (top?.deleted) return [];
   // A finished promise is still a row: it can be corrected or reopened.
   if (!live && kind === "promise" && (data.promises ?? []).some((promise: any) => String(promise?.id) === id)) return [
@@ -375,10 +384,10 @@ function detailActions(chain: RecordChain, data: DashboardData, busy: (row: NowR
       { label: "지켜짐", icon: "check", action: "edit-world", data: { kind, id, status: "kept" }, disabled: promiseBusy },
       { label: "깨짐", icon: "close", action: "edit-world", data: { kind, id, status: "broken" }, disabled: promiseBusy },
     ] : []),
-    { label: "수정", icon: "edit", action: "edit-world", data: { kind, id } },
-    ...(kind === "promise" ? [] : [{ label: "종료", icon: "inactive", action: "end-world", data: { kind, id } }]),
+    { label: "수정", icon: "edit", action: "edit-world", data: recordData },
+    ...(kind === "promise" ? [] : [{ label: "종료", icon: "inactive", action: "end-world", data: recordData }]),
     "sep",
-    { label: "삭제", icon: "delete", action: "delete-world", data: { kind, id }, danger: true },
+    { label: "삭제", icon: "delete", action: "delete-world", data: recordData, danger: true },
   ];
 }
 

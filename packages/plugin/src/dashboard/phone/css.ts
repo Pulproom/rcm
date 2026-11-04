@@ -1665,6 +1665,7 @@ button.say { cursor: pointer; }
 .say__bub.is-empty { font-size: var(--t-meta); color: var(--ink-3); }
 .say.is-mine .say__bub.is-empty { background: var(--fill); color: var(--ink-3); }
 .say__bub b { font-weight: 600; }
+.pair-rel__way { white-space: pre-wrap; font-size: inherit; }
 button.say:hover .say__bub { filter: brightness(.97); }
 
 .meters { padding: 10px 14px 4px; border-radius: 14px; background: var(--screen); }
@@ -1859,9 +1860,6 @@ button.say:hover .say__bub { filter: brightness(.97); }
 .gap-card .noti__acts { width: auto; min-width: 0; }
 .gap-card .gap-progress { flex-basis: 100%; }
 .gap-open { display: block; padding: 0; border: 0; text-align: left; background: none; color: inherit; font: inherit; cursor: pointer; }
-.delivery-switch > i { background: var(--fill); }
-.delivery-switch > i::after { background: #fff; }
-.delivery-switch[aria-checked="true"] > i { background: var(--k-green); }
 `;
 
 export const PHONE_CSS: string = FILM_CSS + PHONE_SKIN_CSS;

@@ -296,8 +296,11 @@ export function completeExtractionJob(
       }
     }
     if (finalValidationErrors.length) throw new ExtractionValidationError(finalValidationErrors);
+    const pendingStateReviews = () => Number((db.prepare("SELECT COUNT(*) n FROM reconciliation_items WHERE job_id=? AND status='pending'").get(jobId) as {n:number}).n);
+    const reviewsBeforeIngest = pendingStateReviews();
     const relationWarnings = ingestExtraction(db, job.chat_id, storedResult, jobId, payload.batchId,
       { sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] });
+    pendingReconciliations += pendingStateReviews() - reviewsBeforeIngest;
     normalizedEpisodic.warnings.push(...relationWarnings);
     recordSeedResolutionDrops(db,jobId,seedResolutionDrops);
     recordStateObservationDrops(db,jobId,stateObservationDrops);
@@ -316,7 +319,8 @@ export function completeExtractionJob(
     applyMemoryRecallObservations(db, job.chat_id, normalized.result.memoryRecallObservations, payload.recallCandidates ?? [], sourceMessageIds, payload.batchId);
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status=?,draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(reconciled.pending ? "pending_review" : "applied", JSON.stringify(recognitionReviewDraft ?? submitted), JSON.stringify(storedResult), audit?.patch ? JSON.stringify(audit.patch) : null, Date.now(), payload.batchId);
     if (job.type !== "social_backfill") lockInitialCalibration(db, job.chat_id);
-    if (!markJobComplete(db, jobId, workerId)) throw new Error("Lease not found while completing extraction");
+    if (!markJobComplete(db, jobId, workerId, {memoryKeys:storedResult.memories.map(memory=>memory.key),
+      memoryScope:payload.batchId ?? payload.retryOfJobId ?? jobId, skippedSource:submitted.skippedSource})) throw new Error("Lease not found while completing extraction");
   })();
   if (payload.regenerationRunId) return { chatId: job.chat_id, warnings: normalizedEpisodic.warnings, pendingReconciliations };
   if (payload.retryOfAuditId && pendingReconciliations === 0) {

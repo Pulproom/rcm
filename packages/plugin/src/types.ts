@@ -118,6 +118,8 @@ export interface CurrentContext {
   sourceMessageTimes?: Array<{ id: string; ordinal: number; time: number }>;
   estimatedSourceTokens: number;
   snapshotScope: "full" | "tail";
+  hostIdentity?: import('@rcm/shared').TurnPrepareRequest['hostIdentity'];
+  sourceSnapshot?: import('@rcm/shared').TurnPrepareRequest['sourceSnapshot'];
   snapshot: Array<{ id: string; role: "user" | "assistant" | "system"; content: string; ordinal: number; time?: number; generationId?: string; sourceKind: "risu_display" | "yumi_model"; disabled: boolean }>;
   messageVisibility?: Array<{ id: string; ordinal: number; visibility: MessageHostVisibility; role?: "user" | "assistant" | "system"; contentHash?: string }>;
   lineageHint?: ChatLineageHint;
@@ -147,8 +149,10 @@ export interface RuntimeState {
   /** Identity already read by normal context sync; diagnostics only verify selection indices. */
   hostChatIdentity?: { characterIndex: number; chatIndex: number; chatId: string };
   lastPrepare?: TurnPrepareResponse;
-  chatOpen?: { key: string; pending: Promise<void>; resolved?: boolean };
-  lineageOperation?: { chatId: string; kind: "open" | "select" | "transfer"; status: "running" | "failed"; error?: string; parentChatId?: string; previousLineage?: import("@rcm/shared").ChatLineageStatus };
+  chatOpen?: { key: string; pending?: Promise<void>; resolved?: boolean };
+  lineageOperation?: { chatId: string; serverUrl?: string; kind: "open" | "select" | "transfer"; status: "running" | "failed"; error?: string; parentChatId?: string; previousLineage?: import("@rcm/shared").ChatLineageStatus };
+  statusScope?: { chatId: string; serverUrl: string };
+  statusStale?: boolean;
   lastResolvedSetup?: { chatId: string; projection: ResolvedSetupProjection };
   activeMemoryLanguages?: Record<string, MemoryLanguage>;
   perspectiveStatus?: { perspectives: string[]; unresolved: boolean; omissionReason?: TurnPrepareResponse["omissionReason"] };

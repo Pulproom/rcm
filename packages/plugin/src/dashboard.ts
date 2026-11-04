@@ -1,3 +1,4 @@
+import { cachedSourceReceipt } from './api-client.js';
 import { MAX_MEMORY_BUDGET } from "@rcm/shared";
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { errorMessage, formatServerError, ServerConnectionError, ServerRequestError } from "./server-errors.js";
@@ -33,7 +34,7 @@ import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
 declare const __RCM_DISTRIBUTION__: boolean;
 import { ANNIVERSARY_KINDS, LANDMARK_KIND_VALUES, StoredLandmarkKindSchema as LandmarkKindSchema, RelationshipProjectionItemSchema, RCM_API_REVISION, RCM_PRODUCT_VERSION, RCM_PLUGIN_VERSION, compareNumericVersions, formatStoryTime, parseStoryTime, estimateTokens, joinDialogueSpans, validateCanonicalRemovalRule, type CanonicalRemovalRule, type ChatLineageStatus, type StoredLandmarkKind as LandmarkKind, type LineageProbeRequest, type LineageProbeResponse, type MemoryLanguage, type RpProfile, type ServerLlmPublicConfig, type ServerWorkerStatus } from "@rcm/shared";
 import { SERVER_STATUS_TIMEOUT_MS, type ChatViewPreferences, type MemoryDetailAccessPatch, type MemoryDetailAccessResponse, ServerClient } from "./api-client.js";
-import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest } from "./context.js";
+import { makePrepareRequest, readCurrentContext, readOptionalCurrentContext, readOptionalDashboardContext, readDashboardLineageRequest, sha256 } from "./context.js";
 import { addLog, rememberDiagnosticSecrets, defaults, isChatMemoryEnabled, normalizeMemoryOnlyInjection, supportedSettingsRevision, saveSettings, serverScopeKey, CACHE_KEY, loadStoredJson, saveStoredJson } from "./settings.js";
 import type { ActivityProgress, DashboardSkin, InitialCalibrationActivity, PluginSettings, RuntimeState, TranslationDisplay } from "./types.js";
 import { drainWorker, reconcileAutomaticServerPause } from "./worker.js";
@@ -44,7 +45,7 @@ import { createOrganizationView, memoryOrganization } from './memory-organizatio
 import { subscribeActivity } from "./activity-state.js";
 import { translatePacket, clearTranslationCache, displayText, prefetchTranslationRecords, googleTranslationCooldownMs, invalidateTranslationCache, readCachedTranslations, translateRecords, translationCacheStats, type TranslationCacheStats, type TranslationSource } from "./translation.js";
 export { syncLineageActivity } from "./lineage-settings.js";
-import { syncLineageActivity, currentLineageOperation, runLineageOperation, inheritLineageSettings, needsOpenedChatResolution, resolveOpenedChat, lineageFailureMessage } from "./lineage-settings.js";
+import { syncLineageActivity, currentLineageOperation, runLineageOperation, inheritLineageSettings, needsOpenedChatResolution, resolveOpenedChat, lineageFailureMessage, hasFreshChatStatus } from "./lineage-settings.js";
 import {restoreChatSettings} from "./backup-settings.js";
 import { ServerCompatibilityError, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, SERVER_RESPONSE_DELAYED, type ServerConnectionIssue } from "./connection.js";
 import { syncQuizSettings } from "./quiz-sync.js";
@@ -75,7 +76,7 @@ import { lex, setSkin } from "./dashboard/lexicon.js";
 import { avatar, btn, contactRow, empty, errorDetails, field, filters, fold, frame, iconBtn, loading, menu, notice, row, statusList, secretInput, toggleSecretInput, maskSecretInputs, tabs as filmTabs, type MenuItem } from "./dashboard/film/ui.js";
 import { nameHtml } from "./dashboard/film/names.js";
 import { dayPart, sceneDate, slugline } from "./dashboard/film/scene.js";
-import { actScenes, compareStoryMemories, pickFrames, sceneLocator, sceneNumbers, storyScenes } from "./dashboard/scenes.js";
+import { actScenes, orderStoryMemories, isScene, pickFrames, sceneLocator, sceneNumbers, storyScenes } from "./dashboard/scenes.js";
 import { buildCast } from "./dashboard/film/cast.js";
 import { installMenuController } from "./dashboard/film/menu.js";
 import { chatFamilies, familyShortTitle } from "./dashboard/chat-families.js";
@@ -83,7 +84,7 @@ import { buildHomePairs, homePencilCounts, homeRecentMemories, homeTranslationRe
 import { sentPage, sentWidget, type SentData, type SentPerson, type SentScene, type SentView } from "./dashboard/sent.js";
 
 import { recoveryCard, recoverySheet, recoveryProgress } from './dashboard/gap-recovery.js';
-import { deliverySwitches, memoryDeliveryTokens, toggleAlwaysInject, ALWAYS_INJECT_LIMIT_MESSAGE } from './dashboard/memory-delivery.js';
+import { memoryDeliveryTokens, toggleAlwaysInject, ALWAYS_INJECT_LIMIT_MESSAGE } from './dashboard/memory-delivery.js';
 
 export type Tab = "overview" | "initial" | "story" | "timeline" | "relationships" | "world" | "reviews" | "conflicts" | "operations" | "data" | "settings";
 
@@ -224,6 +225,8 @@ export function dashboardThemeFromColor(value: string, prefersDark: boolean): "d
 }
 
 export interface DashboardData {
+  serverUrl?: string;
+  lineageFresh?: boolean;
   gapRecovery?: import('@rcm/shared').GapRecoveryStatus;
   gapRecoveryDismissed?: boolean;
   alwaysInject?: import('@rcm/shared').AlwaysInjectEstimate;
@@ -962,14 +965,17 @@ function lineageProbePayload(context: NonNullable<Awaited<ReturnType<typeof read
 
 async function probeDashboardLineage(state: RuntimeState, client: ServerClient, context: NonNullable<RuntimeState["current"]>): Promise<void> {
   if (!isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) return;
+  const serverUrl = state.settings.serverUrl;
+  const statusRevision = state.statusSummaryRevision ?? 0;
+  const current = () => state.current?.chatId === context.chatId && state.settings.serverUrl === serverUrl && (state.statusSummaryRevision ?? 0) === statusRevision && hasFreshChatStatus(state);
   let payload: LineageProbeRequest;
-  try { payload = context.snapshot !== undefined ? lineageProbePayload(context) : await readDashboardLineageRequest(context); }
+  try { payload = await readDashboardLineageRequest(context as any); }
   catch { return; }
-  if (state.current?.chatId !== context.chatId || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) return;
+  if (!current() || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) return;
   const projection = payload.messageVisibility;
   if (!projection.length) return;
-  const last = projection.at(-1);
-  const key = `${state.settings.serverUrl.replace(/\/$/, "")}:${context.chatId}:${projection.length}:${last?.id ?? ""}:${last?.contentHash ?? ""}:${payload.lineageHint?.parentChatId ?? ""}:${payload.lineageHint?.forkMessageId ?? ""}:${payload.lineageHint?.markerMessageId ?? ""}`;
+  const key = `${serverUrl}:${context.chatId}:${await sha256(JSON.stringify(payload))}`;
+  if (!current()) return;
   if (state.lineageProbe?.key === key && state.lineageProbe.status === "ready") return;
   const existing = lineageProbeFlights.get(key);
   if (existing) return existing;
@@ -977,10 +983,10 @@ async function probeDashboardLineage(state: RuntimeState, client: ServerClient, 
   const flight = (async () => {
     try {
       const result = await client.request<LineageProbeResponse>(`/v1/chats/${encodeURIComponent(context.chatId)}/lineage/probe`, { method: "POST", body: JSON.stringify(payload) }, 15_000);
-      if (state.current?.chatId !== context.chatId) return;
+      if (!current() || state.lineageProbe?.key !== key) return;
       state.lineageProbe = { key, status: "ready", result, selectedParentId: result.candidates[0]?.chatId };
     } catch (error) {
-      if (state.current?.chatId !== context.chatId) return;
+      if (!current() || state.lineageProbe?.key !== key) return;
       addLog(state.logs, "error", `Lineage preview failed: ${String(error)}`);
       state.lineageProbe = { key, status: "failed", error: lineageFailureMessage(error) };
     } finally {
@@ -1114,21 +1120,26 @@ function homeDailyMemory(state: RuntimeState, data: DashboardData, view?: DailyM
 
 export function overview(state: RuntimeState, data: DashboardData, translations: Map<string, string> = new Map(), loaded = true, sentView?: SentView, dailyMemoryView?: DailyMemoryView): string {
   if (data.connectionIssue?.kind === "incompatible") return incompatibleHome(state, data);
-  if (state.current && (!data.chatId || data.chatId === state.current.chatId) && state.statusSummary?.lineage) data = { ...data, lineage: state.statusSummary.lineage };
+  if (hasFreshChatStatus(state) && state.current && (!data.chatId || data.chatId === state.current.chatId) && state.statusSummary?.lineage) data = { ...data, lineage: state.statusSummary.lineage, lineageFresh: true };
+  if (state.current?.hostIdentity && ['choice_required', 'ambiguous'].includes(data.lineage?.status ?? 'none')) data = { ...data, lineage: { status: 'none' } };
+  if (data.lineageFresh === false || data.serverUrl && data.serverUrl !== state.settings.serverUrl || data.chatId && data.chatId !== state.current?.chatId) data = { ...data, lineage: { status: 'none' }, initialCalibration: undefined };
   const operation = currentLineageOperation(state);
+  const sourceNotice = state.current && cachedSourceReceipt(state.settings, state.current.chatId)?.sourceNotice;
+  const openNotice = sourceNotice ? notice(sourceNotice, { tone: 'plain' }) : operation?.kind === 'open' ? notice(operation.status === 'running' ? '채팅 상태 확인 중' : '채팅 상태를 확인하지 못했어요.', { tone: operation.status === 'running' ? 'plain' : 'cut' }) : '';
+  const fetchNotice = data.failedDatasets?.length ? notice('데이터를 불러오지 못했어요. 연결 후 다시 확인해 주세요.', { tone: 'cut', action: btn('다시 시도', { kind: 'quiet', action: 'refresh' }) }) : '';
   // A parent choice keeps its own card through running and failure; opening a chat gets one plain card.
-  if (operation) return `<div class="home lineage-operation" data-lineage-state="${operation.status}" aria-busy="${operation.status === "running"}">${operation.kind === "select" ? lineagePanel(data, operation) : homeMessage({
+  if (operation && operation.kind !== 'open') return `<div class="home lineage-operation" data-lineage-state="${operation.status}" aria-busy="${operation.status === "running"}">${operation.kind === "select" ? lineagePanel(data, operation) : homeMessage({
     title: operation.status === "running" ? "기억을 이어받고 있어요" : "기억 이어받기를 확인하지 못했어요",
-    bodyHtml: operation.status === "running" ? `<p role="status">원본을 확인하고 기억을 가져오고 있어요. 대화가 길면 조금 걸려요.</p>${LINEAGE_PROGRESS}` : `<p role="alert">완료됐는지 확인하지 못했어요. 원문과 기존 기억은 그대로예요.</p>${operation.error ? `<p class="lc__err">${escapeHtml(operation.error)}</p>` : ""}`,
+    bodyHtml: operation.status === "running" ? `<p role="status">원본을 확인하고 기억을 가져오고 있어요. 대화가 길면 조금 걸려요.</p>${LINEAGE_PROGRESS}` : `<p role="alert">완료됐는지 확인하지 못했어요. 현재 상태를 다시 확인해 주세요.</p>${operation.error ? `<p class="lc__err">${escapeHtml(operation.error)}</p>` : ""}`,
     actionsHtml: operation.status === "failed" ? btn("다시 확인", { kind: "primary", action: "retry-lineage-open" }) : "",
     tone: operation.status === "failed" ? "warning" : "neutral",
     iconName: operation.status === "failed" ? undefined : "branch",
     className: "lc",
   })}</div>`;
-  if (!loaded) {
+  if (!loaded && !data.memories.length) {
     const failed = data.failedDatasets?.some((dataset) => dashboardDatasetsForTab("overview").includes(dataset));
     const body = lineagePanel(data) || (failed ? notice("데이터를 불러오지 못했어요.", { tone: "cut", action: btn("다시 시도", { kind: "quiet", action: "refresh", hit: true }) }) : loading());
-    return `<div class="home"><h1 class="sr-only">홈</h1><div class="home__poster"><section class="poster is-empty">${body}</section></div></div>`;
+    return `<div class="home"><h1 class="sr-only">홈</h1>${openNotice}<div class="home__poster"><section class="poster is-empty">${body}</section></div></div>`;
   }
   const canonicalLanguage = state.lastPrepare?.memoryLanguage ?? state.current?.memoryLanguage ?? (state.current ? state.settings.memoryLanguages[state.current.chatId] : undefined) ?? "en";
   const translationDisplay: TranslationDisplay = canonicalLanguage === "ko" ? "en" : state.settings.translationDisplay;
@@ -1226,7 +1237,7 @@ export function overview(state: RuntimeState, data: DashboardData, translations:
         : data.bufferedTurns > 0 ? `현재 ${data.bufferedTurns}/${data.extractionGroupTurns || 6}턴이 준비되었습니다.`
           : "처리 가능한 기록은 모두 반영되었습니다.");
   const setupPending = setupPendingIn(data);
-  const alerts = `${setupPending && lex().skin !== "phone" ? initialCalibrationNotice(data) : ""}${updateNotice(state)}${lineagePanel(data)}${setupPending || (setupPickerNeeded(data.initialCalibration?.status) && !data.loadedDatasets?.includes("initialCalibration")) ? "" : initialCalibrationNotice(data)}${backfillNotice(state, data)}${data.connectionIssue ? "" : workerAttentionNotice(state, true)}`;
+  const alerts = `${openNotice}${fetchNotice}${setupPending && lex().skin !== "phone" ? initialCalibrationNotice(data) : ""}${updateNotice(state)}${lineagePanel(data)}${setupPending || (setupPickerNeeded(data.initialCalibration?.status) && !data.loadedDatasets?.includes("initialCalibration")) ? "" : initialCalibrationNotice(data)}${backfillNotice(state, data)}${data.connectionIssue ? "" : workerAttentionNotice(state, true)}`;
   const numbers = sceneNumbers(data.memories);
   const today = new Date();
   const dailyMemory = homeDailyMemory(state, data, dailyMemoryView, today);
@@ -1419,7 +1430,7 @@ export function lineagePanel(data: DashboardData, operation?: RuntimeState["line
     const chosen = candidates.find((item) => item.chatId === operation?.parentChatId);
     if (failed) return homeMessage({
       title: `「${chosen?.title || "원본 채팅"}」의 기억을 가져오지 못했어요`,
-      bodyHtml: `<p role="alert">원문과 기존 기억은 그대로예요.</p>${failed.error ? `<p class="lc__err">${escapeHtml(failed.error)}</p>` : ""}`,
+      bodyHtml: `<p role="alert">완료 여부와 현재 상태를 다시 확인해 주세요.</p>${failed.error ? `<p class="lc__err">${escapeHtml(failed.error)}</p>` : ""}`,
       actionsHtml: `${chosen ? btn("다시 시도", { kind: "primary", action: "select-lineage", data: { parentId: chosen.chatId, lineageChoice: "true" } }) : ""}${btn(candidates.length > 1 ? "다른 채팅 고르기" : "돌아가기", { action: "lineage-choose-again" })}`,
       tone: "warning",
       className: "lc",
@@ -1697,9 +1708,9 @@ const memoryDay = (memory: any): { key: string; label: string } => {
   return time ? { key: key ?? `raw:${time}`, label: formatStoryTime(time, true) } : { key: "undated", label: "시간 미상" };
 };
 
-function memorySignals(memory: any): string {
+function memorySignals(memory: any, delivery = true): string {
   const signal = (on: boolean, name: string, label: string) => on ? `<span class="signal" role="img" aria-label="${label}" title="${label}">${icon(name)}</span>` : "";
-  const html = `${signal(Boolean(memory.bookmarked), "bookmark", "북마크")}${signal(Boolean(memory.landmark), "landmark", "랜드마크")}${signal(Boolean(memory.pinned), "pin", "검색 우선 고정")}${signal(Boolean(memory.alwaysInject), "arrow-right", "항상 전달")}${signal(memory.active === false, "inactive", "비활성")}`;
+  const html = `${signal(Boolean(memory.bookmarked), "bookmark", "북마크")}${signal(Boolean(memory.landmark), "landmark", "랜드마크")}${signal(delivery && Boolean(memory.pinned), "pin", "검색 우선 고정")}${signal(delivery && Boolean(memory.alwaysInject), "arrow-right", "항상 전달")}${signal(memory.active === false, "inactive", "비활성")}`;
   return html ? `<span class="row__signals">${html}</span>` : "";
 }
 
@@ -1748,11 +1759,9 @@ function memoryActionMenu(memory: any, count: number): string {
   const id = { id: String(memory.id) };
   return menu({ label: "기억 더보기", items: [
     { label: memory.bookmarked ? "북마크 해제" : "북마크", icon: "bookmark", action: "toggle-bookmark", data: id },
-    ...(lex().skin === 'phone' ? [] : [
-      { label: memory.pinned ? "검색 우선 해제" : "검색 우선 고정", icon: "pin", action: "toggle-pin", data: id },
-      { label: memory.alwaysInject ? '항상 전달 해제' : '항상 전달', icon: 'arrow-right', action: 'toggle-always-inject', data: id,
-        count: `${count}/5`, hint: !memory.alwaysInject && count >= 5 ? ALWAYS_INJECT_LIMIT_MESSAGE : `매 턴 꼭 넣어요 · 약 ${memoryDeliveryTokens(memory)}토큰`, disabled: !memory.alwaysInject && count >= 5 },
-    ]),
+    { label: memory.pinned ? "검색 우선 해제" : "검색 우선 고정", icon: "pin", action: "toggle-pin", data: id },
+    { label: memory.alwaysInject ? '항상 전달 해제' : '항상 전달', icon: 'arrow-right', action: 'toggle-always-inject', data: id,
+      count: `${count}/5`, hint: !memory.alwaysInject && count >= 5 ? ALWAYS_INJECT_LIMIT_MESSAGE : `매 턴 꼭 넣어요 · 약 ${memoryDeliveryTokens(memory)}토큰`, disabled: !memory.alwaysInject && count >= 5 },
     { label: memory.active === false ? "다시 사용" : "비활성화", icon: "inactive", action: "toggle-memory", data: id },
     { label: "관련 원문 보기", icon: "search", action: "related-source", data: id },
     { label: "기억 삭제", icon: "delete", action: "delete-memory", data: id, danger: true },
@@ -1928,7 +1937,7 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
   const content = phone
     ? `<div data-preserve-scroll="timeline-detail">${record}${lines ? labelledBlock("주요 대사", displayedDialogues.length, lines) : ""}${detailsFold}${hiddenFold}${structure}${evidenceFold}${info}</div>`
     : `${lines}<div data-preserve-scroll="timeline-detail">${expandableLongContent("기억 본문", record, Math.max(String(memory.content ?? "").length, String(translatedContent ?? "").length))}${info}${structure}${detailsFold}${hiddenFold}${evidenceFold}</div>`;
-  return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${people}${landmarkMarks}${memory.alwaysInject ? `<div class="marks"><span class="mark">${icon("arrow-right")}항상 전달 · 약 ${memoryDeliveryTokens(memory)}토큰</span></div>` : ""}${phone ? deliverySwitches(memory, alwaysCount) : ""}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억입니다.") : ""}${translationState}${content}${pager}</article>`;
+  return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory, false)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${people}${landmarkMarks}${memory.pinned || memory.alwaysInject ? `<div class="marks">${memory.pinned ? `<span class="mark">${icon("pin")}검색 우선</span>` : ""}${memory.alwaysInject ? `<span class="mark">${icon("arrow-right")}항상 전달</span>` : ""}</div>` : ""}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억입니다.") : ""}${translationState}${content}${pager}</article>`;
 }
 
 /** Labels for picking a landmark kind; 기념일 기준 is set from a pair's scene log, so it is kept but never offered here. */
@@ -2003,7 +2012,7 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
     relationshipEvents: data.relationshipEvents.filter((event) => event.sourceMemoryId === selectedBase.id || selectedDetailIds.has(event.sourceDetailId)),
     intimacyMilestones: data.physicalIntimacy.filter((item) => item.sourceMemoryId === selectedBase.id),
   } : undefined;
-  const storyOrdered = [...topLevel].sort(compareStoryMemories);
+  const storyOrdered = orderStoryMemories(topLevel, data.memories.filter(isScene));
   const selectedIndex = storyOrdered.findIndex((memory) => memory.id === selectedBase?.id);
   const adjacent = { previous: selectedIndex > 0 ? storyOrdered[selectedIndex - 1] : undefined, next: selectedIndex >= 0 ? storyOrdered[selectedIndex + 1] : undefined };
   let lastDay = "";
@@ -3008,7 +3017,11 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     const calls = operationCalls(payload, job.status, Number(job.updated_at));
     const totalCalls = Math.max(Number(callStats?.total ?? 0), calls.length);
     const retryAttempt = Math.max(0, Number(payload.pipelineRetryAttempt ?? 0));
-    const summary = [retryAttempt ? `재시도 ${retryAttempt}회` : "", totalCalls ? `호출 ${totalCalls}회` : "",
+    const coverage = payload.sourceCoverage as {total:number;retried:number;needsReview:number} | undefined;
+    const coverageText = coverage?.needsReview ? `원문 ${coverage.needsReview}개 확인 필요`
+      : coverage?.retried ? `원문 ${coverage.total}개 중 ${coverage.retried}개 다시 정리 요청`
+        : payload.coverageRetry === 1 && ['queued','leased'].includes(job.status) ? '남은 원문 다시 정리 중' : '';
+    const summary = [coverageText, retryAttempt ? `재시도 ${retryAttempt}회` : "", totalCalls ? `호출 ${totalCalls}회` : "",
       Number(usage?.callsWithUsage ?? 0) > 0 ? `입력 ${Number(usage!.inputTokens ?? 0).toLocaleString()} · 출력 ${Number(usage!.outputTokens ?? 0).toLocaleString()}토큰` : totalCalls ? "토큰 사용량 미제공" : "",
       !["done", "completed", "cancelled", "superseded"].includes(job.status) && stageLabel ? `현재 ${stageLabel}` : ""].filter(Boolean).join(" · ");
     const ordinal = Number(payload.operationStageOrdinal ?? 0), total = Number(payload.operationStageTotal ?? 0);
@@ -3337,13 +3350,15 @@ export function dataManagement(state: RuntimeState, data: DashboardData, view: D
   };
   // Bots keep their order; inside a bot, each original chat leads its branches and copies, folded one level deep.
   // A search shows plain matching rows so a hit is never hidden inside a closed family.
-  const bots: Array<[string, any[]]> = [];
+  const bots = new Map<string, { name: string; chats: any[] }>();
   for (const chat of filtered.filter(chat => chat.engagedAt !== null)) {
-    const name = botOf(chat);
-    const group = bots.find(([bot]) => bot === name);
-    if (group) group[1].push(chat); else bots.push([name, [chat]]);
+    const id = String(chat.characterId ?? "").trim();
+    const key = id ? `character:${id}` : `chat:${chat.id}`;
+    const group = bots.get(key) ?? { name: botOf(chat), chats: [] };
+    group.chats.push(chat);
+    bots.set(key, group);
   }
-  const rows = bots.map(([bot, chats]) => `<h2 class="sec chats__bot">${escapeHtml(bot)}</h2>${query ? chats.map((chat) => chatRow(chat)).join("") : chatFamilies(chats, state.current?.chatId).map(({ root, members }) => {
+  const rows = [...bots.values()].map(({ name: bot, chats }) => `<h2 class="sec chats__bot">${escapeHtml(bot)} <span class="n">채팅 ${chats.length}개 · ${escapeHtml(String(chats[0].characterId || chats[0].id).slice(-6))}</span></h2>${query ? chats.map((chat) => chatRow(chat)).join("") : chatFamilies(chats, state.current?.chatId).map(({ root, members }) => {
     const rootTitle = titleOf(root);
     if (!members.length) return `<div class="fam">${chatRow(root)}</div>`;
     const open = root.id === state.current?.chatId || members.some(({ chat }) => chat.id === state.current?.chatId);
@@ -3721,7 +3736,7 @@ export function structuredTranslationRecords(state: RuntimeState, data: Dashboar
       : activeTab === "world"
         // 현재 and 지난 기록 read every version of a record, so its whole history is translated with it.
         ? [
-          ...[...data.assertions, ...data.endedAssertions].filter((item) => !item.socialRelation).flatMap((item, index) => [
+          ...[...data.assertions, ...data.endedAssertions].flatMap((item, index) => [
             { kind: data.assertions.includes(item) ? "assertion" : "assertion-history", itemId: data.assertions.includes(item) ? `assertion:${item.id ?? index}` : `history:assertions:${item.id ?? index}`, text: String(item.value) },
             { kind: "assertion-predicate", itemId: `assertion-predicate:${item.id ?? index}`, text: String(item.predicate) },
           ]),
@@ -3794,13 +3809,16 @@ export async function prefetchCurrentChatTranslations(state: RuntimeState, clien
   return prefetchTranslationRecords(state, await loadCurrentChatTranslationSources(state, client, chatId, scope, isCurrent), isCurrent);
 }
 
+const dashboardLoads = new WeakMap<RuntimeState, number>();
 export async function loadDashboardData(
   state: RuntimeState,
   client: ServerClient,
   options: { tab?: Tab; previous?: DashboardData } = {},
 ): Promise<DashboardData> {
   const startedStatusRevision = state.statusSummaryRevision ?? 0;
-  if (currentLineageOperation(state)?.status === "running") return { ...(options.previous ?? emptyData()), chatId: state.current?.chatId, initialCalibration: undefined };
+  const serverUrl = state.settings.serverUrl;
+  const loadRevision = (dashboardLoads.get(state) ?? 0) + 1;
+  dashboardLoads.set(state, loadRevision);
   const contextPromise = readOptionalDashboardContext(state);
   const requested = new Set(options.tab ? dashboardDatasetsForTab(options.tab) : ALL_DASHBOARD_DATASETS);
   if (!isServerConfigured(state.settings)) {
@@ -3820,8 +3838,12 @@ export async function loadDashboardData(
     contextPromise,
   ]);
   const optionalContext = contextCall.status === "fulfilled" ? contextCall.value : { error: String(contextCall.reason) };
-  const context = optionalContext.context;
-  let previous = options.previous && options.previous.chatId === context?.chatId ? options.previous : emptyData();
+  const context = optionalContext.context ?? (optionalContext.error ? state.current : undefined);
+  const assertCurrent = () => {
+    if (state.settings.serverUrl !== serverUrl || state.current?.chatId !== context?.chatId || dashboardLoads.get(state) !== loadRevision || (state.statusSummaryRevision ?? 0) !== startedStatusRevision) throw new Error('Dashboard request superseded');
+  };
+  assertCurrent();
+  let previous = options.previous && (!options.previous.serverUrl || options.previous.serverUrl === serverUrl) && options.previous.chatId === context?.chatId ? options.previous : emptyData();
   if (healthCall.status === "fulfilled" && Number(healthCall.value?.apiRevision) !== RCM_API_REVISION) {
     const health = healthCall.value;
     // Update discovery must not delay the already-known compatibility state.
@@ -3850,7 +3872,7 @@ export async function loadDashboardData(
     return `/v1/chats/${chat}/${paths[dataset]}${query}`;
   };
   const chatCalls = new Map<DashboardChatDataset, PromiseSettledResult<any>>();
-  if (context && serverHasCurrent && healthCall.status === "fulfilled" && adminCall.status === "fulfilled") {
+  if (context && (serverHasCurrent || !options.tab || options.tab === 'overview' || options.tab === 'initial') && !optionalContext.error && healthCall.status === "fulfilled" && adminCall.status === "fulfilled") {
     if (options.tab === "overview") {
       try {
         const batch = await client.request<{ datasets: Record<string, { ok: true; value: unknown } | { ok: false; error: string }> }>(
@@ -3910,31 +3932,36 @@ export async function loadDashboardData(
     historicalBackfillMessages: previous.historicalBackfillMessages, ingestionState: previous.ingestionState,
   });
   const statusState = value("status", { pendingReviews: previous.pendingReviews, progress: previous.coldStartProgress });
-  const lineage = value("lineage", statusState.lineage ?? previous.lineage ?? { status: "none" }) as ChatLineageStatus;
-  const calibration = value("initialCalibration", previous.initialCalibration);
+  const lineageFresh = !optionalContext.error && (chatCalls.get('lineage')?.status === 'fulfilled' || chatCalls.get('status')?.status === 'fulfilled' && Boolean(statusState.lineage));
+  const lineage = (lineageFresh ? value("lineage", statusState.lineage) : { status: 'none' }) as ChatLineageStatus;
+  const calibration = chatCalls.get('initialCalibration')?.status === 'fulfilled' ? value('initialCalibration', undefined)
+    : chatCalls.get('status')?.status === 'fulfilled' ? statusState.initialCalibration : undefined;
+  const gapRecoveryDismissed = value("gapRecovery", previous.gapRecovery)?.results?.some((row: any) => row.status === "done") && await loadStoredJson<boolean>(`rcm:gap-dismissed:${serverScopeKey(state.settings, context?.chatId ?? "")}`) === true;
+  assertCurrent();
+  if (!lineageFresh && requested.has('lineage')) state.statusStale = true;
   if ((!options.tab || options.tab === "overview" || options.tab === "initial")
     && context && healthCall.status === "fulfilled" && adminCall.status === "fulfilled" && isChatMemoryEnabled(state.settings, context.chatId, context.characterId)
+    && lineageFresh && chatCalls.get('initialCalibration')?.status === 'fulfilled'
     && needsOpenedChatResolution(state, calibration, lineage)) {
     void resolveOpenedChat(state, client).catch(() => undefined); // operation owns visible errors
-    return { ...emptyData(), chatId: context.chatId, health: healthCall.value, initialCalibration: undefined };
   }
-  if (context && lineage.status !== "none" && (state.statusSummaryRevision ?? 0) === startedStatusRevision
-    && JSON.stringify(state.statusSummary?.lineage) !== JSON.stringify(lineage)) syncLineageActivity(state, context.chatId, lineage, calibration);
+  if (context && lineageFresh) syncLineageActivity(state, context.chatId, lineage, calibration);
   const currentAdmin = context ? adminChats.find((chat: any) => chat.id === context.chatId) : undefined;
   const currentHasDerived = currentAdmin && ["memories", "relationships", "assertions", "beliefs", "promises"].some((key) => Number(currentAdmin[key] ?? 0) > 0);
-  if (requested.has("lineage") && context && healthCall.status === "fulfilled" && healthCall.value?.capabilities?.readOnlyLineageProbe && lineage.status === "none" && !currentHasDerived) {
+  if (lineageFresh && requested.has("lineage") && context && healthCall.status === "fulfilled" && healthCall.value?.capabilities?.readOnlyLineageProbe && lineage.status === "none" && !context.hostIdentity && !currentHasDerived) {
     void probeDashboardLineage(state, client, context);
-  } else if (requested.has("lineage") && (!context || lineage.status !== "none" || currentHasDerived)) {
+  } else if (requested.has("lineage") && (!lineageFresh || !context || context.hostIdentity || lineage.status !== "none" || currentHasDerived)) {
     state.lineageProbe = undefined;
   }
   return {
     chatId: context?.chatId,
+    serverUrl, lineageFresh,
     quizStatus,
     loadedDatasets: [...loadedDatasets],
     failedDatasets,
     health: healthCall.status === "fulfilled" ? healthCall.value : previous.health,
     gapRecovery: value("gapRecovery", previous.gapRecovery),
-    gapRecoveryDismissed: value("gapRecovery", previous.gapRecovery)?.results?.some((row: any) => row.status === "done") && await loadStoredJson<boolean>(`rcm:gap-dismissed:${serverScopeKey(state.settings, context?.chatId ?? "")}`) === true,
+    gapRecoveryDismissed,
     alwaysInject: value("memories", { alwaysInject: previous.alwaysInject }).alwaysInject,
     memories: value("memories", { items: previous.memories }).items,
     storySpine: value("storySpine", previous.storySpine),
@@ -3964,7 +3991,7 @@ export async function loadDashboardData(
     conflicts: value("conflicts", { items: previous.conflicts }).items,
     reconciliationReviews: value("reviews", { items: previous.reconciliationReviews }).items,
     extractionAudits: value("audits", { items: previous.extractionAudits }).items,
-    initialCalibration: value("initialCalibration", previous.initialCalibration),
+    initialCalibration: lineageFresh && currentLineageOperation(state)?.kind !== 'open' ? calibration : undefined,
     jobs: jobsState.items,
     cancelledMessages: Number(jobsState.cancelledMessages ?? 0),
     waitingForAssistant: Number(jobsState.waitingForAssistant ?? 0),
@@ -4886,12 +4913,18 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const refresh = async (options: { forceApply?: boolean; navigation?: DashboardNavigationRefresh } = {}) => {
     const generation = ++refreshGeneration;
     const requestedTab = activeTab;
+    const requestedServer = state.settings.serverUrl;
+    let requestChatId = state.current?.chatId;
+    const stillCurrent = () => generation === refreshGeneration && dashboardOpen && state.settings.serverUrl === requestedServer && state.current?.chatId === requestChatId;
     refreshing = true;
     updateTopbar();
     try {
       const refreshed = await loadDashboardData(state, client, { tab: requestedTab, previous: data });
+      requestChatId = refreshed.chatId;
+      if (!stillCurrent()) return;
       if (refreshed.chatId === state.current?.chatId) data.quizStatus = refreshed.quizStatus;
       await organizationActions.refreshData();
+      if (!stillCurrent()) return;
       const previousIssue = state.serverConnectionIssue;
       if (refreshed.connectionIssue) {
         const confirmed = noteServerConnectionFailure(state, state.settings, refreshed.connectionIssue.kind === "incompatible" ? new ServerCompatibilityError(Number(refreshed.health?.apiRevision)) : new Error(refreshed.error ?? refreshed.connectionIssue.technical ?? refreshed.connectionIssue.detail));
@@ -4914,6 +4947,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         worker: refreshed.health?.serverWorker ?? state.serverWorker,
         available: !refreshed.connectionIssue && !refreshed.jobsError && !refreshed.error && Boolean(refreshed.health?.serverWorker ?? state.serverWorker),
       });
+      if (!stillCurrent()) return;
       if (recovered && refreshed.health && state.serverWorker) refreshed.health.serverWorker = state.serverWorker;
       if (generation !== refreshGeneration || !dashboardOpen) return;
       if (refreshed.health?.ok) observeServerUpdateVersion(state, refreshed.health.version);
@@ -4923,7 +4957,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       syncPendingReviewCount(state, refreshed.pendingReviews);
       if (activeTab === "reviews") syncReviewActivity(state, refreshed);
       await hydrateCachedMemoryTranslations(refreshed);
-      if (generation !== refreshGeneration || !dashboardOpen) return;
+      if (!stillCurrent()) return;
       if (shouldDeferDashboardRefresh(options.forceApply === true, formDirty || connectionCheckBusy, activeTab, hasActiveSelection())) {
         pendingData = refreshed;
         newDataAvailable = true;
@@ -4956,6 +4990,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         storyView.detailSheet = "";
       }
     } catch (error) {
+      if (!stillCurrent() || String(error).includes('Dashboard request superseded')) return;
       console.error("[RCM dashboard] initial data load failed", error);
       const confirmed = noteServerConnectionFailure(state, state.settings, error);
       if (confirmed) data = { ...data, error: String(error), errorReport: formatServerError(error), connectionIssue: confirmed };
@@ -5803,15 +5838,20 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       catch { render(); }
       return;
     }
+    if (['select-lineage', 'decline-lineage', 'acknowledge-lineage', 'revert-lineage'].includes(action ?? '')
+      && (!hasFreshChatStatus(state) || data.chatId !== state.current?.chatId || data.serverUrl !== state.settings.serverUrl)) {
+      await refresh(); return;
+    }
     if (action === "select-lineage" && state.current) {
       if (currentLineageOperation(state)?.status === "running") return;
       const chatId = state.current.chatId;
+      const serverUrl = state.settings.serverUrl;
       const parentChatId = target.dataset.parentId;
       const fingerprint = data.lineage?.ambiguousCandidates?.find(item => item.chatId === parentChatId)?.fingerprint;
       try {
         await runLineageOperation(state, chatId, "select", async () => {
           const current = await readCurrentContext(state);
-          if (current.chatId !== chatId) throw new Error("채팅이 변경되었습니다. 현재 채팅에서 다시 선택해 주세요.");
+          if (current.chatId !== chatId || state.settings.serverUrl !== serverUrl) throw new Error("채팅이 변경되었습니다. 현재 채팅에서 다시 선택해 주세요.");
           const result = await client.request<ChatLineageStatus & { initialCalibration: InitialCalibrationActivity }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage/select`, {
             method: "POST", body: JSON.stringify({ ...lineageProbePayload(current), parentChatId, fingerprint }),
           }, 60_000);
@@ -5834,15 +5874,19 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (action === "acknowledge-lineage" && state.current) {
       const chatId = state.current.chatId;
+      const serverUrl = state.settings.serverUrl;
       const result = await client.request<{ lineage: ChatLineageStatus }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage/acknowledge`, { method: "POST" }, 30_000);
+      if (state.settings.serverUrl !== serverUrl || state.current?.chatId !== chatId) return;
       syncLineageActivity(state, chatId, result.lineage);
       await refresh(); return;
     }
     if (action === "revert-lineage" && state.current) {
       const chatId = state.current.chatId;
-      if (!await confirmDashboard("상속된 기억과 파생 상태를 비우고, 현재 Risu 원문만으로 다시 시작할까요? Risu 원문은 변경되지 않습니다.")) return;
-      if (state.current?.chatId !== chatId) return;
+      const serverUrl = state.settings.serverUrl;
+      if (!await confirmDashboard("상속 연결을 끊고, 이어받은 뒤 바뀌지 않은 기록만 지울까요? 이 채팅에서 만든 기록과 그 기록이 참조하는 자료는 남겨요. 구버전 상속처럼 구분할 수 없는 기록도 남겨요.")) return;
+      if (state.current?.chatId !== chatId || state.settings.serverUrl !== serverUrl) return;
       const result = await client.request<{ lineage: ChatLineageStatus }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage/revert`, { method: "POST" }, 30_000);
+      if (state.settings.serverUrl !== serverUrl || state.current?.chatId !== chatId) return;
       syncLineageActivity(state, chatId, result.lineage);
       await refresh(); return;
     }

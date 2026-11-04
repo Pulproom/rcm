@@ -1,3 +1,4 @@
+import { lineageRevisionKey, repairInheritedRevisions } from './lineage-revisions.js';
 import { sanitizeSetupRows } from "./setup-storage.js";
 import { syncManualCognition } from "./social-knowledge.js";
 import { memoryReferenceHighWater } from "./memory-references.js";
@@ -121,11 +122,11 @@ function chatTableWhere(db: RcmDatabase, table: string): string {
   if (owner) return `${owner[0]} IN (SELECT id FROM ${owner[1]} WHERE chat_id=?)`;
   // Chat-owned keys, including access edits and pending dialogue identities. Keep restore
   // validation aligned; admin deletion retains reference counters and tombstones.
-  if (table === "server_meta") return "key IN ('retrieval_trace_chat:' || ?, 'memory_bookmarks:' || ?, 'view_preferences:' || ?, 'user_deletions:' || ?, 'persona_hint:' || ?, 'ledger_edit_origins:' || ?, 'removed_aliases:' || ?, 'detail_access_edits:' || ?, 'dialogue_access_identity:' || ?, 'quiz_history_boundary:' || ?, 'memory_ref_sequence:' || ?)";
+  if (table === "server_meta") return "key IN ('retrieval_trace_chat:' || ?, 'memory_bookmarks:' || ?, 'view_preferences:' || ?, 'user_deletions:' || ?, 'persona_hint:' || ?, 'ledger_edit_origins:' || ?, 'removed_aliases:' || ?, 'detail_access_edits:' || ?, 'dialogue_access_identity:' || ?, 'quiz_history_boundary:' || ?, 'memory_ref_sequence:' || ?, 'source_coverage_retry:' || ?, 'lineage_revision_clock:' || ?)";
   throw new Error(`Chat backup ownership is not defined: ${table}`);
 }
 
-const chatTableBindings = (table: string, chatId: string): string[] => table === "server_meta" ? Array(11).fill(chatId) : [chatId];
+const chatTableBindings = (table: string, chatId: string): string[] => table === "server_meta" ? Array(13).fill(chatId) : [chatId];
 
 export function exportCompleteArchive(db: RcmDatabase, privateData: CompleteBackupPrivateData = {}): Uint8Array {
   return exportArchive(db, privateData);
@@ -365,6 +366,7 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array): { 
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }
+  repairInheritedRevisions(db);
   return { inspection: { manifest: parsed.manifest, privateData: { serverUrl: parsed.privateData.serverUrl, serverToken: parsed.privateData.serverToken } }, vectorsRestored, privateData: parsed.privateData };
 }
 
@@ -381,7 +383,7 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
     Object.entries(indirectChatOwners).map(([table,[column,parent]])=>[table,[column,ownedIds(parent,"id")]]));
   for (const [table,rows] of Object.entries(tables)) for (const row of rows) {
     const valid=table==="chats" ? row.id===chatId : table==="server_meta" ? [
-      `retrieval_trace_chat:${chatId}`, `memory_bookmarks:${chatId}`, `view_preferences:${chatId}`, `user_deletions:${chatId}`, `persona_hint:${chatId}`, ledgerEditOriginsKey(chatId), removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `memory_ref_sequence:${chatId}`,
+      `retrieval_trace_chat:${chatId}`, `memory_bookmarks:${chatId}`, `view_preferences:${chatId}`, `user_deletions:${chatId}`, `persona_hint:${chatId}`, ledgerEditOriginsKey(chatId), removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `memory_ref_sequence:${chatId}`, `source_coverage_retry:${chatId}`, lineageRevisionKey(chatId),
     ].includes(String(row.key))
       : Object.hasOwn(row,"chat_id") ? row.chat_id===chatId : Object.hasOwn(row,"child_chat_id") ? row.child_chat_id===chatId
       : owners[table]?.[1].has(row[owners[table]![0]]);
@@ -412,6 +414,7 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array): {chatI
       rebuildSearch(db);
     })();
   } finally { db.pragma("foreign_keys = ON"); }
+  repairInheritedRevisions(db);
   return {chatId,characterId:parsed.manifest.chats[0]!.characterId,chatSettings:parsed.privateData.chatSettings??{},vectorsRestored};
 }
 

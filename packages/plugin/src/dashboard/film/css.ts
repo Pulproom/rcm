@@ -2012,17 +2012,6 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .gap-sheet__foot { border-top: 1px solid var(--rule); padding-top: 16px; }
 .menu__hint { display: block; max-width: 27ch; white-space: normal; color: var(--ink-3); font-size: var(--t-cap); font-weight: 400; margin-top: 3px; }
 .menu__item:has(.menu__hint) { align-items: flex-start; }
-.delivery-group { margin: 24px 0; }
-.delivery-switch { width: 100%; min-height: 64px; display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 0; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
-.delivery-switch + .delivery-switch { border-top: 1px solid var(--rule); }
-.delivery-switch > span { flex: 1; }
-.delivery-switch b { font-weight: 500; }
-.delivery-switch small { display: block; margin-top: 3px; color: var(--ink-3); font-size: var(--t-cap); }
-.delivery-switch > i { position: relative; width: 51px; height: 31px; flex-shrink: 0; background: var(--rule-2); border-radius: 20px; }
-.delivery-switch > i::after { content: ''; position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 50%; background: var(--ink); transition: transform var(--fast) var(--ease); }
-.delivery-switch[aria-checked="true"] > i { background: var(--ok); }
-.delivery-switch[aria-checked="true"] > i::after { transform: translateX(20px); }
-.delivery-switch:disabled { opacity: .55; cursor: default; }
 :root[data-skin="phone"] .gap-card { margin: 0 0 12px; width: 100%; }
 :root[data-skin="phone"] .gap-card p { font-size: var(--t-meta); }
 @media (max-width: 700px) {

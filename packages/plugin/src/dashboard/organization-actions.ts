@@ -1,5 +1,5 @@
 import { formatServerError } from "../server-errors.js";
-import { compareStoryTimes, compareStoryMemories, isRecognitionMemory } from "@rcm/shared";
+import { compareStoryTimes, orderStoryMemories, isScene, isRecognitionMemory } from "@rcm/shared";
 import { isMissingServerRoute, ServerRequestError, type ServerClient } from "../api-client.js";
 import type { EpisodeActivity, RuntimeState } from "../types.js";
 import { readHostSourceTranslations } from "../context.js";
@@ -433,24 +433,21 @@ export interface TimelineMemory {
 export const createTimelineView = (): TimelineViewState => ({ query: "", landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false, includeInactive: false, editing: false, creating: false, mobileDetail: false });
 
 export function filterTimelineMemories<T extends TimelineMemory>(memories: T[], view: Pick<TimelineViewState, "landmarkOnly" | "bookmarkedOnly" | "pinnedOnly" | "includeInactive">): T[] {
-  return memories.filter((memory) => !isRecognitionMemory(memory)
+  const filtered = memories.filter((memory) => !isRecognitionMemory(memory)
     && (view.includeInactive || memory.active !== false)
     && (!view.landmarkOnly || Boolean(memory.landmark))
     && (!view.bookmarkedOnly || Boolean(memory.bookmarked))
-    && (!view.pinnedOnly || Boolean(memory.pinned))).sort((left, right) => {
-      const compared = compareStoryTimes(left.story_time ?? left.storyTime, right.story_time ?? right.storyTime);
-      if (compared !== null && compared !== 0) return compared;
-      const leftHasTime = Boolean(String(left.story_time ?? left.storyTime ?? "").trim());
-      const rightHasTime = Boolean(String(right.story_time ?? right.storyTime ?? "").trim());
-      if (leftHasTime !== rightHasTime) return leftHasTime ? -1 : 1;
-      return Number(left.created_revision ?? left.created_at ?? 0) - Number(right.created_revision ?? right.created_at ?? 0);
-    });
+    && (!view.pinnedOnly || Boolean(memory.pinned)));
+  return orderStoryMemories(filtered, memories.filter(isScene));
 }
 
 export function timelineMemoryView<T extends TimelineMemory>(memories: T[], view: TimelineViewState): { matching: T[]; topLevel: T[] } {
   const sort = view.sortOrder === "ascending" ? 1 : -1;
   const undated = (memory: T): number => Number(!String(memory?.story_time ?? memory?.storyTime ?? "").trim());
-  const ordered = (items: T[]) => [...items].sort((left, right) => undated(left) - undated(right) || sort * compareStoryMemories(left, right));
+  const ordered = (items: T[]) => {
+    const sorted = orderStoryMemories(items, memories.filter(isScene));
+    return (sort < 0 ? sorted.reverse() : sorted).sort((left, right) => undated(left) - undated(right));
+  };
   const matching = ordered(filterTimelineMemories(memories, view));
   const matchingIds = new Set(matching.map((memory) => memory.id));
   const matchingParents = new Set(matching.map((memory) => memory.capsule_parent_id).filter(Boolean));

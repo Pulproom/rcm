@@ -9,6 +9,27 @@ export type Deletion = { kind: "entity" | "assertion" | "belief" | "promise"; id
 export const userDeletionsKey = (chatId: string): string => `user_deletions:${chatId}`;
 export const ledgerEditOriginsKey = (chatId: string): string => `ledger_edit_origins:${chatId}`;
 export const removedAliasesKey = (chatId: string): string => `removed_aliases:${chatId}`;
+
+/** Deletion intent belongs to copied source, not to the parent's UUIDs. */
+export function inheritUserDeletions(db:RcmDatabase,parent:string,child:string,messageMap:Map<string,string>,batchMap:Map<string,string>,entityMap:Map<string,string>,ledgerMap:Map<string,string>,fork:number):void {
+  const rewrite=(entry:Deletion):Deletion[]=>{
+    const messageIds=entry.messageIds.flatMap(id=>{
+      const mapped=messageMap.get(id) ?? id;
+      const source=db.prepare('SELECT ordinal FROM messages WHERE chat_id=? AND message_id=?').get(child,mapped) as {ordinal:number}|undefined;
+      return source && source.ordinal<=fork ? [mapped] : [];
+    });
+    const sourceBatchId=entry.sourceBatchId ? batchMap.get(entry.sourceBatchId) : undefined;
+    if(!messageIds.length && !sourceBatchId) return [];
+    return [{...entry,messageIds,sourceBatchId,entityId:entry.entityId ? entityMap.get(entry.entityId) : undefined}];
+  };
+  const entries=readUserDeletions(db,parent).flatMap(rewrite);
+  if(entries.length) db.prepare('INSERT OR REPLACE INTO server_meta(key,value) VALUES(?,?)')
+    .run(userDeletionsKey(child),JSON.stringify([...readUserDeletions(db,child),...entries]));
+  const stored=db.prepare('SELECT value FROM server_meta WHERE key=?').get(ledgerEditOriginsKey(parent)) as {value:string}|undefined;
+  const origins=Object.fromEntries(Object.entries(JSON.parse(stored?.value ?? '{}') as Record<string,Deletion>)
+    .flatMap(([id,entry])=>ledgerMap.has(id) ? rewrite(entry).map(value=>[ledgerMap.get(id)!,value]) : []));
+  if(Object.keys(origins).length) db.prepare('INSERT OR REPLACE INTO server_meta(key,value) VALUES(?,?)').run(ledgerEditOriginsKey(child),JSON.stringify(origins));
+}
 export type RemovedAliases = Record<string, string[]>;
 
 export function readRemovedAliases(db: RcmDatabase, chatId: string): RemovedAliases {

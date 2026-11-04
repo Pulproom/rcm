@@ -4,9 +4,9 @@ import { sourceHasProcessingHistory } from './source-processing.js';
 
 interface SourceRow { message_id: string; ordinal: number; role: string; lifecycle: string; host_visibility: string; extraction_state: string; memory_excluded: number; content: string | null; completed_turn_seq: number | null }
 
-/** Pure, read-only schema-58 detector. No source content is returned. On schema 59
- * the frozen migration targets are authoritative; lineage can create fresh pending
- * source later, and must never trigger a second historical detection. */
+/** No source content is returned. On schema 59 the explicit targets are authoritative:
+ * frozen migration gaps plus bounded extraction coverage failures. Fresh pending
+ * lineage source must never trigger a second historical detection. */
 export function gapRecoveryCandidates(db: RcmDatabase, chatId: string): Array<{ messageId: string; ordinal: number }> {
   if (db.prepare("SELECT 1 FROM schema_migrations WHERE version>=59").get()) {
     return db.prepare(`SELECT g.message_id AS messageId,m.ordinal FROM gap_recovery_messages g

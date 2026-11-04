@@ -2,6 +2,7 @@ import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPoli
 import type { CurrentContext, DashboardContext, RuntimeState } from "./types.js";
 import { serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
+import { cachedSourceReceipt, type ServerClient } from './api-client.js';
 
 const encoder = new TextEncoder();
 export const MEMORY_MARKER = "[[RCM]]";
@@ -71,11 +72,13 @@ export async function readHostSourceLedgers(onlyChatIds?: ReadonlySet<string>): 
     const chats = Array.isArray((character as any).chats) ? (character as any).chats : [];
     for (const [chatIndex, descriptor] of chats.entries()) {
       if (!descriptor || typeof descriptor !== "object") continue;
-      const chatId = String(descriptor.id ?? `${characterId}:${chatIndex}`);
+      const chatId = String(descriptor.id || `${characterId}:${chatIndex}`);
       if (onlyChatIds && !onlyChatIds.has(chatId)) continue;
       const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
       if (!chat) throw new Error(`Risu 원문을 불러오지 못했습니다: ${String(descriptor.name ?? descriptor.title ?? chatId)}`);
-      const source = Array.isArray(chat.message) ? chat.message : [];
+      assertCompleteHostChat(chat);
+      if (String(chat.id || `${characterId}:${chatIndex}`) !== chatId) throw new Error('HOST_SOURCE_CHANGED');
+      const source = chat.message;
       const resolved = await Promise.all(source.map((message: any) => resolveMessageSource(chat, message)));
       const allBefore = source.reduce((last: number, message: any, index: number) => message?.disabled === "allBefore" ? index : last, -1);
       const messageVisibility = await Promise.all(source.map(async (message: any, ordinal: number) => {
@@ -240,6 +243,15 @@ export function isNoActiveChatError(error: unknown): boolean {
     || /Cannot read properties of (?:undefined|null).*chatPage/i.test(message);
 }
 
+function assertCompleteHostChat(chat: any): void {
+  if (!chat || chat._placeholder === true || !Array.isArray(chat.message)) throw new Error('HOST_SOURCE_INCOMPLETE');
+}
+
+async function assertHostSelection(characterIndex: number, chatIndex: number, chatId?: string): Promise<void> {
+  const [currentCharacter, currentChat] = await Promise.all([risuai.getCurrentCharacterIndex(), risuai.getCurrentChatIndex()]);
+  if (currentCharacter !== characterIndex || currentChat !== chatIndex) throw new Error('HOST_SELECTION_CHANGED');
+}
+
 async function readCurrentChatIdentity(): Promise<{ characterIndex: number; character: any; chatIndex: number; chat: any; chatId: string }> {
   const characterIndex = await risuai.getCurrentCharacterIndex();
   if (!Number.isInteger(characterIndex) || characterIndex < 0) throw new NoActiveChatError();
@@ -247,10 +259,13 @@ async function readCurrentChatIdentity(): Promise<{ characterIndex: number; char
   if (!character || typeof character !== "object") throw new NoActiveChatError();
   const chatIndex = await risuai.getCurrentChatIndex();
   if (!Number.isInteger(chatIndex) || chatIndex < 0) throw new NoActiveChatError();
-  const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+  let chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
   if (!chat) throw new NoActiveChatError();
   const characterId = String(character?.chaId ?? character?.id ?? characterIndex);
-  return { characterIndex, character, chatIndex, chat, chatId: String(chat.id ?? `${characterId}:${chatIndex}`) };
+  await assertHostSelection(characterIndex, chatIndex);
+  if (!chat.id && character?.chats?.[chatIndex]?.id) throw new Error('HOST_CHAT_ID_LOADING');
+  const chatId = String(chat.id || `${characterId}:${chatIndex}`);
+  return { characterIndex, character, chatIndex, chat, chatId };
 }
 
 function chatIdentityFields(characterIndex: number, character: any, chatIndex: number, chat: any) {
@@ -258,9 +273,9 @@ function chatIdentityFields(characterIndex: number, character: any, chatIndex: n
   const chatTitle = String(chat.name ?? chat.title ?? "").trim() || `채팅 ${chatIndex + 1}`;
   const chatTitles = Object.fromEntries((Array.isArray(character?.chats) ? character.chats : [])
     .map((item: any, index: number) => {
-      const id = String(item?.id ?? `${characterId}:${index}`);
+      const id = String(item?.id || `${characterId}:${index}`);
       const title = String(item?.name ?? item?.title ?? "").trim();
-      return title ? [id, title] : undefined;
+      return id && title ? [id, title] : undefined;
     })
     .filter((entry: [string, string] | undefined): entry is [string, string] => Boolean(entry)));
   return { characterId, chatTitle, chatTitles };
@@ -289,13 +304,19 @@ async function sourceMessageVisibility(chatId: string, messages: any[], messageS
 
 /** Only lineage needs source hashes; perform this separately from dashboard paint. */
 export async function readDashboardLineageRequest(context: DashboardContext): Promise<LineageProbeRequest> {
-  const { chat, chatId } = await readCurrentChatIdentity();
+  const { chat, chatId, characterIndex, chatIndex } = await readCurrentChatIdentity();
   if (chatId !== context.chatId) throw new Error("Dashboard chat changed");
-  const messages = Array.isArray(chat.message) ? chat.message : [];
+  assertCompleteHostChat(chat);
+  const messages = chat.message;
   const sources = await Promise.all(messages.map((message: any) => resolveMessageSource(chat, message)));
+  const messageVisibility = await sourceMessageVisibility(chatId, messages, sources, context.canonicalizationPolicy);
+  const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
+  if (JSON.stringify(latest?.message) !== JSON.stringify(messages)
+    || sources.some((source: ResolvedMessageSource) => source.sourceRecordId && JSON.stringify(chat.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]) !== JSON.stringify(latest?.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]))) throw new Error('HOST_SOURCE_CHANGED');
+  await assertHostSelection(characterIndex, chatIndex, chatId);
   return {
     chatTitle: context.chatTitle, characterId: context.characterId, profile: context.profile,
-    messageVisibility: await sourceMessageVisibility(chatId, messages, sources, context.canonicalizationPolicy),
+    messageVisibility,
     lineageHint: parseBranchLineageHint(messages), canonicalizationPolicy: context.canonicalizationPolicy,
     includeUserMessages: context.includeUserMessages, extractionGroupTurns: context.extractionGroupTurns, memoryLanguage: context.memoryLanguage,
   };
@@ -305,6 +326,8 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
 export async function readDashboardContext(state: RuntimeState): Promise<DashboardContext> {
   const generation = state.mainGeneration;
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  const database = await risuai.getDatabase(["personas", "selectedPersona"]);
+  await assertHostSelection(characterIndex, chatIndex, chatId);
   if (state.current?.chatId !== chatId) {
     state.statusSummary = undefined;
     state.lastPrepare = undefined;
@@ -314,7 +337,6 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
   }
   state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   generation?.observe(chatId, chat);
-  const database = await risuai.getDatabase(["personas", "selectedPersona"]);
   const identity = chatIdentityFields(characterIndex, character, chatIndex, chat);
   const characterName = String(character?.name ?? "Character");
   const messages = Array.isArray(chat.message) ? chat.message : [];
@@ -326,7 +348,7 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
   const scopeKey = serverScopeKey(state.settings, chatId);
   const perspectives = (state.settings.perspectives[chatId] ?? []).map(name => name.trim()).filter(Boolean);
   const context: DashboardContext = {
-    ...identity, chatId, characterName,
+    ...identity, chatId, characterName, hostIdentity: !chat.id ? { kind: 'position', listFingerprint: '' } : undefined,
     identityHints: { userPersonaName: resolveUserPersonaName(database, chat), hostCharacterName: characterName, recentSpeakerNames: [], cachedPerspectives: scopeKey ? state.settings.detectedPerspectives[scopeKey] ?? [] : [] },
     activePerspectives: [...new Set(perspectives)].slice(0, 4), perspectiveMode: perspectives.length ? "manual" : "auto",
     profile: state.settings.profiles[chatId] ?? state.settings.defaultProfile,
@@ -351,9 +373,11 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
 }
 
 export async function readOptionalDashboardContext(state: RuntimeState): Promise<{ context?: DashboardContext | CurrentContext; error?: string }> {
+  const previous = state.current;
   try { return { context: await readDashboardContext(state) }; }
   catch (error) {
-    state.current = undefined; state.refreshStatusWidget?.();
+    if (isNoActiveChatError(error) && state.current === previous && await risuai.getCurrentCharacterIndex().catch(() => 0) < 0) state.current = undefined;
+    state.refreshStatusWidget?.();
     return isNoActiveChatError(error) ? {} : { error: String(error) };
   }
 }
@@ -435,12 +459,19 @@ export async function readCurrentContext(
   options: { snapshotMode?: "auto" | "full" | "tail" } = {},
 ): Promise<CurrentContext> {
   const generation = state.mainGeneration;
+  const serverUrl = state.settings.serverUrl;
+  const receiptChatId = state.current?.chatId;
+  // Capture before any host await: an older host read must not acquire a newer receipt.
+  const receipt = receiptChatId ? cachedSourceReceipt(state.settings, receiptChatId) : undefined;
   // PocketRisu may throw inside getCurrentChatIndex() while its home screen has
   // no selected character. Resolve the character first so that this normal UI
   // state does not masquerade as a server failure in callers such as Dashboard.
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
-  generation?.observe(chatId, chat);
-  state.hostChatIdentity = { characterIndex, chatIndex, chatId };
+  const sourceHead = chatId === receiptChatId ? receipt : undefined;
+  assertCompleteHostChat(chat);
+  const descriptor = character?.chats?.[chatIndex];
+  if (descriptor && !descriptor._placeholder && Array.isArray(descriptor.message)
+    && JSON.stringify(descriptor.message) !== JSON.stringify(chat.message)) throw new Error('HOST_SOURCE_CHANGED');
   const [lore, database] = await Promise.all([
     risuai.getCurrentLorebookEntries?.() ?? Promise.resolve([]),
     risuai.getDatabase(["personas", "selectedPersona", "characters"]),
@@ -470,7 +501,6 @@ export async function readCurrentContext(
     startOrdinal = selectTailStart(messageContents, TAIL_MESSAGE_LIMIT, TAIL_TOKEN_LIMIT);
   }
   const messageVisibility = await sourceMessageVisibility(chatId, messages, messageSources, state.settings.canonicalizationPolicy);
-  generation?.observe(chatId, chat, messageVisibility);
   const snapshot: CurrentContext["snapshot"] = messages.slice(startOrdinal).map((message: any, localOrdinal: number) => {
     const ordinal = startOrdinal + localOrdinal;
     const content = messageContents[ordinal] ?? "";
@@ -519,6 +549,7 @@ export async function readCurrentContext(
   const query = "continue";
   const querySourceHash = await sha256(JSON.stringify(querySources.map(message => [message.id, message.role, message.content])));
   const context: CurrentContext = {
+    hostIdentity: !chat.id ? { kind: 'position', listFingerprint: '' } : undefined,
     chatId,
     chatTitle,
     chatTitles,
@@ -553,6 +584,20 @@ export async function readCurrentContext(
     backfillApproved: scopeKey ? state.settings.backfillApproved[scopeKey] === true : false,
     postExtractionReview: state.settings.postExtractionReview,
   };
+  // A destructive re-check uses another full read; normal turns use the host's full-read contract.
+  if (options.snapshotMode === 'full') {
+    const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    assertCompleteHostChat(latest);
+    if (String(latest.id || `${context.characterId}:${chatIndex}`) !== chatId
+      || JSON.stringify(latest.message) !== JSON.stringify(chat.message)
+      || messageSources.some((source: ResolvedMessageSource) => source.sourceRecordId && JSON.stringify(chat.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]) !== JSON.stringify(latest.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]))) throw new Error('HOST_SOURCE_CHANGED');
+  }
+  context.sourceSnapshot = { baseRevision: sourceHead?.sourceRevision ?? 0, baseInventory: sourceHead?.sourceInventory, complete: true, messageCount: messages.length };
+  if (!chat.id) context.hostIdentity = { kind: 'position', listFingerprint: Array.isArray(character.chats) ? await sha256(JSON.stringify(character.chats.map((item: any) => [item?.id ?? null, item?.name ?? item?.title ?? '']))) : '' };
+  await assertHostSelection(characterIndex, chatIndex);
+  if (state.settings.serverUrl !== serverUrl) throw new Error('SERVER_SCOPE_CHANGED');
+  state.hostChatIdentity = { characterIndex, chatIndex, chatId };
+  generation?.observe(chatId, chat, messageVisibility);
   state.current = context;
   state.refreshStatusWidget?.();
   return context;
@@ -580,6 +625,8 @@ export function makePrepareRequest(
     memoryReferenceMode: options.memoryReferenceMode ?? "short",
     memoryGeneration: options.memoryGeneration,
     messages: context.snapshot,
+    sourceSnapshot: context.sourceSnapshot,
+    hostIdentity: context.hostIdentity,
     messageVisibility: context.messageVisibility ?? context.snapshot.map((message) => ({ id: message.id, ordinal: message.ordinal, visibility: message.disabled ? "disabled" : "active" })),
     lineageHint: context.lineageHint,
     query: context.query,
@@ -736,4 +783,18 @@ export function injectMemory(messages: OpenAIChat[], rawPacket: string, requeste
     }
   }
   return { messages: output, packet: memoryMessage.content, injectedTokens, removedTokens: 0, omitted: false };
+}
+
+const sourceRechecks = new WeakMap<RuntimeState, Promise<void>>();
+export function recheckHeldSources(state: RuntimeState, client: ServerClient): void {
+  const chatId = state.current?.chatId;
+  const receipt = chatId ? cachedSourceReceipt(state.settings, chatId) : undefined;
+  if (!chatId || !receipt || !['stale', 'incomplete', 'proof_required'].includes(receipt.sourceChangeHeld ?? '') || sourceRechecks.has(state)) return;
+  const serverUrl = state.settings.serverUrl;
+  const pending = (async () => {
+    const context = await readCurrentContext(state, { snapshotMode: 'full' });
+    if (context.chatId !== chatId || state.settings.serverUrl !== serverUrl || state.unloaded) return;
+    await client.request(`/v1/chats/${encodeURIComponent(chatId)}/source-sync`, { method: 'POST', body: JSON.stringify(makePrepareRequest(context, 0, { deferExtraction: true })) });
+  })().catch(() => undefined).finally(() => sourceRechecks.delete(state));
+  sourceRechecks.set(state, pending);
 }

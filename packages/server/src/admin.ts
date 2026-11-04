@@ -1,3 +1,4 @@
+import { lineageRevisionKey } from './lineage-revisions.js';
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { clearAuxiliaryInputs } from './auxiliary-input-cache.js';
 import type { RcmDatabase } from "./db.js";
@@ -212,7 +213,7 @@ export function deleteChats(db: RcmDatabase, embeddings: EmbeddingService, chatI
     db.prepare(`DELETE FROM memory_fts WHERE chat_id IN (${placeholders})`).run(...unique);
     for (const chatId of unique) {
       clearAuxiliaryInputs(db,chatId);
-      db.prepare("DELETE FROM server_meta WHERE key IN (?,?,?,?,?,?,?,?,?,?)").run(`retrieval_trace_chat:${chatId}`, memoryBookmarksKey(chatId), viewPreferencesKey(chatId), `user_deletions:${chatId}`, `persona_hint:${chatId}`, `ledger_edit_origins:${chatId}`, removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`);
+      db.prepare("DELETE FROM server_meta WHERE key IN (?,?,?,?,?,?,?,?,?,?,?,?)").run(`retrieval_trace_chat:${chatId}`, memoryBookmarksKey(chatId), viewPreferencesKey(chatId), `user_deletions:${chatId}`, `persona_hint:${chatId}`, `ledger_edit_origins:${chatId}`, removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `source_coverage_retry:${chatId}`, lineageRevisionKey(chatId));
     }
     for (const chatId of unique) db.prepare("DELETE FROM server_meta WHERE key=?").run(chatPacketBudgetKey(chatId));
     return db.prepare(`DELETE FROM chats WHERE id IN (${placeholders})`).run(...unique).changes;

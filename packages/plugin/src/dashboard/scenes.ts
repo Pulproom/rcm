@@ -1,5 +1,5 @@
-import { compareStoryMemories, isScene, storyScenes, sceneNumbers } from "@rcm/shared";
-export { compareStoryMemories, isScene, storyScenes, sceneNumbers };
+import { orderStoryMemories, isScene, storyScenes, sceneNumbers } from "@rcm/shared";
+export { orderStoryMemories, isScene, storyScenes, sceneNumbers };
 import { isRecognitionMemory } from "@rcm/shared";
 
 /** `number` and `place` let a caller write a short range (S#12–S#31) or name where it happened. */
@@ -41,7 +41,7 @@ export const recentScenes = (memories: any[], count: number): any[] =>
 /** An act's linked memories in story order (capsule children and initial calibration excluded). */
 export const actScenes = (group: any, memories: any[]): any[] => {
   const ids = new Set((group?.linkedMemoryIds ?? []).map(String));
-  return memories.filter((memory) => memory && ids.has(String(memory.id)) && !memory.capsule_parent_id && !isRecognitionMemory(memory)).sort(compareStoryMemories);
+  return orderStoryMemories(memories.filter((memory) => memory && ids.has(String(memory.id)) && !memory.capsule_parent_id && !isRecognitionMemory(memory)), memories.filter(isScene));
 };
 
 /** Up to `count` frames for an act strip: landmarks first, then scenes with dialogue spread across the act, shown in story order. */

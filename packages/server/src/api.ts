@@ -1,4 +1,5 @@
 import { markChatEngaged, recordOpenChat, deleteUnengagedChats, recentChatCleanup } from "./chat-engagement.js";
+import { sourceSnapshotStatus, withSourceSnapshot } from './source-snapshot.js';
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { sharedPastPacket, withMemoryGuidance, clipLandmarkDisplayText } from "@rcm/shared";
 import { editPairProgress, listPairProgress, pairProgressResponse, renderPairProgress } from "./pair-progress.js";
@@ -8,7 +9,7 @@ import { patchMemoryLine } from './memory-detail-edits.js';
 import { CharacterWorkRequestSchema } from "@rcm/shared";
 import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
 import { EntityColorSchema, hasSocialTermSeparator } from "@rcm/shared";
-import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
+import { recordPromiseRecency, snapshotPromiseRecency, promiseFirstMade } from "./promise-recency.js";
 import { Api38ExtractionDraftResultSchema, ExtractionAuditSubmissionSchema } from "@rcm/shared";
 import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { isProviderAuthenticationError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES } from "@rcm/shared";
@@ -113,7 +114,7 @@ import { hasBufferedSource, ingestionSummary } from "./ingestion-state.js";
 import { resolveConflict, type ConflictResolution } from "./conflicts.js";
 import { readMemoryBookmarks, setMemoryBookmark } from "./memory-bookmarks.js";
 import { InvalidViewPreferencesPatchError, readViewPreferences, ViewPreferencesStorageError, writePersonaHint, writeViewPreferences } from "./view-preferences.js";
-import { acknowledgeChatLineage, applyManualLineage, applyProbedLineage, chooseChatLineage, declineChatLineage, ensureChatLineage, getChatLineage, previewManualLineage, probeChatLineage, revertChatLineage } from "./lineage.js";
+import { acknowledgeChatLineage, applyManualLineage, applyProbedLineage, chooseChatLineage, declineChatLineage, ensureChatLineage, hasPendingLineageDiscovery, getChatLineage, previewManualLineage, probeChatLineage, revertChatLineage } from "./lineage.js";
 import { appendSceneNames, mentionedCharacters, renderSceneNames, listSocialKnowledge, retractSocialKnowledge, setManualSocialKnowledge } from "./social-knowledge.js";
 import { fingerprintMatches, parseSourceFingerprintJson } from "./source-fingerprint.js";
 import { completeRelationshipProjectionJob, flushRelationshipProjectionQueue, listRelationshipProjections, setRelationshipProjectionOverride } from "./relationship-projections.js";
@@ -371,11 +372,16 @@ export function createApp(dependencies: Dependencies): Hono {
     finishSyncPhase("requestBodyReadMs");
     const parsed = TurnPrepareRequestSchema.parse(JSON.parse(requestBody));
     finishSyncPhase("requestParseMs");
-    const lineage = ensureChatLineage(db, parsed, true);
-    const lineagePending = ["ambiguous", "choice_required"].includes(lineage.status);
-    finishSyncPhase("lineageMs");
     const effectiveBackfillApproved = parsed.backfillApproved === true && parsed.serverInstanceId === serverInstanceId;
-    const sync = syncSnapshot(db, { ...parsed, forceBackfill: parsed.forceBackfill && !lineagePending, backfillApproved: effectiveBackfillApproved && !lineagePending });
+    const { lineage, sync, lineageDeferred, ...sourceStatus } = withSourceSnapshot(db, parsed, (policy, allowDiscovery) => {
+      const lineage = ensureChatLineage(db, parsed, allowDiscovery, policy.allowDestructive);
+      const lineageDeferred = !allowDiscovery && hasPendingLineageDiscovery(db, parsed);
+      if (lineageDeferred) policy.held = true;
+      const pending = lineageDeferred || ["ambiguous", "choice_required"].includes(lineage.status);
+      return { lineage, lineageDeferred, sync: syncSnapshot(db, { ...parsed, forceBackfill: parsed.forceBackfill && !pending, backfillApproved: effectiveBackfillApproved && !pending }, policy) };
+    });
+    const lineagePending = lineageDeferred || ["ambiguous", "choice_required"].includes(lineage.status);
+    finishSyncPhase("lineageMs");
     db.prepare(`INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
       WHERE server_meta.value<>excluded.value`).run(chatPacketBudgetKey(parsed.chatId), String(parsed.tokenBudget));
     if (parsed.memoryGeneration) memoryReferences.begin(parsed.chatId, parsed.memoryGeneration);
@@ -428,6 +434,7 @@ export function createApp(dependencies: Dependencies): Hono {
         apiRevision: RCM_API_REVISION,
         serverInstanceId,
         chatRevision: sync.revision,
+        ...sourceStatus,
         profile: parsed.profile,
         memoryLanguage: languageState.memory_language,
         pendingMemoryLanguage: languageState.pending_memory_language,
@@ -874,6 +881,7 @@ export function createApp(dependencies: Dependencies): Hono {
       apiRevision: RCM_API_REVISION,
       serverInstanceId,
       chatRevision: sync.revision,
+      ...sourceStatus,
       profile: parsed.profile,
       memoryLanguage: languageState.memory_language,
       pendingMemoryLanguage: languageState.pending_memory_language,
@@ -1125,18 +1133,19 @@ export function createApp(dependencies: Dependencies): Hono {
     // Opening a host chat only resolves identity and stores sources. It must not
     // capture setup, retrieve a packet, enqueue work or wake a provider.
     const request = { ...body, resolvedSetup: undefined, forceBackfill: false, backfillApproved: false, deferExtraction: true, tokenBudget: 0 };
-    const lineage = db.transaction(() => {
+    const { lineage, ...sourceStatus } = withSourceSnapshot(db, body, (policy, allowDiscovery) => {
       syncChatTitle(db,body.chatId,body.chatTitle);
       const current = getChatLineage(db, body.chatId);
-      const resolved = current.status === "none" ? ensureChatLineage(db, request) : current;
+      if (!allowDiscovery && hasPendingLineageDiscovery(db, request)) policy.held = true;
+      const resolved = current.status === "none" ? ensureChatLineage(db, request, allowDiscovery, policy.allowDestructive) : current;
       // A concurrent prepare may already have advanced this chat. Opening is
       // not an edit/rollback event; only fill a previously empty source ledger.
-      if (!db.prepare("SELECT 1 FROM messages WHERE chat_id=? LIMIT 1").get(body.chatId)) syncSnapshot(db, request);
+      if (!db.prepare("SELECT 1 FROM messages WHERE chat_id=? LIMIT 1").get(body.chatId)) syncSnapshot(db, request, policy);
       recordOpenChat(db, body.workerId ?? "legacy", body.chatId);
       writePersonaHint(db, body.chatId, body.identityHints?.userPersonaName);
-      return resolved;
-    })();
-    return context.json({ lineage, initialCalibration: initialCalibrationView(db, body.chatId), memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(body.chatId) as { memory_language: string }).memory_language });
+      return { lineage: resolved };
+    });
+    return context.json({ ...sourceStatus, lineage, initialCalibration: initialCalibrationView(db, body.chatId), memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(body.chatId) as { memory_language: string }).memory_language });
   });
   app.post("/v1/chats/:id/lineage/probe", async (context) => {
     try {
@@ -2936,9 +2945,11 @@ export function createApp(dependencies: Dependencies): Hono {
       worker: serverWorker.statusForChat(chatId),
       episode: (episodeOverview(db, chatId) as any).active,
       lineage: getChatLineage(db, chatId),
+      ...sourceSnapshotStatus(db, chatId),
     };
   }
   app.get("/v1/chats/:id/status", (context) => context.json(readDashboardStatus(context.req.param("id"))));
+  app.get('/v1/chats/:id/source-head', (context) => context.json(sourceSnapshotStatus(db, context.req.param('id'))));
   app.patch("/v1/chats/:id/relationships", async (context) => {
     const body = await context.req.json() as Record<string, unknown>;
     if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
@@ -2990,6 +3001,7 @@ export function createApp(dependencies: Dependencies): Hono {
       (SELECT MAX(msg.ordinal) FROM json_each(beliefs.evidence_json) ev CROSS JOIN messages msg
         ON msg.chat_id=beliefs.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')) AS last_mention_ordinal,
       NULL AS last_mention_story_time FROM beliefs`;
+    const promiseOrigins=promiseFirstMade(db,chatId);
     const promiseSelect = `SELECT promises.*,
       NULLIF(MAX(
         COALESCE((SELECT MAX(msg.ordinal) FROM memories source JOIN json_each(source.evidence_json) ev CROSS JOIN messages msg
@@ -3003,7 +3015,7 @@ export function createApp(dependencies: Dependencies): Hono {
       at: { revision: hasRevision ? atRevision : null, ordinal: hasOrdinal ? atOrdinal : null },
       assertions: (db.prepare(`${assertionSelect} WHERE ${clauses.join(" AND ")}`).all(...values) as LastMentionRow[]).map(assertionItem),
       beliefs: (db.prepare(`${beliefSelect} WHERE chat_id=? AND active=1`).all(chatId) as LastMentionRow[]).map(withLastMention),
-      promises: (db.prepare(`${promiseSelect} WHERE chat_id=?`).all(chatId) as LastMentionRow[]).map(withLastMention),
+      promises: (db.prepare(`${promiseSelect} WHERE chat_id=?`).all(chatId) as LastMentionRow[]).map(row=>({...withLastMention(row),firstMade:promiseOrigins.get(String(row.id))})),
       ...(includeHistory ? {
         endedAssertions: (db.prepare(`${assertionSelect} WHERE chat_id=? AND valid_to_revision IS NOT NULL ORDER BY COALESCE(valid_to_ordinal,2147483647) DESC,created_at DESC`).all(chatId) as LastMentionRow[]).map(assertionItem),
         endedBeliefs: (db.prepare(`${beliefSelect} WHERE chat_id=? AND active=0 AND (source IS NULL OR source NOT LIKE 'user_deleted:%') ORDER BY COALESCE(valid_to_ordinal,2147483647) DESC,created_at DESC`).all(chatId) as LastMentionRow[]).map(withLastMention),
@@ -3361,8 +3373,11 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/source-sync", async (context) => {
     const body = TurnPrepareRequestSchema.parse(await context.req.json());
     if (body.chatId !== context.req.param("id")) return context.json({ error: "chatId does not match route" }, 400);
-    const stats = syncSnapshot(db, { ...body, deferExtraction: true, tokenBudget: 0, forceBackfill: false });
-    return context.json({ ok: true, stats });
+    const { stats, ...sourceStatus } = withSourceSnapshot(db, body, (policy) => {
+      ensureChatLineage(db, body, false, policy.allowDestructive);
+      return { stats: syncSnapshot(db, { ...body, deferExtraction: true, tokenBudget: 0, forceBackfill: false }, policy) };
+    });
+    return context.json({ ok: true, stats, ...sourceStatus });
   });
   app.patch("/v1/chats/:id/conflicts/:conflictId", async (context) => {
     const body = await context.req.json() as { resolution?: ConflictResolution; targetAssertionId?: unknown };

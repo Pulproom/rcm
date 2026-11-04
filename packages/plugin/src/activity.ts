@@ -3,7 +3,7 @@ export { publishActivity, publishStatusSummary, subscribeActivity, stopDeletedHo
 import { prefetchCurrentChatTranslations } from "./dashboard.js";
 import { observeSetupAttention } from "./setup-sources.js";
 import { backgroundTranslationEnabled, googleTranslationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
-import { observeCurrentHostGeneration, readCurrentChatPresence, readOptionalDashboardContext } from "./context.js";
+import { recheckHeldSources, observeCurrentHostGeneration, readCurrentChatPresence, readOptionalDashboardContext } from "./context.js";
 import { SERVER_STATUS_TIMEOUT_MS, ServerRequestError, type ServerClient } from "./api-client.js";
 import type { RuntimeState } from "./types.js";
 import { reconcileAutomaticServerPause } from "./worker.js";
@@ -84,6 +84,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
   let prefetchNextAt = 0;
   const poll = async () => {
     if (unloaded) return;
+    const pollServerUrl = state.settings.serverUrl;
+    let requestCurrent = () => !unloaded && state.settings.serverUrl === pollServerUrl;
     try {
       if (state.mainGeneration) await observeCurrentHostGeneration(state);
       // Chat switches need to update visibility even without a new RP request.
@@ -92,9 +94,13 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         if (!Number.isInteger(character) || character < 0) return "none";
         const chat = await risuai.getCurrentChatIndex();
         return Number.isInteger(chat) && chat >= 0 ? `${character}:${chat}` : "none";
-      })().catch(() => "none");
+      })();
       // Branching/copying can replace the chat at the same host indices.
-      const presence = selection === "none" ? undefined : await readCurrentChatPresence().catch(() => undefined);
+      const presence = selection === "none" ? undefined : await readCurrentChatPresence();
+      if (!requestCurrent()) {
+        if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+        return;
+      }
       const activeChatId = presence?.chatId;
       if (presence?.chatTitle && isServerConfigured(state.settings) && currentLineageOperation(state)?.status !== 'running') {
         const key = `${state.settings.serverUrl}\0${presence.chatId}`;
@@ -102,6 +108,15 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           const result = await client.request<{ok:boolean}>(`/v1/chats/${encodeURIComponent(presence.chatId)}/title`, {
             method:'PUT',body:JSON.stringify({chatTitle:presence.chatTitle}),
           }).catch(error => { if (error instanceof ServerRequestError && error.status === 404) return {ok:false}; throw error; });
+          if (!requestCurrent()) {
+            if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+            return;
+          }
+          const latest = await readCurrentChatPresence();
+          if (!requestCurrent() || latest.chatId !== presence.chatId || latest.chatTitle !== presence.chatTitle) {
+            if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+            return;
+          }
           if (result.ok) syncedTitles.set(key,presence.chatTitle);
           if (state.current?.chatId === presence.chatId) state.current.chatTitle = presence.chatTitle;
         }
@@ -113,7 +128,14 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         if (removed.length) {
           // Only disappearance from two complete inventories is authoritative.
           // Keep the archive; stop work and revoke leases before removing jobs.
-          for (const id of removed) await stopDeletedHostChatWork(state, client, id);
+          for (const id of removed) {
+            const latest = await readCurrentChatPresence();
+            if (!requestCurrent() || latest.inventory?.characterId !== characterId || latest.inventory.chatIds.includes(id)) {
+              if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+              return;
+            }
+            await stopDeletedHostChatWork(state, client, id);
+          }
         }
         hostInventories.set(characterId, ids);
       }
@@ -157,14 +179,24 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           return;
         }
         const startedRevision = state.statusSummaryRevision ?? 0;
+        requestCurrent = () => !unloaded && state.settings.serverUrl === pollServerUrl && state.current?.chatId === chatId && (state.statusSummaryRevision ?? 0) === startedRevision;
         let result = await client.request<StatusResponse>(`/v1/chats/${encodeURIComponent(chatId)}/status`, {}, SERVER_STATUS_TIMEOUT_MS);
+        if (requestCurrent() && (await readCurrentChatPresence()).chatId !== chatId) {
+          state.statusStale = true;
+          if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+          return;
+        }
+        if (!requestCurrent()) {
+          if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+          return;
+        }
+        recheckHeldSources(state, client);
+        state.statusScope = { chatId, serverUrl: pollServerUrl };
+        state.statusStale = false;
+        reconcileLineageOperation(state,chatId,result.lineage);
         if (needsOpenedChatResolution(state, result.initialCalibration, result.lineage)) {
           void resolveOpenedChat(state, client).catch(() => undefined); // operation owns visible errors
           state.activityTimer = window.setTimeout(() => void poll(), 1_000);
-          return;
-        }
-        if (state.current?.chatId !== chatId || (state.statusSummaryRevision ?? 0) !== startedRevision) {
-          if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), isActive(state) ? 1_000 : 4_000);
           return;
         }
         observeSetupAttention(state, chatId, result.initialCalibration?.status, result.lineage);
@@ -220,6 +252,10 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           worker: result.worker,
           available: true,
         });
+        if (!requestCurrent()) {
+          if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+          return;
+        }
         state.activityReady = true;
         noteServerConnectionSuccess(state);
         } else {
@@ -239,6 +275,11 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         }
       }
     } catch (error) {
+      if (!requestCurrent()) {
+        if (!unloaded) state.activityTimer = window.setTimeout(() => void poll(), 1_000);
+        return;
+      }
+      state.statusStale = true;
       state.activityReady = true;
       if (!(error instanceof ServerCompatibilityError) && (error as { code?: string })?.code === "API_REVISION_MISMATCH") {
         try {

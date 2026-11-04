@@ -1,7 +1,7 @@
 import { SocialRelationSchema, type SocialRelation } from "@rcm/shared";
 import { EVERYONE_HOLDER, intersectAccessKnowledge } from "./item-access.js";
 import type { RcmDatabase } from "./db.js";
-import { normalizeEntityName } from "./entities.js";
+import { normalizeEntityName, type ResolvedEntityIdentity } from "./entities.js";
 
 export interface StoredSocialRelation extends SocialRelation { detailIds: string[]; manual?: boolean; knownBy?: string[]; knownByEveryone?: boolean }
 export function parseSocialRelation(value: unknown): StoredSocialRelation | undefined {
@@ -24,21 +24,24 @@ export function socialRelationKnowledge(db: RcmDatabase, chatId: string, relatio
   }
   return common ?? [];
 }
-export function resolveSocialRelation(db: RcmDatabase, chatId: string, relation: SocialRelation & { memoryKey: string; detailKeys: string[] }, memoryByKey: Map<string, string>): StoredSocialRelation {
+export const UNSUPPORTED_SOCIAL_RELATION = "Social relation requires active supporting details in its memory; review the memory and detail links";
+export function resolveSocialRelation(db: RcmDatabase, chatId: string, relation: SocialRelation & { memoryKey: string; detailKeys: string[] }, memoryByKey: Map<string, string>): StoredSocialRelation | undefined {
   const memoryId = memoryByKey.get(relation.memoryKey) ?? (db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1").get(chatId, relation.memoryKey) as { id: string } | undefined)?.id;
-  const detailIds = relation.detailKeys.map(key => {
+  const detailIds: string[] = [];
+  for (const key of relation.detailKeys) {
     const row = db.prepare("SELECT id FROM visible_memory_details WHERE chat_id=? AND memory_id=? AND detail_key=? AND active=1").get(chatId, memoryId ?? null, key) as { id: string } | undefined;
-    if (!row) throw new Error("Social relation requires active supporting details in its memory");
-    return row.id;
-  });
+    if (!row) return undefined;
+    detailIds.push(row.id);
+  }
   return { ...SocialRelationSchema.parse(relation), detailIds: [...new Set(detailIds)] };
 }
 
 /** Typed endpoints partition ledger properties; labels remain free text, never parsed. */
-export function sameSocialRelationScope(stored: unknown, incoming: SocialRelation | undefined): boolean {
+export function sameSocialRelationScope(stored: unknown, incoming: SocialRelation | undefined, resolve?: (value: string) => ResolvedEntityIdentity): boolean {
   const relation = parseSocialRelation(stored);
   return !relation && !incoming || !!relation && !!incoming
-    && relation.target.trim().toLocaleLowerCase() === incoming.target.trim().toLocaleLowerCase()
+    && !resolve?.(relation.target).ambiguous && !resolve?.(incoming.target).ambiguous
+    && normalizeEntityName(resolve?.(relation.target).canonical ?? relation.target) === normalizeEntityName(resolve?.(incoming.target).canonical ?? incoming.target)
     && relation.kind === incoming.kind && relation.direction === incoming.direction;
 }
 

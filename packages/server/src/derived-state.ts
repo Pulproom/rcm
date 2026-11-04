@@ -7,8 +7,8 @@ import { pruneDetailAccessEdits } from "./item-access.js";
 
 /**
  * Delete every chat-scoped derived record while preserving the source message
- * ledger, chat configuration and lineage row. Reset, reprocess and lineage
- * revert share this registry so new derived tables cannot drift between paths.
+ * ledger, chat configuration and lineage row. Reset, reprocess and explicit
+ * replacement use this registry; inheritance cancellation uses its ownership receipt.
  */
 export function deleteDerivedRows(db: RcmDatabase, chatId: string, options: { preserveInitialCalibration?: boolean; preserveUserCorrections?: boolean } = {}): void {
   if (options.preserveInitialCalibration || options.preserveUserCorrections) resetProgress(db,chatId,"scene");

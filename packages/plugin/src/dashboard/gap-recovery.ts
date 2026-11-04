@@ -59,7 +59,7 @@ export function recoveryCard(status: GapRecoveryStatus | undefined, memories: an
       : s.started ? `빠진 기억을 채웠어요 · 새 기억 ${s.created}개` : `중간에 빠진 기억 ${s.rows.length}곳`;
   const body = s.running ? '끝나면 여기서 결과를 볼 수 있어요.'
     : s.failed.length ? `새 기억 ${s.created}개를 채웠어요. ${s.failed.map(row => `${recoveryLocation(row, memories)}는 ${row.error || '다시 시도해 주세요'}`).join('. ')}.`
-      : s.started ? '' : `${phone ? '' : '입력 없이 이어진 턴이 기억으로 정리되지 못했어요. '}장면 기억만 만들고 관계·약속은 그대로 둬요.`;
+      : s.started ? '' : `아직 정리되지 않은 원문은 확인이 필요해요. 장면 기억만 만들고 관계·약속은 그대로 둬요.`;
   const actions = s.running ? btn('결과 보기', { kind: 'quiet', action: 'gap-sheet' })
     : s.failed.length ? btn('다시 시도', { kind: 'primary', action: 'gap-retry' }) + btn('결과 보기', { kind: 'quiet', action: 'gap-sheet' })
       : s.started ? btn('결과 보기', { kind: 'quiet', action: 'gap-sheet' }) + iconBtn('close', '닫기', { action: 'gap-dismiss' })
