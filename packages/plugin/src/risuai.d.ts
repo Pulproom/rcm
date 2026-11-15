@@ -46,6 +46,9 @@ interface RisuPluginApi {
   alert?(message: string): Promise<void>;
   parseRisuChat?(text: string, options: { processRegex: false; runVar: false; rmVar: true }): Promise<string>;
   getCharacter(): Promise<any>;
+  getCharacterFromIndex?(index: number): Promise<any | null>;
+  readImage?(path: string): Promise<Uint8Array>;
+  readInlay?(id: string): Promise<{ data: string; ext: string; name: string; type: "image" | "video" | "audio" | "signature"; width?: number; height?: number } | null>;
   getCurrentCharacterIndex(): Promise<number>;
   getCurrentChatIndex(): Promise<number>;
   getChatFromIndex(characterIndex: number, chatIndex: number): Promise<any | null>;

@@ -1,3 +1,4 @@
+import { assertUserChat, userChatSql } from './chat-work.js';
 import type { RcmDatabase } from "./db.js";
 import type { EmbeddingService } from "./embedding.js";
 import { deleteChats } from "./admin.js";
@@ -30,8 +31,9 @@ export function recentChatCleanup(db: RcmDatabase): { at: number; count: number 
 
 /** Candidate IDs grant no deletion authority; every guard is read under the write transaction. */
 export function deleteUnengagedChats(db: RcmDatabase, embeddings: EmbeddingService, candidates: string[], before?: number): number {
+  candidates.forEach(id=>assertUserChat(db,id));
   return db.transaction(() => {
-    const eligible = db.prepare(`SELECT c.id FROM chats c WHERE c.id=? AND c.is_internal=0 AND c.engaged_at IS NULL
+    const eligible = db.prepare(`SELECT c.id FROM chats c WHERE c.id=? AND ${userChatSql('c')} AND c.engaged_at IS NULL
       AND (? IS NULL OR c.last_seen_at<?)
       AND NOT EXISTS(SELECT 1 FROM memories WHERE chat_id=c.id)
       AND NOT EXISTS(SELECT 1 FROM jobs WHERE chat_id=c.id)
@@ -52,7 +54,7 @@ export function cleanupUnengagedChats(db: RcmDatabase, embeddings: EmbeddingServ
   return db.transaction(() => {
     if (timestamp - recentChatCleanup(db).at < DAY) return 0;
     const before = timestamp - 30 * DAY;
-    const ids = (db.prepare("SELECT id FROM chats WHERE engaged_at IS NULL AND last_seen_at<? AND is_internal=0").all(before) as { id: string }[]).map(row => row.id);
+    const ids = (db.prepare(`SELECT id FROM chats WHERE engaged_at IS NULL AND last_seen_at<? AND ${userChatSql()}`).all(before) as { id: string }[]).map(row => row.id);
     const count = deleteUnengagedChats(db, embeddings, ids, before);
     db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(CLEANUP_KEY, JSON.stringify({ at: timestamp, count }));
     console.info(`[RCM] Unengaged chat cleanup deleted=${count}`);

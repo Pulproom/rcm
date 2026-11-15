@@ -5,7 +5,17 @@ import { normalizeLedgerPredicate, normalizeLedgerText } from "./normalization.j
 import { invalidateStorySupports } from "./story-spine.js";
 
 type Evidence = Array<{ messageId?: string }>;
-export type Deletion = { kind: "entity" | "assertion" | "belief" | "promise"; identities: string[]; messageIds: string[]; sourceBatchId?: string; entityId?: string };
+
+/** User deletion covers processed history, including policy-skipped source. */
+export function processedSourceWatermark(db: RcmDatabase, chatId: string): number {
+  return (db.prepare("SELECT COALESCE(MAX(ordinal),-1) ordinal FROM messages WHERE chat_id=? AND extraction_state IN ('done','encapsulated','skipped_policy')").get(chatId) as { ordinal: number }).ordinal;
+}
+
+/** NULL is the legacy permanent tombstone; a retained boundary also guards revived rows. */
+export function deletionSuppressesEvidence(watermark: number | null, deleted: boolean, ordinal: number | null): boolean {
+  return watermark == null ? deleted : ordinal === null || ordinal <= watermark;
+}
+export type Deletion = { kind: "entity" | "memory" | "assertion" | "belief" | "promise"; identities: string[]; messageIds: string[]; sourceBatchId?: string; entityId?: string };
 export const userDeletionsKey = (chatId: string): string => `user_deletions:${chatId}`;
 export const ledgerEditOriginsKey = (chatId: string): string => `ledger_edit_origins:${chatId}`;
 export const removedAliasesKey = (chatId: string): string => `removed_aliases:${chatId}`;
@@ -98,6 +108,18 @@ export function readUserDeletions(db: RcmDatabase, chatId: string): Deletion[] {
   return row ? JSON.parse(row.value) as Deletion[] : [];
 }
 
+/** New candidates reserve deleted identities; stored snapshots keep their original keys. */
+export function deletedMemoryKeys(db:RcmDatabase,chatId:string):Set<string> {
+  return new Set(readUserDeletions(db,chatId).filter(entry=>entry.kind==='memory')
+    .flatMap(entry=>entry.identities.filter(identity=>identity.startsWith('key:')).map(identity=>identity.slice(4))));
+}
+
+/** Memory keys are immutable structural identities, including after family folding. */
+export function rememberMemoryDeletion(db: RcmDatabase, chatId: string, memoryId: string): void {
+  const row = db.prepare("SELECT memory_key,evidence_json,source_batch_id FROM memories WHERE chat_id=? AND id=?").get(chatId, memoryId) as Record<string, any> | undefined;
+  if (row) rememberUserDeletion(db, chatId, "memory", [`key:${row.memory_key}`], ledgerLineage(db, chatId, row));
+}
+
 // These are typed ledger identities, never a classifier over RP prose.
 export function ledgerDeletionIdentities(kind: "assertion" | "belief" | "promise", row: Record<string, any>): string[] {
   const identity = normalizeEntityName;
@@ -124,9 +146,9 @@ export function deletionGuard(db: RcmDatabase, chatId: string) {
   const liveMessages = new Set((db.prepare("SELECT message_id FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").all(chatId) as Array<{ message_id: string }>).map(row => row.message_id));
   return (kind: Deletion["kind"], identities: string[], evidence: Evidence = [], sourceBatchId?: string): boolean => entries.some(entry =>
     entry.kind === kind && identities.some(identity => entry.identities.includes(identity))
-    // A new, stored source message is required to lift a deletion. Empty,
-    // setup-only and unknown evidence cannot resurrect old derived data.
-    && (kind === "entity"
+    // An immutable memory key stays deleted. Other ledger identities require
+    // a new, stored source message to lift their source-scoped deletion.
+    && (kind === "memory" ? true : kind === "entity"
       ? !evidence.some(item => item.messageId && liveMessages.has(item.messageId) && !entry.oldMessages.has(item.messageId))
       : evidence.some(item => item.messageId && entry.oldMessages.has(item.messageId))
         || Boolean((!evidence.length || !entry.messageIds.length) && sourceBatchId && entry.sourceBatchId === sourceBatchId)));
@@ -134,6 +156,7 @@ export function deletionGuard(db: RcmDatabase, chatId: string) {
 
 export function suppressDeletedExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceMessageIds: string[] = [], sourceBatchId?: string): ExtractionResult {
   const blocked = deletionGuard(db, chatId);
+  result.memories=result.memories.filter(memory=>!blocked('memory',[`key:${memory.key}`]));
   const fallbackEvidence = sourceMessageIds.map(messageId => ({ messageId }));
   const promiseEvidence = (item: ExtractionResult["promises"][number]): Evidence => item.evidence?.length ? item.evidence
     : result.memories.find(memory => memory.key === item.memoryKey)?.evidence ?? fallbackEvidence;
@@ -175,6 +198,7 @@ export function suppressDeletedExtraction(db: RcmDatabase, chatId: string, resul
       detail.participants = detail.participants.filter(keep);
       detail.knownBy = detail.knownBy.filter(keep);
       detail.access = detail.access?.filter(item => keep(item.holder));
+      detail.hiddenFrom = detail.hiddenFrom?.filter(keep);
     }
     for (const dialogue of memory.keyDialogues ?? []) dialogue.access = dialogue.access?.filter(item => keep(item.holder));
   }
@@ -217,7 +241,11 @@ export function deleteLedgerRecord(db: RcmDatabase, chatId: string, kind: "asser
     (SELECT 1 FROM json_tree(conflicts.existing_json) WHERE key='id' AND value=?)`).run(chatId, recordId);
   db.prepare(`DELETE FROM reconciliation_items WHERE chat_id=? AND EXISTS
     (SELECT 1 FROM json_tree(reconciliation_items.candidates_json) WHERE key='id' AND value=?)`).run(chatId, recordId);
-  if (kind === "promise") db.prepare("DELETE FROM promise_events WHERE chat_id=? AND (promise_id=? OR promise_key=?)").run(chatId, recordId, row.promise_key);
+  if (kind === "promise") {
+    db.prepare(`DELETE FROM item_access WHERE chat_id=? AND item_kind='promise_event' AND item_id IN
+      (SELECT id FROM promise_events WHERE chat_id=? AND (promise_id=? OR promise_key=?))`).run(chatId,chatId,recordId,row.promise_key);
+    db.prepare("DELETE FROM promise_events WHERE chat_id=? AND (promise_id=? OR promise_key=?)").run(chatId, recordId, row.promise_key);
+  }
   db.prepare(`DELETE FROM ${table} WHERE id=? AND chat_id=?`).run(recordId, chatId);
   const supports=invalidatedSupports ?? new Set<string>();
   supports.add(`${table}:${recordId}`);

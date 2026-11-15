@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-export const RCM_PRODUCT_VERSION = "1.0.28";
-export const RCM_PLUGIN_VERSION = "1.0.28";
-export const RCM_SERVER_VERSION = "1.0.28";
+export const RCM_PRODUCT_VERSION = "2.0.0";
+export const RCM_PLUGIN_VERSION = "2.0.0";
+export const RCM_SERVER_VERSION = "2.0.0";
 
 export const ReleaseChannelSchema = z.literal("stable");
 export type ReleaseChannel = z.infer<typeof ReleaseChannelSchema>;

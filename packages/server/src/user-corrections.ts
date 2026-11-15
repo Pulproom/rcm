@@ -1,5 +1,6 @@
 import type { RcmDatabase } from "./db.js";
 import { normalizeLedgerPredicate } from "./normalization.js";
+import { rebuildPromiseContent } from './item-access.js';
 
 export interface UserCorrection { id?: string; user_edit_ordinal?: number | null; auto_locked?: number; holder?: string; subject?: string; predicate?: string; valid_from_revision?: number; social_relation_json?: string | null }
 
@@ -17,6 +18,13 @@ export const isUserCorrected = (row: UserCorrection): boolean => row.user_edit_o
 /** Source cleanup/rollback never revokes a user's correction, regardless of lock. */
 export const UNCORRECTED_SQL = "user_edit_ordinal IS NULL AND auto_locked=0";
 export const USER_CORRECTION_GUIDANCE = `User edits are baselines, not permanent locks. auto_locked=1 prohibits automatic replacement, closure or contradiction. An unlocked user_edit_ordinal baseline may change only with direct source evidence after that ordinal; old-source replay or silence cannot undo it. Preserve prior values as history. For coexistence of genuinely compatible, independent beliefs, return action=coexist and compatibleWithIds listing all protected prior belief IDs with the same normalized predicate in that holder/subject scope. For a genuinely independent new assertion or promise, return action=create and compatibleWithIds listing the protected prior candidate IDs with the same normalized predicate/key. Unrelated protected properties do not block create or coexist, which cannot target existing rows; a changed property/key never authorizes replacing or ending a protected row. This typed declaration means the new belief does not replace, end or contradict those beliefs. Different wording or a changed key alone does not establish independence. Never use coexistence to evade a protected target.`;
+
+/** Typed independence permits insertion only; it never authorizes touching a protected row. */
+export function compatibleIndependentAssertion(input:{create:boolean;targetIds:readonly string[];compatibleWithIds?:readonly string[];protectedIds:readonly string[];candidateIds:readonly string[]}):boolean {
+  return input.create && !input.targetIds.length && input.protectedIds.length>0
+    && input.protectedIds.every(id=>input.compatibleWithIds?.includes(id))
+    && (input.compatibleWithIds ?? []).every(id=>input.candidateIds.includes(id));
+}
 
 export function committedEditOrdinal(db: RcmDatabase, chatId: string): number {
   return Number((db.prepare("SELECT COALESCE(MAX(ordinal),-1) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number }).ordinal);
@@ -148,6 +156,7 @@ export function invalidateAutomaticTransitions(db: RcmDatabase, chatId: string, 
   }
   const promiseAtoms=new Map([...new Set(affectedPromises)].map(id=>[id,db.prepare("SELECT promisor,promisee,content FROM promises WHERE chat_id=? AND id=?").get(chatId,id)]));
   restoreCorrectedPromises(db,chatId,[...promiseAtoms.keys()]);
+  for (const id of promiseAtoms.keys()) rebuildPromiseContent(db,chatId,id);
   // Same-row automatic transitions can change a corrected promise's Story atom
   // without deactivating its ID. Report only actual content changes.
   return [...promiseAtoms].filter(([id,before])=>JSON.stringify(before)!==JSON.stringify(db.prepare("SELECT promisor,promisee,content FROM promises WHERE chat_id=? AND id=?").get(chatId,id))).map(([id])=>id);

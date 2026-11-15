@@ -44,7 +44,7 @@ const textOf=(row:Row):string=>[row.subject,row.holder,row.promisor,row.promisee
   row.predicate,row.promise_key,row.value,row.content,row.text,row.summary,row.label,row.title,...(row.knownAs ?? []),...(row.cognition ?? []).map((r:Row)=>r.text)].filter(v=>typeof v==='string').join(' ');
 
 /** Ranking is provenance and lexical retrieval, never a local interpretation of RP prose. */
-export function selectStatePrior(db:RcmDatabase,chatId:string,context:Context,systemPrompt:string,budget:number,sourceIds:string[],draft:ExtractionDraftResult,jobId?:string):Context {
+export function selectStatePrior(db:RcmDatabase,chatId:string,context:Context,systemPrompt:string,budget:number,sourceIds:string[],draft:ExtractionDraftResult,jobId?:string,rankingContext:Context=context):Context {
   const selected=emptyStatePrior(context), sourceSet=new Set(sourceIds);
   const memories=db.prepare('SELECT id,memory_key,evidence_json FROM memories WHERE chat_id=? AND active=1').all(chatId) as Row[];
   const linked=new Set<string>([...draft.memories.map(m=>m.key),...(draft.memoryRecallObservations ?? []).map(o=>o.memoryId)]);
@@ -66,7 +66,8 @@ export function selectStatePrior(db:RcmDatabase,chatId:string,context:Context,sy
   const query=new Set(normalizeSearchTokens(context.sources.map((s:Row)=>s.units.map((u:Row)=>u.text).join(' ')).join(' '),draft.language));
   const propertyQuery=new Set([...query,...normalizeSearchTokens(JSON.stringify(context.eventDraft),draft.language)]);
   const ranked=components.flatMap(key=>((context[key] ?? []) as Row[]).map((item,index)=>{
-    const row=item.value && typeof item.value==='object'?item.value:item;
+    const rankingItem=(key==='priorSeeds' ? rankingContext.priorSeeds?.find((row:Row)=>row.detailId===item.detailId) : rankingContext[key]?.[index]) ?? item;
+    const row=rankingItem.value && typeof rankingItem.value==='object'?rankingItem.value:rankingItem;
     const metadata=key==='priorSeeds'?detailRows.get(item.detailId):key==='relationships'?relationships.get(JSON.stringify([row.from_entity,row.to_entity])):row;
     const text=textOf(row), identities:string[]=([row.subject,row.holder,row.promisor,row.promisee,row.from_entity,row.to_entity,row.persona,row.character,...(row.seed?.noticedBy ?? [])] as unknown[]).filter((n):n is string=>typeof n==='string').map(n=>n.toLocaleLowerCase());
     const direct=evidenceIds(row).some(id=>sourceSet.has(id))||[item.id,item.detailId,row.source_memory_id,row.memory_id,row.key].some(id=>id&&linked.has(id));

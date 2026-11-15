@@ -41,7 +41,7 @@ const plugin = await build({absWorkingDir:root,entryPoints:['packages/plugin/src
 if (repository) {
   const serverBytes=readFileSync(join(out,'server.mjs'));
   put(join(base,'update-manifest.json'),JSON.stringify({schemaVersion:1,channel:releaseChannel,productVersion:PRODUCT_VERSION,pluginVersion:PLUGIN_VERSION,serverVersion:SERVER_VERSION,apiRevision:releaseConfig.apiRevision,minimumPluginVersion:releaseConfig.minimumPluginVersion,minimumServerVersion:releaseConfig.minimumServerVersion,publishedAt:new Date().toISOString(),notesUrl:`https://github.com/${repository}/releases/tag/v${PRODUCT_VERSION}`,sourceUrl:`https://github.com/${repository}/tree/v${PRODUCT_VERSION}`,pluginUrl:pluginUpdateUrl,assets:[{kind:'server-bundle',platform:'any',arch:'any',url:`https://github.com/${repository}/releases/download/v${PRODUCT_VERSION}/server.mjs`,sha256:createHash('sha256').update(serverBytes).digest('hex'),size:serverBytes.byteLength}]},null,2));
-  put(join(base,'release-notes.json'),JSON.stringify({schemaVersion:1,productVersion:PRODUCT_VERSION,notes:releaseConfig.releaseNotes},null,2));
+  put(join(base,'release-notes.json'),JSON.stringify({schemaVersion:1,productVersion:PRODUCT_VERSION,notes:releaseConfig.pluginNotes?.length ? releaseConfig.pluginNotes : releaseConfig.releaseNotes},null,2));
 }
 const req = createRequire(join(root,'packages/server/package.json'));
 function packageRoot(entry){let p=dirname(entry);while(!existsSync(join(p,'package.json'))){const q=dirname(p);if(q===p)throw new Error('Package root missing');p=q;}return realpathSync(p);}
@@ -69,8 +69,8 @@ const licenseRoots = new Set([native,bindings,uri,vec,vecNative]);
 for(const result of [server,plugin]) for(const input of Object.keys(result.metafile.inputs)) if(input.includes('node_modules')) licenseRoots.add(packageRoot(resolve(root,input)));
 let notices=`Risu Cognitive Memory ${PRODUCT_VERSION} (server ${SERVER_VERSION}, plugin ${PLUGIN_VERSION}) is licensed under MPL-2.0. See LICENSE and the source location in README.md. Third-party component licenses follow.\n`;
 for(const path of licenseRoots){const info=JSON.parse(readFileSync(join(path,'package.json')));notices+=`\n${info.name} ${info.version}: ${info.license || 'see bundled license'}\n`;for(const file of readdirSync(path))if(/^(licen[cs]e|copying|notice)(\.|$)/i.test(file))copy(join(path,file),join(out,'licenses',info.name.replaceAll('/','_')+'-'+file));}
-if(process.version!=='v24.15.0')throw new Error('Verify and update the bundled Node license hash for this runtime version.');
-for(const [name,expected] of [['Node-LICENSE','4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18'],['sqlite-vec-LICENSE-MIT','6ce72bbe12d975bd5286e5ab0a064c069693300c47bccbc57bec18485f1621ea']]) {
+if(process.version!=='v24.22.1')throw new Error('Verify and update the bundled Node license hash for this runtime version.');
+for(const [name,expected] of [['Node-LICENSE','5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace'],['sqlite-vec-LICENSE-MIT','6ce72bbe12d975bd5286e5ab0a064c069693300c47bccbc57bec18485f1621ea']]) {
   const source=join(here,'licenses',name);const bytes=readFileSync(source);
   if(createHash('sha256').update(bytes).digest('hex')!==expected)throw new Error(`License hash mismatch: ${name}`);
   copy(source,join(out,'licenses',name));

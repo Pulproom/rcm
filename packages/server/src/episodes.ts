@@ -37,7 +37,7 @@ export function completedEpisodeTurns(messages: EpisodeMessage[]): EpisodeTurn[]
     groups.push(users.length ? [...users, message] : [message]);
     users = [];
   }
-  return groups.map(group => group.filter(message => !message.memory_excluded)).filter(group => group.length).map((group, index) => ({
+  return groups.map(group => group.filter(message => !message.memory_excluded)).filter(group => group.some(message=>message.role==='assistant')).map((group, index) => ({
     index,
     startMessageId: group[0]!.message_id,
     endMessageId: group.at(-1)!.message_id,
@@ -168,7 +168,7 @@ export function previewEpisodeStart(db: RcmDatabase, chatId: string, startMessag
   let selected: EpisodeTurn[];
   if (startMessageId) {
     const start = turns.find((turn) => turn.messageIds.includes(startMessageId));
-    if (!start) throw Object.assign(new Error("완료된 턴에서 시작점을 찾을 수 없습니다."), { code: "EPISODE_START_NOT_FOUND" });
+    if (!start) throw Object.assign(new Error("완료된 턴에서 시작점을 찾을 수 없어요."), { code: "EPISODE_START_NOT_FOUND" });
     selected = turns.filter((turn) => turn.startOrdinal >= start.startOrdinal);
   } else selected = [];
   const messageIds = selected.flatMap((turn) => turn.messageIds);
@@ -185,7 +185,7 @@ export function previewEpisodeStart(db: RcmDatabase, chatId: string, startMessag
 }
 
 export function startEpisodeHold(db: RcmDatabase, chatId: string, startMessageId?: string): string {
-  if (activeEpisode(db, chatId)) throw Object.assign(new Error("이 채팅에는 이미 진행 중인 기억 보류가 있습니다."), { code: "EPISODE_ALREADY_ACTIVE" });
+  if (activeEpisode(db, chatId)) throw Object.assign(new Error("이 채팅에는 이미 진행 중인 기억 보류가 있어요."), { code: "EPISODE_ALREADY_ACTIVE" });
   const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
   if (!chat) throw Object.assign(new Error("Chat not found"), { code: "CHAT_NOT_FOUND" });
   const preview = previewEpisodeStart(db, chatId, startMessageId) as { startOrdinal: number };
@@ -201,7 +201,7 @@ export function startEpisodeHold(db: RcmDatabase, chatId: string, startMessageId
 
 export function changeEpisodeStart(db: RcmDatabase, chatId: string, episodeId: string, startMessageId?: string): void {
   const episode = db.prepare("SELECT status FROM episodes WHERE id=? AND chat_id=?").get(episodeId, chatId) as { status: string } | undefined;
-  if (!episode || episode.status !== "holding") throw Object.assign(new Error("진행 중인 기억 보류만 시작점을 바꿀 수 있습니다."), { code: "EPISODE_NOT_HOLDING" });
+  if (!episode || episode.status !== "holding") throw Object.assign(new Error("진행 중인 기억 보류만 시작점을 바꿀 수 있어요."), { code: "EPISODE_NOT_HOLDING" });
   const oldIds = (db.prepare("SELECT message_id FROM episode_messages WHERE episode_id=?").all(episodeId) as Array<{ message_id: string }>).map((row) => row.message_id);
   const preview = previewEpisodeStart(db, chatId, startMessageId) as { startOrdinal: number };
   db.transaction(() => {
@@ -214,7 +214,7 @@ export function changeEpisodeStart(db: RcmDatabase, chatId: string, episodeId: s
 
 function queueEpisodeJob(db: RcmDatabase, chatId: string, episodeId: string): void {
   const sourceMessageIds = (db.prepare("SELECT message_id FROM episode_messages WHERE episode_id=? ORDER BY ordinal").all(episodeId) as Array<{ message_id: string }>).map((row) => row.message_id);
-  if (sourceMessageIds.length === 0) throw Object.assign(new Error("정리할 완료 턴이 없습니다."), { code: "EPISODE_EMPTY" });
+  if (sourceMessageIds.length === 0) throw Object.assign(new Error("정리할 완료 턴이 없어요."), { code: "EPISODE_EMPTY" });
   db.prepare("INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'episode','queued',?,0,?,?)")
     .run(randomUUID(), chatId, JSON.stringify({ episodeId, sourceMessageIds, sourceFingerprint: sourceFingerprint(db, chatId, sourceMessageIds) }), now(), now());
   db.prepare("UPDATE episodes SET status='queued',resolution='capsule',last_error=NULL,updated_at=? WHERE id=?").run(now(), episodeId);
@@ -223,7 +223,7 @@ function queueEpisodeJob(db: RcmDatabase, chatId: string, episodeId: string): vo
 export function closeEpisodeHold(db: RcmDatabase, chatId: string, episodeId: string, action: EpisodeRangeAction): void {
   syncEpisodeMembership(db, chatId);
   const episode = db.prepare("SELECT status FROM episodes WHERE id=? AND chat_id=?").get(episodeId, chatId) as { status: string } | undefined;
-  if (!episode || !["holding", "failed"].includes(episode.status)) throw Object.assign(new Error("종료할 기억 보류가 없습니다."), { code: "EPISODE_NOT_ACTIVE" });
+  if (!episode || !["holding", "failed"].includes(episode.status)) throw Object.assign(new Error("종료할 기억 보류가 없어요."), { code: "EPISODE_NOT_ACTIVE" });
   const sourceIds = (db.prepare("SELECT message_id FROM episode_messages WHERE episode_id=? ORDER BY ordinal").all(episodeId) as Array<{ message_id: string }>).map((row) => row.message_id);
   if (action === "capsule") {
     queueEpisodeJob(db, chatId, episodeId);
@@ -245,7 +245,7 @@ export function closeEpisodeHold(db: RcmDatabase, chatId: string, episodeId: str
 
 export function retryEpisode(db: RcmDatabase, chatId: string, episodeId: string): void {
   const episode = db.prepare("SELECT status FROM episodes WHERE id=? AND chat_id=?").get(episodeId, chatId) as { status: string } | undefined;
-  if (!episode || episode.status !== "failed") throw Object.assign(new Error("실패한 캡슐만 다시 시도할 수 있습니다."), { code: "EPISODE_NOT_FAILED" });
+  if (!episode || episode.status !== "failed") throw Object.assign(new Error("실패한 캡슐만 다시 시도할 수 있어요."), { code: "EPISODE_NOT_FAILED" });
   queueEpisodeJob(db, chatId, episodeId);
 }
 

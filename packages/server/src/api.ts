@@ -1,26 +1,40 @@
+import { automaticPacketBudget, packetFloorUsage } from "./packet-budget.js";
+import { memoryEpoch, renewMemoryEpoch } from './derived-state.js';
+import { assertUserChat, userChatSql } from './chat-work.js';
+import { incidentsSince } from './incidents.js';
+import { assertChatUnlocked, assertUpgradeJobWritable, upgradeLockSql, chatUpgradeLock, withChatWrite, withJobWrite } from './upgrade-lock.js';
+import { configureUpgradePhase2, activeUpgradeRun, previewUpgrade, startUpgrade, cancelUpgrade, resumeUpgrade, retryUpgradePhase2 } from './upgrade-run.js';
+import { legacyMemorySummary } from './legacy-memory.js';
+import { AuxiliaryShapeDiagnosticSchema } from "@rcm/shared";
+import { recordJobShapeNormalizations } from "./jobs.js";
+import { projectMemoryScene, extractionDraftSchema } from "@rcm/shared";
+import { chatPacketPricing, chargedCardTokens, chargedPacketTokens, chargedSectionTokens } from "./charged-cost.js";
+import { availableMemoryKey, scopeMemoryKey } from './extraction-memory-keys.js';
+import { emitsMemoryPlot, narrationLine } from "@rcm/shared";
+import { buildEmissionPlan, omitStateLinkedDetails, buildManifest, emittedMemoryItems, emittedMemoryRecords, memoryCardHasContent, prependAlwaysCards, traceEmissionPlan, type EmissionPlan } from "./emission-plan.js";
 import { markChatEngaged, recordOpenChat, deleteUnengagedChats, recentChatCleanup } from "./chat-engagement.js";
-import { sourceSnapshotStatus, withSourceSnapshot } from './source-snapshot.js';
+import { sourceSnapshotStatus, withSourceSnapshot, assertSourceSnapshotAccepted } from './source-snapshot.js';
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
-import { sharedPastPacket, withMemoryGuidance, clipLandmarkDisplayText } from "@rcm/shared";
+import { initialMemoryGuidanceBlock, memoryGuidanceBlock, sharedPastPacket, withMemoryGuidance, clipLandmarkDisplayText } from "@rcm/shared";
 import { editPairProgress, listPairProgress, pairProgressResponse, renderPairProgress } from "./pair-progress.js";
 import { prepareOccasions, renderOccasions } from "./occasions.js";
-import { readSmallReviews, smallReviewView, resolveSmallReviews } from "./small-review.js";
+import { readSmallReviews, visibleSmallReviews, resolveSmallReviews } from "./small-review.js";
 import { patchMemoryLine } from './memory-detail-edits.js';
 import { CharacterWorkRequestSchema } from "@rcm/shared";
 import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
 import { EntityColorSchema, hasSocialTermSeparator } from "@rcm/shared";
 import { recordPromiseRecency, snapshotPromiseRecency, promiseFirstMade } from "./promise-recency.js";
-import { Api38ExtractionDraftResultSchema, ExtractionAuditSubmissionSchema } from "@rcm/shared";
+import { ExtractionAuditSubmissionSchema } from "@rcm/shared";
 import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { isProviderAuthenticationError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES } from "@rcm/shared";
 import { StateOutcomeCapture } from "./state-outcomes.js";
-import { automaticStateCandidates, fundAutomaticState, renderAutomaticState, selectAutomaticState, trimAutomaticStateNote, sharedStateBudget } from "./automatic-state.js";
+import { automaticStateSources, automaticStateCandidates, renderAutomaticState, selectAutomaticState, trimAutomaticStateNote, sharedStateBudget } from "./automatic-state.js";
 import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText } from "@rcm/shared";
 import { requestStructuredProvider } from "./server-llm.js";
 import { connectionFailureReason, type ConnectionFailureCode } from "@rcm/shared";
-import { storySeedCounts } from "./story-seeds.js";
+import { readStorySeed, storySeedCounts, editStorySeed, editStorySeeds, dashboardStorySeeds, recordSeedDelivery } from "./story-seeds.js";
 import { z } from "zod";
-import { deleteLedgerRecord, rememberLedgerEditOrigin } from "./user-deletions.js";
+import { deleteLedgerRecord, rememberLedgerEditOrigin, rememberMemoryDeletion, deletedMemoryKeys, processedSourceWatermark } from "./user-deletions.js";
 import { QuizAnswerRequestSchema, UserCorrectionEditSchema, PromiseEditOptionsSchema, type PromiseEditOptions } from "@rcm/shared";
 import { committedEditOrdinal, correctionView } from "./user-corrections.js";
 import { answerQuiz, completeQuizJob, disableAllQuizzes, nextQuiz, quizStatus, regenerateQuizzes, resetQuizStats, setQuizEnabled } from "./quiz.js";
@@ -33,15 +47,19 @@ import { SocialRelationSchema } from "@rcm/shared";
 import { activeSocialRelations, findSocialRelationConflict, isReverseMutualSocialRelation, parseSocialRelation, sameSocialRelationIdentity, socialRelationKnowledge, socialRelationPredicateCollisions } from "./social-relations.js";
 import { timeout } from "hono/timeout";
 import { MemoryReferences } from "./memory-references.js";
-import { finalizeMcpAnswer } from "./mcp-answer.js";
-import { automaticDeliveryHistory, recordAutomaticDelivery, persistAutomaticActivationObservations, deliveredActivationObservation, type AutomaticActivationObservation } from "./recall-activation.js";
+import { finalizeMcpAnswer, renderAuthorMcpAnswer } from "./mcp-answer.js";
+import { AUTHOR_ACTIVATION_KEY, longtermFloorActive, automaticDeliveryHistory, recordAutomaticDelivery, persistAutomaticActivationObservations, deliveredActivationObservation, type AutomaticActivationObservation } from "./recall-activation.js";
 import { projectJobListPayload, stageJobModelOutput, manualRetryPayload } from "./jobs.js";
-import { inspectDraftEvidence, describeEvidenceReview, countBlockingExtractionAudits, describeWithheldRecognitions } from "./evidence-review.js";
+import { inspectDraftEvidence, rescueDraftDialogues, describeEvidenceReview, countBlockingExtractionAudits, describeWithheldRecognitions } from "./evidence-review.js";
 import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "./packet-manifest.js";
 import { queueSourceRecovery, retrieveSourceEvidence, renderSourceEvidence, sourceEvidenceAtomKey } from "./source-evidence.js";
-import { trimAutomaticAtom, planAutomaticAtoms, selectCueAnchor, selectAutomaticPortfolio, AUTOMATIC_ROLE_SHARES, type AutomaticPortfolioCandidate, type AutomaticAtomPriority } from "./automatic-packet.js";
+import { fitAutomaticCard, automaticAtoms, planAutomaticAtoms, selectCueAnchor, selectAutomaticPortfolio, AUTOMATIC_ROLE_SHARES, type AutomaticPortfolioCandidate, type AutomaticAtomPriority } from "./automatic-packet.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createAlbumPhotoStore } from "./album-photos.js";
+import { createAlbumExportStore, registerAlbumExportReadRoute } from "./album-exports.js";
+import { registerAlbumRoutes } from "./album-api.js";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { methodOverride } from "hono/method-override";
@@ -91,28 +109,27 @@ import { BackupValidationError, exportCompleteArchive, exportChatArchive, restor
 import { deleteChats, listAdminChats, reprocessChat, resetDerivedChat, saveSecret, saveVoyageKey } from "./admin.js";
 import { recanonicalizeSourceLedger } from "./lifecycle.js";
 import { EmbeddingRequestError, type EmbeddingService } from "./embedding.js";
-import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failedExtractionSources, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
+import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enqueueInitialCalibration, enqueueSocialKnowledgeBackfill, failedExtractionSources, failJob, leaseJob, previewSocialKnowledgeBackfill, renewJobLease, requeueCancelledMessages, resplitFailedExtractionJob, recordJobStateRecovery, setJobPipelineStage, type JobPipelineStage } from "./jobs.js";
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot, syncChatTitle } from "./lifecycle.js";
-import { alwaysInjectEstimate, prepareAlwaysInject, prependAlwaysInject, automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, mergeMemoryContextItems, processedHistoryCoverage, retrieve, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
+import { alwaysInjectEstimate, prepareAlwaysInject, prependAlwaysInject, automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, renderAlwaysInjectPlan, processedHistoryCoverage, lexicalCandidates, retrieve, mcpRetrievalAudience, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
 import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
 import { ServerExtractionWorker } from "./server-worker.js";
-import { chatPacketBudgetKey, compileStorySpine, createStorySpineCompiler, completeStoryConsolidationById, expandArcForMemory, expandArcHits, invalidateStorySpine, invalidateStorySupports, storyMemorySupportIds, listStorySpine, maybeEnqueueStorySpine, storyBudgetLimit, updateStorySpineGroup } from "./story-spine.js";
-import { intimacyMilestonePacketType } from "./intimacy-milestones.js";
+import { detachRetryStorySupports, chatPacketBudgetKey, compileStorySpine, createStorySpineCompiler, completeStoryConsolidationById, expandArcForMemory, expandArcHits, invalidateStorySpine, invalidateStorySupports, storyMemoryCascadeSupportIds, storyMemorySupportIds, listStorySpine, maybeEnqueueStorySpine, storyBudgetLimit, storyOverviewRenderBudgetLimit, updateStorySpineGroup } from "./story-spine.js";
 import { buildEntityIdentityResolver, deleteEntity, listEntities, mergeEntities, previewEntityDelete, previewEntityMerge, refreshMemoryParticipantCounts } from "./entities.js";
-import { EVERYONE_HOLDER, publicKnowledgeScope, publicMemoryContext, publicMcpAnswers, memoryDetailAccess, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
+import { EVERYONE_HOLDER, NARRATOR_ARCHIVE_HOLDER, PENDING_ACCESS_HOLDER, linkedDetailKnowledge, promiseLinkedSupport, snapshotKnowledgeGrants, correctedPromiseDetailIds, publicKnowledgeScope, publicMemoryContext, publicMcpAnswers, memoryDetailAccess, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy, projectPromiseRow, promiseContributionState } from "./item-access.js";
 import { normalizeUnitScore } from "./scores.js";
 import { listReconciliationReviews, prepareReconciliation, resolveReconciliationReview } from "./reconciliation.js";
 import { recordProgressSent, prepareStateExtraction, usesStateExtraction } from "./state-extraction.js";
 import { memoryAdditionStopsAfterEvents } from "@rcm/shared";
 import { applyExtractionAuditPatch } from "./extraction-audit.js";
 import { changeEpisodeStart, closeEpisodeHold, episodeOverview, previewEpisodeStart, retryEpisode, releaseManualEpisode, startEpisodeHold, syncEpisodeMembership } from "./episodes.js";
-import { resolveTurnPerspectives } from "./perspectives.js";
+import { resolveSceneCharacters, resolveNarrationViewpoint, narrationViewpointKey, storedNarrationViewpoint } from "./perspectives.js";
 import { hasBufferedSource, ingestionSummary } from "./ingestion-state.js";
 import { resolveConflict, type ConflictResolution } from "./conflicts.js";
-import { readMemoryBookmarks, setMemoryBookmark } from "./memory-bookmarks.js";
+import { readMemoryBookmarks, rememberMemoryPreferenceFields, setMemoryBookmark } from "./memory-bookmarks.js";
 import { InvalidViewPreferencesPatchError, readViewPreferences, ViewPreferencesStorageError, writePersonaHint, writeViewPreferences } from "./view-preferences.js";
 import { acknowledgeChatLineage, applyManualLineage, applyProbedLineage, chooseChatLineage, declineChatLineage, ensureChatLineage, hasPendingLineageDiscovery, getChatLineage, previewManualLineage, probeChatLineage, revertChatLineage } from "./lineage.js";
 import { appendSceneNames, mentionedCharacters, renderSceneNames, listSocialKnowledge, retractSocialKnowledge, setManualSocialKnowledge } from "./social-knowledge.js";
@@ -121,7 +138,7 @@ import { completeRelationshipProjectionJob, flushRelationshipProjectionQueue, li
 import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
 import { replaceItemAccess } from "./ingest.js";
 import { buildRetrievalQuerySignals, sourceQuerySignals } from "./retrieval-planner.js";
-import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, resetRejectedJobCache } from "./auxiliary-page-cache.js";
+import { cachedAuxiliaryPage, cachedAuxiliaryStateRecovery, storeValidatedAuxiliaryPage, resetRejectedJobCache } from "./auxiliary-page-cache.js";
 import { assertSetupLineageResolved, beginInitialCalibration, prepareInitialCalibrationRetry, completeInitialCalibrationJob, deleteInitialEntity, initialCalibrationLedger, initialCalibrationRetryInput, initialCalibrationView, resolveInitialCalibrationConfirmation, updateInitialRelationship, upsertInitialEntity } from "./initial-calibration.js";
 import { previewRegeneration, applyCanonicalRegeneration, applyEpisodeRegeneration, discardRegeneration, listExtractionBatches, listRegenerations, regenerationRun, startCanonicalRegeneration, startEpisodeRegeneration } from "./regeneration.js";
 import { listSourceRanges, rangeMessages, setMemoryExclusion } from "./source-ranges.js";
@@ -166,24 +183,12 @@ const xmlText = (value: unknown): string => String(value ?? "")
 
 function ledgerConflictResponse(conflict: NonNullable<ReturnType<typeof findSocialRelationConflict>>) {
   return { error: conflict.code === "REVERSE_RELATION_EXISTS"
-    ? "같은 이름의 역방향 관계가 이미 있습니다." : "같은 활성 장부 항목이 이미 있습니다.", ...conflict };
+    ? "같은 이름의 역방향 관계가 이미 있어요." : "같은 활성 장부 항목이 이미 있어요.", ...conflict };
 }
 
 function lastMatchingIndex<T>(items: T[], predicate: (item: T) => boolean): number {
   for (let index = items.length - 1; index >= 0; index -= 1) if (predicate(items[index]!)) return index;
   return -1;
-}
-
-export function mergePerspectiveFocusLeaderIds(groups: string[][], limit = 8): string[] {
-  const merged: string[] = [];
-  for (let rank = 0; rank < limit && merged.length < limit; rank += 1) {
-    for (const leaders of groups) {
-      const id = leaders[rank];
-      if (id && !merged.includes(id)) merged.push(id);
-      if (merged.length >= limit) break;
-    }
-  }
-  return merged;
 }
 
 function injectionManifest(packet: string, manifest: PacketManifest, perspectives: string[], storySpineNodeIds: string[] = []) {
@@ -257,7 +262,7 @@ export function createApp(dependencies: Dependencies): Hono {
   const restartScheduler = dependencies.restartScheduler ?? scheduleManagedRestart;
   let managedRestartScheduled = false;
   const serverInstanceId = (db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value: string }).value;
-  app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "Authorization", "X-RCM-Plugin-Version", "X-RCM-API-Revision", "X-HTTP-Method-Override"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "Authorization", "X-RCM-Plugin-Version", "X-RCM-API-Revision", "X-HTTP-Method-Override", "X-RCM-Photo-Meta"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], exposeHeaders: ["Retry-After"] }));
   const overrideMethod = methodOverride({ app, header: "X-HTTP-Method-Override" });
   app.use("*", async (context, next) => {
     const override = context.req.header("X-HTTP-Method-Override");
@@ -276,12 +281,14 @@ export function createApp(dependencies: Dependencies): Hono {
     };
     Object.assign(health.capabilities, {
       methodOverride: true,
+      memoryAlbum: true,
       chatOperationLifecycleV2: true,
       mcpEvidenceRerank: true,
       turnLineageDiscovery: true,
       ledgerConsistencyBarrier: true,
       canonicalLedgerIdentity: true,
       repairDiagnosticsV2: true,
+      stateFieldRecovery: true,
       operationRunAccounting: true,
       persistentBackfillResult: true,
       mcpCompactEvidence: true,
@@ -290,6 +297,8 @@ export function createApp(dependencies: Dependencies): Hono {
     });
     return context.json(health);
   });
+  const albumExportStore = createAlbumExportStore(dirname(config.dbPath));
+  registerAlbumExportReadRoute(app, albumExportStore);
   app.use("/v1/*", async (context, next) => {
     const token = context.req.header("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
     if (!equalToken(token, config.token)) return context.json({ error: "Unauthorized" }, 401);
@@ -302,6 +311,48 @@ export function createApp(dependencies: Dependencies): Hono {
     if (!updateDiscovery && !updateRecovery && (revision !== undefined || context.req.header("X-RCM-Plugin-Version")) && revision !== String(RCM_API_REVISION)) {
       return context.json({ error: "RCM API revision mismatch; update the plugin and server together", code: "API_REVISION_MISMATCH", expectedApiRevision: RCM_API_REVISION }, 409);
     }
+    await next();
+  });
+  const albumPhotoStore = createAlbumPhotoStore(join(dirname(config.dbPath), "albums"));
+  registerAlbumRoutes(app, { db, photoStore: albumPhotoStore, exportStore: albumExportStore });
+  configureUpgradePhase2(db,chatId => embeddings.finishUpgradeIndex(chatId),()=>serverWorker.wake(),()=>embeddings.ready);
+  // Reject early here; synchronous mutation tails also use withChatWrite after
+  // reading bodies. Middleware alone cannot protect an awaited request body.
+  // Reads are exempt. Future upgrade controls own their phase rules;
+  // chat work OFF is handled by Task 5's cancellation confirmation.
+  const guardUpgradeWrite: import('hono').MiddlewareHandler = async (context,next) => {
+    assertUserChat(db,context.req.param('id')!);
+    if (!['GET','HEAD','OPTIONS'].includes(context.req.method)) {
+      const body=await context.req.json().catch(()=>({}));
+      for (const key of ['sourceChatId','targetChatId','parentChatId']) if (typeof body[key]==='string') assertUserChat(db,body[key]);
+    }
+    const readOnlyPost = context.req.method === 'POST' && /\/(?:lineage\/(?:probe|preview)|memory-transplant\/preview|memory-additions\/(?:sources|preview)|memory-groups\/preview|extraction-batches\/[^/]+\/preview-regeneration|entities\/(?:[^/]+\/delete-preview|merge-preview))$/.test(context.req.path);
+    const sourceWrite = context.req.method === 'POST' && (/\/(?:reprocess|gap-recovery|jobs\/(?:retry-failed|requeue-cancelled|[^/]+\/resplit)|episodes\/[^/]+\/(?:retry|release)|extraction-audits\/[^/]+\/retry|social-knowledge\/backfill|story-spine\/rebuild|embeddings\/retry-failed|initial-calibration\/(?:retry|confirm|skip)|memory-(?:additions|groups)\/(?:create|[^/]+\/(?:apply|retry))|extraction-batches\/[^/]+\/regenerate-(?:episode|canonical)|regenerations\/[^/]+\/apply(?:-with-keep)?)$/.test(context.req.path)
+      || context.req.path.endsWith('/small-reviews/resolve') && (await context.req.json().catch(()=>null))?.action === 'retry');
+    const projectionRetry = context.req.method === 'PATCH' && context.req.path.endsWith('/relationships')
+      && (await context.req.json().catch(()=>null))?.clear === true;
+    if (sourceWrite || projectionRetry) {
+      assertSourceSnapshotAccepted(db,context.req.param('id')!);
+    }
+    if (!['GET','HEAD','OPTIONS'].includes(context.req.method)
+      && !readOnlyPost
+      && !/\/(?:upgrade(?:\/.*)?|work|source-sync)$/.test(context.req.path)) {
+      assertChatUnlocked(db,context.req.param('id')!);
+      // Parent/source protection must happen outside handlers' legacy error
+      // catches, so lineage selection consistently returns the lock payload.
+      if (/\/(?:lineage\/(?:select|apply|inherit)|memory-transplant)$/.test(context.req.path)) {
+        const body = await context.req.json().catch(()=>({}));
+        if (typeof body.parentChatId === 'string') assertChatUnlocked(db,body.parentChatId);
+        if (typeof body.sourceChatId === 'string') assertChatUnlocked(db,body.sourceChatId);
+      }
+    }
+    await next();
+  };
+  app.use('/v1/admin/chats/:id/*',async (context,next)=>{ assertUserChat(db,context.req.param('id')!); await next(); });
+  app.use('/v1/chats/:id',guardUpgradeWrite);
+  app.use('/v1/chats/:id/*',guardUpgradeWrite);
+  app.use('/v1/jobs/:id/*',async (context,next) => {
+    if (!['GET','HEAD','OPTIONS'].includes(context.req.method)) assertUpgradeJobWritable(db,context.req.param('id')!);
     await next();
   });
   app.get("/v1/chats/:id/dashboard-home", (context) => {
@@ -372,6 +423,9 @@ export function createApp(dependencies: Dependencies): Hono {
     finishSyncPhase("requestBodyReadMs");
     const parsed = TurnPrepareRequestSchema.parse(JSON.parse(requestBody));
     finishSyncPhase("requestParseMs");
+    assertUserChat(db,parsed.chatId);
+    const upgradeLock = chatUpgradeLock(db,parsed.chatId);
+    if (upgradeLock) return context.json({ blocked: true, reason: 'CHAT_UPGRADING', lock: upgradeLock });
     const effectiveBackfillApproved = parsed.backfillApproved === true && parsed.serverInstanceId === serverInstanceId;
     const { lineage, sync, lineageDeferred, ...sourceStatus } = withSourceSnapshot(db, parsed, (policy, allowDiscovery) => {
       const lineage = ensureChatLineage(db, parsed, allowDiscovery, policy.allowDestructive);
@@ -381,9 +435,12 @@ export function createApp(dependencies: Dependencies): Hono {
       return { lineage, lineageDeferred, sync: syncSnapshot(db, { ...parsed, forceBackfill: parsed.forceBackfill && !pending, backfillApproved: effectiveBackfillApproved && !pending }, policy) };
     });
     const lineagePending = lineageDeferred || ["ambiguous", "choice_required"].includes(lineage.status);
+    if (parsed.forceBackfill) assertSourceSnapshotAccepted(db,parsed.chatId);
     finishSyncPhase("lineageMs");
     db.prepare(`INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
       WHERE server_meta.value<>excluded.value`).run(chatPacketBudgetKey(parsed.chatId), String(parsed.tokenBudget));
+    db.prepare(`INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      WHERE server_meta.value<>excluded.value`).run(narrationViewpointKey(parsed.chatId), parsed.narrationViewpoint ?? "");
     if (parsed.memoryGeneration) memoryReferences.begin(parsed.chatId, parsed.memoryGeneration);
     markChatEngaged(db, parsed.chatId);
     finishSyncPhase("snapshotMs");
@@ -433,6 +490,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({
         apiRevision: RCM_API_REVISION,
         serverInstanceId,
+        memoryEpoch: memoryEpoch(db,parsed.chatId),
         chatRevision: sync.revision,
         ...sourceStatus,
         profile: parsed.profile,
@@ -470,9 +528,22 @@ export function createApp(dependencies: Dependencies): Hono {
       ?? querySignals.find(signal => signal.kind === 'scene')?.text ?? 'continue';
     const retrievalSignals = buildRetrievalQuerySignals(db, parsed.chatId, querySignals, languageState.memory_language);
     const semantic = await embeddings.searchManyDetailed(retrievalSignals, parsed.chatId);
+    assertChatUnlocked(db,parsed.chatId);
     const embeddingFinishedAt = performance.now();
     const perspectiveQuery = querySignals.map((signal) => signal.text).join("\n");
-    const perspectiveResolution = resolveTurnPerspectives(db, parsed, perspectiveQuery);
+    const lexicalSearch = lexicalCandidates(db, parsed.chatId, retrievalSignals, languageState.memory_language);
+    const sceneHitScores = new Map(semantic.scores);
+    for (const [id, score] of lexicalSearch.scores) sceneHitScores.set(id, Math.max(sceneHitScores.get(id) ?? 0, score));
+    const strongSceneIds = [...new Set([...sceneHitScores].filter(([, score]) => score >= .72)
+      .sort((a,b) => b[1] - a[1]).slice(0, 4).map(([id]) => id))];
+    const sceneHitParticipants = (db.prepare(`SELECT participants_json FROM memories WHERE chat_id=? AND active=1
+      AND id IN (SELECT value FROM json_each(?))`).all(parsed.chatId, JSON.stringify(strongSceneIds)) as Array<{participants_json:string}>)
+      .flatMap(row => JSON.parse(row.participants_json) as string[]);
+    const sceneCharacters = resolveSceneCharacters(db, parsed, perspectiveQuery, sceneHitParticipants);
+    const narrationViewpoint = resolveNarrationViewpoint(db, parsed.chatId, parsed.narrationViewpoint);
+    const narrationDiagnostics = parsed.narrationViewpoint && !narrationViewpoint ? ["viewpoint_unresolved" as const] : [];
+    // Compatibility metadata for older plugins; these names are scene hints only.
+    const perspectiveResolution = { perspectives: sceneCharacters, source: "ledger" as const, unresolved: false };
     const requestedPromptIds = [...new Set(parsed.promptSourceMessageIds ?? [])].slice(-512);
     const trustedPromptSourceMessageIds = requestedPromptIds.length === 0 ? [] : (db.prepare(`
       SELECT message_id FROM messages
@@ -480,20 +551,30 @@ export function createApp(dependencies: Dependencies): Hono {
         AND lifecycle='committed' AND memory_excluded=0 AND host_visibility='active' AND content IS NOT NULL
       ORDER BY ordinal
     `).all(parsed.chatId, ...requestedPromptIds) as Array<{ message_id: string }>).map((row) => row.message_id);
-    const activeMemoryCount = (db.prepare("SELECT count(*) AS count FROM memories WHERE chat_id=? AND active=1").get(parsed.chatId) as { count: number }).count;
-    const retrievalPerspectives = perspectiveResolution.perspectives.length ? perspectiveResolution.perspectives : activeMemoryCount > 0 ? ["__shared__"] : [];
-    // Guidance and the shared XML root are added after perspective retrieval.
-    // Reserve their cost up front instead of letting N perspective-local caps
-    // silently overflow the actual injection budget.
-    const activeTurnPerspectives = perspectiveResolution.perspectives.filter((name) => name !== "__shared__");
+    const { hasActiveMemory, hasTimelineMemory } = db.prepare(`SELECT
+      EXISTS(SELECT 1 FROM memories WHERE chat_id=$chatId AND active=1) AS hasActiveMemory,
+      EXISTS(SELECT 1 FROM memories m WHERE m.chat_id=$chatId AND m.active=1 AND m.capsule_parent_id IS NULL
+        AND NOT ${recognitionOnlyMemorySql("m")}) AS hasTimelineMemory`).get({ chatId: parsed.chatId }) as { hasActiveMemory: number; hasTimelineMemory: number };
+    const initialSetupOnly = !hasTimelineMemory && ["ready", "inherited"].includes(initialCalibration.status);
+    const withAutomaticGuidance = (body: string): string => {
+      const guided = withMemoryGuidance(body);
+      return initialSetupOnly ? guided.replace(memoryGuidanceBlock, initialMemoryGuidanceBlock) : guided;
+    };
+    const fallbackPacket = initialSetupOnly ? "" : sharedPastPacket;
+    const pricing = chatPacketPricing(db,parsed.chatId);
+    const renderState = (rows: Parameters<typeof renderAutomaticState>[0], viewpoint?: string) => renderAutomaticState(rows,viewpoint,pricing);
+    const retrievalPerspectives = ["narrator"];
+    const activeTurnPerspectives = sceneCharacters;
     const namesPresent = [...activeTurnPerspectives, ...(parsed.identityHints?.recentSpeakerNames ?? []), parsed.identityHints?.userPersonaName ?? ""];
     const namesPrompt = (db.prepare("SELECT CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END content FROM messages WHERE chat_id=? AND memory_excluded=0 AND message_id IN (SELECT value FROM json_each(?)) ORDER BY ordinal")
       .all(parsed.chatId, JSON.stringify(trustedPromptSourceMessageIds)) as Array<{ content: string }>).map(row => row.content).join("\n");
     const namesMentioned = mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n"));
     const sceneNames = renderSceneNames(db, parsed.chatId, namesPresent, namesPresent,
-      namesMentioned, Math.min(200, Math.floor(parsed.tokenBudget * .1)));
+      namesMentioned, Math.min(200, Math.floor(parsed.tokenBudget * .1)), pricing);
+    const allocation = automaticPacketBudget(parsed.tokenBudget);
     const maximumStoryBudget = storyBudgetLimit(parsed.tokenBudget);
-    const storyProbe = compileStorySpine(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, maximumStoryBudget);
+    const overviewRenderMaximum = storyOverviewRenderBudgetLimit(parsed.tokenBudget);
+    const storyProbe = compileStorySpine(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, maximumStoryBudget,new Set(),false,pricing,overviewRenderMaximum);
     const stateTrace = retrievalTrace.isChatEnabled(parsed.chatId) ? new StateOutcomeCapture() : undefined;
     const stateCorpus = collectStateEvidence(db, parsed.chatId, stateTrace, "shared");
     const stateMemorySources = db.prepare(`WITH sources AS (SELECT value id FROM json_each(?))
@@ -503,24 +584,23 @@ export function createApp(dependencies: Dependencies): Hono {
         JOIN sources s ON s.id=e.value ->> '$.messageId' WHERE d.chat_id=? AND d.active=1`)
       .all(JSON.stringify([...new Set(stateCorpus.filter(state => state.current).flatMap(state => state.sourceIds))]), parsed.chatId, parsed.chatId) as Array<{memory_id:string;source_id:string}>;
     const stateSources = (state: typeof stateCorpus[number]) => state.memoryId ? [state.memoryId]
-      : stateMemorySources.filter(row => state.sourceIds.includes(row.source_id)).map(row => row.memory_id);
-    const arcExpansion = expandArcHits(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores);
+      : [...new Set(stateMemorySources.filter(row => state.sourceIds.includes(row.source_id)).map(row => row.memory_id))];
+    const arcExpansion = expandArcHits(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, 3, { kind: "author", sceneCharacters });
     // Retrieval competes against the full packet budget. Story overlap is
     // known only after leaf memories are selected; reserving the unsuppressed
     // Story probe here would strand that recovered space. The final compiler
     // trims the lowest-priority memories against the actual compact Story.
-    const storyBudget = storyProbe.tokens;
-    const alwaysInject=prepareAlwaysInject(db,parsed.chatId,parsed.profile,retrievalPerspectives,trustedPromptSourceMessageIds);
+    const storyBudget = storyProbe.chargedTokens;
+    const alwaysInject=prepareAlwaysInject(db,parsed.chatId,parsed.profile,retrievalPerspectives,trustedPromptSourceMessageIds,true,pricing);
     const alwaysIds=new Set(alwaysInject.manifest.memoryIds);
-    const remainingBudget=Math.max(0,parsed.tokenBudget-alwaysInject.estimatedTokens);
+    const remainingBudget=Math.max(0,parsed.tokenBudget-alwaysInject.chargedTokens);
     const retrievalBudget = Math.max(0, remainingBudget - Math.min(320, Math.floor(remainingBudget * 0.08)));
     // Mandatory compact records stay whole even when larger than the preset.
-    const hardTokenCeiling = Math.max(automaticHardTokenCeiling(parsed.tokenBudget),alwaysInject.estimatedTokens+estimateTokens(sharedPastPacket)+64);
-    // Each perspective searches against the full candidate budget. The final
-    // compiler performs the one global trim, so adding a second protagonist
-    // cannot halve recall depth before duplicate memories are merged.
-    const perPerspective = Math.max(128, retrievalBudget);
-    const perspectiveSections: Array<{ name: string; data: string }> = [];
+    const hardTokenCeiling = Math.max(automaticHardTokenCeiling(parsed.tokenBudget),chargedPacketTokens(alwaysInject.xml ? withAutomaticGuidance(prependAlwaysInject("",alwaysInject.xml)) : fallbackPacket, alwaysInject.plan, pricing));
+    const fullGuidancePacket = withMemoryGuidance("");
+    const emptyPacket = hasTimelineMemory && chargedPacketTokens(fullGuidancePacket, alwaysInject.plan, pricing) <= hardTokenCeiling
+      ? fullGuidancePacket : fallbackPacket;
+    const perspectiveSections: Array<{ name: string; data: string; standaloneScopes?: import("@rcm/shared").KnowledgeScope[] }> = [];
     const structuredManifests: PacketManifest[] = [];
     const eligibleAtoms = new Map<string, MemoryContextItem>();
     const directAtomKeys = new Set<string>();
@@ -529,25 +609,28 @@ export function createApp(dependencies: Dependencies): Hono {
     const automaticAssociationSources = new Map<string, string>();
     const selectedCandidateClasses = new Map<string, RetrievalCandidateClass>();
     const selectedRoles = new Map<string, RetrievalSelectionRole>();
-    const candidateClassPriority: Record<RetrievalCandidateClass, number> = { unclassified: 0, associative: 1, continuity: 2, core: 3 };
     const retrievalDiagnostics: RetrievalDiagnostics[] = [];
     const recentMemoryIds = new Set<string>();
-    const perspectiveFocusLeaderIds: string[][] = [];
+    let focusLeaderIds: string[] = [];
     const continuityBridgeIds: string[] = [];
     const activationByPerspective: Array<{ perspective: string; observations: AutomaticActivationObservation[] }> = [];
-    for (const perspective of retrievalPerspectives) {
+    {
+      const perspective = "narrator";
       const result = retrieve(db, {
         chatId: parsed.chatId,
         query: parsed.query,
         querySignals: retrievalSignals,
         perspective,
-        tokenBudget: perPerspective,
+        pricing,
+        audience: { kind: "author", sceneCharacters },
+        lexicalSearch,
+        tokenBudget: Math.max(128, retrievalBudget),
         memoryOnlyInjection: parsed.memoryOnlyInjection,
         deferAutomaticBudget: true,
-        excludeMemoryIds:[...alwaysIds],
+        excludeAtomKeys:alwaysInject.manifest.atomKeys,
         automaticSupportMemoryIds: [...new Set([...(storyProbe.supportMemoryIds ?? []), ...stateCorpus.flatMap(state => state.current ? stateSources(state) : [])])],
-        structuredBudgetScale: 1 / Math.max(1, retrievalPerspectives.length),
-        hardTokenCeiling: automaticHardTokenCeiling(perPerspective),
+        structuredBudgetScale: 1,
+        hardTokenCeiling: automaticHardTokenCeiling(Math.max(128, retrievalBudget)),
         semanticScores: semantic.scores,
         stateScores: semantic.stateScores,
         semanticHits: semantic.hits,
@@ -558,77 +641,70 @@ export function createApp(dependencies: Dependencies): Hono {
         arcDialogueIds: arcExpansion.dialogueIds,
         arcExpansionDiagnostics: arcExpansion.diagnostics,
         promptSourceMessageIds: trustedPromptSourceMessageIds,
-        activePerspectives: retrievalPerspectives.filter((name) => name !== "__shared__"),
+        activePerspectives: sceneCharacters,
         collectDiagnostics: retrievalTrace.enabled,
         stateOutcomeCapture: stateTrace,
       });
       if (result.perspectiveData) {
-        const name = perspective === "__shared__" ? "shared" : perspective;
-        perspectiveSections.push({ name, data: result.perspectiveData });
+        const name = "narrator";
+        perspectiveSections.push({ name, data: result.perspectiveData, standaloneScopes: result.standaloneScopes });
         structuredManifests.push(result.structuredManifest);
       }
-      for (const item of result.eligibleCandidates) {
-        if (alwaysIds.has(item.id)) continue;
-        const existing = eligibleAtoms.get(item.id);
-        eligibleAtoms.set(item.id, existing ? mergeMemoryContextItems(existing, item) : item);
+      for (const item of emittedMemoryItems(buildEmissionPlan(result.eligibleCandidates, { promptSourceMessageIds: trustedPromptSourceMessageIds, excludedAtomKeys: new Set(alwaysInject.manifest.atomKeys) }))) {
+        // Open seeds remain candidates until the portfolio chooses their typed
+        // ID. They acquire an emission reason only at that selection.
+        const seeds = result.eligibleCandidates.find(candidate=>candidate.id === item.id)?.details
+          .filter(detail=>detail.seed?.status === "open" && !item.details.some(selected=>selected.id === detail.id)) ?? [];
+        item.details.push(...seeds);
+        if (!alwaysIds.has(item.id) || memoryCardHasContent(item)) eligibleAtoms.set(item.id, item);
       }
-      for (const [id, metadata] of result.automaticPortfolioCandidates ?? []) {
-        const old = portfolioMetadata.get(id);
-        portfolioMetadata.set(id, old ? { ...metadata, baseDirect: Math.max(old.baseDirect, metadata.baseDirect), core: old.core || metadata.core,
-          typedDetailIds: [...new Set([...old.typedDetailIds, ...metadata.typedDetailIds])],
-          resemblance: (old.resemblance?.adjustedScore ?? 0) > (metadata.resemblance?.adjustedScore ?? 0) ? old.resemblance : metadata.resemblance } : metadata);
-      }
+      for (const [id, metadata] of result.automaticPortfolioCandidates ?? []) portfolioMetadata.set(id, metadata);
       result.directAtomKeys.forEach((key) => directAtomKeys.add(key));
       for (const [id, via] of Object.entries(result.automaticAssociationSources ?? {})) automaticAssociationSources.set(id, via);
-      for (const [key, priority] of Object.entries(result.automaticAtomPriorities ?? {})) {
-        const old = automaticAtomPriorities.get(key);
-        automaticAtomPriorities.set(key, old ? { focus: Math.max(old.focus, priority.focus), cue: Math.max(old.cue, priority.cue),
-          scene: Math.max(old.scene, priority.scene), semantic: Math.max(old.semantic, priority.semantic),
-          cueViews: Object.fromEntries([...new Set([...Object.keys(old.cueViews ?? {}), ...Object.keys(priority.cueViews ?? {})])]
-            .map((view) => [view, Math.max(old.cueViews?.[view] ?? 0, priority.cueViews?.[view] ?? 0)])),
-          connection: Math.max(old.connection ?? 0, priority.connection ?? 0),
-          connectionViaMemoryId: (old.connection ?? 0) >= (priority.connection ?? 0) ? old.connectionViaMemoryId : priority.connectionViaMemoryId,
-          connectionEvidence: (old.connection ?? 0) >= (priority.connection ?? 0) ? old.connectionEvidence : priority.connectionEvidence,
-          sourceMessageIds: [...new Set([...old.sourceMessageIds, ...priority.sourceMessageIds])] } : priority);
-      }
+      for (const [key, priority] of Object.entries(result.automaticAtomPriorities ?? {})) automaticAtomPriorities.set(key, priority);
       for (const item of result.selected) {
-        const candidateClass = result.selectedCandidateClasses[item.id] ?? "unclassified";
-        const currentClass = selectedCandidateClasses.get(item.id);
-        if (!currentClass || candidateClassPriority[candidateClass] > candidateClassPriority[currentClass]) selectedCandidateClasses.set(item.id, candidateClass);
-        const role = result.selectedRoles[item.id];
-        if (role === "serendipity" || !selectedRoles.has(item.id)) selectedRoles.set(item.id, role ?? "filler");
+        selectedCandidateClasses.set(item.id, result.selectedCandidateClasses[item.id] ?? "unclassified");
+        selectedRoles.set(item.id, result.selectedRoles[item.id] ?? "filler");
       }
       result.recentMemoryIds.forEach((id) => recentMemoryIds.add(id));
-      perspectiveFocusLeaderIds.push(result.focusLeaderIds);
-      activationByPerspective.push({ perspective, observations: result.activationObservations });
+      focusLeaderIds = result.focusLeaderIds;
+      activationByPerspective.push({ perspective: AUTHOR_ACTIVATION_KEY, observations: result.activationObservations });
       for (const id of result.continuityBridgeIds) if (!continuityBridgeIds.includes(id)) continuityBridgeIds.push(id);
       if (result.diagnostics) retrievalDiagnostics.push(result.diagnostics);
     }
     const retrievalFinishedAt = performance.now();
-    const focusLeaderIds = mergePerspectiveFocusLeaderIds(perspectiveFocusLeaderIds);
-    // A shared focus scene does not consume the unexpected-memory slot merely
-    // because another perspective reached it by association.
+    // Direct focus leaders keep their protection in the global portfolio.
     for (const id of focusLeaderIds) selectedRoles.set(id, "focus");
     for (const [id, candidateClass] of selectedCandidateClasses) if (candidateClass === "core"
       && ["association", "serendipity"].includes(selectedRoles.get(id) ?? "")) selectedRoles.set(id, "core");
-    const selectedItems = [...eligibleAtoms.values()].filter(item=>!alwaysIds.has(item.id)).sort((a,b) => Number(focusLeaderIds.includes(b.id)) - Number(focusLeaderIds.includes(a.id))
+    const selectedItems = [...eligibleAtoms.values()].sort((a,b) => Number(focusLeaderIds.includes(b.id)) - Number(focusLeaderIds.includes(a.id))
       || (portfolioMetadata.get(b.id)?.baseDirect ?? 0) - (portfolioMetadata.get(a.id)?.baseDirect ?? 0) || a.id.localeCompare(b.id));
     for (const item of selectedItems) {
       const metadata = portfolioMetadata.get(item.id);
       if (!selectedRoles.has(item.id)) selectedRoles.set(item.id, metadata?.core ? "core" : metadata?.typedDetailIds.length ? "association" : "longterm");
       if (!selectedCandidateClasses.has(item.id)) selectedCandidateClasses.set(item.id, metadata?.core ? "core" : metadata?.typedDetailIds.length ? "associative" : "unclassified");
     }
-    let renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, storyBudget, retrievalTrace.enabled);
+    let renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, Math.min(storyBudget,maximumStoryBudget), retrievalTrace.enabled, pricing, storyBudget);
     // Trim only removes atoms. Resolve their original support IDs once, then
     // recompute exclusions from the atoms still present on every render.
     const dialogueSupportIds = new Map<MemoryContextItem["keyDialogues"][number], string>();
-    const dialogueSupportQuery = db.prepare("SELECT id FROM memory_dialogues WHERE chat_id=? AND memory_id=? AND message_id=? AND text=? LIMIT 1");
+    // The old lookup uses idx_memory_dialogues_memory (memory_id, ordinal).
+    // Preserve its ordinal/rowid first match for identical legacy tuples.
+    const dialogueRows = db.prepare(`SELECT id,memory_id,message_id,text FROM memory_dialogues WHERE chat_id=?
+      AND memory_id IN (SELECT value FROM json_each(?)) ORDER BY memory_id,ordinal,rowid`)
+      .all(parsed.chatId,JSON.stringify(selectedItems.map(item=>item.id))) as Array<{id:string;memory_id:string;message_id:string;text:string}>;
+    const dialogueByTuple=new Map<string,string>();
+    const dialogueTuple=(memoryId:string,messageId:string,text:string)=>JSON.stringify([memoryId,messageId,text]);
+    for (const row of dialogueRows) {
+      const key=dialogueTuple(row.memory_id,row.message_id,row.text);
+      if (!dialogueByTuple.has(key)) dialogueByTuple.set(key,row.id);
+    }
     for (const item of selectedItems) for (const dialogue of item.keyDialogues) {
-      const row = dialogueSupportQuery.get(parsed.chatId, item.id, dialogue.messageId, dialogue.text) as { id: string } | undefined;
-      if (row) dialogueSupportIds.set(dialogue, `dialogue:${row.id}`);
+      const id=dialogueByTuple.get(dialogueTuple(item.id,dialogue.messageId,dialogue.text));
+      if (id) dialogueSupportIds.set(dialogue, `dialogue:${id}`);
     }
     const compileStoryForSelection = () => {
-      const excluded = new Set(selectedItems.flatMap((item) => [...(item.atomAccessVersion === 0 && item.content ? [`memory:${item.id}`] : []), ...item.details.map((detail) => `detail:${detail.id}`)]));
+      const excluded = new Set(selectedItems.flatMap((item) => [...(emitsMemoryPlot(item) ? [`memory:${item.id}`] : []), ...item.details.map((detail) => `detail:${detail.id}`)]));
       for (const item of selectedItems) for (const dialogue of item.keyDialogues) {
         const supportId = dialogueSupportIds.get(dialogue);
         if (supportId) excluded.add(supportId);
@@ -637,9 +713,10 @@ export function createApp(dependencies: Dependencies): Hono {
     };
     let finalStory = compileStoryForSelection();
     const sourceEvidence = retrieveSourceEvidence(db, parsed.chatId, retrievalSignals.filter((signal) => signal.kind !== "scene").map((signal) => signal.text).join("\n"),
-      activeTurnPerspectives, parsed.tokenBudget, trustedPromptSourceMessageIds, semantic.sourceHits?.filter((hit) => hit.score >= 0.72 && (hit.viewIndex === undefined || retrievalSignals[hit.viewIndex]?.kind !== "scene")));
+      activeTurnPerspectives, parsed.tokenBudget, trustedPromptSourceMessageIds, semantic.sourceHits?.filter((hit) => hit.score >= 0.72 && (hit.viewIndex === undefined || retrievalSignals[hit.viewIndex]?.kind !== "scene")), [], [], undefined, undefined, { kind: "author", sceneCharacters });
     let deliveredSources = sourceEvidence.items;
     let emittedManifest = emptyPacketManifest();
+    let emittedAtomKeys = new Set(emittedManifest.atomKeys);
     const requestRefs = new Map<string, string>();
     const referencePacket = (value: string): string => parsed.memoryReferenceMode === "none"
       ? value.replace(/\s+id="[^"]+"/g, "")
@@ -655,44 +732,62 @@ export function createApp(dependencies: Dependencies): Hono {
       const end = structuredStoryTimeEnd(row.story_time);
       return end === undefined ? latest : latest === undefined ? end : Math.max(latest, end);
     }, undefined);
-    const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives,
+    const resolveRelationshipName = buildEntityIdentityResolver(db, parsed.chatId);
+    const preferredRelationshipNames = [parsed.identityHints?.userPersonaName, parsed.identityHints?.hostCharacterName,
+      ...(db.prepare("SELECT entity_name FROM entity_prominence WHERE chat_id=? AND (tier='core' OR pinned=1)").all(parsed.chatId) as Array<{entity_name:string}>).map(row => row.entity_name)]
+      .flatMap(name => { if (!name) return []; const identity = resolveRelationshipName(name); return identity.ambiguous ? [] : [identity.canonical]; });
+    const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives, sceneCharacters, preferredRelationshipNames,
       activeNames: [...new Set([...namesPresent, ...namesMentioned])], query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
       covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
       namesRecognitionIds: new Set(sceneNames.recognitionIds), sceneRecognitionIds: new Set(sceneNames.sceneRecognitionIds) });
     const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(remainingBudget);
-    const selectedState = selectAutomaticState(stateCandidates, stateBudget);
+    const selectedState = selectAutomaticState(stateCandidates, stateBudget, pricing, allocation.sceneRelationships);
     const ceilingDroppedState = new Set<string>();
-    let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName),namesPresent);
-    const occasions = parsed.upcomingOccasions === false ? { asOf: null, items: [] } : prepareOccasions(db, parsed.chatId, parsed.profile, retrievalPerspectives, parsed.identityHints?.userPersonaName);
-    // Core portfolio selection sees the full budget. Calendar context yields first at the final ceiling.
-    let includeOccasions = false;
-    const rebuildPacket = () => {
-      const state = renderAutomaticState(selectedState);
-      emittedManifest = mergePacketManifests([...structuredManifests, state.manifest,alwaysInject.manifest]);
-      let body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text);
-      body=prependAlwaysInject(body,alwaysInject.xml);
-      const calendar = includeOccasions ? renderOccasions(occasions.asOf, occasions.items) : "";
+    let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName),namesPresent,{ initialSetupOnly });
+    const occasions = parsed.upcomingOccasions === false ? { asOf: null, items: [] } : prepareOccasions(db, parsed.chatId, parsed.profile, retrievalPerspectives, parsed.identityHints?.userPersonaName, { kind: "author", sceneCharacters });
+    // Present calendar context is fixed output, charged before memories compete.
+    let emissionPlan: EmissionPlan;
+    const rebuildPacket = (viewpoint?: string) => {
+      const state = renderState(selectedState, viewpoint);
+      emittedManifest = mergePacketManifests([...structuredManifests, state.manifest,
+        { ...emptyPacketManifest(), alwaysInjectMemoryIds: alwaysInject.manifest.alwaysInjectMemoryIds }]);
+      emissionPlan = buildEmissionPlan(selectedItems, { promptSourceMessageIds: trustedPromptSourceMessageIds, lanes: emittedManifest });
+      prependAlwaysCards(emissionPlan,alwaysInject.plan);
+      omitStateLinkedDetails(emissionPlan,new Set(state.linkedDetailIds));
+      emittedManifest = buildManifest(emissionPlan);
+      emittedAtomKeys = new Set(emittedManifest.atomKeys);
+      let body = consolidateMemoryPacket(db, parsed.chatId, bufferedSource, [...perspectiveSections, { name: "shared", data: state.xml }], selectedItems, "recall", "context", [...recentMemoryIds].filter((id) => selectedItems.some((item) => item.id === id)), activeTurnPerspectives, finalStory.xml, emittedManifest, latestStoryTime, sceneNames.text, undefined, emissionPlan, viewpoint);
+      body=prependAlwaysInject(body,renderAlwaysInjectPlan(emissionPlan, viewpoint));
+      const calendar = renderOccasions(occasions.asOf, occasions.items, 160, viewpoint, pricing);
       if (progress) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${progress}\n</rp_memory_context>`);
       if (calendar) body = (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${calendar}\n</rp_memory_context>`);
       const deliveredDetails = selectedItems.flatMap(item => item.details
-        .filter(detail => emittedManifest.atomKeys.includes(memoryDetailAtomKey(detail))).map(detail => detail.text));
+        .filter(detail => emittedAtomKeys.has(memoryDetailAtomKey(detail))).map(detail => detail.text));
       const deliveredDialogueEvidence = selectedItems.flatMap(item => item.keyDialogues
-        .filter(dialogue => emittedManifest.atomKeys.includes(memoryDialogueAtomKey(item.id, dialogue))).flatMap(dialogue => dialogue.evidence));
+        .filter(dialogue => emittedAtomKeys.has(memoryDialogueAtomKey(item.id, dialogue))).flatMap(dialogue => dialogue.evidence));
       deliveredSources = sourceEvidence.items.filter(source => !deliveredDetails.some(text => text.includes(source.quote))
         && !(source.startOffset !== undefined && source.endOffset !== undefined && deliveredDialogueEvidence.some(evidence =>
           evidence.messageId === source.messageId && evidence.canonicalHash === source.canonicalHash
           && evidence.startOffset <= source.startOffset! && evidence.endOffset >= source.endOffset!)));
+      emissionPlan.laneRows.push(...deliveredSources.map(source => ({ lane: "atomKeys", id: sourceEvidenceAtomKey(source) })));
+      emittedManifest = buildManifest(emissionPlan);
+      emittedAtomKeys = new Set(emittedManifest.atomKeys);
       const sourceXml = renderSourceEvidence(deliveredSources);
-      if (!sourceXml) return referencePacket(body ? withMemoryGuidance(body) : sharedPastPacket);
-      return referencePacket(withMemoryGuidance(body.includes("</past_records>") ? body.replace("</past_records>", `${sourceXml}</past_records>`) : (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${sourceXml}</rp_memory_context>`)));
+      const finish = (value: string) => referencePacket(viewpoint
+        ? value.replace("</guidance>", `</guidance>\n${narrationLine(viewpoint)}`) : value);
+      if (sourceXml) body = body.includes("</past_records>")
+        ? body.replace("</past_records>", `${sourceXml}</past_records>`)
+        : (body || "<rp_memory_context></rp_memory_context>").replace("</rp_memory_context>", `${sourceXml}</rp_memory_context>`);
+      return finish(body ? withAutomaticGuidance(body) : emptyPacket);
     };
+    const packetCharge = (value: string) => chargedPacketTokens(value, emissionPlan, pricing);
     let packet = rebuildPacket();
     const focusLeaderIdSet = new Set(focusLeaderIds);
     const continuityBridgeIdSet = new Set(continuityBridgeIds);
     const cueAnchorKeys = new Set<string>();
     const atomPolicy = { latestStoryTime, priorities: automaticAtomPriorities, focusIds: focusLeaderIdSet, continuityIds: continuityBridgeIdSet,
-      roles: selectedRoles, associationSources: automaticAssociationSources, cueAnchorKeys };
-    const atomDecisions = planAutomaticAtoms(selectedItems, directAtomKeys, atomPolicy);
+      roles: new Map(selectedRoles), associationSources: automaticAssociationSources, cueAnchorKeys };
+    let atomDecisions = planAutomaticAtoms(selectedItems, directAtomKeys, atomPolicy);
     const cueAnchor = selectCueAnchor(atomDecisions, automaticAtomPriorities,
       new Map(retrievalSignals.flatMap((signal, index) => signal.kind === "cue" ? [[index, signal.weight]] : [])));
     if (cueAnchor) {
@@ -701,28 +796,46 @@ export function createApp(dependencies: Dependencies): Hono {
       cueAnchor.decision.cueViewIndex = cueAnchor.cueViewIndex;
     }
     const completedTurn = Number((db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(parsed.chatId) as { completed_turn_count?: number } | undefined)?.completed_turn_count ?? 0);
-    const deliveredStateIds = new Set(selectedState.map(row => row.item.id));
+    const floorActive = longtermFloorActive(db,parsed.chatId,parsed.tokenBudget,completedTurn);
+    const portfolioCandidates = [...selectedItems];
+    const candidateRoles = new Map(selectedRoles);
     const portfolioStory = renderStory();
-    const portfolio = selectAutomaticPortfolio({ candidates: [...selectedItems], metadata: portfolioMetadata, policy: atomPolicy,
-      stateSourceIds: new Set(stateCorpus.flatMap(state => state.current && deliveredStateIds.has(state.id) ? stateSources(state) : [])),
-      storySupportIds: new Set(portfolioStory.supportMemoryIds ?? []), storySupportAtomIds: new Set(portfolioStory.supportItemIds ?? []), activeParticipants: activeTurnPerspectives,
-      lastDelivered: automaticDeliveryHistory(db, parsed.chatId), completedTurn, hardTokenCeiling,
-      stateTokens: renderAutomaticState(selectedState).tokens,
-      renderTokens: items => { selectedItems.splice(0, selectedItems.length, ...items); finalStory = compileStoryForSelection(); return estimateTokens(rebuildPacket()); } });
-    selectedItems.splice(0, selectedItems.length, ...portfolio.items);
-    for (const [id, role] of portfolio.roles) selectedRoles.set(id, role);
-    for (const decision of atomDecisions) {
-      decision.role = selectedRoles.get(decision.memoryId) ?? decision.role;
-      if (!selectedItems.some(item => item.id === decision.memoryId && (item.details.some(detail => memoryDetailAtomKey(detail) === decision.atomKey)
-        || item.keyDialogues.some(dialogue => memoryDialogueAtomKey(item.id, dialogue) === decision.atomKey)))) decision.outcome = "target_budget";
-    }
-    includeOccasions = true;
+    const selectPortfolio = (stateSourceGroups: readonly (readonly string[])[]) => {
+      const stateLinkedDetailIds = new Set(renderState(selectedState).linkedDetailIds);
+      const result = selectAutomaticPortfolio({ candidates: portfolioCandidates, metadata: portfolioMetadata, policy: atomPolicy,
+        stateSourceGroups,
+        storySupportIds: new Set(portfolioStory.supportMemoryIds ?? []), storySupportAtomIds: new Set(portfolioStory.supportItemIds ?? []), activeParticipants: activeTurnPerspectives,
+        lastDelivered: automaticDeliveryHistory(db, parsed.chatId), completedTurn, hardTokenCeiling, allocation, longtermFloorActive: floorActive,
+        directAtomKeys,
+        cardTokens: item => {
+          const plan=buildEmissionPlan([item],{promptSourceMessageIds:trustedPromptSourceMessageIds});
+          omitStateLinkedDetails(plan,stateLinkedDetailIds);
+          return emittedMemoryItems(plan).reduce((sum,card)=>sum+chargedCardTokens(projectMemoryScene(card),{plot:plan.cards[0]!.plot,latestStoryTime},pricing),0);
+        },
+        renderTokens: items => { selectedItems.splice(0, selectedItems.length, ...items); finalStory = compileStoryForSelection(); return packetCharge(rebuildPacket()); } });
+      selectedItems.splice(0, selectedItems.length, ...result.items);
+      selectedRoles.clear();
+      for (const [id,role] of candidateRoles) selectedRoles.set(id,role);
+      for (const [id,role] of result.roles) selectedRoles.set(id,role);
+      return result;
+    };
+    // Delivered state is fixed before its source scenes compete for card space.
+    const portfolio = selectPortfolio(automaticStateSources(selectedState,stateSources));
     finalStory = compileStoryForSelection(); packet = rebuildPacket();
     const removeAt = (index: number): void => {
       const removed = selectedItems.splice(index, 1)[0];
       for (const decision of atomDecisions) if (decision.memoryId === removed?.id && decision.outcome === "retained") decision.outcome = "memory_removed";
       finalStory = compileStoryForSelection();
       packet = rebuildPacket();
+    };
+    const fitAt = (index: number): void => {
+      const fitted = fitAutomaticCard(selectedItems[index]!, item => {
+        selectedItems[index] = item;
+        finalStory = compileStoryForSelection();
+        packet = rebuildPacket();
+        return packetCharge(packet) <= hardTokenCeiling;
+      },directAtomKeys,atomPolicy,atomDecisions,"hard_ceiling");
+      if (!fitted) removeAt(index);
     };
     const protectedScene = (item: MemoryContextItem) => focusLeaderIdSet.has(item.id) || portfolioMetadata.get(item.id)?.core
       || item.details.some(detail => cueAnchorKeys.has(memoryDetailAtomKey(detail)))
@@ -733,109 +846,89 @@ export function createApp(dependencies: Dependencies): Hono {
     const dropState = (index: number) => {
       ceilingDroppedState.add(selectedState.splice(index, 1)[0]!.item.id); packet = rebuildPacket();
     };
-    while (estimateTokens(packet) > hardTokenCeiling) {
-      if (trimAutomaticStateNote(selectedState)) { packet = rebuildPacket(); continue; }
-      if (progress) { progress = ""; packet = rebuildPacket(); continue; }
-      if (occasions.items.length) { occasions.items.pop(); packet = rebuildPacket(); continue; }
-      const supplemental = lastMatchingIndex(selectedState, row => !!row.promiseSlot);
-      if (supplemental >= 0) { dropState(supplemental); continue; }
-      // 1. Peripheral memories yield before any current-state row.
-      const peripheral = lastMatchingIndex(selectedItems, item => !protectedScene(item)
-        && ["longterm", "association", "serendipity"].includes(selectedRoles.get(item.id) ?? ""));
-      if (peripheral >= 0) { removeAt(peripheral); continue; }
-      // 2. State outside the active scene yields before older continuity.
-      const outside = lastMatchingIndex(selectedState, row => !row.active);
-      if (outside >= 0) { dropState(outside); continue; }
-      // 3. Oldest continuity first, including historical structured records.
-      const continuity = selectedItems.filter(item => !protectedScene(item) && selectedRoles.get(item.id) === "continuity")
-        .sort((a, b) => (a.sourceOrdinal ?? 0) - (b.sourceOrdinal ?? 0))[0];
-      if (continuity) { removeAt(selectedItems.indexOf(continuity)); continue; }
-      if (finalStory.xml) {
-        const reducedBudget = Math.max(0, finalStory.tokens - (estimateTokens(packet) - hardTokenCeiling) - 1);
-        renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, reducedBudget, retrievalTrace.enabled);
-        finalStory = compileStoryForSelection(); packet = rebuildPacket(); continue;
-      }
-      if (perspectiveSections.length) {
-        // These sections contain only physical/relationship history now; the
-        // current ledger is independently selected and cannot be popped here.
-        perspectiveSections.splice(0); structuredManifests.splice(0); packet = rebuildPacket(); continue;
-      }
-      const ordinary = lastMatchingIndex(selectedItems, item => !protectedScene(item));
-      if (ordinary >= 0) { removeAt(ordinary); continue; }
-      // 4. Only protected scene and active-participant state remain.
-      if (trimAutomaticAtom(selectedItems, directAtomKeys, true, atomPolicy, atomDecisions, "hard_ceiling")) {
-        packet = rebuildPacket(); continue;
-      }
-      const unpinned = lastMatchingIndex(selectedState, row => !row.pinned);
-      if (unpinned >= 0) { dropState(unpinned); continue; }
-      if (selectedItems.length) { removeAt(selectedItems.length - 1); continue; }
-      if (sourceEvidence.items.length) { sourceEvidence.items.pop(); packet = rebuildPacket(); continue; }
-      sceneNames.text = ""; sceneNames.omittedCount += sceneNames.pairCount; sceneNames.pairCount = 0;
-      packet = rebuildPacket();
-      break;
-    }
-    const fundedFrom = fundAutomaticState({ candidates: stateCandidates.filter(row => !ceilingDroppedState.has(row.item.id)),
-      tokenBudget: parsed.tokenBudget,
-      longtermMemoryIds: selectedItems.filter(item => selectedRoles.get(item.id) === "longterm")
-        .sort((a, b) => Number(portfolio.reasons.get(b.id)?.kind === "open_seed") - Number(portfolio.reasons.get(a.id)?.kind === "open_seed"))
-        .map(item => item.id),
-      selected: selectedState, memories: selectedItems, canYield: peripheralMemory, hardTokenCeiling,
-      renderTokens: () => { finalStory = compileStoryForSelection(); return estimateTokens(rebuildPacket()); } });
-    for (const decision of atomDecisions) if (fundedFrom.includes(decision.memoryId) && decision.outcome === "retained") decision.outcome = "memory_removed";
-    finalStory = compileStoryForSelection(); packet = rebuildPacket();
-    // Only genuinely unused capacity goes to remaining, non-scene state rows.
-    let sharedBudgetUsed = Math.max(stateBudget, renderAutomaticState(selectedState).tokens);
-    for (const row of stateCandidates) {
-      if (row.promiseSlot || selectedState.includes(row) || ceilingDroppedState.has(row.item.id)) continue;
-      const previousLines = selectedState.map(item => item.line);
-      selectedState.push(row); let expanded = rebuildPacket();
-      while (estimateTokens(expanded) > hardTokenCeiling && trimAutomaticStateNote(selectedState)) expanded = rebuildPacket();
-      if (estimateTokens(expanded) <= hardTokenCeiling) {
-        packet = expanded; sharedBudgetUsed = Math.max(sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
-      } else {
-        selectedState.pop(); selectedState.forEach((item, index) => { item.line = previousLines[index]!; });
+    const floorCardCost = (item: MemoryContextItem) => chargedCardTokens(projectMemoryScene(item),{plot:"emit",latestStoryTime},pricing);
+    const floorProtected = (item: MemoryContextItem) => {
+      const dialogueCost = (current: MemoryContextItem) => Math.max(0,floorCardCost(current)-floorCardCost({...current,keyDialogues:[]}));
+      return dialogueCost(item)>0 && selectedItems.filter(current=>current!==item).reduce((sum,current)=>sum+dialogueCost(current),0)<portfolio.floors.dialogue.reserved
+        || selectedRoles.get(item.id)==="longterm" && selectedItems.filter(current=>current!==item&&selectedRoles.get(current.id)==="longterm")
+          .reduce((sum,current)=>sum+floorCardCost(current),0)<portfolio.floors.longterm.reserved;
+    };
+    const fitPacket = (allowStateRemoval: boolean) => {
+      while (packetCharge(packet) > hardTokenCeiling) {
+        if (allowStateRemoval && trimAutomaticStateNote(selectedState)) { packet = rebuildPacket(); continue; }
+        // A relationship reservation must never buy room by removing a promise
+        // or a surrounding memory, including the final portfolio rebuild.
+        const reservedRelationship = lastMatchingIndex(selectedState, row => row.relationshipReservation === "reserved");
+        if (reservedRelationship >= 0) { dropState(reservedRelationship); continue; }
+        if (progress) { progress = ""; packet = rebuildPacket(); continue; }
+        // 1. Peripheral memories yield before any current-state row.
+        const peripheral = lastMatchingIndex(selectedItems, item => !protectedScene(item) && !floorProtected(item)
+          && ["longterm", "association", "serendipity"].includes(selectedRoles.get(item.id) ?? ""));
+        if (peripheral >= 0) { fitAt(peripheral); continue; }
+        if (occasions.items.length) { occasions.items.pop(); packet = rebuildPacket(); continue; }
+        // 2. State outside the active scene yields before older continuity.
+        const outside = lastMatchingIndex(selectedState, row => !row.active && !row.protectedPromise && !row.pinned);
+        if (allowStateRemoval && outside >= 0) { dropState(outside); continue; }
+        // 3. Oldest continuity first, including historical structured records.
+        const continuity = selectedItems.filter(item => !protectedScene(item) && !floorProtected(item) && selectedRoles.get(item.id) === "continuity")
+          .sort((a, b) => (a.sourceOrdinal ?? 0) - (b.sourceOrdinal ?? 0))[0];
+        if (continuity) { fitAt(selectedItems.indexOf(continuity)); continue; }
+        if (finalStory.xml) {
+          const reducedBudget = Math.max(0, chargedSectionTokens(finalStory.xml, pricing) - (packetCharge(packet) - hardTokenCeiling) - 1);
+          const previousStory=finalStory.xml;
+          renderStory = createStorySpineCompiler(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, Math.min(reducedBudget,maximumStoryBudget), retrievalTrace.enabled, pricing, storyBudget);
+          finalStory = compileStoryForSelection(); packet = rebuildPacket();
+          if (finalStory.xml!==previousStory) continue;
+        }
+        if (perspectiveSections.length) {
+          // These sections contain only physical/relationship history now; the
+          // current ledger is independently selected and cannot be popped here.
+          perspectiveSections.splice(0); structuredManifests.splice(0); packet = rebuildPacket(); continue;
+        }
+        const ordinary = lastMatchingIndex(selectedItems, item => !protectedScene(item) && !floorProtected(item));
+        if (ordinary >= 0) { fitAt(ordinary); continue; }
+        // 4. Preserve scene state while the protected card still has a smaller
+        // emission: optional lines, then plot, then ordinary remaining lines.
+        if (selectedItems.length) { fitAt(selectedItems.length - 1); continue; }
+        const unpinned = lastMatchingIndex(selectedState, row => !row.pinned && !row.protectedPromise);
+        if (allowStateRemoval && unpinned >= 0) { dropState(unpinned); continue; }
+        if (sourceEvidence.items.length) { sourceEvidence.items.pop(); packet = rebuildPacket(); continue; }
+        // A mandatory-lane collision may omit the overview whole as a last
+        // resort; never shorten an in-allowance stored overview by position.
+        if (finalStory.xml) {
+          renderStory=createStorySpineCompiler(db,parsed.chatId,activeTurnPerspectives,semantic.storyScores,0,retrievalTrace.enabled,pricing,0);
+          finalStory=compileStoryForSelection(); packet=rebuildPacket(); continue;
+        }
+        // Global ceiling escape hatch only after every reservation and card has
+        // yielded. Protected promises are not an unbounded packet-budget bypass.
+        const promise = lastMatchingIndex(selectedState, row => !!row.protectedPromise);
+        if (allowStateRemoval && promise >= 0) { dropState(promise); continue; }
+        sceneNames.text = ""; sceneNames.omittedCount += sceneNames.pairCount; sceneNames.pairCount = 0;
         packet = rebuildPacket();
+        break;
       }
+    };
+    fitPacket(true);
+    // State membership is bounded before memory allocation. Returned floors
+    // buy useful card depth/breadth, never a second unbounded state exchange.
+    for (const decision of atomDecisions) {
+      decision.role = selectedRoles.get(decision.memoryId) ?? decision.role;
+      if (decision.outcome === "retained" && !selectedItems.some(item => item.id === decision.memoryId && (item.details.some(detail => memoryDetailAtomKey(detail) === decision.atomKey)
+        || item.keyDialogues.some(dialogue => memoryDialogueAtomKey(item.id, dialogue) === decision.atomKey)))) decision.outcome = "target_budget";
     }
-    // Refill whole detail/dialogue units in rounds. Already selected connection
-    // scenes keep their places; omitted records must fit as readable bundles.
-    let refillAdded = 0;
-    const refillRejected = { atomBudget: 0, sceneBudget: 0 };
-    const candidates = [...eligibleAtoms.values()].filter(item => ["focus", "core"].includes(selectedRoles.get(item.id) ?? "") && selectedItems.some(current => current.id === item.id));
-    const additions = candidates.map(candidate => {
-      const item = selectedItems.find(current => current.id === candidate.id)!;
-      const details = candidate.details.filter(detail => !item.details.some(old => old.id === detail.id));
-      const dialogues = candidate.keyDialogues.filter(dialogue => !item.keyDialogues.some(old => memoryDialogueAtomKey(item.id, old) === memoryDialogueAtomKey(item.id, dialogue)));
-      const units: Array<{detail?: typeof details[number]; dialogue?: typeof dialogues[number]}> = [];
-      for (let i=0;i<Math.max(details.length,dialogues.length);i++) {
-        if (dialogues[i]) units.push({dialogue:dialogues[i]});
-        if (details[i]) units.push({detail:details[i]});
-      }
-      return { candidate, units };
-    });
-    const rounds = Math.max(0,...additions.map(entry => entry.units.length));
-    for (let round=0;round<rounds;round++) for (const {candidate,units} of additions) {
-      const unit = units[round]; if (!unit) continue;
-      const index = selectedItems.findIndex(item => item.id === candidate.id), previous = selectedItems[index]!;
-      selectedItems[index] = {...previous,details:unit.detail?[...previous.details,unit.detail]:previous.details,
-        keyDialogues:unit.dialogue?[...previous.keyDialogues,unit.dialogue]:previous.keyDialogues};
-      finalStory = compileStoryForSelection(); const expanded = rebuildPacket();
-      if (estimateTokens(expanded) <= hardTokenCeiling) { packet=expanded; refillAdded++; }
-      else { refillRejected.atomBudget++; selectedItems[index]=previous; finalStory=compileStoryForSelection(); packet=rebuildPacket(); }
-    }
+    const chargedTokens = packetCharge(packet);
+    packet = rebuildPacket(narrationViewpoint);
     if (parsed.memoryReferenceMode === "none") packet = packet.replace(/\s+id="[^"]+"/g, "");
     const keptPeripheralIds = selectedItems.filter(peripheralMemory).map(item => item.id);
-    if (!sceneNames.text) for (const entry of stateTrace?.snapshot().entries ?? []) {
-      if (entry.rendered === "folded_into_names") for (const perspective of entry.perspectives) {
-        stateTrace?.record(perspective, entry, "final_ceiling");
-      }
-    }
     for (const row of stateCandidates) for (const [index, perspective] of row.perspectives.entries()) {
       stateTrace?.record(perspective, row.item, selectedState.includes(row) ? index ? "deduped" : "delivered"
         : ceilingDroppedState.has(row.item.id) ? "final_ceiling" : "budget", { rank: row.rank,
+          ...(row.item.kind === "relationship" ? { reason: row.item.automatic?.summaryReady === false ? "relationship_summary_pending" : row.relationshipReservation === "reserved"
+            ? selectedState.includes(row) ? "scene_relationship_reserved" : "scene_relationship_final_ceiling"
+            : row.relationshipReservation === "overflow" ? "scene_relationship_allowance_exceeded" : "relationship_ranked_state" } : {}),
           ...(!selectedState.includes(row) ? { keptPeripheralMemoryIds: keptPeripheralIds } : {}) });
     }
-    stateTrace?.budget("shared", sharedBudgetUsed, renderAutomaticState(selectedState).tokens);
+    stateTrace?.budget("shared", stateBudget, renderState(selectedState).tokens);
     const assemblyFinishedAt = performance.now();
     const finalSelectedIds = new Set([...alwaysIds,...selectedItems.map((item) => item.id)]);
     for (const retrieval of retrievalDiagnostics) for (const candidate of retrieval.candidates) if (finalSelectedIds.has(candidate.id)) {
@@ -844,8 +937,8 @@ export function createApp(dependencies: Dependencies): Hono {
     }
     const deliveredPerspectives = [...new Set([...perspectiveSections.map(item => item.name), ...selectedState.flatMap(row => row.perspectives)])]
       .map(name => name === "__shared__" ? "shared" : name);
-    const finalManifest = { ...injectionManifest(packet, emittedManifest, deliveredPerspectives, finalStory.nodeIds), sourceEvidenceIds: deliveredSources.map((item) => item.id) };
-    finalManifest.atomKeys.push(...deliveredSources.map(sourceEvidenceAtomKey));
+    const finalManifest = { ...injectionManifest(packet, emittedManifest, deliveredPerspectives, finalStory.nodeIds), sourceEvidenceIds: deliveredSources.map((item) => item.id),
+      longtermMemoryIds: [...finalSelectedIds].filter(id=>selectedRoles.get(id)==="longterm") };
     if (parsed.memoryGeneration) memoryReferences.deliver(parsed.chatId, parsed.memoryGeneration, [...packet.matchAll(/ref="(m[0-9]+)"/g)].map(match => match[1]!));
     const deliveredActivationAtoms = new Set(finalManifest.atomKeys);
     for (const entry of activationByPerspective) persistAutomaticActivationObservations(
@@ -873,13 +966,25 @@ export function createApp(dependencies: Dependencies): Hono {
     toolOpportunity.archiveSearchAvailable = accessibleArchiveExists(db, parsed.chatId, activeTurnPerspectives)
       || memoryToolReadiness(db, parsed.chatId).processedStates > 0;
     const sectionTokens = Object.fromEntries(["always_inject", "story_continuity", "current_state", "occasions", "not_yet"].map(tag => [tag, (packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))?.[0] ? estimateTokens(packet.match(new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`))![0]) : 0)]));
-    const sceneDelivery = selectedItems.map(item => ({memoryId:item.id,ref:requestRefs.get(item.id),details:item.details.length,dialogues:item.keyDialogues.length}));
+    const cardEmission = traceEmissionPlan(emissionPlan!);
+    const sceneDelivery = emissionPlan!.cards.map((card, index) => ({memoryId:card.memoryId,ref:requestRefs.get(card.memoryId),
+      plots:card.plot === "emit" ? 1 : 0, exceptions:cardEmission[index]!.requiredExceptionIds.filter(id=>card.detailIds.includes(id)).length,
+      details:card.detailIds.length,dialogues:card.dialogueIds.length}));
     const stateKinds = Object.fromEntries([...new Set(finalManifest.stateEvidenceIds.map(id=>id.split(":")[0]!))].map(kind=>[kind,finalManifest.stateEvidenceIds.filter(id=>id.startsWith(kind+":")).length]));
     const stateInventory = Object.fromEntries([...new Set(stateCorpus.map(item => item.kind))].map(kind => [kind, stateCorpus.filter(item => item.kind === kind).length]));
-    const assembly = { names: { pairCount: sceneNames.pairCount, omittedCount: sceneNames.omittedCount }, stateInventory, stateSearch: { ...embeddings.stateIndex.status }, sectionTokens, sceneDelivery, stateKinds, ...processedHistoryCoverage(db, parsed.chatId), refillAdded, refillRejected, unusedTokens: Math.max(0, hardTokenCeiling - estimateTokens(packet)), unusedReason: estimateTokens(packet) < hardTokenCeiling * .8 ? "eligible_scene_or_whole_atom_limit" : undefined };
+    const floorItems = emittedMemoryItems(emissionPlan!);
+    const floors = {
+      dialogue: packetFloorUsage(portfolio.floors.dialogue.reserved, floorItems.reduce((sum,item) =>
+        sum + Math.max(0,floorCardCost(item)-floorCardCost({...item,keyDialogues:[]})),0)),
+      longterm: packetFloorUsage(portfolio.floors.longterm.reserved, floorItems.filter(item=>selectedRoles.get(item.id)==="longterm")
+        .reduce((sum,item)=>sum+floorCardCost(item),0)),
+    };
+    if (!floorActive) Object.assign(floors.longterm,{inactive:"cadence"});
+    const assembly = { allocation, floors, chargedTokens, renderedTokens: estimateTokens(packet), names: { pairCount: sceneNames.pairCount, omittedCount: sceneNames.omittedCount }, stateInventory, stateSearch: { ...embeddings.stateIndex.status }, sectionTokens, sceneDelivery, stateKinds, ...processedHistoryCoverage(db, parsed.chatId), unusedTokens: Math.max(0, hardTokenCeiling - chargedTokens), unusedReason: chargedTokens < hardTokenCeiling * .8 ? "eligible_scene_or_whole_atom_limit" : undefined };
     const response = context.json({
       apiRevision: RCM_API_REVISION,
       serverInstanceId,
+      memoryEpoch: memoryEpoch(db,parsed.chatId),
       chatRevision: sync.revision,
       ...sourceStatus,
       profile: parsed.profile,
@@ -890,17 +995,18 @@ export function createApp(dependencies: Dependencies): Hono {
       stableAnchors,
       estimatedTokens: estimateTokens(packet),
       assembly,
-      selected: [...alwaysInject.items,...selectedItems.map(publicMemoryContext)],
-      stateSnapshots: selectedState.filter(row => finalManifest.stateEvidenceIds.includes(row.item.id) && packet.includes(row.line))
-        .map(row => ({ id: row.item.id, text: row.line })),
+      selected: emittedMemoryRecords(emissionPlan!).map(publicMemoryContext),
+      stateSnapshots: renderAutomaticState(selectedState, narrationViewpoint).snapshots
+        .filter(row => finalManifest.stateEvidenceIds.includes(row.id) && packet.includes(row.text)),
       injectionManifest: finalManifest,
       memoryToolsAvailable: memoryToolReadiness(db, parsed.chatId).available,
       memoryToolOpportunity: toolOpportunity,
       mcpRequestTimeoutMs:mcpRequestTimeoutMs(mcpSelector.publicConfig),
       perspectiveResolution,
+      sceneCharacters, narrationViewpoint, narrationDiagnostics,
       initialCalibration: initialCalibrationView(db, parsed.chatId),
       lineage,
-      omissionReason: packet ? undefined : activeMemoryCount === 0 ? "no_memories" : perspectiveResolution.unresolved ? "unresolved_perspective" : "no_relevance",
+      omissionReason: packet ? undefined : !hasActiveMemory ? "no_memories" : perspectiveResolution.unresolved ? "unresolved_perspective" : "no_relevance",
       sync: {
         inserted: sync.inserted,
         revised: sync.revised,
@@ -914,7 +1020,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const finalDecisions = new Map(atomDecisions.map(decision => [decision.atomKey, decision]));
     for (const decision of planAutomaticAtoms(selectedItems, directAtomKeys, atomPolicy)) {
       const old = finalDecisions.get(decision.atomKey);
-      finalDecisions.set(decision.atomKey, { ...decision, ...old, outcome: "retained" });
+      finalDecisions.set(decision.atomKey, { ...decision, ...old, bundle:decision.bundle, outcome: "retained" });
     }
     const atomPreservation = [...finalDecisions.values()].map((decision) => ({ ...decision,
       delivered: deliveredAtomSet.has(decision.atomKey),
@@ -956,7 +1062,7 @@ export function createApp(dependencies: Dependencies): Hono {
       totalMs: finalizedAt - prepareStartedAt,
     };
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) void retrievalTrace.record({
-      atomPreservation, roleTokens,
+      atomPreservation, roleTokens, cardEmission,
       currentState: stateTrace?.snapshot(),
       timings,
       syncTimings,
@@ -973,8 +1079,9 @@ export function createApp(dependencies: Dependencies): Hono {
       tokenBudget: parsed.tokenBudget,
       chatRevision: sync.revision,
       perspectives: retrievalPerspectives,
+      audience: "author", sceneCharacters, narrationViewpoint, narrationDiagnostics,
       promptSourceMessageIds: trustedPromptSourceMessageIds,
-      selectedIds: [...alwaysIds,...selectedItems.map((item) => item.id)],
+      selectedIds: [...finalSelectedIds],
       selection: {
         seedCounts: storySeedCounts(db,parsed.chatId),
         reasons: Object.fromEntries([...portfolio.reasons].filter(([id]) => finalSelectedIds.has(id))),
@@ -993,6 +1100,7 @@ export function createApp(dependencies: Dependencies): Hono {
         targetBudget: parsed.tokenBudget,
         hardTokenCeiling,
         storyMaximum: maximumStoryBudget,
+        storyOverviewRenderMaximum: overviewRenderMaximum,
         storyReserved: storyBudget,
         storyUsed: finalStory.tokens,
         retrievalBudget,
@@ -1035,117 +1143,158 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/chats/:id/story-spine", (context) => context.json(listStorySpine(db, context.req.param("id"))));
   app.patch("/v1/chats/:id/story-spine/:groupId", async (context) => {
     const body = await context.req.json() as { pinned?: boolean; hidden?: boolean; summary?: string };
-    if (!updateStorySpineGroup(db, context.req.param("id"), context.req.param("groupId"), body)) {
-      return context.json({ error: "Story spine group not found or read-only" }, 404);
-    }
-    void embeddings.indexPending(context.req.param("id"));
-    return context.json({ ok: true, ...listStorySpine(db, context.req.param("id")) });
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!updateStorySpineGroup(db, context.req.param("id"), context.req.param("groupId"), body)) {
+        return context.json({ error: "Story spine group not found or read-only" }, 404);
+      }
+      void embeddings.indexPending(context.req.param("id"));
+      return context.json({ ok: true, ...listStorySpine(db, context.req.param("id")) });
+    });
   });
   app.post("/v1/chats/:id/story-spine/rebuild", (context) => {
-    const chatId = context.req.param("id");
-    // This explicit action rebuilds the complete hierarchy, including boundaries.
-    invalidateStorySpine(db, chatId);
-    const queued = maybeEnqueueStorySpine(db, chatId, undefined, 'rebuild');
-    if (queued) serverWorker.wake();
-    void embeddings.indexPending(chatId);
-    return context.json({ ok: true, queued, ...listStorySpine(db, chatId) });
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      // This explicit action rebuilds the complete hierarchy, including boundaries.
+      invalidateStorySpine(db, chatId);
+      const queued = maybeEnqueueStorySpine(db, chatId, undefined, 'rebuild');
+      if (queued) serverWorker.wake();
+      void embeddings.indexPending(chatId);
+      return context.json({ ok: true, queued, ...listStorySpine(db, chatId) });
+    });
   });
   app.get('/v1/chats/:id/story-spine/rebuild/estimate',context=>context.json(estimateStoryRebuild(db,context.req.param('id'))));
   app.get("/v1/chats/:id/initial-calibration", (context) => context.json(initialCalibrationLedger(db, context.req.param("id"))));
   app.post("/v1/chats/:id/initial-calibration/confirm", (context) => {
-    try {
-      const chatId = context.req.param("id");
-      const pending = resolveInitialCalibrationConfirmation(db, chatId, "confirm");
-      if (pending.alreadyResolved) return context.json({ ok: true, queuedJobs: 0, calibration: initialCalibrationLedger(db, chatId) });
-      const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
-      const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
-      if (queuedJobs) serverWorker.wake();
-      return context.json({ ok: true, queuedJobs, calibration: initialCalibrationLedger(db, chatId) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const chatId = context.req.param("id");
+        const pending = resolveInitialCalibrationConfirmation(db, chatId, "confirm");
+        if (pending.alreadyResolved) return context.json({ ok: true, queuedJobs: 0, calibration: initialCalibrationLedger(db, chatId) });
+        const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
+        const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
+        if (queuedJobs) serverWorker.wake();
+        return context.json({ ok: true, queuedJobs, calibration: initialCalibrationLedger(db, chatId) });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
   app.post("/v1/chats/:id/initial-calibration/skip", (context) => {
-    try {
-      const chatId = context.req.param("id");
-      if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined);
-      const pending = resolveInitialCalibrationConfirmation(db, chatId, "skip");
-      if (pending.alreadyResolved) return context.json({ ok: true, queuedJobs: 0, calibration: initialCalibrationLedger(db, chatId) });
-      const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
-      const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
-      if (queuedJobs) serverWorker.wake();
-      return context.json({ ok: true, queuedJobs, calibration: initialCalibrationLedger(db, chatId) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const chatId = context.req.param("id");
+        if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined);
+        const pending = resolveInitialCalibrationConfirmation(db, chatId, "skip");
+        if (pending.alreadyResolved) return context.json({ ok: true, queuedJobs: 0, calibration: initialCalibrationLedger(db, chatId) });
+        const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number };
+        const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, pending.forceBackfill, chat.include_user_messages === 1, chat.extraction_group_turns, pending.forceBackfill ? "ledger" : "current", pending.extractionReview, undefined, pending.backfillRunId);
+        if (queuedJobs) serverWorker.wake();
+        return context.json({ ok: true, queuedJobs, calibration: initialCalibrationLedger(db, chatId) });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
   app.post("/v1/chats/:id/initial-calibration/retry", async (context) => {
     try {
       const chatId = context.req.param("id");
       const body = await context.req.json().catch(() => ({})) as { resolvedSetup?: unknown; identityHints?: unknown };
-      const setupResult = body.resolvedSetup === undefined ? undefined : PickerSetupProjectionSchema.safeParse(body.resolvedSetup);
-      if (setupResult && !setupResult.success) return context.json({ error: "resolvedSetup is invalid", issues: setupResult.error.issues }, 400);
-      if (body.identityHints !== undefined && (typeof body.identityHints !== "object" || body.identityHints === null || Array.isArray(body.identityHints))) {
-        return context.json({ error: "identityHints must be an object" }, 400);
-      }
-      const retry = setupResult?.success
-        ? { projection: setupResult.data, identityHints: (body.identityHints ?? {}) as Record<string, unknown> }
-        : initialCalibrationRetryInput(db, chatId);
-      const queued = db.transaction(() => {
-        if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined, { confirmationRequired: true });
-        prepareInitialCalibrationRetry(db, chatId);
-        if (!enqueueInitialCalibration(db, chatId, retry.projection, retry.identityHints, retry.backfillRunId)) throw new Error("Initial calibration is already queued");
-        return true;
-      })();
-      if (queued) serverWorker.wake();
-      return context.json({ ok: true, queued, calibration: initialCalibrationLedger(db, chatId) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        const setupResult = body.resolvedSetup === undefined ? undefined : PickerSetupProjectionSchema.safeParse(body.resolvedSetup);
+        if (setupResult && !setupResult.success) return context.json({ error: "resolvedSetup is invalid", issues: setupResult.error.issues }, 400);
+        if (body.identityHints !== undefined && (typeof body.identityHints !== "object" || body.identityHints === null || Array.isArray(body.identityHints))) {
+          return context.json({ error: "identityHints must be an object" }, 400);
+        }
+        const retry = setupResult?.success
+          ? { projection: setupResult.data, identityHints: (body.identityHints ?? {}) as Record<string, unknown> }
+          : initialCalibrationRetryInput(db, chatId);
+        const queued = db.transaction(() => {
+          if (initialCalibrationView(db, chatId).status === "unseeded") beginInitialCalibration(db, chatId, "new_root", undefined, { confirmationRequired: true });
+          prepareInitialCalibrationRetry(db, chatId);
+          if (!enqueueInitialCalibration(db, chatId, retry.projection, retry.identityHints, retry.backfillRunId)) throw new Error("Initial calibration is already queued");
+          return true;
+        })();
+        if (queued) serverWorker.wake();
+        return context.json({ ok: true, queued, calibration: initialCalibrationLedger(db, chatId) });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+    }
   });
   app.post("/v1/chats/:id/initial-calibration/entities", async (context) => {
     try {
       const body = await context.req.json() as { displayName?: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference"; birthday?: import("@rcm/shared").EntityBirthday | null };
-      const id = upsertInitialEntity(db, context.req.param("id"), { displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence, birthday: body.birthday });
-      return context.json({ ok: true, id, calibration: initialCalibrationLedger(db, context.req.param("id")) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        const id = upsertInitialEntity(db, context.req.param("id"), { displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence, birthday: body.birthday });
+        return context.json({ ok: true, id, calibration: initialCalibrationLedger(db, context.req.param("id")) });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   });
   app.patch("/v1/chats/:id/initial-calibration/entities/:entityId", async (context) => {
     try {
       const body = await context.req.json() as { displayName?: string; aliases?: string[]; prominence?: "primary" | "supporting" | "reference"; birthday?: import("@rcm/shared").EntityBirthday | null };
-      upsertInitialEntity(db, context.req.param("id"), { id: context.req.param("entityId"), displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence, birthday: body.birthday });
-      return context.json({ ok: true, calibration: initialCalibrationLedger(db, context.req.param("id")) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        upsertInitialEntity(db, context.req.param("id"), { id: context.req.param("entityId"), displayName: body.displayName ?? "", aliases: body.aliases, prominence: body.prominence, birthday: body.birthday });
+        return context.json({ ok: true, calibration: initialCalibrationLedger(db, context.req.param("id")) });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   });
   app.delete("/v1/chats/:id/initial-calibration/entities/:entityId", (context) => {
-    try {
-      const chatId = context.req.param("id");
-      const deleted = deleteInitialEntity(db, chatId, context.req.param("entityId"));
-      return deleted
-        ? context.json({ ok: true, calibration: initialCalibrationLedger(db, chatId) })
-        : context.json({ error: "Initial setup entity not found" }, 404);
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const chatId = context.req.param("id");
+        const deleted = deleteInitialEntity(db, chatId, context.req.param("entityId"));
+        return deleted
+          ? context.json({ ok: true, calibration: initialCalibrationLedger(db, chatId) })
+          : context.json({ error: "Initial setup entity not found" }, 404);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
   app.patch("/v1/chats/:id/initial-calibration/relationships/:baselineId", async (context) => {
     try {
       const body = await context.req.json() as { axes?: Record<string, string>; summary?: string };
-      updateInitialRelationship(db, context.req.param("id"), context.req.param("baselineId"), { axes: body.axes ?? {}, summary: body.summary ?? "" });
-      return context.json({ ok: true, calibration: initialCalibrationLedger(db, context.req.param("id")) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        updateInitialRelationship(db, context.req.param("id"), context.req.param("baselineId"), { axes: body.axes ?? {}, summary: body.summary ?? "" });
+        return context.json({ ok: true, calibration: initialCalibrationLedger(db, context.req.param("id")) });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+    }
   });
   app.post("/v1/chats/:id/open", async (context) => {
     const body = TurnPrepareRequestSchema.extend({ workerId: z.string().min(1).optional() }).parse(await context.req.json());
-    if (body.chatId !== context.req.param("id")) return context.json({ error: "chatId does not match route" }, 400);
-    // Opening a host chat only resolves identity and stores sources. It must not
-    // capture setup, retrieve a packet, enqueue work or wake a provider.
-    const request = { ...body, resolvedSetup: undefined, forceBackfill: false, backfillApproved: false, deferExtraction: true, tokenBudget: 0 };
-    const { lineage, ...sourceStatus } = withSourceSnapshot(db, body, (policy, allowDiscovery) => {
-      syncChatTitle(db,body.chatId,body.chatTitle);
-      const current = getChatLineage(db, body.chatId);
-      if (!allowDiscovery && hasPendingLineageDiscovery(db, request)) policy.held = true;
-      const resolved = current.status === "none" ? ensureChatLineage(db, request, allowDiscovery, policy.allowDestructive) : current;
-      // A concurrent prepare may already have advanced this chat. Opening is
-      // not an edit/rollback event; only fill a previously empty source ledger.
-      if (!db.prepare("SELECT 1 FROM messages WHERE chat_id=? LIMIT 1").get(body.chatId)) syncSnapshot(db, request, policy);
-      recordOpenChat(db, body.workerId ?? "legacy", body.chatId);
-      writePersonaHint(db, body.chatId, body.identityHints?.userPersonaName);
-      return { lineage: resolved };
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (body.chatId !== context.req.param("id")) return context.json({ error: "chatId does not match route" }, 400);
+      // Opening a host chat only resolves identity and stores sources. It must not
+      // capture setup, retrieve a packet, enqueue work or wake a provider.
+      const request = { ...body, resolvedSetup: undefined, forceBackfill: false, backfillApproved: false, deferExtraction: true, tokenBudget: 0 };
+      const { lineage, ...sourceStatus } = withSourceSnapshot(db, body, (policy, allowDiscovery) => {
+        syncChatTitle(db,body.chatId,body.chatTitle);
+        const current = getChatLineage(db, body.chatId);
+        if (!allowDiscovery && hasPendingLineageDiscovery(db, request)) policy.held = true;
+        const resolved = current.status === "none" ? ensureChatLineage(db, request, allowDiscovery, policy.allowDestructive) : current;
+        // A concurrent prepare may already have advanced this chat. Opening is
+        // not an edit/rollback event; only fill a previously empty source ledger.
+        if (!db.prepare("SELECT 1 FROM messages WHERE chat_id=? LIMIT 1").get(body.chatId)) syncSnapshot(db, request, policy);
+        recordOpenChat(db, body.workerId ?? "legacy", body.chatId);
+        writePersonaHint(db, body.chatId, body.identityHints?.userPersonaName);
+        return { lineage: resolved };
+      });
+      return context.json({ ...sourceStatus, lineage, initialCalibration: initialCalibrationView(db, body.chatId), memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(body.chatId) as { memory_language: string }).memory_language });
     });
-    return context.json({ ...sourceStatus, lineage, initialCalibration: initialCalibrationView(db, body.chatId), memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(body.chatId) as { memory_language: string }).memory_language });
   });
   app.post("/v1/chats/:id/lineage/probe", async (context) => {
     try {
@@ -1168,57 +1317,70 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/lineage/apply", async (context) => {
     try {
       const body = LineageProbeApplyRequestSchema.parse(await context.req.json());
-      const request = {
-        chatTitle: body.chatTitle,
-        characterId: body.characterId,
-        profile: body.profile,
-        messageVisibility: body.messageVisibility,
-        lineageHint: body.lineageHint,
-        includeUserMessages: body.includeUserMessages,
-        extractionGroupTurns: body.extractionGroupTurns,
-        memoryLanguage: body.memoryLanguage,
-        canonicalizationPolicy: body.canonicalizationPolicy,
-        chatId: context.req.param("id"),
-        messages: [],
-        query: "",
-        perspectives: [],
-        tokenBudget: 0,
-        forceBackfill: false,
-        deferExtraction: true,
-      };
-      const lineage = applyProbedLineage(db, request, body.parentChatId, body.fingerprint);
-      return context.json({ ok: true, lineage, initialCalibration: initialCalibrationView(db, request.chatId), queuedJobs: 0 });
+      return withChatWrite(db, context.req.param('id'), () => {
+        const request = {
+          chatTitle: body.chatTitle,
+          characterId: body.characterId,
+          profile: body.profile,
+          messageVisibility: body.messageVisibility,
+          lineageHint: body.lineageHint,
+          includeUserMessages: body.includeUserMessages,
+          extractionGroupTurns: body.extractionGroupTurns,
+          memoryLanguage: body.memoryLanguage,
+          canonicalizationPolicy: body.canonicalizationPolicy,
+          chatId: context.req.param("id"),
+          messages: [],
+          query: "",
+          perspectives: [],
+          tokenBudget: 0,
+          forceBackfill: false,
+          deferExtraction: true,
+        };
+        const lineage = applyProbedLineage(db, request, body.parentChatId, body.fingerprint);
+        return context.json({ ok: true, lineage, initialCalibration: initialCalibrationView(db, request.chatId), queuedJobs: 0 });
+      });
     } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
       const message = error instanceof Error ? error.message : String(error);
       return context.json({ error: message }, ["LINEAGE_PROBE_STALE", "LINEAGE_ALREADY_APPLIED", "TARGET_HAS_DERIVED_DATA"].includes(message) ? 409 : 400);
     }
   });
-  app.post("/v1/chats/:id/lineage/acknowledge", (context) => context.json({ ok: true, lineage: acknowledgeChatLineage(db, context.req.param("id")) }));
+  app.post("/v1/chats/:id/lineage/acknowledge", (context) => withChatWrite(db, context.req.param('id'), () => context.json({ ok: true, lineage: acknowledgeChatLineage(db, context.req.param("id")) })));
   app.post("/v1/chats/:id/lineage/select", async (context) => {
     try {
       const body = LineageProbeApplyRequestSchema.parse(await context.req.json());
-      const chatId = context.req.param("id");
-      const lineage = chooseChatLineage(db, chatId, body.parentChatId, { ...body, chatId, messages: [], query: '', perspectives: [],
-        tokenBudget: 0, forceBackfill: false, deferExtraction: true }, body.fingerprint);
-      return context.json({ ...lineage, initialCalibration: initialCalibrationView(db, chatId), queuedJobs: 0 });
+      return withChatWrite(db, context.req.param('id'), () => {
+        const chatId = context.req.param("id");
+        const lineage = chooseChatLineage(db, chatId, body.parentChatId, { ...body, chatId, messages: [], query: '', perspectives: [],
+          tokenBudget: 0, forceBackfill: false, deferExtraction: true }, body.fingerprint);
+        return context.json({ ...lineage, initialCalibration: initialCalibrationView(db, chatId), queuedJobs: 0 });
+      });
     }
-    catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   });
   app.post("/v1/chats/:id/lineage/decline", async (context) => {
     try {
       const body = await context.req.json() as { fingerprint?: string };
-      if (!body.fingerprint) return context.json({ error: "fingerprint is required" }, 400);
-      return context.json({ ok: true, lineage: declineChatLineage(db, context.req.param("id"), body.fingerprint) });
+      return withChatWrite(db, context.req.param('id'), () => {
+        if (!body.fingerprint) return context.json({ error: "fingerprint is required" }, 400);
+        return context.json({ ok: true, lineage: declineChatLineage(db, context.req.param("id"), body.fingerprint) });
+      });
     } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
       const message = error instanceof Error ? error.message : String(error);
       return context.json({ error: message }, message === "LINEAGE_PROBE_STALE" ? 409 : 400);
     }
   });
   app.post("/v1/chats/:id/lineage/revert", (context) => {
-    const chatId = context.req.param("id");
-    revertChatLineage(db, chatId);
-    // Reverting is cancellation, not consent to a full source backfill.
-    return context.json({ ok: true, lineage: getChatLineage(db, context.req.param("id")) });
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      revertChatLineage(db, chatId);
+      // Reverting is cancellation, not consent to a full source backfill.
+      return context.json({ ok: true, lineage: getChatLineage(db, context.req.param("id")) });
+    });
   });
   app.post("/v1/chats/:id/lineage/preview", async (context) => {
     try {
@@ -1232,10 +1394,13 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/lineage/inherit", async (context) => {
     try {
       const body = ManualLineageApplyRequestSchema.parse(await context.req.json());
-      const chatId = context.req.param("id");
-      const lineage = applyManualLineage(db, chatId, body.parentChatId, body.fingerprint, body.targetMessageInventory, body.replaceDerived, body.target);
-      return context.json({ ok: true, lineage, initialCalibration:initialCalibrationView(db,chatId), queuedJobs: 0 });
+      return withChatWrite(db, context.req.param('id'), () => {
+        const chatId = context.req.param("id");
+        const lineage = applyManualLineage(db, chatId, body.parentChatId, body.fingerprint, body.targetMessageInventory, body.replaceDerived, body.target);
+        return context.json({ ok: true, lineage, initialCalibration:initialCalibrationView(db,chatId), queuedJobs: 0 });
+      });
     } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
       const message = error instanceof Error ? error.message : String(error);
       return context.json({ error: message }, ["TARGET_HAS_DERIVED_DATA", "TARGET_INVENTORY_REQUIRED", "LINEAGE_PREVIEW_STALE"].includes(message) ? 409 : 400);
     }
@@ -1248,31 +1413,47 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/chats/:id/memory-transplant", async (context) => {
     const body = await context.req.json() as { sourceChatId?: string; fingerprint?: string; replaceDerived?: boolean };
-    if (!body.sourceChatId || !body.fingerprint) return context.json({ error: "sourceChatId and fingerprint are required" }, 400);
-    const targetChatId = context.req.param("id");
-    try {
-      const result = db.transaction(() => {
-        const preview = previewMemoryTransplant(db, body.sourceChatId!, targetChatId);
-        if (preview.fingerprint !== body.fingerprint) throw new Error("TRANSPLANT_PREVIEW_STALE");
-        if (preview.requiresReplacement && !body.replaceDerived) throw new Error("TARGET_HAS_DERIVED_DATA");
-        return transplantCompleteArchive(db, exportCompleteArchive(db), body.sourceChatId!, targetChatId);
-      })();
-      void embeddings.indexPending(targetChatId);
-      return context.json({ ok: true, ...result, lineage:getChatLineage(db,targetChatId),initialCalibration:initialCalibrationView(db,targetChatId) });
-    } catch (error) {
-      return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body.sourceChatId || !body.fingerprint) return context.json({ error: "sourceChatId and fingerprint are required" }, 400);
+      const targetChatId = context.req.param("id");
+      try {
+        const result = db.transaction(() => {
+          const preview = previewMemoryTransplant(db, body.sourceChatId!, targetChatId);
+          if (preview.fingerprint !== body.fingerprint) throw new Error("TRANSPLANT_PREVIEW_STALE");
+          if (preview.requiresReplacement && !body.replaceDerived) throw new Error("TARGET_HAS_DERIVED_DATA");
+          return transplantCompleteArchive(db, exportCompleteArchive(db, {}, albumPhotoStore), body.sourceChatId!, targetChatId);
+        })();
+        void embeddings.indexPending(targetChatId);
+        return context.json({ ok: true, ...result, lineage:getChatLineage(db,targetChatId),initialCalibration:initialCalibrationView(db,targetChatId) });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
 
-  const syncChatWork = (body: { chatEnabled?: Record<string, boolean>; characterEnabled?: Record<string, boolean>; defaultChatEnabled?: boolean }, characterId?: string) => {
+  const checkWorkOff = (chatIds: string[], cancel: boolean) => {
+    const locks = chatIds.map(chatId => ({ chatId, lock: chatUpgradeLock(db,chatId) })).filter(item => item.lock);
+    const locked = locks.find(item => item.lock!.phase === 2);
+    const conflict = locked ?? locks[0];
+    if (conflict && (locked || !cancel)) throw Object.assign(new Error(locked ? '마무리하는 중이라 지금은 끌 수 없어요.' : '다시 만들기를 취소하고 기억을 끌까요?'), {
+      code: locked ? 'PHASE_LOCKED' : 'UPGRADE_ACTIVE', lock: conflict.lock, chatId: conflict.chatId,
+    });
+    for (const {chatId,lock} of locks) cancelUpgrade(db,chatId,lock!.runId);
+  };
+  const syncChatWork = (body: { chatEnabled?: Record<string, boolean>; characterEnabled?: Record<string, boolean>; defaultChatEnabled?: boolean; cancelUpgrade?: boolean; chatId?: string }, characterId?: string) => {
+    if (body.chatId) assertUserChat(db,body.chatId);
+    Object.keys(body.chatEnabled ?? {}).forEach(id=>assertUserChat(db,id));
     const settings = body.chatEnabled ?? {};
     const effective = new Map(characterId ? [] : Object.entries(settings));
-    if (body.characterEnabled) {
-      const chats = db.prepare(`SELECT id,character_id FROM chats${characterId ? " WHERE character_id=?" : ""}`)
+    if (body.characterEnabled || body.defaultChatEnabled !== undefined) {
+      const chats = db.prepare(`SELECT id,character_id FROM chats WHERE ${userChatSql()} AND NOT EXISTS
+        (SELECT 1 FROM regeneration_runs u WHERE u.shadow_chat_id=chats.id)${characterId ? " AND character_id=?" : ""}`)
         .all(...(characterId ? [characterId] : [])) as Array<{ id: string; character_id: string }>;
-      for (const chat of chats) effective.set(chat.id, body.characterEnabled[chat.character_id] !== false
+      for (const chat of chats) effective.set(chat.id, body.characterEnabled?.[chat.character_id] !== false
         && (settings[chat.id] ?? body.defaultChatEnabled ?? true));
     }
+    checkWorkOff([...effective].filter(([,enabled]) => !enabled).map(([chatId]) => chatId),body.cancelUpgrade === true);
     for (const [chatId, enabled] of effective) {
       if (isChatWorkHeld(db, chatId) === !enabled) continue;
       setChatWorkEnabled(db, chatId, enabled);
@@ -1286,7 +1467,13 @@ export function createApp(dependencies: Dependencies): Hono {
     syncChatWork(body);
     if (llmStore.config.engine === "server") return context.json({ job: null });
     if(body.modelSettingsFingerprint) db.prepare("INSERT INTO server_meta(key,value) VALUES('risu_model_settings_fingerprint',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(body.modelSettingsFingerprint);
-    const job = attachAuxiliaryPlan(db, leaseJob(db, body.workerId, config.leaseSeconds), {
+    let leased;
+    try {leased=leaseJob(db,body.workerId,config.leaseSeconds,{stateContract:body.capabilities?.stateExtractionV2===true,stateWriting:body.capabilities?.stateWritingFormat===true,eventWriting:body.capabilities?.eventWritingFormat===true,eventWritingE1e:body.capabilities?.eventWritingFormatE1e===true,eventWritingE1f:body.capabilities?.eventWritingFormatE1f===true,stateWritingR10:body.capabilities?.stateWritingFormatR10===true,stateWritingR11:body.capabilities?.stateWritingFormatR11===true});}
+    catch(error) {
+      if((error as {code?:string}).code==="PLUGIN_UPDATE_REQUIRED")return context.json({code:"PLUGIN_UPDATE_REQUIRED",error:"기억 플러그인을 업데이트해 주세요."},409);
+      throw error;
+    }
+    const job = attachAuxiliaryPlan(db, leased, {
       maxInputTokens: llmStore.config.maxInputTokens, maxOutputTokens: llmStore.config.maxOutputTokens, llmTimeoutMs: llmStore.config.llmTimeoutMs,
     });
     const checkpoints=job ? JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(job.id) as {payload_json:string}).payload_json).risuStageCheckpoints : undefined;
@@ -1294,116 +1481,141 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post('/v1/jobs/:id/validated-stage',async context=>{
     const body=await context.req.json() as {workerId:string;stage:string;inputHash:string;result:unknown};
-    if(!['extraction','audit'].includes(body.stage) || !/^[a-f0-9]{64}$/.test(body.inputHash)) return context.json({error:'Invalid stage checkpoint'},400);
-    const parsed=body.stage==='extraction' ? Api38ExtractionDraftResultSchema.safeParse(body.result) : ExtractionAuditSubmissionSchema.safeParse(body.result);
-    if(!parsed.success || body.stage==='audit' && !(parsed.data as any).patch) return context.json({error:'Stage validation failed'},400);
-    const row=db.prepare("SELECT payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param('id'),body.workerId) as {payload_json:string}|undefined;
-    if(!row) return context.json({error:'Lease not found'},409);
-    const payload=JSON.parse(row.payload_json);
-    payload.risuStageCheckpoints={...payload.risuStageCheckpoints,[body.stage]:{inputHash:body.inputHash,result:parsed.data}};
-    db.prepare('UPDATE jobs SET payload_json=? WHERE id=?').run(JSON.stringify(payload),context.req.param('id'));
-    return context.json({ok:true});
+    return withJobWrite(db, context.req.param('id'), () => {
+      if(!['extraction','audit'].includes(body.stage) || !/^[a-f0-9]{64}$/.test(body.inputHash)) return context.json({error:'Invalid stage checkpoint'},400);
+      const row=db.prepare("SELECT payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param('id'),body.workerId) as {payload_json:string}|undefined;
+      if(!row) return context.json({error:'Lease not found'},409);
+      const payload=JSON.parse(row.payload_json);
+      const parsed=body.stage==='extraction' ? extractionDraftSchema(payload.promptContract).safeParse(body.result) : ExtractionAuditSubmissionSchema.safeParse(body.result);
+      if(!parsed.success || body.stage==='audit' && !(parsed.data as any).patch) return context.json({error:'Stage validation failed'},400);
+      payload.risuStageCheckpoints={...payload.risuStageCheckpoints,[body.stage]:{inputHash:body.inputHash,result:parsed.data}};
+      db.prepare('UPDATE jobs SET payload_json=? WHERE id=?').run(JSON.stringify(payload),context.req.param('id'));
+      return context.json({ok:true});
+    });
   });
   app.post("/v1/jobs/:id/draft", async (context) => {
     const body = await context.req.json() as { workerId?: string; output?: string; storyValidationReason?: string };
-    if (typeof body.workerId !== "string" || typeof body.output !== "string") return context.json({ error: "Invalid draft" }, 400);
-    const ok = stageJobModelOutput(db, context.req.param("id"), body.output, body.workerId,
-      typeof body.storyValidationReason === "string" ? body.storyValidationReason : undefined);
-    return ok ? context.json({ ok: true }) : context.json({ error: "Lease not found" }, 409);
+    return withJobWrite(db, context.req.param('id'), () => {
+      if (typeof body.workerId !== "string" || typeof body.output !== "string") return context.json({ error: "Invalid draft" }, 400);
+      const ok = stageJobModelOutput(db, context.req.param("id"), body.output, body.workerId,
+        typeof body.storyValidationReason === "string" ? body.storyValidationReason : undefined);
+      return ok ? context.json({ ok: true }) : context.json({ error: "Lease not found" }, 409);
+    });
   });
   app.post("/v1/jobs/:id/renew", async (context) => {
     const body = await context.req.json() as { workerId?: string };
-    if (typeof body.workerId !== "string" || !body.workerId) return context.json({ error: "Invalid lease renewal" }, 400);
-    return renewJobLease(db, context.req.param("id"), body.workerId, config.leaseSeconds)
-      ? context.json({ ok: true })
-      : context.json({ error: "Lease not found" }, 409);
+    return withJobWrite(db, context.req.param('id'), () => {
+      if (typeof body.workerId !== "string" || !body.workerId) return context.json({ error: "Invalid lease renewal" }, 400);
+      return renewJobLease(db, context.req.param("id"), body.workerId, config.leaseSeconds)
+        ? context.json({ ok: true })
+        : context.json({ error: "Lease not found" }, 409);
+    });
   });
   app.post("/v1/jobs/:id/progress", async (context) => {
-    const body = await context.req.json() as { workerId?: string; stage?: string; repairDelta?: number; llmCallStats?: { total?: unknown; repairs?: unknown; byPurpose?: unknown }; llmCallDiagnostic?: { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; code?: unknown; httpStatus?: unknown; risuCall?: unknown } };
-    const allowed = new Set<JobPipelineStage>(["queued", "first_extraction", "post_extraction_audit", "state_reconciliation", "ledger_consistency", "relationship_projection", "story_consolidation", "storing", "complete", "failed"]);
-    if (!body.workerId || !allowed.has(body.stage as JobPipelineStage)) return context.json({ error: "Invalid pipeline progress" }, 400);
-    const repairDelta = Math.min(1, Math.max(0, Math.trunc(Number(body.repairDelta ?? 0))));
-    const llmCallStats = body.llmCallStats && Number.isInteger(Number(body.llmCallStats.total)) && Number(body.llmCallStats.total) >= 0
-      ? { total: Number(body.llmCallStats.total), repairs: Math.max(0, Number(body.llmCallStats.repairs) || 0), byPurpose: (body.llmCallStats.byPurpose as Record<string, number> | undefined) ?? {} }
-      : undefined;
-    const rawDiagnostic = body.llmCallDiagnostic;
-    const llmCallDiagnostic = rawDiagnostic && typeof rawDiagnostic.purpose === "string" && /^[a-z_]{1,80}$/.test(rawDiagnostic.purpose)
-      && Number.isInteger(Number(rawDiagnostic.attempt)) && ["started", "succeeded", "failed"].includes(String(rawDiagnostic.outcome))
-      ? { purpose: rawDiagnostic.purpose, attempt: Number(rawDiagnostic.attempt), outcome: String(rawDiagnostic.outcome) as "started" | "succeeded" | "failed", at: Math.max(0, Number(rawDiagnostic.at) || Date.now()),
-        risuCall: projectRisuAuxiliaryCallDiagnostic(rawDiagnostic.risuCall),
-        ...(RISU_AUXILIARY_FAILURE_CODES.includes(rawDiagnostic.code as any) ? { code: String(rawDiagnostic.code) } : {}),
-        ...(typeof rawDiagnostic.httpStatus === "number" && Number.isInteger(rawDiagnostic.httpStatus) && rawDiagnostic.httpStatus >= 100 && rawDiagnostic.httpStatus <= 599 ? { httpStatus: rawDiagnostic.httpStatus } : {}),
-        ...(typeof rawDiagnostic.error === "string" ? { error: rawDiagnostic.error.slice(0, 300) } : {}) } : undefined;
-    const ok = setJobPipelineStage(db, context.req.param("id"), body.stage as JobPipelineStage, body.workerId, repairDelta, llmCallStats, llmCallDiagnostic);
-    return ok ? context.json({ ok: true }) : context.json({ error: "Lease not found" }, 409);
+    const body = await context.req.json() as { shapeNormalizations?:unknown; workerId?: string; stage?: string; repairDelta?: number; llmCallStats?: { total?: unknown; repairs?: unknown; byPurpose?: unknown }; llmCallDiagnostic?: { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; code?: unknown; httpStatus?: unknown; risuCall?: unknown } };
+    return withJobWrite(db, context.req.param('id'), () => {
+      const allowed = new Set<JobPipelineStage>(["queued", "first_extraction", "post_extraction_audit", "state_reconciliation", "ledger_consistency", "relationship_projection", "story_consolidation", "storing", "complete", "failed"]);
+      if (!body.workerId || !allowed.has(body.stage as JobPipelineStage)) return context.json({ error: "Invalid pipeline progress" }, 400);
+      const repairDelta = Math.min(1, Math.max(0, Math.trunc(Number(body.repairDelta ?? 0))));
+      const llmCallStats = body.llmCallStats && Number.isInteger(Number(body.llmCallStats.total)) && Number(body.llmCallStats.total) >= 0
+        ? { total: Number(body.llmCallStats.total), repairs: Math.max(0, Number(body.llmCallStats.repairs) || 0), byPurpose: (body.llmCallStats.byPurpose as Record<string, number> | undefined) ?? {} }
+        : undefined;
+      const rawDiagnostic = body.llmCallDiagnostic;
+      const llmCallDiagnostic = rawDiagnostic && typeof rawDiagnostic.purpose === "string" && /^[a-z_]{1,80}$/.test(rawDiagnostic.purpose)
+        && Number.isInteger(Number(rawDiagnostic.attempt)) && ["started", "succeeded", "failed"].includes(String(rawDiagnostic.outcome))
+        ? { purpose: rawDiagnostic.purpose, attempt: Number(rawDiagnostic.attempt), outcome: String(rawDiagnostic.outcome) as "started" | "succeeded" | "failed", at: Math.max(0, Number(rawDiagnostic.at) || Date.now()),
+          risuCall: projectRisuAuxiliaryCallDiagnostic(rawDiagnostic.risuCall),
+          ...(RISU_AUXILIARY_FAILURE_CODES.includes(rawDiagnostic.code as any) ? { code: String(rawDiagnostic.code) } : {}),
+          ...(typeof rawDiagnostic.httpStatus === "number" && Number.isInteger(rawDiagnostic.httpStatus) && rawDiagnostic.httpStatus >= 100 && rawDiagnostic.httpStatus <= 599 ? { httpStatus: rawDiagnostic.httpStatus } : {}),
+          ...(typeof rawDiagnostic.error === "string" ? { error: rawDiagnostic.error.slice(0, 300) } : {}) } : undefined;
+      const ok = setJobPipelineStage(db, context.req.param("id"), body.stage as JobPipelineStage, body.workerId, repairDelta, llmCallStats, llmCallDiagnostic);
+      if(ok && body.shapeNormalizations!==undefined) {
+        const diagnostics=AuxiliaryShapeDiagnosticSchema.array().parse(body.shapeNormalizations);
+        recordJobShapeNormalizations(db,context.req.param("id"),diagnostics,body.workerId);
+      }
+      return ok ? context.json({ ok: true }) : context.json({ error: "Lease not found" }, 409);
+    });
   });
   app.post("/v1/jobs/:id/complete", async (context) => {
     const rawBody = await context.req.json();
-    const body = CompleteJobRequestSchema.parse(rawBody);
-    const job = db.prepare(`SELECT j.type,j.chat_id,j.payload_json,j.attempts,c.profile,c.memory_language FROM jobs j JOIN chats c ON c.id=j.chat_id
+    return withJobWrite(db, context.req.param('id'), () => {
+      const body = CompleteJobRequestSchema.parse(rawBody);
+      const job = db.prepare(`SELECT j.type,j.chat_id,j.payload_json,j.attempts,c.profile,c.memory_language FROM jobs j JOIN chats c ON c.id=j.chat_id
       WHERE j.id=? AND j.lease_owner=? AND j.status='leased'`).get(context.req.param("id"), body.workerId) as { type: string; chat_id: string; payload_json: string; attempts: number; profile: any; memory_language: any } | undefined;
-    if (!job) return context.json({ error: "Lease not found" }, 409);
-    const expectedLanguage = (JSON.parse(job.payload_json || "{}") as { memoryLanguage?: string }).memoryLanguage ?? job.memory_language;
-    if (job.type !== 'memory_group' && job.type !== "relationship_projection" && job.type !== "initial_calibration" && job.type !== "story_consolidation" && job.type !== "ledger_consistency" && job.type !== "quiz" && (body.result as { language?: unknown } | null)?.language !== expectedLanguage) {
-      return context.json({ error: `Canonical language must be ${expectedLanguage}` }, 400);
-    }
-    try {
-      const completed = job.type === 'memory_group' ? completeMemoryGroupJob(db, context.req.param('id'), body.workerId, body.result) : job.type === "episode"
-        ? completeEpisodeJob(db, context.req.param("id"), body.workerId, EpisodeCapsuleResultSchema.parse(body.result), body.reconciliation, body.audit)
-        : job.type === "initial_calibration"
-          ? completeInitialCalibrationJob(db, context.req.param("id"), body.workerId, InitialCalibrationResultSchema.parse(body.result))
-        : job.type === "relationship_projection"
-          ? completeRelationshipProjectionJob(db, context.req.param("id"), body.workerId, RelationshipProjectionResultSchema.parse(body.result))
-        : job.type === "quiz"
-          ? completeQuizJob(db, context.req.param("id"), body.workerId, body.result)
-        : job.type === "story_consolidation"
-          ? completeStoryConsolidationById(db, context.req.param("id"), body.workerId, StorySpineConsolidationResultSchema.parse(body.result))
-        : job.type === "ledger_consistency"
-          ? completeLedgerConsistencyJob(db, buildLedgerConsistencyJob({ id: context.req.param("id"), chatId: job.chat_id, profile: job.profile, memoryLanguage: job.memory_language,
-            attempt: job.attempts, payload: JSON.parse(job.payload_json) }), body.workerId, LedgerConsistencyResultSchema.parse(body.result))
-          : completeExtractionJob(db, context.req.param("id"), body.workerId, ExtractionAggregateSchema.parse(body.result), body.reconciliation, body.audit);
-      if (job.type === "ledger_consistency") {
-        finalizeLedgerConsistencyRun(db, completed.chatId, String((JSON.parse(job.payload_json) as { backfillRunId?: string }).backfillRunId ?? ""));
+      if (!job) return context.json({ error: "Lease not found" }, 409);
+      const expectedLanguage = (JSON.parse(job.payload_json || "{}") as { memoryLanguage?: string }).memoryLanguage ?? job.memory_language;
+      if (job.type !== 'memory_group' && job.type !== "relationship_projection" && job.type !== "initial_calibration" && job.type !== "story_consolidation" && job.type !== "ledger_consistency" && job.type !== "quiz" && (body.result as { language?: unknown } | null)?.language !== expectedLanguage) {
+        return context.json({ error: `Canonical language must be ${expectedLanguage}` }, 400);
       }
-      if (job.type !== "quiz") void embeddings.indexPending(completed.chatId);
-      return context.json({ ok: true, warnings: completed.warnings, pendingReconciliations: "pendingReconciliations" in completed ? completed.pendingReconciliations : undefined });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === "QUIZ_EMPTY: no valid quiz items") {
-        return context.json({ error: message }, 422);
+      try {
+        if (body.reconciliation?.stateRecovery) recordJobStateRecovery(db, context.req.param("id"), body.reconciliation.stateRecovery, body.workerId);
+        const completed = job.type === 'memory_group' ? completeMemoryGroupJob(db, context.req.param('id'), body.workerId, body.result) : job.type === "episode"
+          ? completeEpisodeJob(db, context.req.param("id"), body.workerId, EpisodeCapsuleResultSchema.parse(body.result), body.reconciliation, body.audit)
+          : job.type === "initial_calibration"
+            ? completeInitialCalibrationJob(db, context.req.param("id"), body.workerId, InitialCalibrationResultSchema.parse(body.result))
+          : job.type === "relationship_projection"
+            ? completeRelationshipProjectionJob(db, context.req.param("id"), body.workerId, RelationshipProjectionResultSchema.parse(body.result))
+          : job.type === "quiz"
+            ? completeQuizJob(db, context.req.param("id"), body.workerId, body.result)
+          : job.type === "story_consolidation"
+            ? completeStoryConsolidationById(db, context.req.param("id"), body.workerId, StorySpineConsolidationResultSchema.parse(body.result))
+          : job.type === "ledger_consistency"
+            ? completeLedgerConsistencyJob(db, buildLedgerConsistencyJob({ id: context.req.param("id"), chatId: job.chat_id, profile: job.profile, memoryLanguage: job.memory_language,
+              attempt: job.attempts, payload: JSON.parse(job.payload_json) }), body.workerId, LedgerConsistencyResultSchema.parse(body.result))
+            : completeExtractionJob(db, context.req.param("id"), body.workerId, ExtractionAggregateSchema.parse(body.result), body.reconciliation, body.audit);
+        if (job.type === "ledger_consistency") {
+          finalizeLedgerConsistencyRun(db, completed.chatId, String((JSON.parse(job.payload_json) as { backfillRunId?: string }).backfillRunId ?? ""));
+        }
+        if (job.type !== "quiz") void embeddings.indexPending(completed.chatId);
+        return context.json({ ok: true, warnings: completed.warnings, pendingReconciliations: "pendingReconciliations" in completed ? completed.pendingReconciliations : undefined });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === "QUIZ_EMPTY: no valid quiz items") {
+          return context.json({ error: message }, 422);
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   });
   app.post("/v1/jobs/:id/reconciliation/prepare", async (context) => {
     const body = PrepareReconciliationRequestSchema.parse(await context.req.json());
-    const job = db.prepare("SELECT chat_id,type,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param("id"), body.workerId) as { chat_id: string; type: string; payload_json: string } | undefined;
-    if (!job) return context.json({ error: "Lease not found" }, 409);
-    const jobPayload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
-    const sourceMessageIds = jobPayload.sourceMessageIds ?? [];
-    if ((jobPayload as {memoryOnly?:boolean}).memoryOnly) return context.json({required:false});
-    if (job.type === 'memory_addition' && memoryAdditionStopsAfterEvents(body.result)) return context.json({ required: false });
-    const preparedResult = body.audit?.patch ? applyExtractionAuditPatch(db, job.chat_id, sourceMessageIds, body.result, body.audit.patch).result : body.result;
-    if (body.audit?.patch?.keepPendingItemRefs.some((ref) => !ref.startsWith("dialogue:"))) return context.json({ required: false, blocked: true });
-    const evidenceIssues = inspectDraftEvidence(db, job.chat_id, sourceMessageIds, preparedResult);
-    if (evidenceIssues.some((issue) => issue.blocking)) return context.json({ required: false, candidateSetHash: "", blocked: true, groundingDraft: preparedResult, evidenceIssues });
-    if ((jobPayload as any).regenerationRunId) return context.json({ required: false, groundingDraft: preparedResult, evidenceIssues });
-    const maxInputTokens = jobPayload.auxiliaryBudget?.maxInputTokens ?? jobPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000;
-    const prepared = usesStateExtraction(job.type, jobPayload)
-      ? prepareStateExtraction(db, job.chat_id, sourceMessageIds, preparedResult, maxInputTokens, job.type === 'memory_addition'
-        ? { userRequest: (jobPayload as any).userRequest, existingMemories: (jobPayload as any).existingMemories } : undefined, context.req.param("id"))
-      : prepareReconciliation(db, job.chat_id, preparedResult, maxInputTokens);
-    if ('stateInput' in prepared) (jobPayload as any).stateInput = prepared.stateInput;
-    (jobPayload as any).auxiliaryPromptParts = prepared.parts?.map((part) => ({ purpose: "reconciliation", systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) ?? [];
-    db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND lease_owner=? AND status='leased'").run(JSON.stringify(jobPayload), Date.now(), context.req.param("id"), body.workerId);
-    if ("progressSent" in prepared) recordProgressSent(db, context.req.param("id"), prepared.progressSent);
-    const parts = prepared.parts?.map((part) => ({ ...part, cachedResult: cachedAuxiliaryPage(jobPayload as any, "reconciliation", part.systemPrompt, part.userPrompt) }));
-    return context.json({ required: prepared.required, candidateSetHash: prepared.candidateSetHash, systemPrompt: prepared.systemPrompt,
-      userPrompt: prepared.userPrompt, parts, ...('stateExtraction' in prepared || evidenceIssues.length ? { groundingDraft: preparedResult, evidenceIssues } : {}) });
+    return withJobWrite(db, context.req.param('id'), () => {
+      const job = db.prepare("SELECT chat_id,type,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param("id"), body.workerId) as { chat_id: string; type: string; payload_json: string } | undefined;
+      if (!job) return context.json({ error: "Lease not found" }, 409);
+      const jobPayload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; auxiliaryBudget?: { maxInputTokens?: number }; serverLlmSnapshot?: { maxInputTokens?: number } };
+      const sourceMessageIds = jobPayload.sourceMessageIds ?? [];
+      if ((jobPayload as {memoryOnly?:boolean}).memoryOnly) return context.json({required:false});
+      if (job.type === 'memory_addition' && memoryAdditionStopsAfterEvents(body.result)) return context.json({ required: false });
+      const preparedResult = rescueDraftDialogues(db, job.chat_id, sourceMessageIds,
+        body.audit?.patch ? applyExtractionAuditPatch(db, job.chat_id, sourceMessageIds, body.result, body.audit.patch).result : body.result);
+      if (body.audit?.patch?.keepPendingItemRefs.some((ref) => !ref.startsWith("dialogue:"))) return context.json({ required: false, blocked: true });
+      const evidenceIssues = inspectDraftEvidence(db, job.chat_id, sourceMessageIds, preparedResult);
+      if (evidenceIssues.some((issue) => issue.blocking)) return context.json({ required: false, candidateSetHash: "", blocked: true, groundingDraft: preparedResult, evidenceIssues });
+      if ((jobPayload as any).regenerationRunId) return context.json({ required: false, groundingDraft: preparedResult, evidenceIssues });
+      const maxInputTokens = jobPayload.auxiliaryBudget?.maxInputTokens ?? jobPayload.serverLlmSnapshot?.maxInputTokens ?? 80_000;
+      const prepared = usesStateExtraction(job.type, jobPayload)
+        ? prepareStateExtraction(db, job.chat_id, sourceMessageIds, preparedResult, maxInputTokens, job.type === 'memory_addition'
+          ? { userRequest: (jobPayload as any).userRequest, existingMemories: (jobPayload as any).existingMemories } : undefined, context.req.param("id"))
+        : prepareReconciliation(db, job.chat_id, preparedResult, maxInputTokens);
+      if ('stateInput' in prepared) (jobPayload as any).stateInput = prepared.stateInput;
+      (jobPayload as any).auxiliaryPromptParts = prepared.parts?.map((part) => ({ purpose: "reconciliation", systemPrompt: part.systemPrompt, userPrompt: part.userPrompt })) ?? [];
+      db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND lease_owner=? AND status='leased'").run(JSON.stringify(jobPayload), Date.now(), context.req.param("id"), body.workerId);
+      if ("progressSent" in prepared) recordProgressSent(db, context.req.param("id"), prepared.progressSent);
+      const parts = prepared.parts?.map((part) => {
+        const cachedResult=cachedAuxiliaryPage(jobPayload as any,"reconciliation",part.systemPrompt,part.userPrompt);
+        return {...part,cachedResult,...(cachedResult!==undefined ? {cachedStateRecovery:cachedAuxiliaryStateRecovery(jobPayload,part.systemPrompt,part.userPrompt)} : {})};
+      });
+      return context.json({ required: prepared.required, candidateSetHash: prepared.candidateSetHash, systemPrompt: prepared.systemPrompt,
+        ...("reviewExemptItemRefs" in prepared ? { reviewExemptItemRefs: prepared.reviewExemptItemRefs } : {}),
+        userPrompt: prepared.userPrompt, parts, ...('stateExtraction' in prepared || evidenceIssues.length ? { groundingDraft: preparedResult, evidenceIssues } : {}) });
+    });
   });
   app.get("/v1/update/status", async (context) => {
     const refresh = context.req.query("refresh") === "1";
-    return context.json(refresh ? await updateService.check() : updateService.status());
+    const cursor = context.req.query('incidentCursor');
+    return context.json({...(refresh ? await updateService.check() : updateService.status()),
+      ...incidentsSince(db,cursor === undefined ? undefined : Number(cursor))});
   });
   app.post("/v1/update/stage", async (context) => {
     try { return context.json(await updateService.stageServer()); }
@@ -1426,43 +1638,53 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/jobs/:id/validated-auxiliary-part", async (context) => {
     const body = await context.req.json() as Record<string, unknown>;
-    if (typeof body.workerId !== "string" || typeof body.systemPrompt !== "string" || typeof body.userPrompt !== "string" ||
-      !["initial_calibration", "ledger_consistency", "reconciliation"].includes(String(body.purpose))) return context.json({ error: "Invalid validated auxiliary page" }, 400);
-    try {
-      const key = storeValidatedAuxiliaryPage(db, context.req.param("id"), body.workerId, { purpose: body.purpose as any,
-        systemPrompt: body.systemPrompt, userPrompt: body.userPrompt, result: body.result });
-      return context.json({ ok: true, key });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+    return withJobWrite(db, context.req.param('id'), () => {
+      if (typeof body.workerId !== "string" || typeof body.systemPrompt !== "string" || typeof body.userPrompt !== "string" ||
+        !["initial_calibration", "ledger_consistency", "reconciliation"].includes(String(body.purpose))) return context.json({ error: "Invalid validated auxiliary page" }, 400);
+      try {
+        const key = storeValidatedAuxiliaryPage(db, context.req.param("id"), body.workerId, { purpose: body.purpose as any,
+          systemPrompt: body.systemPrompt, userPrompt: body.userPrompt, result: body.result, stateRecovery: body.stateRecovery });
+        return context.json({ ok: true, key });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
   app.post("/v1/jobs/:id/fail", async (context) => {
     const body = FailJobRequestSchema.parse(await context.req.json());
-    const failedJob = db.prepare("SELECT chat_id,type,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param("id"), body.workerId) as { chat_id: string; type: string; payload_json: string } | undefined;
-    const result = failJob(db, context.req.param("id"), body.workerId, {message:body.error,...body.providerFailure,modelContentRejected:body.modelContentRejected});
-    if (result?.status === "failed" && failedJob?.type === "ledger_consistency") {
-      finalizeLedgerConsistencyRun(db, failedJob.chat_id, String((JSON.parse(failedJob.payload_json) as { backfillRunId?: string }).backfillRunId ?? ""));
-    }
-    return result ? context.json({ ok: true, ...result }) : context.json({ error: "Lease not found" }, 409);
+    return withJobWrite(db, context.req.param('id'), () => {
+      const failedJob = db.prepare("SELECT chat_id,type,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(context.req.param("id"), body.workerId) as { chat_id: string; type: string; payload_json: string } | undefined;
+      const result = failJob(db, context.req.param("id"), body.workerId, {message:body.error,...body.providerFailure,modelContentRejected:body.modelContentRejected});
+      if (result?.status === "failed" && failedJob?.type === "ledger_consistency") {
+        finalizeLedgerConsistencyRun(db, failedJob.chat_id, String((JSON.parse(failedJob.payload_json) as { backfillRunId?: string }).backfillRunId ?? ""));
+      }
+      return result ? context.json({ ok: true, ...result }) : context.json({ error: "Lease not found" }, 409);
+    });
   });
 
   app.post("/v1/chats/:id/recall", async (context) => {
     const recallSignal=AbortSignal.any([context.req.raw.signal,AbortSignal.timeout(mcpRequestTimeoutMs(mcpSelector.publicConfig)-5_000)]);
     const handlerStarted = performance.now();
     const body = RecallRequestSchema.parse(await context.req.json());
+    const staleResponse = () => context.json({ answers: [], packet: "", selected: [], deliveredAtomKeys: [], deliveredSourceRanges: [],
+      opportunityError: "stale_turn", newAtomCount: 0, error: "The request generation is no longer current." });
+    const audience = mcpRetrievalAudience(body.activePerspectives);
     if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(context.req.param("id"))) {
       const answers = [{ question: body.query, evidence: [], alreadyPresent: false }];
       return context.json({ answers, packet: renderMcpAnswer(answers), selected: [], deliveredAtomKeys: [], deliveredSourceRanges: [],
         archiveEmpty: true, timings: { serverMs: performance.now() - handlerStarted, rerankCalls: 0, rerankTotalTokens: 0 } });
     }
-    if (body.memoryGeneration && !memoryReferences.ensure(context.req.param("id"), body.memoryGeneration)) return context.json({ answers: [], opportunityError: "stale_turn", newAtomCount: 0, error: "The request generation is no longer current." });
+    if (body.memoryGeneration && !memoryReferences.ensure(context.req.param("id"), body.memoryGeneration)) return staleResponse();
     const embeddingStarted = performance.now();
     const semanticResults = await embeddings.searchBatchDetailed([body.query], context.req.param("id"));
     const embeddingMs = performance.now() - embeddingStarted;
     const retrievalStarted = performance.now();
     const semantic = semanticResults[0]!;
     const storyScores = new Map(semantic.storyScores ?? []);
-    const arcExpansion = expandArcHits(db, context.req.param("id"), body.activePerspectives?.length ? body.activePerspectives : [body.perspective], storyScores);
+    const arcExpansion = expandArcHits(db, context.req.param("id"), body.activePerspectives?.length ? body.activePerspectives : ["narrator"], storyScores, 3, audience);
     let result = retrieve(db, {
-      chatId: context.req.param("id"), query: body.query, perspective: body.perspective,
+      chatId: context.req.param("id"), query: body.query, perspective: "narrator", audience,
       intent: "recall", tokenBudget: body.tokenBudget, semanticScores: semantic.scores,
       memoryOnlyInjection: body.memoryOnlyInjection,
         stateScores: semantic.stateScores, semanticHits: semantic.hits,
@@ -1489,10 +1711,10 @@ export function createApp(dependencies: Dependencies): Hono {
     let finalized: Awaited<ReturnType<typeof finalizeMcpAnswer>>;
     try {
       finalized = await finalizeMcpAnswer(db, context.req.param("id"), result, {
-        archiveView: ["narrator", "omniscient", "omniscient narrator"].includes(body.perspective.trim().toLowerCase()),
+        audience,
         memoryOnlyInjection: body.memoryOnlyInjection,
         query: body.query, aspects: undefined,
-        tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives?.length ? body.activePerspectives : [body.perspective],
+        tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives?.length ? body.activePerspectives : ["narrator"],
         promptIds: body.promptSourceMessageIds, excludedAtoms: [...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])],
         excludedSourceRanges: body.excludeSourceRanges, currentMessageId: body.traceContext?.latestMessageId,
         semantic: semanticResults, referenceMemoryId: undefined,
@@ -1508,16 +1730,22 @@ export function createApp(dependencies: Dependencies): Hono {
         failureStage:"rerank", failureKind:kind, timings, elapsedMs:timings.serverMs });
       return context.json({ error:"MCP evidence verification service unavailable", code:"MCP_RERANK_UNAVAILABLE", failureKind:kind, timings }, 503);
     }
-    if (body.memoryGeneration && memoryReferences.current(context.req.param("id"), body.memoryGeneration)) {
+    if (body.memoryGeneration && !memoryReferences.current(context.req.param("id"),body.memoryGeneration)) return staleResponse();
+    const referenceGeneration = body.memoryGeneration ?? randomUUID();
+    const requestReferences = body.memoryGeneration ? memoryReferences : new MemoryReferences(db);
+    if (!body.memoryGeneration) requestReferences.begin(context.req.param("id"), referenceGeneration);
+    if (requestReferences.current(context.req.param("id"), referenceGeneration)) {
       for (const answer of result.answers ?? []) for (const evidence of answer.evidence) {
-        if (evidence.memoryId) evidence.ref = memoryReferences.issue(context.req.param("id"), body.memoryGeneration, evidence.memoryId);
+        if (evidence.memoryId) evidence.ref = requestReferences.issue(context.req.param("id"), referenceGeneration, evidence.memoryId);
       }
-      result.packet = renderMcpAnswer(result.answers ?? [], id => memoryReferences.issue(context.req.param("id"), body.memoryGeneration!, id));
+      const reference = (id: string) => requestReferences.issue(context.req.param("id"), referenceGeneration, id);
+      result.packet = renderAuthorMcpAnswer(result.answers ?? [],result.emissionPlan,result.eligibleCandidates,
+        reference,storedNarrationViewpoint(db,context.req.param("id")),new Set([...(body.alreadyPresentAtomKeys??[]),...(body.excludeAtomKeys??[])]));
       result.estimatedTokens = estimateTokens(result.packet);
     }
     const involvedCharacters = queriedCharacters.length ? [...new Set([...queriedCharacters, ...result.selected.flatMap(item => item.participants)])] : [];
     const names = renderSceneNames(db, context.req.param("id"),
-      [body.perspective, ...involvedCharacters], involvedCharacters, [], namesBudget);
+      ["narrator", ...involvedCharacters], involvedCharacters, [], namesBudget);
     result.packet = appendSceneNames(result.packet, names);
     result.estimatedTokens = estimateTokens(result.packet);
     const spanRerankTokens=finalized.sourceSpans.usage?.total_tokens;
@@ -1534,6 +1762,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
       id: traceRequestId,
       kind: "mcp_search",
+      cardEmission: traceEmissionPlan(result.emissionPlan),
       names: { pairCount: names.pairCount, omittedCount: names.omittedCount },
       selector: finalized.selector,
       timings, elapsedMs: timings.serverMs,
@@ -1562,14 +1791,16 @@ export function createApp(dependencies: Dependencies): Hono {
       retrieval: result.diagnostics,
     });
     const followableMemoryIds = result.mcpFollowableMemoryIds ?? [];
-    const { diagnostics: _diagnostics, eligibleCandidates: _eligible, mcpSearchEnvelopes: _envelopes,
+    const { emissionPlan: _emissionPlan, standaloneScopes: _standaloneScopes, diagnostics: _diagnostics, eligibleCandidates: _eligible, mcpSearchEnvelopes: _envelopes,
       mcpFollowableMemoryIds: _followable, directAtomKeys: _direct, structuredManifest: _structured, ...publicResult } = result;
     const opportunityError = !opportunityCurrent && (result.deliveredAtomKeys?.length ?? 0) === 0 ? "stale_turn" : undefined;
+    if (body.memoryGeneration && !memoryReferences.current(context.req.param("id"),body.memoryGeneration)) return staleResponse();
     return context.json({ ...publicResult, selected: result.selected.map(publicMemoryContext), answers: publicMcpAnswers(result.answers ?? []), timings, followableMemoryIds, deliverySource, newAtomCount: result.deliveredAtomKeys.filter(key => ![...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])].includes(key)).length, ...(opportunityError ? { opportunityError } : {}) });
   });
   app.post("/v1/chats/:id/expand", async (context) => {
     const started = performance.now();
     const body = ExpandRequestSchema.parse(await context.req.json());
+    const audience = mcpRetrievalAudience(body.activePerspectives);
     const chatId = context.req.param("id");
     const reject = async (code: string, reason: string, error: string) => {
       if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
@@ -1583,7 +1814,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const memoryId = memoryReferences.resolve(chatId, body.ref);
     if (!memoryId) return reject("INVALID_MEMORY_REF", "invalid_ref", INVALID_MEMORY_REF_MESSAGE);
     const version = memoryReferences.version(chatId, memoryId);
-    const result = retrieve(db, { chatId, query: body.focus ?? "", perspective: body.perspective,
+    const result = retrieve(db, { chatId, query: body.focus ?? "", perspective: "narrator", audience,
       memoryOnlyInjection: body.memoryOnlyInjection,
       tokenBudget: body.tokenBudget, seedMemoryId: memoryId, followAllDetails: true,
       reinforce: true, deferReinforcement: true, mcpCandidatesOnly: true,
@@ -1593,19 +1824,22 @@ export function createApp(dependencies: Dependencies): Hono {
     result.answers = [];
     const involved = [...new Set(result.eligibleCandidates.flatMap(item => item.participants))];
     const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
-    await finalizeMcpAnswer(db, chatId, result, { archiveView: ["narrator", "omniscient", "omniscient narrator"].includes(body.perspective.trim().toLowerCase()), query: body.focus ?? "",
-      tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives ?? [body.perspective], excludedAtoms: [],
+    await finalizeMcpAnswer(db, chatId, result, { audience, query: body.focus ?? "",
+      tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives ?? ["narrator"],
+      promptIds:body.promptSourceMessageIds,excludedAtoms:[...(body.alreadyPresentAtomKeys ?? []),...(body.excludeAtomKeys ?? [])],
       semantic: [], seedMemoryId: memoryId });
     // A change before the request is allowed; a change during assembly is not.
     if (version !== memoryReferences.version(chatId, memoryId)) return reject("MEMORY_SNAPSHOT_CHANGED", "snapshot_changed", "The memory changed during this request. Retry against the current chat.");
     for (const answer of result.answers ?? []) for (const evidence of answer.evidence) if (evidence.memoryId === memoryId) evidence.ref = body.ref;
-    const names = renderSceneNames(db, chatId, [body.perspective, ...involved], involved,
+    const names = renderSceneNames(db, chatId, ["narrator", ...involved], involved,
       mentionedCharacters(db, chatId, body.focus ?? ""), namesBudget);
-    result.packet = appendSceneNames(renderMcpAnswer(result.answers ?? []), names);
+    result.packet = appendSceneNames(renderAuthorMcpAnswer(result.answers ?? [],result.emissionPlan,result.eligibleCandidates,()=>body.ref,storedNarrationViewpoint(db,chatId),
+        new Set([...(body.alreadyPresentAtomKeys??[]),...(body.excludeAtomKeys??[])])), names);
     result.estimatedTokens = estimateTokens(result.packet);
     const timings = { serverMs: performance.now() - started, rerankCalls: 0, rerankTotalTokens: 0 };
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
       id: body.traceContext?.requestId ?? randomUUID(), kind: "mcp_search", chatId,
+      cardEmission: traceEmissionPlan(result.emissionPlan),
       traceContext: body.traceContext, query: body.focus ?? "Expand the referenced record", intent: "expand",
       names: { pairCount: names.pairCount, omittedCount: names.omittedCount },
       answers: publicMcpAnswers(result.answers ?? []), selectedIds: result.selected.map(item => item.id), packet: result.packet,
@@ -1618,12 +1852,18 @@ export function createApp(dependencies: Dependencies): Hono {
   });
 
   app.post("/v1/turn/delivery", async (context) => {
-    const body = await context.req.json().catch(() => undefined) as { chatId?: unknown; memoryIds?: unknown } | undefined;
+    const body = await context.req.json().catch(() => undefined) as { chatId?: unknown; memoryIds?: unknown; atomKeys?: unknown; receiptId?: unknown; longtermMemoryIds?: unknown } | undefined;
     if (!body || typeof body.chatId !== "string" || !Array.isArray(body.memoryIds)
       || body.memoryIds.length > 512 || !body.memoryIds.every(id => typeof id === "string")) {
       return context.json({ error: "Invalid memory delivery receipt" }, 400);
     }
-    recordAutomaticDelivery(db, body.chatId, body.memoryIds);
+    if (body.atomKeys !== undefined && (!Array.isArray(body.atomKeys) || body.atomKeys.length > 4096 || !body.atomKeys.every(key => typeof key === 'string') || typeof body.receiptId !== 'string' || !body.receiptId)) return context.json({error:'Invalid detail delivery receipt'},400);
+    assertChatUnlocked(db,body.chatId);
+    if (body.longtermMemoryIds !== undefined && (!Array.isArray(body.longtermMemoryIds)
+      || body.longtermMemoryIds.length > 512 || !body.longtermMemoryIds.every(id=>typeof id === "string" && (body.memoryIds as string[]).includes(id))))
+      return context.json({error:"Invalid long-term delivery receipt"},400);
+    recordAutomaticDelivery(db, body.chatId, body.memoryIds,body.longtermMemoryIds as string[]|undefined);
+    if (Array.isArray(body.atomKeys)) recordSeedDelivery(db,body.chatId,body.atomKeys,body.receiptId as string);
     // Risu plugin API v3 rebuilds responses as new Response(body, init); a 204 with any body throws there.
     return context.json({ ok: true });
   });
@@ -1725,7 +1965,7 @@ export function createApp(dependencies: Dependencies): Hono {
     try {
       const resolved = translationConnection.resolve(body);
       const config = resolved.config; apiKey = resolved.apiKey;
-      if (!apiKey) throw new TranslationError("AUTH_FAILED", "번역 연결의 인증정보가 없습니다.");
+      if (!apiKey) throw new TranslationError("AUTH_FAILED", "번역 연결의 인증정보가 없어요.");
       if (estimateTokens(JSON.stringify({ items: body.items })) > Math.floor(config.maxOutputTokens / 1.5)) throw new TranslationError("INVALID_CONFIG", "Translation batch exceeds output budget");
       const result = await requestStructuredProvider(llmStore, config, apiKey,
         [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items: body.items }) }],
@@ -1737,6 +1977,9 @@ export function createApp(dependencies: Dependencies): Hono {
       const code = error instanceof TranslationError ? error.code : error instanceof ProviderRequestError
         ? error.kind === "timeout" ? "TIMEOUT" : error.kind === "json" ? "INVALID_RESPONSE" : error.kind === "transport" ? "NETWORK_ERROR" : error.status === 401 || error.status === 403 ? "AUTH_FAILED" : error.status === 429 ? "RATE_LIMITED" : "PROVIDER_HTTP_ERROR"
         : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "TIMEOUT" : "INVALID_CONFIG";
+      if (code === "RATE_LIMITED" && error instanceof ProviderRequestError && error.retryAfterMs !== undefined) {
+        context.header("Retry-After", String(Math.ceil(error.retryAfterMs / 1000)));
+      }
       return context.json({ code, error: settingsFailureMessage(error, "translation") }, 502);
     } finally { scope.finish(); }
   });
@@ -1758,14 +2001,17 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ ok: true, config: llmStore.publicConfig, worker: serverWorker.status });
   });
   app.post("/v1/worker/heartbeat", async (context) => {
-    const body = WorkerControlSchema.parse(await context.req.json());
+    const raw = await context.req.json();
+    const body = WorkerControlSchema.parse(raw);
     syncChatWork(body);
     recordOpenChat(db, body.workerId, body.chatId);
     serverWorker.heartbeat(body.workerId);
-    return context.json({ ok: true, worker: body.chatId ? serverWorker.statusForChat(body.chatId) : serverWorker.status });
+    return context.json({ ok: true, worker: body.chatId ? serverWorker.statusForChat(body.chatId) : serverWorker.status,
+      ...incidentsSince(db,typeof raw.incidentCursor === 'number' ? raw.incidentCursor : undefined) });
   });
   app.post("/v1/worker/resume", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
+    if (body.chatId) assertSourceSnapshotAccepted(db,body.chatId);
     syncChatWork(body);
     return context.json({ ok: true, worker: serverWorker.resume(body.workerId) });
   });
@@ -1788,16 +2034,20 @@ export function createApp(dependencies: Dependencies): Hono {
   });
 
   app.delete("/v1/chats/:id/derived", (context) => {
-    try {
-      const ok = resetDerivedChat(db, embeddings, context.req.param("id"));
-      return ok ? context.json({ ok }) : context.json({ error: "Chat not found" }, 404);
-    } catch (error) {
-      return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const ok = resetDerivedChat(db, embeddings, context.req.param("id"));
+        return ok ? context.json({ ok }) : context.json({ error: "Chat not found" }, 404);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
   app.post("/v1/chats/:id/reprocess", async (context) => {
     try {
       const chatId = context.req.param("id");
+      assertSourceSnapshotAccepted(db,chatId);
       assertSetupLineageResolved(db, chatId);
       const body = await context.req.json().catch(() => ({})) as {
         activatePendingMemoryLanguage?: unknown;
@@ -1806,74 +2056,77 @@ export function createApp(dependencies: Dependencies): Hono {
         identityHints?: unknown;
         expectedSourceMessages?: unknown;
       };
-      if (body.activatePendingMemoryLanguage !== undefined && typeof body.activatePendingMemoryLanguage !== "boolean") return context.json({ error: "activatePendingMemoryLanguage must be boolean" }, 400);
-      if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
-      if (body.expectedSourceMessages !== undefined && (!Number.isInteger(body.expectedSourceMessages) || Number(body.expectedSourceMessages) < 0)) return context.json({ error: "expectedSourceMessages must be a non-negative integer" }, 400);
-      const setupResult = body.resolvedSetup === undefined ? undefined : PickerSetupProjectionSchema.safeParse(body.resolvedSetup);
-      if (setupResult && !setupResult.success) return context.json({ error: "resolvedSetup is invalid", issues: setupResult.error.issues }, 400);
-      if (body.identityHints !== undefined && (typeof body.identityHints !== "object" || body.identityHints === null || Array.isArray(body.identityHints))) {
-        return context.json({ error: "identityHints must be an object" }, 400);
-      }
-      const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as
-        | { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number }
-        | undefined;
-      if (!chat) return context.json({ error: "Chat not found" }, 404);
-      if (body.expectedSourceMessages !== undefined) {
-        const stored = db.prepare(`SELECT COUNT(*) count FROM messages WHERE chat_id=? AND content IS NOT NULL AND lifecycle IN ('committed','pending')`).get(chatId) as { count: number };
-        if (stored.count !== body.expectedSourceMessages) {
+      return withChatWrite(db, context.req.param('id'), () => {
+        if (body.activatePendingMemoryLanguage !== undefined && typeof body.activatePendingMemoryLanguage !== "boolean") return context.json({ error: "activatePendingMemoryLanguage must be boolean" }, 400);
+        if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
+        if (body.expectedSourceMessages !== undefined && (!Number.isInteger(body.expectedSourceMessages) || Number(body.expectedSourceMessages) < 0)) return context.json({ error: "expectedSourceMessages must be a non-negative integer" }, 400);
+        const setupResult = body.resolvedSetup === undefined ? undefined : PickerSetupProjectionSchema.safeParse(body.resolvedSetup);
+        if (setupResult && !setupResult.success) return context.json({ error: "resolvedSetup is invalid", issues: setupResult.error.issues }, 400);
+        if (body.identityHints !== undefined && (typeof body.identityHints !== "object" || body.identityHints === null || Array.isArray(body.identityHints))) {
+          return context.json({ error: "identityHints must be an object" }, 400);
+        }
+        const chat = db.prepare("SELECT profile,include_user_messages,extraction_group_turns FROM chats WHERE id=?").get(chatId) as
+          | { profile: "companion" | "simulation"; include_user_messages: number; extraction_group_turns: number }
+          | undefined;
+        if (!chat) return context.json({ error: "Chat not found" }, 404);
+        if (body.expectedSourceMessages !== undefined) {
+          const stored = db.prepare(`SELECT COUNT(*) count FROM messages WHERE chat_id=? AND content IS NOT NULL AND lifecycle IN ('committed','pending')`).get(chatId) as { count: number };
+          if (stored.count !== body.expectedSourceMessages) {
+            return context.json({
+              error: `Full source synchronization is incomplete: expected ${body.expectedSourceMessages}, stored ${stored.count}.`,
+              code: "SOURCE_LEDGER_INCOMPLETE",
+              expectedSourceMessages: body.expectedSourceMessages,
+              storedSourceMessages: stored.count,
+            }, 409);
+          }
+        }
+        const calibrationBefore = initialCalibrationView(db, chatId);
+        const needsCalibration = ["unseeded", "awaiting_setup", "failed"].includes(calibrationBefore.status);
+        if (["queued", "awaiting_confirmation"].includes(calibrationBefore.status)) {
+          return context.json({ error: "Initial calibration is already in progress", code: "INITIAL_CALIBRATION_IN_PROGRESS", calibration: calibrationBefore }, 409);
+        }
+        if (needsCalibration && !setupResult?.success) {
           return context.json({
-            error: `Full source synchronization is incomplete: expected ${body.expectedSourceMessages}, stored ${stored.count}.`,
-            code: "SOURCE_LEDGER_INCOMPLETE",
-            expectedSourceMessages: body.expectedSourceMessages,
-            storedSourceMessages: stored.count,
+            error: "Choose setup materials in the picker before rebuilding initial memory.",
+            code: "INITIAL_SETUP_REQUIRED",
+            calibration: calibrationBefore,
           }, 409);
         }
-      }
-      const calibrationBefore = initialCalibrationView(db, chatId);
-      const needsCalibration = ["unseeded", "awaiting_setup", "failed"].includes(calibrationBefore.status);
-      if (["queued", "awaiting_confirmation"].includes(calibrationBefore.status)) {
-        return context.json({ error: "Initial calibration is already in progress", code: "INITIAL_CALIBRATION_IN_PROGRESS", calibration: calibrationBefore }, 409);
-      }
-      if (needsCalibration && !setupResult?.success) {
-        return context.json({
-          error: "Choose setup materials in the picker before rebuilding initial memory.",
-          code: "INITIAL_SETUP_REQUIRED",
-          calibration: calibrationBefore,
-        }, 409);
-      }
-      recanonicalizeSourceLedger(db, chatId);
-      const pendingMessages = reprocessChat(db, embeddings, chatId, body.activatePendingMemoryLanguage === true);
-      if (needsCalibration && setupResult?.success) {
-        const operationRunId = randomUUID();
-        beginInitialCalibration(db, chatId, "cold_start", setupResult.data, {
-          confirmationRequired: true,
-          forceBackfill: true,
-          extractionReview: body.extractionReviewOverride as boolean | undefined,
-        });
-        const queued = enqueueInitialCalibration(
-          db,
-          chatId,
-          setupResult.data,
-          (body.identityHints ?? {}) as Record<string, unknown>,
-          operationRunId,
-        );
-        if (queued) serverWorker.wake();
+        recanonicalizeSourceLedger(db, chatId);
+        const pendingMessages = reprocessChat(db, embeddings, chatId, body.activatePendingMemoryLanguage === true);
+        if (needsCalibration && setupResult?.success) {
+          const operationRunId = randomUUID();
+          beginInitialCalibration(db, chatId, "cold_start", setupResult.data, {
+            confirmationRequired: true,
+            forceBackfill: true,
+            extractionReview: body.extractionReviewOverride as boolean | undefined,
+          });
+          const queued = enqueueInitialCalibration(
+            db,
+            chatId,
+            setupResult.data,
+            (body.identityHints ?? {}) as Record<string, unknown>,
+            operationRunId,
+          );
+          if (queued) serverWorker.wake();
+          const language = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
+          return context.json({
+            ok: true,
+            pendingMessages,
+            queuedJobs: queued ? 1 : 0,
+            awaitingCalibration: true,
+            calibration: initialCalibrationView(db, chatId),
+            memoryLanguage: language.memory_language,
+            pendingMemoryLanguage: language.pending_memory_language,
+          });
+        }
+        const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages !== 0, chat.extraction_group_turns, "ledger", body.extractionReviewOverride as boolean | undefined, undefined, randomUUID());
+        if (queuedJobs > 0) serverWorker.wake();
         const language = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
-        return context.json({
-          ok: true,
-          pendingMessages,
-          queuedJobs: queued ? 1 : 0,
-          awaitingCalibration: true,
-          calibration: initialCalibrationView(db, chatId),
-          memoryLanguage: language.memory_language,
-          pendingMemoryLanguage: language.pending_memory_language,
-        });
-      }
-      const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages !== 0, chat.extraction_group_turns, "ledger", body.extractionReviewOverride as boolean | undefined, undefined, randomUUID());
-      if (queuedJobs > 0) serverWorker.wake();
-      const language = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
-      return context.json({ ok: true, pendingMessages, queuedJobs, memoryLanguage: language.memory_language, pendingMemoryLanguage: language.pending_memory_language });
+        return context.json({ ok: true, pendingMessages, queuedJobs, memoryLanguage: language.memory_language, pendingMemoryLanguage: language.pending_memory_language });
+      });
     } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
       return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }
   });
@@ -1884,19 +2137,25 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ ok: true, deletedChats });
   });
   app.delete("/v1/chats/:id", (context) => {
-    try {
-      const deletedChats = deleteChats(db, embeddings, [context.req.param("id")]);
-      return deletedChats ? context.json({ ok: true, deletedChats }) : context.json({ error: "Chat not found" }, 404);
-    } catch (error) {
-      return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const deletedChats = deleteChats(db, embeddings, [context.req.param("id")]);
+        return deletedChats ? context.json({ ok: true, deletedChats }) : context.json({ error: "Chat not found" }, 404);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        if ((error as {code?:string}).code === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      }
+    });
   });
   app.delete("/v1/characters/:id", (context) => {
-    const chatIds = (db.prepare("SELECT id FROM chats WHERE character_id=?").all(context.req.param("id")) as Array<{ id: string }>).map((row) => row.id);
+    const chatIds = (db.prepare(`SELECT id FROM chats WHERE character_id=? AND ${userChatSql()}`).all(context.req.param("id")) as Array<{ id: string }>).map((row) => row.id);
+    chatIds.forEach(chatId=>assertChatUnlocked(db,chatId));
     try {
       const deletedChats = deleteChats(db, embeddings, chatIds);
       return deletedChats ? context.json({ ok: true, deletedChats }) : context.json({ error: "Character not found" }, 404);
     } catch (error) {
+      if ((error as {code?:string}).code === 'CHAT_UPGRADING') throw error;
       return context.json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }
   });
@@ -1909,37 +2168,47 @@ export function createApp(dependencies: Dependencies): Hono {
   app.put("/v1/chats/:id/social-knowledge", async (context) => {
     try {
       const body = await context.req.json() as { holder?: unknown; subject?: unknown; level?: unknown; knownAs?: unknown; addressTerms?: unknown; previousHolder?: unknown; previousSubject?: unknown; description?: unknown; locked?: boolean };
-      if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
-      const holder = typeof body.holder === "string" ? body.holder.trim() : "";
-      const subject = typeof body.subject === "string" ? body.subject.trim() : "";
-      if (!holder || !subject || !["aware_of", "interacted"].includes(String(body.level))) return context.json({ error: "holder, subject, and a valid level are required" }, 400);
-      const knownAs = Array.isArray(body.knownAs) ? body.knownAs.filter((value): value is string => typeof value === "string") : [];
-      for (const field of ["knownAs", "addressTerms"] as const) {
-        const terms = body[field];
-        if (Array.isArray(terms) && terms.some(value => typeof value === "string" && hasSocialTermSeparator(value))) {
-          return context.json({ error: `${field} items must not contain commas (, ， 、); send each term as a separate array item` }, 400);
+      return withChatWrite(db, context.req.param('id'), () => {
+        if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
+        const holder = typeof body.holder === "string" ? body.holder.trim() : "";
+        const subject = typeof body.subject === "string" ? body.subject.trim() : "";
+        if (!holder || !subject || !["aware_of", "interacted"].includes(String(body.level))) return context.json({ error: "holder, subject, and a valid level are required" }, 400);
+        const knownAs = Array.isArray(body.knownAs) ? body.knownAs.filter((value): value is string => typeof value === "string") : [];
+        for (const field of ["knownAs", "addressTerms"] as const) {
+          const terms = body[field];
+          if (Array.isArray(terms) && terms.some(value => typeof value === "string" && hasSocialTermSeparator(value))) {
+            return context.json({ error: `${field} items must not contain commas (, ， 、); send each term as a separate array item` }, 400);
+          }
         }
-      }
-      let addressTerms: string[] | undefined;
-      if (body.addressTerms !== undefined) {
-        if (!Array.isArray(body.addressTerms) || body.addressTerms.some(value => typeof value !== "string" || value.trim().length > 120)) return context.json({ error: "addressTerms must contain strings up to 120 characters" }, 400);
-        addressTerms = [...new Set((body.addressTerms as string[]).map(value => value.trim()).filter(Boolean))];
-        if (addressTerms.length > 16) return context.json({ error: "addressTerms must contain up to 16 terms" }, 400);
-      }
-      const previousHolder = typeof body.previousHolder === "string" ? body.previousHolder.trim() : undefined;
-      const previousSubject = typeof body.previousSubject === "string" ? body.previousSubject.trim() : undefined;
-      if ((previousHolder && !previousSubject) || (!previousHolder && previousSubject)) return context.json({ error: "previousHolder and previousSubject must be provided together" }, 400);
-      return context.json({ items: setManualSocialKnowledge(db, context.req.param("id"), { holder, subject, level: body.level as "aware_of" | "interacted", knownAs, addressTerms, previousHolder, previousSubject, description: typeof body.description === "string" ? body.description : undefined, locked:body.locked }) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+        let addressTerms: string[] | undefined;
+        if (body.addressTerms !== undefined) {
+          if (!Array.isArray(body.addressTerms) || body.addressTerms.some(value => typeof value !== "string" || value.trim().length > 120)) return context.json({ error: "addressTerms must contain strings up to 120 characters" }, 400);
+          addressTerms = [...new Set((body.addressTerms as string[]).map(value => value.trim()).filter(Boolean))];
+          if (addressTerms.length > 16) return context.json({ error: "addressTerms must contain up to 16 terms" }, 400);
+        }
+        const previousHolder = typeof body.previousHolder === "string" ? body.previousHolder.trim() : undefined;
+        const previousSubject = typeof body.previousSubject === "string" ? body.previousSubject.trim() : undefined;
+        if ((previousHolder && !previousSubject) || (!previousHolder && previousSubject)) return context.json({ error: "previousHolder and previousSubject must be provided together" }, 400);
+        return context.json({ items: setManualSocialKnowledge(db, context.req.param("id"), { holder, subject, level: body.level as "aware_of" | "interacted", knownAs, addressTerms, previousHolder, previousSubject, description: typeof body.description === "string" ? body.description : undefined, locked:body.locked }) });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   });
   app.delete("/v1/chats/:id/social-knowledge", async (context) => {
     try {
       const body = await context.req.json() as { holder?: unknown; subject?: unknown };
-      const holder = typeof body.holder === "string" ? body.holder.trim() : "";
-      const subject = typeof body.subject === "string" ? body.subject.trim() : "";
-      if (!holder || !subject) return context.json({ error: "holder and subject are required" }, 400);
-      return context.json({ items: retractSocialKnowledge(db, context.req.param("id"), holder, subject) });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        const holder = typeof body.holder === "string" ? body.holder.trim() : "";
+        const subject = typeof body.subject === "string" ? body.subject.trim() : "";
+        if (!holder || !subject) return context.json({ error: "holder and subject are required" }, 400);
+        return context.json({ items: retractSocialKnowledge(db, context.req.param("id"), holder, subject) });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   });
   app.get("/v1/chats/:id/social-knowledge/backfill/preview", (context) => {
     try { return context.json(previewSocialKnowledgeBackfill(db, context.req.param("id"))); }
@@ -1948,11 +2217,16 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/social-knowledge/backfill", async (context) => {
     try {
       const body = await context.req.json().catch(() => ({})) as { extractionReviewOverride?: unknown };
-      if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
-      const queuedJobs = enqueueSocialKnowledgeBackfill(db, context.req.param("id"), body.extractionReviewOverride as boolean | undefined);
-      if (queuedJobs) serverWorker.wake();
-      return context.json({ ok: true, queuedJobs });
-    } catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
+        const queuedJobs = enqueueSocialKnowledgeBackfill(db, context.req.param("id"), body.extractionReviewOverride as boolean | undefined);
+        if (queuedJobs) serverWorker.wake();
+        return context.json({ ok: true, queuedJobs });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
   });
 
   app.get("/v1/chats/:id/extraction-audits", (context) => {
@@ -1963,26 +2237,36 @@ export function createApp(dependencies: Dependencies): Hono {
       const sourceMessageIds = JSON.parse(item.sourceMessageIds || "[]");
       const draft = JSON.parse(item.draft);
       const smallReviews = readSmallReviews(draft);
-      // A held recognition offers "add from source" on the range that covers its audit.
-      const sourceRange = sourceMessageIds.length && smallReviews.some(candidate => candidate.kind === "recognition" && candidate.status === "pending")
-        ? listSourceRanges(db, context.req.param("id"), sourceMessageIds).find(range => sourceMessageIds.every((id: string) => range.sourceMessageIds.includes(id))) : undefined;
-      return { ...item, sourceMessageIds, sourceFingerprint: JSON.parse(item.sourceFingerprint || "[]"), draft, ...(sourceRange ? { sourceRangeId: sourceRange.id } : {}),
-        smallReviews: smallReviews.map(candidate => smallReviewView(db, context.req.param("id"), sourceMessageIds, candidate)),
+      return { ...item, sourceMessageIds, sourceFingerprint: JSON.parse(item.sourceFingerprint || "[]"), draft,
+        smallReviews: visibleSmallReviews(db, context.req.param("id"), sourceMessageIds, smallReviews),
         patch: item.patch ? JSON.parse(item.patch) : undefined, usage: JSON.parse(item.usage || "{}"),
         ...(["pending_review", "failed"].includes(item.status) ? { evidenceReview: describeEvidenceReview(db, context.req.param("id"), item.jobId, draft, sourceMessageIds) } : {}) };
     }) });
   });
   app.post("/v1/chats/:id/small-reviews/resolve", async context => {
     const body = await context.req.json().catch(() => null);
-    if (!body || !["keep", "hold", "discard", "retry"].includes(body.action) || !Array.isArray(body.items)
-      || !body.items.length || !body.items.every((item: any) => item && typeof item.auditId === "string" && typeof item.candidateId === "string")
-      || body.items.length > 1 && !["hold", "discard"].includes(body.action)) return context.json({error: "후보와 처리 방법을 확인해 주세요."}, 400);
-    try {
-      const items = resolveSmallReviews(db, context.req.param("id"), body.items, body.action);
-      if (body.action === "retry") serverWorker.wake();
-      if (body.action === "keep") void embeddings.indexPending(context.req.param("id"));
-      return context.json({items});
-    } catch (error) { return context.json({error: error instanceof Error ? error.message : "후보를 처리하지 못했어요."}, 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (body?.action === 'retry') assertSourceSnapshotAccepted(db,context.req.param('id'));
+      if (!body || !["keep", "keep_as_written", "keep_edited", "keep_names", "hold", "discard", "retry"].includes(body.action) || !Array.isArray(body.items)
+        || body.action === "keep_edited" && (typeof body.text !== "string" || !body.text.trim())
+        || !body.items.length || !body.items.every((item: any) => item && typeof item.auditId === "string" && typeof item.candidateId === "string" && (item.sourceChoiceId === undefined || typeof item.sourceChoiceId === "string"))
+        || body.items.length > 1 && !["hold", "discard", "keep_as_written"].includes(body.action)) return context.json({error: "후보와 처리 방법을 확인해 주세요."}, 400);
+      try {
+        const items = resolveSmallReviews(db, context.req.param("id"), body.items, body.action, body.text);
+        if (body.action === "retry") serverWorker.wake();
+        if (["keep", "keep_as_written", "keep_edited", "keep_names"].includes(body.action) && items.some(item => item.status === "kept" && item.reason !== "unsupported_kind")) void embeddings.indexPending(context.req.param("id"));
+        return context.json({items, ...(body.action === "keep_as_written" ? {counts: {
+          kept:items.filter(item => item.status === "kept" && item.reason !== "unsupported_kind").length,
+          pending:items.filter(item => item.status === "pending" && item.reason !== "unsupported_kind").length,
+          missingSource:items.filter(item => item.reason === "source_location_missing").length,
+          skipped:items.filter(item => item.reason === "unsupported_kind").length,
+          stale:items.filter(item => item.status === "stale" && item.reason !== "unsupported_kind").length,
+        }} : {})});
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({error: error instanceof Error ? error.message : "후보를 처리하지 못했어요."}, 409);
+      }
+    });
   });
   app.get("/v1/chats/:id/extraction-batches", (context) => context.json({ items: listExtractionBatches(db, context.req.param("id")) }));
   app.post("/v1/chats/:id/extraction-batches/:batchId/preview-regeneration", async (context) => {
@@ -2014,13 +2298,16 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.get('/v1/chats/:id/gap-recovery', context=>context.json(listGapRecovery(db,context.req.param('id'))));
   app.post('/v1/chats/:id/gap-recovery', context=>{
-    try {
-      const result=startGapRecovery(db,context.req.param('id'));
-      if (result.jobs.length) serverWorker.wake();
-      return context.json(result);
-    } catch (error) {
-      return context.json({error:error instanceof Error ? error.message : String(error),code:(error as {code?:string}).code},409);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const result=startGapRecovery(db,context.req.param('id'));
+        if (result.jobs.length) serverWorker.wake();
+        return context.json(result);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({error:error instanceof Error ? error.message : String(error),code:(error as {code?:string}).code},409);
+      }
+    });
   });
   app.post('/v1/chats/:id/memory-additions/sources', async (context) => {
     const body = await context.req.json() as { rangeIds?: unknown };
@@ -2030,31 +2317,42 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   for (const operation of ['preview', 'create'] as const) app.post(`/v1/chats/:id/memory-additions/${operation}`, async (context) => {
     const body = await context.req.json() as { rangeIds?: unknown; messageIds?: unknown; request?: unknown; postExtractionReview?: unknown; idempotencyKey?:unknown };
-    if (!Array.isArray(body.rangeIds) || !body.rangeIds.every(id => typeof id === 'string') || !Array.isArray(body.messageIds) || !body.messageIds.every(id => typeof id === 'string')
-      || typeof body.request !== 'string' || typeof body.postExtractionReview !== 'boolean'
-      || body.idempotencyKey!==undefined && (typeof body.idempotencyKey!=='string' || !/^[a-zA-Z0-9_-]{16,128}$/.test(body.idempotencyKey))) return context.json({ error: '메시지 선택과 요청을 확인해 주세요' }, 400);
-    try {
-      const chatId = context.req.param('id');
-      if (operation === 'preview') return context.json(previewMemoryAddition(db, chatId, body.rangeIds, body.messageIds, body.request, body.postExtractionReview));
-      const created = startMemoryAddition(db, chatId, body.rangeIds, body.messageIds, body.request, body.postExtractionReview,body.idempotencyKey as string|undefined);
-      serverWorker.wake();
-      return context.json(created, 202);
-    } catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
+    const write = () => {
+      if (!Array.isArray(body.rangeIds) || !body.rangeIds.every(id => typeof id === 'string') || !Array.isArray(body.messageIds) || !body.messageIds.every(id => typeof id === 'string')
+        || typeof body.request !== 'string' || typeof body.postExtractionReview !== 'boolean'
+        || body.idempotencyKey!==undefined && (typeof body.idempotencyKey!=='string' || !/^[a-zA-Z0-9_-]{16,128}$/.test(body.idempotencyKey))) return context.json({ error: '메시지 선택과 요청을 확인해 주세요' }, 400);
+      try {
+        const chatId = context.req.param('id');
+        if (operation === 'preview') return context.json(previewMemoryAddition(db, chatId, body.rangeIds, body.messageIds, body.request, body.postExtractionReview));
+        const created = startMemoryAddition(db, chatId, body.rangeIds, body.messageIds, body.request, body.postExtractionReview,body.idempotencyKey as string|undefined);
+        serverWorker.wake();
+        return context.json(created, 202);
+      } catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error.message, code: error.code }, 409);
+      }
+    };
+    return operation === 'preview' ? write() : withChatWrite(db, context.req.param('id'), write);
   });
   for (const operation of ['apply', 'discard', 'retry'] as const) app.post(`/v1/chats/:id/memory-additions/:runId/${operation}`, (context) => {
-    const chatId = context.req.param('id'), id = context.req.param('runId');
-    try {
-      if (operation === 'apply') { applyMemoryAddition(db, chatId, id); void embeddings.indexPending(chatId); }
-      else if (operation === 'discard') discardMemoryAddition(db, chatId, id);
-      else {
-        if (!listMemoryAdditions(db, chatId).find(row => row.id === id)?.canRetry) return context.json({ error: '다시 시도할 작업이 없어요' }, 409);
-        const job = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='memory_addition' AND status='failed'").get(id, chatId) as { payload_json: string };
-        db.prepare("UPDATE jobs SET status='queued',attempts=0,payload_json=?,last_error=NULL,updated_at=? WHERE id=? AND chat_id=? AND type='memory_addition' AND status='failed'")
-          .run(JSON.stringify(manualRetryPayload(JSON.parse(job.payload_json))), Date.now(), id, chatId);
-        serverWorker.wake();
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param('id'), id = context.req.param('runId');
+      try {
+        if (operation === 'apply') { applyMemoryAddition(db, chatId, id); void embeddings.indexPending(chatId); }
+        else if (operation === 'discard') discardMemoryAddition(db, chatId, id);
+        else {
+          if (!listMemoryAdditions(db, chatId).find(row => row.id === id)?.canRetry) return context.json({ error: '다시 시도할 작업이 없어요' }, 409);
+          const job = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='memory_addition' AND status='failed'").get(id, chatId) as { payload_json: string };
+          db.prepare("UPDATE jobs SET status='queued',attempts=0,payload_json=?,last_error=NULL,updated_at=? WHERE id=? AND chat_id=? AND type='memory_addition' AND status='failed'")
+            .run(JSON.stringify(manualRetryPayload(JSON.parse(job.payload_json))), Date.now(), id, chatId);
+          serverWorker.wake();
+        }
+        return context.json({ ok: true });
+      } catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error.message, code: error.code }, 409);
       }
-      return context.json({ ok: true });
-    } catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
+    });
   });
   app.get('/v1/chats/:id/source-ranges/:batchId', (context) => {
     const chatId = context.req.param('id');
@@ -2065,58 +2363,84 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.put('/v1/chats/:id/messages/:messageId/memory-exclusion', async (context) => {
     const body = await context.req.json() as { excluded?: unknown };
-    if (typeof body.excluded !== 'boolean') return context.json({ error: '제외 여부를 확인해 주세요' }, 400);
-    try { return context.json(setMemoryExclusion(db,context.req.param('id'),context.req.param('messageId'),body.excluded)); }
-    catch (error: any) { return context.json({ error: error.message, reason: error.message, code: error.code }, error.code === 'MESSAGE_NOT_FOUND' ? 404 : 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (typeof body.excluded !== 'boolean') return context.json({ error: '제외 여부를 확인해 주세요' }, 400);
+      try { return context.json(setMemoryExclusion(db,context.req.param('id'),context.req.param('messageId'),body.excluded)); }
+      catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error.message, reason: error.message, code: error.code }, error.code === 'MESSAGE_NOT_FOUND' ? 404 : 409);
+      }
+    });
   });
   for (const operation of ['preview', 'create'] as const) app.post(`/v1/chats/:id/memory-groups/${operation}`, async (context) => {
     try {
       const body = await context.req.json() as { batchIds?: unknown; postExtractionReview?: unknown };
-      if (!Array.isArray(body.batchIds) || !body.batchIds.every((id) => typeof id === 'string') || typeof body.postExtractionReview !== 'boolean') return context.json({ error: '묶음 ID와 재검수 선택을 확인해 줘' }, 400);
-      const chatId = context.req.param('id');
-      if (operation === 'preview') return context.json(previewMemoryGroup(db, chatId, body.batchIds, body.postExtractionReview));
-      const result = startMemoryGroup(db, chatId, body.batchIds, body.postExtractionReview);
-      serverWorker.wake();
-      return context.json(result, 202);
-    } catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
+      const write = () => {
+        if (!Array.isArray(body.batchIds) || !body.batchIds.every((id) => typeof id === 'string') || typeof body.postExtractionReview !== 'boolean') return context.json({ error: '묶음 ID와 재검수 선택을 확인해 줘' }, 400);
+        const chatId = context.req.param('id');
+        if (operation === 'preview') return context.json(previewMemoryGroup(db, chatId, body.batchIds, body.postExtractionReview));
+        const result = startMemoryGroup(db, chatId, body.batchIds, body.postExtractionReview);
+        serverWorker.wake();
+        return context.json(result, 202);
+      };
+      return operation === 'preview' ? write() : withChatWrite(db, context.req.param('id'), write);
+    } catch (error: any) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error.message, code: error.code }, 409);
+    }
   });
   for (const operation of ['apply', 'ungroup', 'discard', 'retry'] as const) app.post(`/v1/chats/:id/memory-groups/:groupId/${operation}`, (context) => {
-    const chatId = context.req.param('id'), groupId = context.req.param('groupId');
-    try {
-      if (operation === 'apply') applyMemoryGroup(db, chatId, groupId);
-      else if (operation === 'ungroup') ungroupMemories(db, chatId, groupId);
-      else if (operation === 'discard') discardMemoryGroup(db, chatId, groupId);
-      else {
-        if (!listMemoryGroups(db, chatId).find((row) => row.id === groupId)?.canRetry) return context.json({ error: '자동으로 더 진행할 수 없어. 원문과 중간 결과를 확인해 줘' }, 409);
-        const changed = db.prepare("UPDATE jobs SET status='queued',attempts=0,last_error=NULL,updated_at=? WHERE chat_id=? AND type='memory_group' AND status='failed' AND json_extract(payload_json,'$.episodeId')=?").run(Date.now(), chatId, groupId);
-        if (!changed.changes) return context.json({ error: '다시 시도할 실패 단계가 없어' }, 409);
-        serverWorker.wake();
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param('id'), groupId = context.req.param('groupId');
+      try {
+        if (operation === 'apply') applyMemoryGroup(db, chatId, groupId);
+        else if (operation === 'ungroup') ungroupMemories(db, chatId, groupId);
+        else if (operation === 'discard') discardMemoryGroup(db, chatId, groupId);
+        else {
+          if (!listMemoryGroups(db, chatId).find((row) => row.id === groupId)?.canRetry) return context.json({ error: '자동으로 더 진행할 수 없어. 원문과 중간 결과를 확인해 줘' }, 409);
+          const changed = db.prepare("UPDATE jobs SET status='queued',attempts=0,last_error=NULL,updated_at=? WHERE chat_id=? AND type='memory_group' AND status='failed' AND json_extract(payload_json,'$.episodeId')=?").run(Date.now(), chatId, groupId);
+          if (!changed.changes) return context.json({ error: '다시 시도할 실패 단계가 없어' }, 409);
+          serverWorker.wake();
+        }
+        if (operation === 'apply' || operation === 'ungroup') void embeddings.indexPending(chatId);
+        return context.json({ ok: true });
+      } catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error.message, code: error.code }, 409);
       }
-      if (operation === 'apply' || operation === 'ungroup') void embeddings.indexPending(chatId);
-      return context.json({ ok: true });
-    } catch (error: any) { return context.json({ error: error.message, code: error.code }, 409); }
+    });
   });
   app.post("/v1/chats/:id/extraction-batches/:batchId/regenerate-episode", async (context) => {
     try {
       const body = await context.req.json().catch(() => ({})) as { postExtractionReview?: unknown };
-      if (body.postExtractionReview !== undefined && typeof body.postExtractionReview !== "boolean") return context.json({ error: "postExtractionReview must be boolean" }, 400);
-      const chat = db.prepare("SELECT post_extraction_review FROM chats WHERE id=?").get(context.req.param("id")) as { post_extraction_review: number } | undefined;
-      if (!chat) return context.json({ error: "Chat not found" }, 404);
-      const result = startEpisodeRegeneration(db, context.req.param("id"), context.req.param("batchId"), body.postExtractionReview === undefined ? chat.post_extraction_review !== 0 : body.postExtractionReview);
-      serverWorker.wake();
-      return context.json({ ok: true, ...result }, 202);
-    } catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code }, error?.code === "BATCH_NOT_FOUND" ? 404 : 409); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        if (body.postExtractionReview !== undefined && typeof body.postExtractionReview !== "boolean") return context.json({ error: "postExtractionReview must be boolean" }, 400);
+        const chat = db.prepare("SELECT post_extraction_review FROM chats WHERE id=?").get(context.req.param("id")) as { post_extraction_review: number } | undefined;
+        if (!chat) return context.json({ error: "Chat not found" }, 404);
+        const result = startEpisodeRegeneration(db, context.req.param("id"), context.req.param("batchId"), body.postExtractionReview === undefined ? chat.post_extraction_review !== 0 : body.postExtractionReview);
+        serverWorker.wake();
+        return context.json({ ok: true, ...result }, 202);
+      });
+    } catch (error: any) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error?.message ?? String(error), code: error?.code, ...(error?.rejectedItems ? {rejectedItems:error.rejectedItems} : {}) }, error?.code === "BATCH_NOT_FOUND" ? 404 : 409);
+    }
   });
   app.post("/v1/chats/:id/extraction-batches/:batchId/regenerate-canonical", async (context) => {
     try {
       const body = await context.req.json().catch(() => ({})) as { postExtractionReview?: unknown };
-      if (body.postExtractionReview !== undefined && typeof body.postExtractionReview !== "boolean") return context.json({ error: "postExtractionReview must be boolean" }, 400);
-      const chat = db.prepare("SELECT post_extraction_review FROM chats WHERE id=?").get(context.req.param("id")) as { post_extraction_review: number } | undefined;
-      if (!chat) return context.json({ error: "Chat not found" }, 404);
-      const result = startCanonicalRegeneration(db, context.req.param("id"), context.req.param("batchId"), body.postExtractionReview === undefined ? chat.post_extraction_review !== 0 : body.postExtractionReview);
-      serverWorker.wake();
-      return context.json({ ok: true, ...result }, 202);
-    } catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code }, error?.code === "BATCH_NOT_FOUND" ? 404 : 409); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        if (body.postExtractionReview !== undefined && typeof body.postExtractionReview !== "boolean") return context.json({ error: "postExtractionReview must be boolean" }, 400);
+        const chat = db.prepare("SELECT post_extraction_review FROM chats WHERE id=?").get(context.req.param("id")) as { post_extraction_review: number } | undefined;
+        if (!chat) return context.json({ error: "Chat not found" }, 404);
+        const result = startCanonicalRegeneration(db, context.req.param("id"), context.req.param("batchId"), body.postExtractionReview === undefined ? chat.post_extraction_review !== 0 : body.postExtractionReview);
+        serverWorker.wake();
+        return context.json({ ok: true, ...result }, 202);
+      });
+    } catch (error: any) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error?.message ?? String(error), code: error?.code, ...(error?.rejectedItems ? {rejectedItems:error.rejectedItems} : {}) }, error?.code === "BATCH_NOT_FOUND" ? 404 : 409);
+    }
   });
   app.get("/v1/chats/:id/regenerations/:runId", (context) => {
     try { return context.json(regenerationRun(db, context.req.param("id"), context.req.param("runId"))); }
@@ -2125,90 +2449,101 @@ export function createApp(dependencies: Dependencies): Hono {
   for (const operation of ['apply', 'apply-with-keep'] as const) app.post(`/v1/chats/:id/regenerations/:runId/${operation}`, async (context) => {
     try {
       const raw = await context.req.text();
-      let body: unknown;
-      try { body = raw.trim() ? JSON.parse(raw) : {}; }
-      catch { return context.json({ error: 'Invalid JSON body' }, 400); }
-      if (!body || typeof body !== 'object' || Array.isArray(body)) return context.json({ error: 'Expected an object body' }, 400);
-      const requestedIds = (body as {keepLostItemIds?:unknown}).keepLostItemIds;
-      const keepLostItemIds = requestedIds === undefined ? [] : requestedIds;
-      if (!Array.isArray(keepLostItemIds) || keepLostItemIds.some(id => typeof id !== 'string' || !id.length)) return context.json({ error: 'keepLostItemIds must be an array of item IDs' }, 400);
-      const mode = (regenerationRun(db, context.req.param("id"), context.req.param("runId")) as any).mode;
-      if (mode !== 'canonical_suffix' && keepLostItemIds.length) return context.json({ error: 'Item preservation requires canonical regeneration', code: 'KEEP_REQUIRES_CANONICAL' }, 409);
-      const result = mode === "canonical_suffix"
-        ? applyCanonicalRegeneration(db, context.req.param("id"), context.req.param("runId"), keepLostItemIds)
-        : applyEpisodeRegeneration(db, context.req.param("id"), context.req.param("runId"));
-      void embeddings.indexPending(context.req.param("id"));
-      return context.json({ ok: true, ...result });
-    } catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code, ...(error?.rejectedItems ? { rejectedItems: error.rejectedItems } : {}) }, 409); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        let body: unknown;
+        try { body = raw.trim() ? JSON.parse(raw) : {}; }
+        catch { return context.json({ error: 'Invalid JSON body' }, 400); }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return context.json({ error: 'Expected an object body' }, 400);
+        const requestedIds = (body as {keepLostItemIds?:unknown}).keepLostItemIds;
+        const keepLostItemIds = requestedIds === undefined ? [] : requestedIds;
+        if (!Array.isArray(keepLostItemIds) || keepLostItemIds.some(id => typeof id !== 'string' || !id.length)) return context.json({ error: 'keepLostItemIds must be an array of item IDs' }, 400);
+        const mode = (regenerationRun(db, context.req.param("id"), context.req.param("runId")) as any).mode;
+        const result = mode === "canonical_suffix"
+          ? applyCanonicalRegeneration(db, context.req.param("id"), context.req.param("runId"), keepLostItemIds)
+          : applyEpisodeRegeneration(db, context.req.param("id"), context.req.param("runId"), keepLostItemIds);
+        void embeddings.indexPending(context.req.param("id"));
+        return context.json({ ok: true, ...result });
+      });
+    } catch (error: any) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error?.message ?? String(error), code: error?.code, ...(error?.rejectedItems ? { rejectedItems: error.rejectedItems } : {}) }, 409);
+    }
   });
   app.delete("/v1/chats/:id/regenerations/:runId", (context) => {
-    try { discardRegeneration(db, context.req.param("id"), context.req.param("runId")); return context.json({ ok: true }); }
-    catch (error: any) { return context.json({ error: error?.message ?? String(error), code: error?.code }, 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try { discardRegeneration(db, context.req.param("id"), context.req.param("runId")); return context.json({ ok: true }); }
+      catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error?.message ?? String(error), code: error?.code }, 409);
+      }
+    });
   });
   app.post("/v1/chats/:id/extraction-audits/:auditId/retry", (context) => {
-    const chatId = context.req.param("id");
-    const audit = db.prepare("SELECT id,job_id,status,source_message_ids_json,source_fingerprint_json,draft_json,patch_json FROM extraction_audits WHERE id=? AND chat_id=?").get(context.req.param("auditId"), chatId) as
-      | { id: string; job_id: string; status: string; source_message_ids_json: string; source_fingerprint_json: string; draft_json: string; patch_json: string | null }
-      | undefined;
-    if (!audit) return context.json({ error: "Extraction audit not found" }, 404);
-    if (!["pending_review", "failed"].includes(audit.status)) return context.json({ error: "Extraction audit is not retryable" }, 409);
-    const sourceMessageIds = JSON.parse(audit.source_message_ids_json || "[]") as string[];
-    const expectedFingerprint = parseSourceFingerprintJson(audit.source_fingerprint_json || "[]");
-    if (!expectedFingerprint || (sourceMessageIds.length > 0 && expectedFingerprint.length !== sourceMessageIds.length) || !fingerprintMatches(db, chatId, expectedFingerprint)) {
-      db.prepare("UPDATE extraction_audits SET status='stale',error='Source fingerprint is no longer current',updated_at=? WHERE id=?").run(Date.now(), audit.id);
-      return context.json({ error: "Source fingerprint is no longer current" }, 409);
-    }
-    const pending = db.prepare("SELECT id FROM jobs WHERE chat_id=? AND status IN ('queued','leased') AND json_extract(payload_json,'$.retryOfAuditId')=?").get(chatId, audit.id) as { id: string } | undefined;
-    if (pending) return context.json({ ok: true, jobId: pending.id });
-    const originalJob = db.prepare("SELECT status,payload_json FROM jobs WHERE id=?").get(audit.job_id) as { status: string; payload_json: string } | undefined;
-    const originalPayload = JSON.parse(originalJob?.payload_json ?? "{}");
-    let retryDraft = JSON.parse(audit.draft_json);
-    if (readSmallReviews(retryDraft).length) return context.json({error: "작은 확인 목록에서 후보별로 다시 확인해 주세요."}, 409);
-    const issues = inspectDraftEvidence(db, chatId, sourceMessageIds, retryDraft);
-    const sourceRecovery = originalJob?.status === "done" || originalPayload.sourceRecovery === true;
-    const dialogueRecovery: DialogueRecoveryCandidate[] = [];
-    // Already-applied state is not replayed to repair optional evidence.
-    if (sourceRecovery && issues.some((issue) => issue.blocking)) return context.json({ error: "이미 적용된 상태의 근거는 개별 수정이 필요합니다. 중복 누적을 막기 위해 전체 재시도를 하지 않았습니다." }, 409);
-    if (sourceRecovery) {
-      const pendingRefs: string[] = JSON.parse(audit.patch_json ?? "{}")?.keepPendingItemRefs ?? [];
-      const passages = (retryDraft.sourcePassages ?? []).filter((_item: unknown, index: number) => pendingRefs.includes(`source:${index}`)
-        || issues.some((issue) => issue.path.startsWith(`sourcePassages[${index}]`)));
-      const previous = new Map<string, DialogueRecoveryCandidate>((originalPayload.dialogueRecovery ?? [])
-        .map((item: DialogueRecoveryCandidate) => [item.ref, item]));
-      const memories = [];
-      for (const [memoryIndex, memory] of (retryDraft.memories ?? []).entries()) for (const [dialogueIndex, dialogue] of (memory.keyDialogues ?? []).entries()) {
-        const prior = previous.get(memory.key);
-        if (!prior && !pendingRefs.includes(`dialogue:${memory.key}:${dialogue.messageId}:${dialogueIndex}`)
-          && !issues.some((issue) => issue.path.startsWith(`memories[${memoryIndex}].keyDialogues[${dialogueIndex}]`))) continue;
-        let recovery = prior;
-        if (!recovery) {
-          const scopeId = originalPayload.batchId ?? originalPayload.retryOfJobId ?? audit.job_id;
-          const scopedKey = originalPayload.episodeId && memory.key === `episode:${originalPayload.episodeId}`
-            ? memory.key : `batch:${scopeId}:${createHash("sha256").update(memory.key).digest("hex")}`;
-          const parent = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1").get(chatId, scopedKey) as {id: string} | undefined;
-          recovery = { ref: `recovery:${memory.key}:${dialogueIndex}`, parentMemoryId: parent?.id, dialogue };
-        }
-        dialogueRecovery.push(recovery);
-        // One frozen candidate per shell keeps identity stable when siblings are removed.
-        memories.push({ ...memory, key: recovery.ref, details: [], landmarkKinds: [], associations: [], keyDialogues: [dialogue] });
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      const audit = db.prepare("SELECT id,job_id,status,source_message_ids_json,source_fingerprint_json,draft_json,patch_json FROM extraction_audits WHERE id=? AND chat_id=?").get(context.req.param("auditId"), chatId) as
+        | { id: string; job_id: string; status: string; source_message_ids_json: string; source_fingerprint_json: string; draft_json: string; patch_json: string | null }
+        | undefined;
+      if (!audit) return context.json({ error: "Extraction audit not found" }, 404);
+      if (!["pending_review", "failed"].includes(audit.status)) return context.json({ error: "Extraction audit is not retryable" }, 409);
+      const sourceMessageIds = JSON.parse(audit.source_message_ids_json || "[]") as string[];
+      const expectedFingerprint = parseSourceFingerprintJson(audit.source_fingerprint_json || "[]");
+      if (!expectedFingerprint || (sourceMessageIds.length > 0 && expectedFingerprint.length !== sourceMessageIds.length) || !fingerprintMatches(db, chatId, expectedFingerprint)) {
+        db.prepare("UPDATE extraction_audits SET status='stale',error='Source fingerprint is no longer current',updated_at=? WHERE id=?").run(Date.now(), audit.id);
+        return context.json({ error: "Source fingerprint is no longer current" }, 409);
       }
-      if (!passages.length && !dialogueRecovery.length) return context.json({ error: "자동으로 다시 확인할 발췌가 없습니다. 보류된 항목의 진단을 확인해 주세요." }, 409);
-      retryDraft = { language: retryDraft.language, entities: [], memories, stateObservations: [], sourcePassages: passages };
-    }
-    const timestamp = Date.now();
-    const jobId = randomUUID();
-    db.transaction(() => {
-      db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'audit_retry','queued',?,0,?,?)`)
-        .run(jobId, chatId, JSON.stringify({ ...originalPayload, sourceMessageIds, sourceFingerprint: expectedFingerprint, auditDraft: retryDraft, sourceRecovery, sourceRecoveryMetadata: sourceRecovery ? { targets: expectedFingerprint.map(({ messageId, ordinal }) => ({ messageId, ordinal })), matchKinds: originalPayload.sourceRecoveryMetadata?.matchKinds ?? [] } : undefined, dialogueRecovery, trigger: 'retry', retryOfAuditId: audit.id, retryOfJobId: audit.job_id, llmCallStats: { total: 0, repairs: 0, byPurpose: {} }, postExtractionReview: true }), timestamp, timestamp);
-    })();
-    serverWorker.wake();
-    return context.json({ ok: true, jobId });
+      const pending = db.prepare("SELECT id FROM jobs WHERE chat_id=? AND status IN ('queued','leased') AND json_extract(payload_json,'$.retryOfAuditId')=?").get(chatId, audit.id) as { id: string } | undefined;
+      if (pending) return context.json({ ok: true, jobId: pending.id });
+      const originalJob = db.prepare("SELECT status,payload_json FROM jobs WHERE id=?").get(audit.job_id) as { status: string; payload_json: string } | undefined;
+      const originalPayload = JSON.parse(originalJob?.payload_json ?? "{}");
+      let retryDraft = JSON.parse(audit.draft_json);
+      if (readSmallReviews(retryDraft).length) return context.json({error: "작은 확인 목록에서 후보별로 다시 확인해 주세요."}, 409);
+      const issues = inspectDraftEvidence(db, chatId, sourceMessageIds, retryDraft);
+      const sourceRecovery = originalJob?.status === "done" || originalPayload.sourceRecovery === true;
+      const dialogueRecovery: DialogueRecoveryCandidate[] = [];
+      // Already-applied state is not replayed to repair optional evidence.
+      if (sourceRecovery && issues.some((issue) => issue.blocking)) return context.json({ error: "이미 적용된 상태의 근거는 개별 수정이 필요해요. 중복 누적을 막기 위해 전체 재시도를 하지 않았어요." }, 409);
+      if (sourceRecovery) {
+        const pendingRefs: string[] = JSON.parse(audit.patch_json ?? "{}")?.keepPendingItemRefs ?? [];
+        const passages = (retryDraft.sourcePassages ?? []).filter((_item: unknown, index: number) => pendingRefs.includes(`source:${index}`)
+          || issues.some((issue) => issue.path.startsWith(`sourcePassages[${index}]`)));
+        const previous = new Map<string, DialogueRecoveryCandidate>((originalPayload.dialogueRecovery ?? [])
+          .map((item: DialogueRecoveryCandidate) => [item.ref, item]));
+        const memories = [];
+        for (const [memoryIndex, memory] of (retryDraft.memories ?? []).entries()) for (const [dialogueIndex, dialogue] of (memory.keyDialogues ?? []).entries()) {
+          const prior = previous.get(memory.key);
+          if (!prior && !pendingRefs.includes(`dialogue:${memory.key}:${dialogue.messageId}:${dialogueIndex}`)
+            && !issues.some((issue) => issue.path.startsWith(`memories[${memoryIndex}].keyDialogues[${dialogueIndex}]`))) continue;
+          let recovery = prior;
+          if (!recovery) {
+            const scopeId = originalPayload.batchId ?? originalPayload.retryOfJobId ?? audit.job_id;
+            const scopedKey = originalPayload.episodeId && memory.key === `episode:${originalPayload.episodeId}`
+              ? availableMemoryKey(memory.key,deletedMemoryKeys(db,chatId)) : scopeMemoryKey(memory.key,scopeId,deletedMemoryKeys(db,chatId));
+            const parent = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1").get(chatId, scopedKey) as {id: string} | undefined;
+            recovery = { ref: `recovery:${memory.key}:${dialogueIndex}`, parentMemoryId: parent?.id, dialogue };
+          }
+          dialogueRecovery.push(recovery);
+          // One frozen candidate per shell keeps identity stable when siblings are removed.
+          memories.push({ ...memory, key: recovery.ref, details: [], landmarkKinds: [], associations: [], keyDialogues: [dialogue] });
+        }
+        if (!passages.length && !dialogueRecovery.length) return context.json({ error: "자동으로 다시 확인할 발췌가 없어요. 보류된 항목의 진단을 확인해 주세요." }, 409);
+        retryDraft = { language: retryDraft.language, entities: [], memories, stateObservations: [], sourcePassages: passages };
+      }
+      const timestamp = Date.now();
+      const jobId = randomUUID();
+      db.transaction(() => {
+        db.prepare(`INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'audit_retry','queued',?,0,?,?)`)
+          .run(jobId, chatId, JSON.stringify({ ...originalPayload, promptContract: originalPayload.promptContract ?? null, sourceMessageIds, sourceFingerprint: expectedFingerprint, auditDraft: retryDraft, sourceRecovery, sourceRecoveryMetadata: sourceRecovery ? { targets: expectedFingerprint.map(({ messageId, ordinal }) => ({ messageId, ordinal })), matchKinds: originalPayload.sourceRecoveryMetadata?.matchKinds ?? [] } : undefined, dialogueRecovery, trigger: 'retry', retryOfAuditId: audit.id, retryOfJobId: audit.job_id, llmCallStats: { total: 0, repairs: 0, byPurpose: {} }, postExtractionReview: true }), timestamp, timestamp);
+      })();
+      serverWorker.wake();
+      return context.json({ ok: true, jobId });
+    });
   });
 
   app.get("/v1/chats/:id/pair-progress", (context) => {
     const chatId = context.req.param("id");
     if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId)) return context.json({ error: "Chat not found" }, 404);
-    writePersonaHint(db, chatId, context.req.query("userPersonaName"));
+    if (!chatUpgradeLock(db,chatId)) writePersonaHint(db, chatId, context.req.query("userPersonaName"));
     const result = pairProgressResponse(db, chatId);
     const persona=context.req.query("persona"), character=context.req.query("character");
     if (persona && character) result.items = result.items.filter(p=>p.persona===persona&&p.character===character);
@@ -2223,19 +2558,28 @@ export function createApp(dependencies: Dependencies): Hono {
     ])});
     try {
       const input=schema.parse(await context.req.json());
-      const result=db.transaction(()=>editPairProgress(db,context.req.param("id"),input.persona,input.character,input.action))();
-      db.prepare("UPDATE chats SET revision=revision+1 WHERE id=?").run(context.req.param("id"));
-      return context.json(result);
-    } catch(error) { return context.json({error:error instanceof Error?error.message:"Invalid progress request"},400); }
+      return withChatWrite(db, context.req.param('id'), () => {
+        const result=db.transaction(()=>editPairProgress(db,context.req.param("id"),input.persona,input.character,input.action))();
+        db.prepare("UPDATE chats SET revision=revision+1 WHERE id=?").run(context.req.param("id"));
+        return context.json(result);
+      });
+    } catch(error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({error:error instanceof Error?error.message:"Invalid progress request"},400);
+    }
   });
 
   app.get("/v1/chats/:id/view-preferences", (context) => context.json(readViewPreferences(db, context.req.param("id"))));
   app.put("/v1/chats/:id/view-preferences", async (context) => {
     try {
-      const result = writeViewPreferences(db, context.req.param("id"), await context.req.json());
-      markChatEngaged(db, context.req.param("id"));
-      return context.json(result);
+      const body = await context.req.json();
+      return withChatWrite(db, context.req.param('id'), () => {
+        const result = writeViewPreferences(db, context.req.param("id"), body);
+        markChatEngaged(db, context.req.param("id"));
+        return context.json(result);
+      });
     } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
       if (error instanceof SyntaxError || error instanceof InvalidViewPreferencesPatchError) {
         return context.json({ error: error.message }, 400);
       }
@@ -2243,18 +2587,40 @@ export function createApp(dependencies: Dependencies): Hono {
     }
   });
 
+  function userOnlyRetryMemoriesSql(): string {
+    // Folded retries retain frozen keys after ownership moves to the parent.
+    return `user_only_retry_batches AS MATERIALIZED (
+        SELECT b.id,b.chat_id,b.final_json FROM extraction_batches b LEFT JOIN jobs j ON j.id=b.job_id AND j.chat_id=b.chat_id
+        WHERE b.chat_id=? AND (
+          json_extract(j.payload_json,'$.coverageParentJobId') IS NOT NULL OR EXISTS (
+            SELECT 1 FROM server_meta meta,json_each(meta.value) family
+            WHERE meta.key='source_coverage_family:'||b.chat_id AND family.key=b.id))
+          AND json_array_length(b.source_message_ids_json)>0 AND NOT EXISTS (
+            SELECT 1 FROM json_each(b.source_message_ids_json) source LEFT JOIN messages msg ON msg.chat_id=b.chat_id AND msg.message_id=source.value
+            WHERE msg.role IS NOT 'user')
+      ), user_only_retry_keys AS MATERIALIZED (
+        SELECT json_extract(memory.value,'$.key') memory_key FROM user_only_retry_batches b,json_each(b.final_json,'$.memories') memory
+      ), user_only_retry_memories AS MATERIALIZED (
+      SELECT m.id FROM memories m WHERE m.chat_id IN (SELECT chat_id FROM user_only_retry_batches) AND (
+        EXISTS (SELECT 1 FROM user_only_retry_batches b WHERE b.id=m.source_batch_id)
+        OR EXISTS (SELECT 1 FROM user_only_retry_keys k WHERE k.memory_key=m.memory_key))
+    )`;
+  }
+
   function readDashboardMemories(chatId: string) {
     const bookmarks = readMemoryBookmarks(db, chatId);
     const items = db.prepare(`
-      SELECT m.id,m.memory_key AS memoryKey,${recognitionOnlyMemorySql('m')} AS recognitionOnly,m.type,m.title,m.content,m.participants_json,m.known_by_json,m.perspective,m.story_time,m.story_time_normalized,m.locations_json,m.landmark,m.landmark_kinds_json,m.evidence_json,
+      WITH ${userOnlyRetryMemoriesSql()}
+      SELECT m.id,m.card_shape AS cardShape,m.memory_key AS memoryKey,${recognitionOnlyMemorySql('m')} AS recognitionOnly,m.type,m.title,m.content,m.participants_json,m.known_by_json,m.perspective,m.story_time,m.story_time_normalized,m.locations_json,m.landmark,m.landmark_kinds_json,m.evidence_json,
         m.salience,m.strength,m.recall_count,m.pinned,m.always_inject,m.active,m.capsule_parent_id,m.source_batch_id AS sourceBatchId,m.user_managed AS userManaged,m.created_revision,m.created_at,m.updated_at,
+        EXISTS (SELECT 1 FROM user_only_retry_memories retry WHERE retry.id=m.id) AS userOnlyRetry,
         (SELECT MIN(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_ordinal,
         (SELECT MAX(msg.ordinal) FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id) AS source_end_ordinal,
         (SELECT msg.event_time FROM evidence_spans e JOIN messages msg ON msg.chat_id=e.chat_id AND msg.message_id=e.message_id WHERE e.memory_id=m.id ORDER BY msg.ordinal LIMIT 1) AS source_event_time
       FROM memories m WHERE m.chat_id=? ORDER BY CASE WHEN source_ordinal IS NULL THEN 0 ELSE 1 END,CASE WHEN source_ordinal IS NULL THEN m.created_at END DESC,source_ordinal DESC,m.created_revision DESC
-    `).all(chatId) as Array<Record<string, unknown> & { id: string }>;
+    `).all(chatId,chatId) as Array<Record<string, unknown> & { id: string }>;
     const dialogueQuery = db.prepare("SELECT id,speaker,text,message_id AS messageId,evidence_json AS evidence,kind FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal");
-    const detailRows = db.prepare(`SELECT memory_id,id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,locations_json AS locations,
+    const detailRows = db.prepare(`SELECT memory_id,id,detail_key AS key,kind,role,original_kind,text,participants_json AS participants,known_by_json AS knownBy,hidden_from_json AS hiddenFrom,seed_json AS seed,locations_json AS locations,
       user_edited AS userEdited,user_hidden AS hidden,epistemic,salience,retention_class AS retention,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal
       FROM memory_details WHERE chat_id=? AND active=1 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at,rowid`).all(chatId) as Array<Record<string, any>>;
     // The old per-memory table scan resolved equal sort keys in rowid order.
@@ -2265,7 +2631,7 @@ export function createApp(dependencies: Dependencies): Hono {
       detailsByMemory.set(memory_id, details);
     }
     const alwaysInject=alwaysInjectEstimate(db,chatId);
-    const alwaysTokens=new Map(alwaysInject.items.map(item=>[item.memoryId,item.estimatedTokens]));
+    const alwaysTokens=new Map(alwaysInject.items.map(item=>[item.memoryId,item]));
     return { alwaysInject, items: items.map((item) => {
       let locations: string[] = [];
       let participants: string[] = [];
@@ -2277,6 +2643,7 @@ export function createApp(dependencies: Dependencies): Hono {
       try { landmarkKinds = JSON.parse(String(item.landmark_kinds_json ?? "[]")) as unknown[]; } catch { landmarkKinds = []; }
       const { locations_json: _locationsJson, landmark_kinds_json: _landmarkKindsJson, ...rest } = item;
       rest.recognitionOnly = Boolean(item.recognitionOnly);
+      rest.userOnlyRetry = Boolean(item.userOnlyRetry);
       const episode = db.prepare("SELECT id,status,resolution,source_tokens FROM episodes WHERE memory_id=? LIMIT 1").get(item.id) as any;
       const sections = episode ? db.prepare("SELECT id,ordinal,title,summary,source_message_ids_json AS sourceMessageIds,key_dialogues_json AS keyDialogues FROM episode_sections WHERE episode_id=? ORDER BY ordinal").all(episode.id).map((section: any) => ({
         ...section,
@@ -2286,25 +2653,28 @@ export function createApp(dependencies: Dependencies): Hono {
       const details = (detailsByMemory.get(item.id) ?? []).map((detail) => {
         const access = memoryDetailAccess(db, chatId, detail.id);
         return { ...detail, userEdited:detail.userEdited===1,hidden:detail.hidden===1, access, participants: JSON.parse(detail.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
+          hiddenFrom: JSON.parse(detail.hiddenFrom || "[]"), seed: readStorySeed(detail.seed),
           locations: JSON.parse(detail.locations || "[]"), evidence: JSON.parse(detail.evidence || "[]") };
       });
       const keyDialogues = (dialogueQuery.all(item.id) as Array<Record<string,any>>).map(dialogue => ({...dialogue,access:memoryDetailAccess(db,chatId,dialogue.id,"dialogue"),evidence:JSON.parse(dialogue.evidence)}));
-      return { ...rest, known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
-        alwaysInject:item.always_inject===1,alwaysInjectEstimatedTokens:alwaysTokens.get(item.id) ?? 0,
+      return { ...rest, access: memoryDetailAccess(db, chatId, String(item.id), "memory"), known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
+        alwaysInject:item.always_inject===1,alwaysInjectEstimatedTokens:alwaysTokens.get(item.id)?.estimatedTokens ?? 0,alwaysInjectChargedTokens:alwaysTokens.get(item.id)?.chargedTokens ?? 0,
         active: item.active === 1, bookmarked: bookmarks.has(item.id), keyDialogues, details, detailCount: details.filter(detail => !detail.hidden).length, episode, sections };
     }) };
   }
   for (const kind of ['detail','event'] as const) app.patch(`/v1/chats/:id/memories/:memoryId/${kind === 'detail' ? 'details' : 'events'}/:lineId`, async context => {
     const body = await context.req.json();
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['text','hidden'].includes(key))
-      || (body.text === undefined && body.hidden === undefined) || (body.text !== undefined && (typeof body.text !== 'string' || !body.text.trim()))
-      || (body.hidden !== undefined && typeof body.hidden !== 'boolean')) return context.json({error:'Expected non-empty text and/or boolean hidden'},400);
-    const chatId=context.req.param('id'), memoryId=context.req.param('memoryId'), id=context.req.param('lineId');
-    const item=patchMemoryLine(db,chatId,memoryId,id,kind,body);
-    if (!item) return context.json({error:'Active memory line not found'},404);
-    if (kind==='detail') embeddings.removeDetail(id);
-    void embeddings.indexPending(chatId);
-    return context.json(item);
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['text','hidden'].includes(key))
+        || (body.text === undefined && body.hidden === undefined) || (body.text !== undefined && (typeof body.text !== 'string' || !body.text.trim()))
+        || (body.hidden !== undefined && typeof body.hidden !== 'boolean')) return context.json({error:'Expected non-empty text and/or boolean hidden'},400);
+      const chatId=context.req.param('id'), memoryId=context.req.param('memoryId'), id=context.req.param('lineId');
+      const item=patchMemoryLine(db,chatId,memoryId,id,kind,body);
+      if (!item) return context.json({error:'Active memory line not found'},404);
+      if (kind==='detail') embeddings.removeDetail(id);
+      void embeddings.indexPending(chatId);
+      return context.json(item);
+    });
   });
   app.get("/v1/chats/:id/memories", (context) => context.json(readDashboardMemories(context.req.param("id"))));
   app.get("/v1/chats/:id/messages", (context) => context.json({ items: db.prepare(`
@@ -2322,7 +2692,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const match = tokens.map((token) => `"${token.replaceAll('"', '""')}"*`).join(" OR ");
     try {
       const rows = db.prepare(`SELECT d.id,d.memory_id AS memoryId,d.detail_key AS key,d.kind,d.text,d.participants_json AS participants,
-        d.known_by_json AS knownBy,d.locations_json AS locations,d.epistemic,d.salience,d.retention_class AS retention,
+        d.known_by_json AS knownBy,d.hidden_from_json AS hiddenFrom,d.seed_json AS seed,d.locations_json AS locations,d.epistemic,d.salience,d.retention_class AS retention,
         d.evidence_json AS evidence,d.source_start_ordinal AS sourceOrdinal,bm25(memory_detail_fts) AS rank
         FROM memory_detail_fts JOIN visible_memory_details d ON d.id=memory_detail_fts.detail_id
         JOIN memories m ON m.id=d.memory_id AND m.active=1
@@ -2332,6 +2702,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ items: rows.map((row) => {
         const access = memoryDetailAccess(db, chatId, row.id);
         return { ...row, access, participants: JSON.parse(row.participants || "[]"), knownBy: access.holders.map(holder => holder.name),
+          hiddenFrom: JSON.parse(row.hiddenFrom || "[]"), seed: readStorySeed(row.seed),
           locations: JSON.parse(row.locations || "[]"), evidence: JSON.parse(row.evidence || "[]") };
       }) });
     } catch { return context.json({ items: [] }); }
@@ -2362,9 +2733,9 @@ export function createApp(dependencies: Dependencies): Hono {
     });
     return context.json({ explicitEvidence: true, items });
   });
-  app.delete("/v1/chats/:id/messages/:messageId", (context) => context.json({
+  app.delete("/v1/chats/:id/messages/:messageId", (context) => withChatWrite(db, context.req.param('id'), () => context.json({
     ok: hardDeleteMessage(db, context.req.param("id"), context.req.param("messageId")),
-  }));
+  })));
   app.put("/v1/characters/:id/work", async context => {
     const body = CharacterWorkRequestSchema.safeParse(await context.req.json().catch(() => null));
     if (!body.success) return context.json({ error: "Invalid character work settings" }, 400);
@@ -2374,10 +2745,11 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ ok: true, chatIds });
   });
   app.put("/v1/chats/:id/work", async context => {
-    const body = z.object({ enabled: z.boolean() }).safeParse(await context.req.json().catch(() => null));
+    const body = z.object({ enabled: z.boolean(), cancelUpgrade: z.boolean().optional() }).safeParse(await context.req.json().catch(() => null));
     if (!body.success) return context.json({ error: "enabled must be boolean" }, 400);
     const chatId = context.req.param("id");
     const wasHeld = isChatWorkHeld(db, chatId);
+    if (!body.data.enabled) checkWorkOff([chatId],body.data.cancelUpgrade === true);
     setChatWorkEnabled(db, chatId, body.data.enabled);
     markChatEngaged(db, chatId);
     if (body.data.enabled && wasHeld) { serverWorker.wake(); void embeddings.indexPending(chatId); }
@@ -2385,223 +2757,264 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.patch("/v1/chats/:id", async (context) => {
     const body = await context.req.json() as { profile?: unknown; includeUserMessages?: unknown; memoryLanguage?: unknown; backfill?: boolean; extractionReviewOverride?: unknown };
-    const chatId = context.req.param("id");
-    const previous = db.prepare("SELECT profile,include_user_messages,memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { profile: string; include_user_messages: number; memory_language: string; pending_memory_language: string | null } | undefined;
-    if (!previous) return context.json({ error: "Chat not found" }, 404);
-    if (body.includeUserMessages !== undefined && typeof body.includeUserMessages !== "boolean") return context.json({ error: "includeUserMessages must be boolean" }, 400);
-    if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
-    const profile = body.profile === undefined ? RpProfileSchema.parse(previous.profile) : RpProfileSchema.parse(body.profile);
-    const includeUserMessages = body.includeUserMessages === undefined ? previous.include_user_messages === 1 : body.includeUserMessages === true;
-    const memoryLanguage = body.memoryLanguage === undefined ? undefined : MemoryLanguageSchema.parse(body.memoryLanguage);
-    const shouldBackfill = body.backfill === true && body.profile !== undefined && previous.profile === "companion" && profile === "simulation";
-    if (body.profile === undefined && body.includeUserMessages === undefined && memoryLanguage === undefined) return context.json({ error: "No supported changes" }, 400);
-    db.transaction(() => {
-      markChatEngaged(db, chatId);
-      db.prepare("UPDATE chats SET profile=?,include_user_messages=?,updated_at=? WHERE id=?").run(profile, includeUserMessages ? 1 : 0, Date.now(), chatId);
-      if (memoryLanguage !== undefined) {
-        if (memoryLanguage === previous.memory_language) db.prepare("UPDATE chats SET pending_memory_language=NULL WHERE id=?").run(chatId);
-        else if (hasDerivedState(db, chatId)) db.prepare("UPDATE chats SET pending_memory_language=? WHERE id=?").run(memoryLanguage, chatId);
-        else db.prepare("UPDATE chats SET memory_language=?,pending_memory_language=NULL WHERE id=?").run(memoryLanguage, chatId);
-      }
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      const previous = db.prepare("SELECT profile,include_user_messages,memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { profile: string; include_user_messages: number; memory_language: string; pending_memory_language: string | null } | undefined;
+      if (!previous) return context.json({ error: "Chat not found" }, 404);
+      if (body.includeUserMessages !== undefined && typeof body.includeUserMessages !== "boolean") return context.json({ error: "includeUserMessages must be boolean" }, 400);
+      if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
+      const profile = body.profile === undefined ? RpProfileSchema.parse(previous.profile) : RpProfileSchema.parse(body.profile);
+      const includeUserMessages = body.includeUserMessages === undefined ? previous.include_user_messages === 1 : body.includeUserMessages === true;
+      const memoryLanguage = body.memoryLanguage === undefined ? undefined : MemoryLanguageSchema.parse(body.memoryLanguage);
+      const shouldBackfill = body.backfill === true && body.profile !== undefined && previous.profile === "companion" && profile === "simulation";
+      if (body.profile === undefined && body.includeUserMessages === undefined && memoryLanguage === undefined) return context.json({ error: "No supported changes" }, 400);
+      db.transaction(() => {
+        markChatEngaged(db, chatId);
+        db.prepare("UPDATE chats SET profile=?,include_user_messages=?,updated_at=? WHERE id=?").run(profile, includeUserMessages ? 1 : 0, Date.now(), chatId);
+        if (memoryLanguage !== undefined) {
+          if (memoryLanguage === previous.memory_language) db.prepare("UPDATE chats SET pending_memory_language=NULL WHERE id=?").run(chatId);
+          else if (hasDerivedState(db, chatId)) db.prepare("UPDATE chats SET pending_memory_language=? WHERE id=?").run(memoryLanguage, chatId);
+          else db.prepare("UPDATE chats SET memory_language=?,pending_memory_language=NULL WHERE id=?").run(memoryLanguage, chatId);
+        }
+        if (shouldBackfill) {
+          db.prepare("UPDATE messages SET extraction_state='pending' WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL").run(chatId);
+        }
+      })();
       if (shouldBackfill) {
-        db.prepare("UPDATE messages SET extraction_state='pending' WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL").run(chatId);
+        enqueueExtractionJobs(db, chatId, profile, true, includeUserMessages, 4, "current", body.extractionReviewOverride as boolean | undefined);
+        setTimeout(() => void embeddings.indexPending(chatId), 1_500);
       }
-    })();
-    if (shouldBackfill) {
-      enqueueExtractionJobs(db, chatId, profile, true, includeUserMessages, 4, "current", body.extractionReviewOverride as boolean | undefined);
-      setTimeout(() => void embeddings.indexPending(chatId), 1_500);
-    }
-    const languageState = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
-    return context.json({ ok: true, profile, includeUserMessages, memoryLanguage: languageState.memory_language, pendingMemoryLanguage: languageState.pending_memory_language, requiresLanguageReprocess: languageState.pending_memory_language !== null });
+      const languageState = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
+      return context.json({ ok: true, profile, includeUserMessages, memoryLanguage: languageState.memory_language, pendingMemoryLanguage: languageState.pending_memory_language, requiresLanguageReprocess: languageState.pending_memory_language !== null });
+    });
   });
   app.put("/v1/chats/:id/title", async (context) => {
     const body = await context.req.json() as { chatTitle?: unknown };
-    const chatTitle = typeof body.chatTitle === "string" ? body.chatTitle.trim().slice(0, 240) : "";
-    if (!chatTitle) return context.json({ error: "chatTitle is required" }, 400);
-    return syncChatTitle(db,context.req.param('id'),chatTitle) ? context.json({ ok: true, chatTitle }) : context.json({ error: "Chat not found" }, 404);
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatTitle = typeof body.chatTitle === "string" ? body.chatTitle.trim().slice(0, 240) : "";
+      if (!chatTitle) return context.json({ error: "chatTitle is required" }, 400);
+      return syncChatTitle(db,context.req.param('id'),chatTitle) ? context.json({ ok: true, chatTitle }) : context.json({ error: "Chat not found" }, 404);
+    });
   });
   app.post("/v1/chats/:id/memories", async (context) => {
     const chatId = context.req.param("id");
     const body = await context.req.json() as {
       title?: unknown; content?: unknown; storyTime?: unknown; participants?: unknown; landmarkKinds?: unknown;
     };
-    const content = typeof body.content === "string" ? body.content.trim() : "";
-    const title = typeof body.title === "string" && body.title.trim()
-      ? body.title.trim()
-      : content.replace(/\s+/g, " ").slice(0, 80);
-    const storyTime = typeof body.storyTime === "string" ? body.storyTime.trim() : "";
-    const parsedParticipants = MemoryParticipantsSchema.safeParse(body.participants);
-    const landmarks = Array.isArray(body.landmarkKinds) ? body.landmarkKinds : [];
-    if (!content || content.length > 20_000 || !title || title.length > 500) return context.json({ error: "Manual memory title or content is invalid" }, 400);
-    if (storyTime.length > 240) return context.json({ error: "storyTime must be a string up to 240 characters" }, 400);
-    if (!parsedParticipants.success) return context.json({ error: "participants must contain up to 16 non-empty unique names" }, 400);
-    const participants = parsedParticipants.data;
-    const parsedLandmarks = StoredLandmarkKindSchema.array().max(12).safeParse(landmarks);
-    if (!parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
-    if (!chat) return context.json({ error: "Chat not found" }, 404);
-    const id = randomUUID();
-    const timestamp = Date.now();
-    const memoryKey = `manual:${id}`;
-    db.prepare(`INSERT INTO memories(
+    return withChatWrite(db, context.req.param('id'), () => {
+      const content = typeof body.content === "string" ? body.content.trim() : "";
+      const title = typeof body.title === "string" && body.title.trim()
+        ? body.title.trim()
+        : content.replace(/\s+/g, " ").slice(0, 80);
+      const storyTime = typeof body.storyTime === "string" ? body.storyTime.trim() : "";
+      const parsedParticipants = MemoryParticipantsSchema.safeParse(body.participants);
+      const landmarks = Array.isArray(body.landmarkKinds) ? body.landmarkKinds : [];
+      if (!content || content.length > 20_000 || !title || title.length > 500) return context.json({ error: "Manual memory title or content is invalid" }, 400);
+      if (storyTime.length > 240) return context.json({ error: "storyTime must be a string up to 240 characters" }, 400);
+      if (!parsedParticipants.success) return context.json({ error: "participants must contain up to 16 non-empty unique names" }, 400);
+      const participants = parsedParticipants.data;
+      const parsedLandmarks = StoredLandmarkKindSchema.array().max(12).safeParse(landmarks);
+      if (!parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
+      const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
+      if (!chat) return context.json({ error: "Chat not found" }, 404);
+      const id = randomUUID();
+      const timestamp = Date.now();
+      const memoryKey = availableMemoryKey(`manual:${id}`,deletedMemoryKeys(db,chatId));
+      db.prepare(`INSERT INTO memories(
       id,chat_id,memory_key,type,title,content,participants_json,known_by_json,perspective,story_time,story_time_normalized,locations_json,
       landmark,landmark_kinds_json,evidence_json,salience,strength,retention_class,atom_access_version,source_batch_id,user_managed,
       created_revision,created_at,updated_at
     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1,?,?,?)`).run(
-      id, chatId, memoryKey, parsedLandmarks.data.length ? "relationship" : "episode", title, content,
-      JSON.stringify(participants), JSON.stringify(participants), null, storyTime || null, normalizeStoryTime(storyTime) ?? null, "[]",
-      parsedLandmarks.data.length ? 1 : 0, JSON.stringify(parsedLandmarks.data.map(clipLandmarkDisplayText)), "[]", .7, .7,
-      parsedLandmarks.data.length ? "durable" : "arc", 0, chat.revision, timestamp, timestamp,
-    );
-    refreshMemoryFts(db, id);
-    refreshMemoryParticipantCounts(db, chatId, id);
-    void embeddings.indexPending(chatId);
-    return context.json({ ok: true, id, memoryKey }, 201);
+        id, chatId, memoryKey, parsedLandmarks.data.length ? "relationship" : "episode", title, content,
+        JSON.stringify(participants), JSON.stringify(participants), null, storyTime || null, normalizeStoryTime(storyTime) ?? null, "[]",
+        parsedLandmarks.data.length ? 1 : 0, JSON.stringify(parsedLandmarks.data.map(clipLandmarkDisplayText)), "[]", .7, .7,
+        parsedLandmarks.data.length ? "durable" : "arc", 0, chat.revision, timestamp, timestamp,
+      );
+      refreshMemoryFts(db, id);
+      refreshMemoryParticipantCounts(db, chatId, id);
+      void embeddings.indexPending(chatId);
+      return context.json({ ok: true, id, memoryKey }, 201);
+    });
   });
-  for (const kind of ["detail", "dialogue"] as const) app.put(`/v1/chats/:id/memories/:memoryId/${kind === "detail" ? "details" : "dialogues"}/:detailId/access`, async (context) => {
+  for (const [kind, route] of [
+    ["detail", "/memories/:memoryId/details/:detailId/access"],
+    ["dialogue", "/memories/:memoryId/dialogues/:detailId/access"],
+    ["memory", "/memories/:detailId/access"],
+    ["promise", "/promises/:detailId/access"],
+    ["physical_milestone", "/physical-intimacy/:detailId/access"],
+  ] as const) app.put(`/v1/chats/:id${route}`, async (context) => {
     const chatId = context.req.param("id"), memoryId = context.req.param("memoryId"), detailId = context.req.param("detailId");
-    const body = z.object({ holders: z.array(z.string().trim().min(1)), everyone: z.boolean().default(false), bases: z.record(z.string().trim(), ItemAccessBasisSchema) }).safeParse(await context.req.json());
-    if (!body.success) return context.json({ error: "Provide character names and a valid knowledge basis for each holder", issues: body.error.issues }, 400);
-    const detail = db.prepare(`SELECT d.evidence_json FROM ${kind === "detail" ? "memory_details" : "memory_dialogues"} d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
-      WHERE d.chat_id=? AND d.memory_id=? AND d.id=? ${kind === "detail" ? "AND d.active=1" : ""}`).get(chatId, memoryId, detailId) as { evidence_json: string } | undefined;
-    if (!detail) return context.json({ error: "Memory atom not found in this chat and memory" }, 404);
-    const resolve = buildEntityIdentityResolver(db, chatId);
-    const names = new Set(listEntities(db, chatId).map(entity => entity.name));
-    const holders: string[] = [];
-    const bases = new Map<string, import("@rcm/shared").ItemAccessBasis>();
-    for (const name of body.data.everyone ? [] : body.data.holders) {
-      const identity = resolve(name);
-      if (identity.ambiguous || !names.has(identity.canonical)) return context.json({ error: `${identity.ambiguous ? "Ambiguous" : "Unknown"} character name: ${name}` }, 400);
-      const basis = body.data.bases[name];
-      if (!basis) return context.json({ error: `Missing knowledge basis: ${name}` }, 400);
-      if (bases.has(identity.canonical) && bases.get(identity.canonical) !== basis) return context.json({ error: `Conflicting knowledge bases: ${name}` }, 400);
-      bases.set(identity.canonical, basis);
-      if (!holders.includes(identity.canonical)) holders.push(identity.canonical);
-    }
-    if (body.data.everyone) { holders.length = 0; holders.push(EVERYONE_HOLDER); }
-    const previousAccess = memoryDetailAccess(db, chatId, detailId, kind);
-    const previousHolders = previousAccess.everyone ? [EVERYONE_HOLDER] : previousAccess.holders.map(holder => holder.name);
-    const accessChanged = previousHolders.length !== holders.length || previousHolders.some(holder => !holders.includes(holder));
-    db.transaction(() => {
-      const timestamp = Date.now();
-      db.prepare("UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?").run(timestamp, chatId);
-      const { revision } = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
-      if (!holders.length) replaceItemAccess(db, chatId, kind, detailId, [], revision, timestamp);
-      else {
-        db.prepare(`UPDATE item_access SET active=0 WHERE chat_id=? AND item_kind=? AND item_id=?
+    const body = z.object({ holders: z.array(z.string().trim().min(1)), everyone: z.boolean().default(false), bases: z.record(z.string().trim(), ItemAccessBasisSchema),
+      speaker: kind === "dialogue" ? z.string().trim().min(1).optional() : z.never().optional() }).safeParse(await context.req.json());
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body.success) return context.json({ error: "Provide character names and a valid knowledge basis for each holder", issues: body.error.issues }, 400);
+      const detail: { evidence_json: string; speaker?: string } | undefined = (kind === "detail" || kind === "dialogue")
+        ? db.prepare(`SELECT d.evidence_json${kind === "dialogue" ? ",d.speaker" : ""} FROM ${kind === "detail" ? "memory_details" : "memory_dialogues"} d JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
+        WHERE d.chat_id=? AND d.memory_id=? AND d.id=? ${kind === "detail" ? "AND d.active=1" : ""}`).get(chatId, memoryId, detailId) as { evidence_json: string; speaker?: string } | undefined
+        : kind === "promise"
+          ? db.prepare(`SELECT COALESCE((SELECT evidence_json FROM promise_events WHERE chat_id=p.chat_id AND promise_id=p.id ORDER BY created_revision DESC,created_at DESC LIMIT 1),
+          (SELECT evidence_json FROM memories WHERE chat_id=p.chat_id AND id=p.source_memory_id),'[]') AS evidence_json FROM promises p WHERE chat_id=? AND id=?`).get(chatId, detailId) as { evidence_json: string } | undefined
+          : db.prepare(`SELECT evidence_json FROM ${kind === "memory" ? "memories" : "physical_intimacy_milestones"} WHERE chat_id=? AND id=? AND active=1`).get(chatId, detailId) as { evidence_json: string } | undefined;
+      if (!detail) return context.json({ error: "Memory atom not found in this chat and memory" }, 404);
+      const resolve = buildEntityIdentityResolver(db, chatId);
+      const names = new Set(listEntities(db, chatId).filter(entity => entity.type === "person" || entity.type === "character").map(entity => entity.name));
+      const holders: string[] = [];
+      const bases = new Map<string, import("@rcm/shared").ItemAccessBasis>();
+      for (const name of body.data.everyone ? [] : body.data.holders) {
+        const identity = resolve(name);
+        if (identity.ambiguous || !names.has(identity.canonical)) return context.json({ error: `${identity.ambiguous ? "Ambiguous" : "Unknown"} character name: ${name}` }, 400);
+        const basis = body.data.bases[name];
+        if (!basis) return context.json({ error: `Missing knowledge basis: ${name}` }, 400);
+        if (bases.has(identity.canonical) && bases.get(identity.canonical) !== basis) return context.json({ error: `Conflicting knowledge bases: ${name}` }, 400);
+        bases.set(identity.canonical, basis);
+        if (!holders.includes(identity.canonical)) holders.push(identity.canonical);
+      }
+      if (body.data.everyone) { holders.length = 0; holders.push(EVERYONE_HOLDER); }
+      const previousAccess = memoryDetailAccess(db, chatId, detailId, kind);
+      const previousHolders = previousAccess.everyone ? [EVERYONE_HOLDER] : previousAccess.holders.map(holder => holder.name);
+      const accessChanged = previousHolders.length !== holders.length || previousHolders.some(holder => !holders.includes(holder));
+      const speaker = kind === "dialogue" ? body.data.speaker : undefined;
+      const speakerChanged = speaker !== undefined && speaker !== detail.speaker;
+      db.transaction(() => {
+        const timestamp = Date.now();
+        db.prepare("UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?").run(timestamp, chatId);
+        const { revision } = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
+        if (!holders.length) replaceItemAccess(db, chatId, kind, detailId, [], revision, timestamp);
+        else {
+          db.prepare(`UPDATE item_access SET active=0 WHERE chat_id=? AND item_kind=? AND item_id=?
           AND holder NOT IN (SELECT value FROM json_each(?))`).run(chatId, kind, detailId, JSON.stringify(holders));
-        const insert = db.prepare(`INSERT OR IGNORE INTO item_access(id,chat_id,item_kind,item_id,holder,basis,evidence_json,confidence,active,source_revision,created_at)
+          const insert = db.prepare(`INSERT OR IGNORE INTO item_access(id,chat_id,item_kind,item_id,holder,basis,evidence_json,confidence,active,source_revision,created_at)
           VALUES(?,?,?,?,?,?,?,1,1,?,?)`);
-        for (const holder of holders) {
-          // Correct attribution without replacing existing evidence; new holders cite the atom.
-          const basis = bases.get(holder) ?? "witnessed";
-          insert.run(randomUUID(), chatId, kind, detailId, holder, basis, detail.evidence_json, revision, timestamp);
-          db.prepare("UPDATE item_access SET active=1,basis=? WHERE chat_id=? AND item_kind=? AND item_id=? AND holder=?").run(basis, chatId, kind, detailId, holder);
+          for (const holder of holders) {
+            // Correct attribution without replacing existing evidence; new holders cite the atom.
+            const basis = bases.get(holder) ?? "witnessed";
+            insert.run(randomUUID(), chatId, kind, detailId, holder, basis, detail.evidence_json, revision, timestamp);
+            db.prepare("UPDATE item_access SET active=1,basis=? WHERE chat_id=? AND item_kind=? AND item_id=? AND holder=?").run(basis, chatId, kind, detailId, holder);
+          }
         }
-      }
-      const edits = readDetailAccessEdits(db, chatId); edits.set(detailId, holders); writeDetailAccessEdits(db, chatId, edits);
-      if (kind === "detail") {
-        syncDetailKnownBy(db, chatId, detailId);
-        db.prepare("UPDATE memory_details SET updated_at=? WHERE chat_id=? AND id=?").run(timestamp, chatId, detailId);
-      }
-      // Story atoms carry holder scope, not the acquisition basis.
-      if (accessChanged) invalidateStorySupports(db, chatId, new Set([`${kind}:${detailId}`]));
-    })();
-    // Contextual detail group fingerprints include access: regroup through the existing indexer.
-    if (accessChanged) void embeddings.indexPending(chatId);
-    const access = memoryDetailAccess(db, chatId, detailId, kind);
-    return context.json({ ok: true, access, knownBy: access.holders.map(holder => holder.name) });
+        const edits = readDetailAccessEdits(db, chatId); edits.set(detailId, holders); writeDetailAccessEdits(db, chatId, edits);
+        if (kind === "memory") db.prepare("UPDATE memories SET known_by_json=?,updated_at=? WHERE chat_id=? AND id=?")
+          .run(JSON.stringify(holders), timestamp, chatId, detailId);
+        if (kind === "detail") {
+          syncDetailKnownBy(db, chatId, detailId);
+          db.prepare("UPDATE memory_details SET updated_at=? WHERE chat_id=? AND id=?").run(timestamp, chatId, detailId);
+        }
+        if (speakerChanged) {
+          db.prepare("UPDATE memory_dialogues SET speaker=? WHERE chat_id=? AND id=?").run(speaker, chatId, detailId);
+          db.prepare("UPDATE memories SET updated_at=? WHERE chat_id=? AND id=?").run(timestamp, chatId, memoryId);
+          refreshMemoryFts(db, memoryId!);
+          renewMemoryEpoch(db, chatId);
+        }
+        // Story atoms carry holder scope, not the acquisition basis.
+        if (accessChanged || speakerChanged) invalidateStorySupports(db, chatId, new Set([`${kind}:${detailId}`]));
+      })();
+      // Contextual detail group fingerprints include access: regroup through the existing indexer.
+      if (accessChanged || speakerChanged) void embeddings.indexPending(chatId);
+      const access = memoryDetailAccess(db, chatId, detailId, kind);
+      return context.json({ ok: true, access, knownBy: access.holders.map(holder => holder.name),
+        ...(kind === "dialogue" ? { speaker: speaker ?? detail.speaker } : {}) });
+    });
   });
   app.patch("/v1/chats/:id/memories/:memoryId", async (context) => {
     const body = await context.req.json() as Record<string, unknown>;
-    const allowed = ["title", "content", "salience", "strength", "pinned", "alwaysInject", "active", "storyTime", "locations", "landmark", "landmarkKinds", "participants"] as const;
-    let updates = allowed.filter((key) => body[key] !== undefined);
-    const bookmarkUpdate = body.bookmarked !== undefined;
-    if (updates.length === 0 && !bookmarkUpdate) return context.json({ error: "No supported changes" }, 400);
-    if (bookmarkUpdate && typeof body.bookmarked !== "boolean") return context.json({ error: "bookmarked must be boolean" }, 400);
-    if (body.alwaysInject!==undefined && typeof body.alwaysInject!=='boolean') return context.json({error:'alwaysInject must be boolean'},400);
-    if (["salience", "strength"].some((key) => body[key] !== undefined && (!Number.isFinite(Number(body[key])) || Number(body[key]) < 0 || Number(body[key]) > 1))) {
-      return context.json({ error: "salience and strength must be finite numbers from 0 to 1" }, 400);
-    }
-    if (body.storyTime !== undefined && body.storyTime !== null && (typeof body.storyTime !== "string" || body.storyTime.length > 240)) {
-      return context.json({ error: "storyTime must be a string up to 240 characters" }, 400);
-    }
-    if (body.locations !== undefined && (!Array.isArray(body.locations) || body.locations.length > 12 || body.locations.some((value) => typeof value !== "string" || !value.trim() || value.length > 240))) {
-      return context.json({ error: "locations must be an array of up to 12 non-empty strings" }, 400);
-    }
-    const parsedParticipants = body.participants === undefined ? undefined : MemoryParticipantsSchema.safeParse(body.participants);
-    if (parsedParticipants && !parsedParticipants.success) {
-      return context.json({ error: "participants must contain up to 16 non-empty unique names" }, 400);
-    }
-    const participants = parsedParticipants?.data;
-    const parsedLandmarks = body.landmarkKinds === undefined ? undefined : StoredLandmarkKindSchema.array().max(12).safeParse(body.landmarkKinds);
-    if (parsedLandmarks && !parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
-    const columns: Record<(typeof allowed)[number], string> = { title: "title", content: "content", salience: "salience", strength: "strength", pinned: "pinned", alwaysInject:'always_inject', active: "active", storyTime: "story_time", locations: "locations_json", landmark: "landmark", landmarkKinds: "landmark_kinds_json", participants: "participants_json" };
-    let values = updates.map((key) => key === "pinned" || key === 'alwaysInject' || key === "active" || key === "landmark"
-      ? (body[key] ? 1 : 0)
-      : key === "participants" ? JSON.stringify(participants) : key === "locations" ? JSON.stringify(body[key])
-        : key === "landmarkKinds" ? JSON.stringify((parsedLandmarks?.data ?? []).map(clipLandmarkDisplayText))
-        : key === "storyTime" ? (body.storyTime || null)
-          : key === "salience" || key === "strength" ? normalizeUnitScore(Number(body[key])) : body[key]);
-    const chatId = context.req.param("id");
-    const memoryId = context.req.param("memoryId");
-    const result = db.transaction(() => {
-      const previous = db.prepare("SELECT * FROM memories WHERE id=? AND chat_id=?").get(memoryId, chatId) as Record<string, any> | undefined;
-      if (!previous) return 0;
-      if (body.alwaysInject===true && !previous.always_inject
-        && (db.prepare('SELECT COUNT(*) n FROM memories WHERE chat_id=? AND always_inject=1').get(chatId) as {n:number}).n>=5) return 2;
-      const changed = updates.map((key,index) => ({key,value:values[index]})).filter(({key,value}) => {
-        const stored = previous[columns[key]];
-        return value !== (columns[key].endsWith('_json') ? JSON.stringify(JSON.parse(stored)) : stored);
-      });
-      updates = changed.map(item => item.key);
-      values = changed.map(item => item.value);
-      if (updates.length > 0) {
-        const normalizedUpdate = updates.includes("storyTime") ? ",story_time_normalized=?" : "";
-        db.prepare(`UPDATE memories SET ${updates.map((key) => `${columns[key]}=?`).join(",")}${normalizedUpdate},user_managed=1,updated_at=? WHERE id=? AND chat_id=?`).run(
-          ...values, ...(updates.includes("storyTime") ? [normalizeStoryTime(body.storyTime) ?? null] : []), Date.now(), memoryId, chatId,
-        );
-        if (participants !== undefined) {
-          const memory = db.prepare("SELECT memory_key FROM memories WHERE id=?").get(memoryId) as { memory_key: string };
-          if (memory.memory_key.startsWith("manual:")) db.prepare("UPDATE memories SET known_by_json=? WHERE id=?").run(JSON.stringify(participants), memoryId);
-          refreshMemoryParticipantCounts(db, chatId, memoryId);
-        }
-        if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || updates.includes("participants")) refreshMemoryFts(db, memoryId);
-        // Parent story atoms use title/content; participant tags and display metadata
-        // do not grant character knowledge. Disabling the parent revokes its children.
-        if (previous.active && body.active === false) invalidateStorySupports(db,chatId,storyMemorySupportIds(db,chatId,[memoryId]));
-        else if (previous.active && (["title", "content"] as const).some(key => body[key] !== undefined && body[key] !== previous[key])) {
-          invalidateStorySupports(db,chatId,new Set([`memory:${memoryId}`]));
-        }
+    return withChatWrite(db, context.req.param('id'), () => {
+      const allowed = ["title", "content", "salience", "strength", "pinned", "alwaysInject", "active", "storyTime", "locations", "landmark", "landmarkKinds", "participants"] as const;
+      let updates = allowed.filter((key) => body[key] !== undefined);
+      const bookmarkUpdate = body.bookmarked !== undefined;
+      if (updates.length === 0 && !bookmarkUpdate) return context.json({ error: "No supported changes" }, 400);
+      if (bookmarkUpdate && typeof body.bookmarked !== "boolean") return context.json({ error: "bookmarked must be boolean" }, 400);
+      if (body.alwaysInject!==undefined && typeof body.alwaysInject!=='boolean') return context.json({error:'alwaysInject must be boolean'},400);
+      if (["salience", "strength"].some((key) => body[key] !== undefined && (!Number.isFinite(Number(body[key])) || Number(body[key]) < 0 || Number(body[key]) > 1))) {
+        return context.json({ error: "salience and strength must be finite numbers from 0 to 1" }, 400);
       }
-      if (bookmarkUpdate && readMemoryBookmarks(db,chatId).has(memoryId) !== body.bookmarked) setMemoryBookmark(db, chatId, memoryId, body.bookmarked === true);
-      return 1;
-    })();
-    if (result === 1 && updates.length > 0) {
-      if (body.active === false) embeddings.removeMemory(memoryId);
-      else if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || body.active === true) void embeddings.indexPending(chatId);
-    }
-    if (result===2) return context.json({error:'항상 주입할 기억은 채팅마다 5개까지 선택할 수 있어요',code:'ALWAYS_INJECT_LIMIT',limit:5},409);
-    return result === 1
-      ? context.json({ ok: true,alwaysInject:alwaysInjectEstimate(db,chatId) })
-      : context.json({ error: "Memory not found" }, 404);
+      if (body.storyTime !== undefined && body.storyTime !== null && (typeof body.storyTime !== "string" || body.storyTime.length > 240)) {
+        return context.json({ error: "storyTime must be a string up to 240 characters" }, 400);
+      }
+      if (body.locations !== undefined && (!Array.isArray(body.locations) || body.locations.length > 12 || body.locations.some((value) => typeof value !== "string" || !value.trim() || value.length > 240))) {
+        return context.json({ error: "locations must be an array of up to 12 non-empty strings" }, 400);
+      }
+      const parsedParticipants = body.participants === undefined ? undefined : MemoryParticipantsSchema.safeParse(body.participants);
+      if (parsedParticipants && !parsedParticipants.success) {
+        return context.json({ error: "participants must contain up to 16 non-empty unique names" }, 400);
+      }
+      const participants = parsedParticipants?.data;
+      const parsedLandmarks = body.landmarkKinds === undefined ? undefined : StoredLandmarkKindSchema.array().max(12).safeParse(body.landmarkKinds);
+      if (parsedLandmarks && !parsedLandmarks.success) return context.json({ error: "Invalid landmarkKinds", issues: parsedLandmarks.error.issues }, 400);
+      const columns: Record<(typeof allowed)[number], string> = { title: "title", content: "content", salience: "salience", strength: "strength", pinned: "pinned", alwaysInject:'always_inject', active: "active", storyTime: "story_time", locations: "locations_json", landmark: "landmark", landmarkKinds: "landmark_kinds_json", participants: "participants_json" };
+      let values = updates.map((key) => key === "pinned" || key === 'alwaysInject' || key === "active" || key === "landmark"
+        ? (body[key] ? 1 : 0)
+        : key === "participants" ? JSON.stringify(participants) : key === "locations" ? JSON.stringify(body[key])
+          : key === "landmarkKinds" ? JSON.stringify((parsedLandmarks?.data ?? []).map(clipLandmarkDisplayText))
+          : key === "storyTime" ? (body.storyTime || null)
+            : key === "salience" || key === "strength" ? normalizeUnitScore(Number(body[key])) : body[key]);
+      const chatId = context.req.param("id");
+      const memoryId = context.req.param("memoryId");
+      const result = db.transaction(() => {
+        const previous = db.prepare("SELECT * FROM memories WHERE id=? AND chat_id=?").get(memoryId, chatId) as Record<string, any> | undefined;
+        if (!previous) return 0;
+        if (body.alwaysInject===true && !previous.always_inject
+          && (db.prepare('SELECT COUNT(*) n FROM memories WHERE chat_id=? AND always_inject=1').get(chatId) as {n:number}).n>=5) return 2;
+        const changed = updates.map((key,index) => ({key,value:values[index]})).filter(({key,value}) => {
+          const stored = previous[columns[key]];
+          return value !== (columns[key].endsWith('_json') ? JSON.stringify(JSON.parse(stored)) : stored);
+        });
+        updates = changed.map(item => item.key);
+        values = changed.map(item => item.value);
+        if (updates.length > 0) {
+          const normalizedUpdate = updates.includes("storyTime") ? ",story_time_normalized=?" : "";
+          const authored = updates.includes('content') || updates.includes('active') && body.active === false;
+          db.prepare(`UPDATE memories SET ${updates.map((key) => `${columns[key]}=?`).join(",")}${normalizedUpdate}${authored?',user_managed=1':''},updated_at=? WHERE id=? AND chat_id=?`).run(
+            ...values, ...(updates.includes("storyTime") ? [normalizeStoryTime(body.storyTime) ?? null] : []), Date.now(), memoryId, chatId,
+          );
+          rememberMemoryPreferenceFields(db,chatId,memoryId,[...updates.map(key=>columns[key]),...(updates.includes('storyTime')?['story_time_normalized']:[])]);
+          if (participants !== undefined) {
+            const memory = db.prepare("SELECT memory_key FROM memories WHERE id=?").get(memoryId) as { memory_key: string };
+            if (memory.memory_key.startsWith("manual:") && !readDetailAccessEdits(db,chatId).has(memoryId)) db.prepare("UPDATE memories SET known_by_json=? WHERE id=?").run(JSON.stringify(participants), memoryId);
+            refreshMemoryParticipantCounts(db, chatId, memoryId);
+          }
+          if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || updates.includes("participants")) refreshMemoryFts(db, memoryId);
+          // Parent story atoms use title/content; participant tags and display metadata
+          // do not grant character knowledge. Disabling the parent revokes its children.
+          if (previous.active && body.active === false) invalidateStorySupports(db,chatId,storyMemorySupportIds(db,chatId,[memoryId]));
+          else if (previous.active && (["title", "content"] as const).some(key => body[key] !== undefined && body[key] !== previous[key])) {
+            invalidateStorySupports(db,chatId,new Set([`memory:${memoryId}`]));
+          }
+        }
+        if (bookmarkUpdate && readMemoryBookmarks(db,chatId).has(memoryId) !== body.bookmarked) setMemoryBookmark(db, chatId, memoryId, body.bookmarked === true);
+        return 1;
+      })();
+      if (result === 1 && updates.length > 0) {
+        if (body.active === false) embeddings.removeMemory(memoryId);
+        else if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || body.active === true) void embeddings.indexPending(chatId);
+      }
+      if (result===2) return context.json({error:'항상 주입할 기억은 채팅마다 5개까지 선택할 수 있어요',code:'ALWAYS_INJECT_LIMIT',limit:5},409);
+      return result === 1
+        ? context.json({ ok: true,alwaysInject:alwaysInjectEstimate(db,chatId) })
+        : context.json({ error: "Memory not found" }, 404);
+    });
   });
   app.delete("/v1/chats/:id/memories/:memoryId", (context) => {
-    const chatId = context.req.param("id");
-    const memoryId = context.req.param("memoryId");
-    const result = db.transaction(() => {
-      const supports=storyMemorySupportIds(db,chatId,[memoryId]);
-      db.prepare("DELETE FROM memory_fts WHERE memory_id=? AND chat_id=?").run(memoryId, chatId);
-      const deleted = db.prepare("DELETE FROM memories WHERE id=? AND chat_id=?").run(memoryId, chatId).changes;
-      if (deleted === 1) {
-        pruneDetailAccessEdits(db, chatId);
-        setMemoryBookmark(db, chatId, memoryId, false);
-        invalidateStorySupports(db,chatId,supports);
-      }
-      return deleted;
-    })();
-    if (result === 1) embeddings.removeMemory(memoryId);
-    return context.json({ ok: result === 1 });
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      const memoryId = context.req.param("memoryId");
+      const result = db.transaction(() => {
+        rememberMemoryDeletion(db,chatId,memoryId);
+        const userOnlyRetry = !!db.prepare(`WITH ${userOnlyRetryMemoriesSql()}
+          SELECT 1 FROM user_only_retry_memories WHERE id=?`).get(chatId,memoryId);
+        const supports=(userOnlyRetry ? storyMemoryCascadeSupportIds : storyMemorySupportIds)(db,chatId,[memoryId]);
+        db.prepare("DELETE FROM memory_fts WHERE memory_id=? AND chat_id=?").run(memoryId, chatId);
+        const deleted = db.prepare("DELETE FROM memories WHERE id=? AND chat_id=?").run(memoryId, chatId).changes;
+        if (deleted === 1) {
+          pruneDetailAccessEdits(db, chatId);
+          setMemoryBookmark(db, chatId, memoryId, false);
+          if (userOnlyRetry) detachRetryStorySupports(db,chatId,supports);
+          else invalidateStorySupports(db,chatId,supports);
+        }
+        return deleted;
+      })();
+      if (result === 1) embeddings.removeMemory(memoryId);
+      return context.json({ ok: result === 1 });
+    });
   });
   function readDashboardRelationships(chatId: string) {
     const events = (db.prepare(`SELECT id,from_entity AS "from",to_entity AS "to",changes_json AS changes,reason,evidence_json AS evidence,
@@ -2618,97 +3031,106 @@ export function createApp(dependencies: Dependencies): Hono {
       'milestone' AS status,p.source_start_ordinal AS sourceOrdinal,p.created_revision AS createdRevision
       FROM physical_intimacy_milestones p LEFT JOIN memories m ON m.id=p.source_memory_id WHERE p.chat_id=? AND p.active=1
       ORDER BY COALESCE(p.source_start_ordinal,2147483647),p.created_at,p.milestone_key`).all(context.req.param("id")) as Array<Record<string, any>>;
-    return context.json({ items: items.map((item) => ({ ...item, autoInject: item.autoInject === 1, manualOverride: item.manualOverride === 1 })) });
+    return context.json({ items: items.map((item) => ({ ...item, autoInject: item.autoInject === 1, manualOverride: item.manualOverride === 1, access: memoryDetailAccess(db, context.req.param("id"), item.id, "physical_milestone") })) });
   });
   app.post("/v1/chats/:id/physical-intimacy", async (context) => {
     const chatId = context.req.param("id");
     const body = await context.req.json() as { participantA?: string; participantB?: string; act?: string; customLabel?: string; initiator?: string; interactionContext?: string; circumstance?: string; sourceMessageId?: string; autoInject?: boolean };
-    const participantA = body.participantA?.trim() ?? "";
-    const participantB = body.participantB?.trim() ?? "";
-    const act = body.act?.trim() ?? "";
-    const customLabel = body.customLabel?.trim() || null;
-    const allowedActs = new Set(["hand_holding", "embrace", "cuddling", "forehead_kiss", "cheek_kiss", "hand_kiss", "lip_kiss", "deep_kiss", "sexual_touch", "manual_sex", "oral_sex", "vaginal_sex", "anal_sex", "other"]);
-    if (!participantA || !participantB || participantA.localeCompare(participantB, undefined, { sensitivity: "base" }) === 0) return context.json({ error: "서로 다른 참여자 두 명을 선택하세요." }, 400);
-    if (!allowedActs.has(act) || (act === "other" && !customLabel)) return context.json({ error: "스킨십 종류를 확인하세요." }, 400);
-    const contextValue = ["mutual", "initiated", "coerced", "nonconsensual", "ambiguous"].includes(body.interactionContext ?? "") ? body.interactionContext! : "ambiguous";
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
-    if (!chat) return context.json({ error: "Chat not found" }, 404);
-    const source = body.sourceMessageId
-      ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
-      : undefined;
-    if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했습니다." }, 400);
-    const ordinal = source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number | null }).ordinal;
-    const revision = chat.revision + 1;
-    const pair = [participantA, participantB].sort((left, right) => left.localeCompare(right));
-    const inserted: string[] = [];
-    db.transaction(() => {
-      for (const milestoneKey of intimacyMilestoneKeys(act)) {
-        const existing = db.prepare("SELECT id,active FROM physical_intimacy_milestones WHERE chat_id=? AND participant_a=? AND participant_b=? AND milestone_key=?").get(chatId, pair[0], pair[1], milestoneKey) as { id: string; active: number } | undefined;
-        if (existing?.active === 1) continue;
-        const id = existing?.id ?? randomUUID();
-        db.prepare(`INSERT INTO physical_intimacy_milestones(id,chat_id,participant_a,participant_b,milestone_key,act,custom_label,initiator,interaction_context,circumstance,evidence_json,source_memory_id,source_start_ordinal,auto_inject,manual_override,deleted_by_user,active,created_revision,created_at)
+    return withChatWrite(db, context.req.param('id'), () => {
+      const participantA = body.participantA?.trim() ?? "";
+      const participantB = body.participantB?.trim() ?? "";
+      const act = body.act?.trim() ?? "";
+      const customLabel = body.customLabel?.trim() || null;
+      const allowedActs = new Set(["hand_holding", "embrace", "cuddling", "forehead_kiss", "cheek_kiss", "hand_kiss", "lip_kiss", "deep_kiss", "sexual_touch", "manual_sex", "oral_sex", "vaginal_sex", "anal_sex", "other"]);
+      if (!participantA || !participantB || participantA.localeCompare(participantB, undefined, { sensitivity: "base" }) === 0) return context.json({ error: "서로 다른 참여자 두 명을 선택해 주세요." }, 400);
+      if (!allowedActs.has(act) || (act === "other" && !customLabel)) return context.json({ error: "스킨십 종류를 확인해 주세요." }, 400);
+      const contextValue = ["mutual", "initiated", "coerced", "nonconsensual", "ambiguous"].includes(body.interactionContext ?? "") ? body.interactionContext! : "ambiguous";
+      const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
+      if (!chat) return context.json({ error: "Chat not found" }, 404);
+      const source = body.sourceMessageId
+        ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
+        : undefined;
+      if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했어요." }, 400);
+      const ordinal = source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number | null }).ordinal;
+      const revision = chat.revision + 1;
+      const pair = [participantA, participantB].sort((left, right) => left.localeCompare(right));
+      const inserted: string[] = [];
+      db.transaction(() => {
+        for (const milestoneKey of intimacyMilestoneKeys(act)) {
+          const existing = db.prepare("SELECT id,active FROM physical_intimacy_milestones WHERE chat_id=? AND participant_a=? AND participant_b=? AND milestone_key=?").get(chatId, pair[0], pair[1], milestoneKey) as { id: string; active: number } | undefined;
+          if (existing?.active === 1) continue;
+          const id = existing?.id ?? randomUUID();
+          db.prepare(`INSERT INTO physical_intimacy_milestones(id,chat_id,participant_a,participant_b,milestone_key,act,custom_label,initiator,interaction_context,circumstance,evidence_json,source_memory_id,source_start_ordinal,auto_inject,manual_override,deleted_by_user,active,created_revision,created_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,1,?,?) ON CONFLICT(chat_id,participant_a,participant_b,milestone_key) DO UPDATE SET
             act=excluded.act,custom_label=excluded.custom_label,initiator=excluded.initiator,interaction_context=excluded.interaction_context,
             circumstance=excluded.circumstance,evidence_json=excluded.evidence_json,source_start_ordinal=excluded.source_start_ordinal,auto_inject=excluded.auto_inject,
             manual_override=1,deleted_by_user=0,active=1,
             created_revision=excluded.created_revision,created_at=excluded.created_at`).run(id, chatId, pair[0], pair[1], milestoneKey, act, customLabel,
-          body.initiator?.trim() || null, contextValue, body.circumstance?.trim() || null, JSON.stringify(source ? [{ messageId: source.message_id }] : []), null, ordinal, body.autoInject === false ? 0 : 1, revision, Date.now());
-        inserted.push(id);
-      }
-      db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
-    })();
-    return inserted.length ? context.json({ ok: true, id: inserted[0], inserted }) : context.json({ error: "해당 최초 마일스톤이 이미 기록되어 있습니다.", code: "DUPLICATE_LEDGER_ITEM" }, 409);
+            body.initiator?.trim() || null, contextValue, body.circumstance?.trim() || null, JSON.stringify(source ? [{ messageId: source.message_id }] : []), null, ordinal, body.autoInject === false ? 0 : 1, revision, Date.now());
+          replaceItemAccess(db, chatId, "physical_milestone", id, pair.map(holder => ({ holder, basis: "experienced",
+            evidence: source ? [{ messageId: source.message_id }] : [], confidence: 1 })), revision, Date.now());
+          inserted.push(id);
+        }
+        db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
+      })();
+      return inserted.length ? context.json({ ok: true, id: inserted[0], inserted }) : context.json({ error: "해당 최초 마일스톤이 이미 기록되어 있어요.", code: "DUPLICATE_LEDGER_ITEM" }, 409);
+    });
   });
   app.patch("/v1/chats/:id/physical-intimacy/:itemId", async (context) => {
     const chatId = context.req.param("id");
     const itemId = context.req.param("itemId");
     const current = db.prepare("SELECT * FROM physical_intimacy_milestones WHERE id=? AND chat_id=? AND active=1").get(itemId, chatId) as any;
-    if (!current) return context.json({ error: "기록을 찾지 못했습니다." }, 404);
+    if (!current) return context.json({ error: "기록을 찾지 못했어요." }, 404);
     const body = await context.req.json() as { participantA?: string; participantB?: string; act?: string; customLabel?: string; initiator?: string; interactionContext?: string; circumstance?: string; sourceMessageId?: string; autoInject?: boolean };
-    const participantA = body.participantA?.trim() || current.participant_a;
-    const participantB = body.participantB?.trim() || current.participant_b;
-    const act = body.act?.trim() || current.act;
-    const customLabel = Object.hasOwn(body, "customLabel") ? body.customLabel?.trim() || null : current.custom_label;
-    if (participantA.localeCompare(participantB, undefined, { sensitivity: "base" }) === 0 || (act === "other" && !customLabel)) return context.json({ error: "입력값을 확인하세요." }, 400);
-    if (!intimacyMilestoneKeys(act).includes(current.milestone_key)) return context.json({ error: "이 실제 행위는 현재 최초 마일스톤 종류와 맞지 않습니다. 기존 행을 삭제하고 새 최초 행위로 추가하세요." }, 400);
-    const sourceWasEdited = Object.hasOwn(body, "sourceMessageId");
-    const source = body.sourceMessageId
-      ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
-      : undefined;
-    if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했습니다." }, 400);
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
-    const revision = chat.revision + 1;
-    const ordinal = sourceWasEdited
-      ? source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=?").get(chatId) as { ordinal: number | null }).ordinal
-      : current.source_start_ordinal;
-    const contextValue = ["mutual", "initiated", "coerced", "nonconsensual", "ambiguous"].includes(body.interactionContext ?? "") ? body.interactionContext! : current.interaction_context;
-    const pair = [participantA, participantB].sort((left, right) => left.localeCompare(right));
-    db.transaction(() => {
-      const semanticEdit = ["participantA", "participantB", "act", "customLabel", "initiator", "interactionContext", "circumstance", "sourceMessageId"].some((key) => Object.hasOwn(body, key));
-      db.prepare(`UPDATE physical_intimacy_milestones SET participant_a=?,participant_b=?,act=?,custom_label=?,initiator=?,interaction_context=?,circumstance=?,
+    return withChatWrite(db, context.req.param('id'), () => {
+      const participantA = body.participantA?.trim() || current.participant_a;
+      const participantB = body.participantB?.trim() || current.participant_b;
+      const act = body.act?.trim() || current.act;
+      const customLabel = Object.hasOwn(body, "customLabel") ? body.customLabel?.trim() || null : current.custom_label;
+      if (participantA.localeCompare(participantB, undefined, { sensitivity: "base" }) === 0 || (act === "other" && !customLabel)) return context.json({ error: "입력값을 확인해 주세요." }, 400);
+      if (!intimacyMilestoneKeys(act).includes(current.milestone_key)) return context.json({ error: "이 실제 행위는 현재 최초 마일스톤 종류와 맞지 않아요. 기존 행을 삭제하고 새 최초 행위로 추가해 주세요." }, 400);
+      const sourceWasEdited = Object.hasOwn(body, "sourceMessageId");
+      const source = body.sourceMessageId
+        ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined
+        : undefined;
+      if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했어요." }, 400);
+      const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
+      const revision = chat.revision + 1;
+      const ordinal = sourceWasEdited
+        ? source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=?").get(chatId) as { ordinal: number | null }).ordinal
+        : current.source_start_ordinal;
+      const contextValue = ["mutual", "initiated", "coerced", "nonconsensual", "ambiguous"].includes(body.interactionContext ?? "") ? body.interactionContext! : current.interaction_context;
+      const pair = [participantA, participantB].sort((left, right) => left.localeCompare(right));
+      db.transaction(() => {
+        const semanticEdit = ["participantA", "participantB", "act", "customLabel", "initiator", "interactionContext", "circumstance", "sourceMessageId"].some((key) => Object.hasOwn(body, key));
+        db.prepare(`UPDATE physical_intimacy_milestones SET participant_a=?,participant_b=?,act=?,custom_label=?,initiator=?,interaction_context=?,circumstance=?,
         evidence_json=?,source_start_ordinal=?,auto_inject=?,manual_override=CASE WHEN ? THEN 1 ELSE manual_override END,deleted_by_user=0,created_revision=? WHERE id=?`).run(pair[0], pair[1], act, customLabel,
-        Object.hasOwn(body, "initiator") ? body.initiator?.trim() || null : current.initiator,
-        contextValue, Object.hasOwn(body, "circumstance") ? body.circumstance?.trim() || null : current.circumstance,
-        sourceWasEdited ? JSON.stringify(source ? [{ messageId: source.message_id }] : []) : current.evidence_json,
-        ordinal, body.autoInject === undefined ? current.auto_inject : body.autoInject ? 1 : 0, semanticEdit ? 1 : 0, revision, itemId);
-      db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
-    })();
-    if (current.source_memory_id) { refreshMemoryFts(db, current.source_memory_id); void embeddings.indexPending(chatId); }
-    return context.json({ ok: true, id: itemId });
+          Object.hasOwn(body, "initiator") ? body.initiator?.trim() || null : current.initiator,
+          contextValue, Object.hasOwn(body, "circumstance") ? body.circumstance?.trim() || null : current.circumstance,
+          sourceWasEdited ? JSON.stringify(source ? [{ messageId: source.message_id }] : []) : current.evidence_json,
+          ordinal, body.autoInject === undefined ? current.auto_inject : body.autoInject ? 1 : 0, semanticEdit ? 1 : 0, revision, itemId);
+        db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
+      })();
+      if (current.source_memory_id) { refreshMemoryFts(db, current.source_memory_id); void embeddings.indexPending(chatId); }
+      return context.json({ ok: true, id: itemId });
+    });
   });
   app.delete("/v1/chats/:id/physical-intimacy/:itemId", (context) => {
-    const chatId = context.req.param("id");
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
-    if (!chat) return context.json({ error: "Chat not found" }, 404);
-    const current = db.prepare("SELECT source_memory_id FROM physical_intimacy_milestones WHERE id=? AND chat_id=? AND active=1").get(context.req.param("itemId"), chatId) as { source_memory_id: string | null } | undefined;
-    const revision = chat.revision + 1;
-    const changed = db.transaction(() => {
-      const result = db.prepare("UPDATE physical_intimacy_milestones SET active=0,manual_override=1,deleted_by_user=1,created_revision=? WHERE id=? AND chat_id=? AND active=1").run(revision, context.req.param("itemId"), chatId).changes;
-      if (result) db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
-      return result;
-    })();
-    if (changed && current?.source_memory_id) { refreshMemoryFts(db, current.source_memory_id); void embeddings.indexPending(chatId); }
-    return changed ? context.json({ ok: true }) : context.json({ error: "기록을 찾지 못했습니다." }, 404);
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
+      if (!chat) return context.json({ error: "Chat not found" }, 404);
+      const current = db.prepare("SELECT source_memory_id FROM physical_intimacy_milestones WHERE id=? AND chat_id=? AND active=1").get(context.req.param("itemId"), chatId) as { source_memory_id: string | null } | undefined;
+      const revision = chat.revision + 1;
+      const changed = db.transaction(() => {
+        const watermark = processedSourceWatermark(db, chatId);
+        const result = db.prepare("UPDATE physical_intimacy_milestones SET active=0,manual_override=1,deleted_by_user=1,deleted_through_ordinal=?,created_revision=? WHERE id=? AND chat_id=? AND active=1").run(watermark, revision, context.req.param("itemId"), chatId).changes;
+        if (result) db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
+        return result;
+      })();
+      if (changed && current?.source_memory_id) { refreshMemoryFts(db, current.source_memory_id); void embeddings.indexPending(chatId); }
+      return changed ? context.json({ ok: true }) : context.json({ error: "기록을 찾지 못했어요." }, 404);
+    });
   });
   function readDashboardEntities(chatId: string) {
     const prominence = new Map((db.prepare("SELECT entity_name,tier,scene_count,durable_links,pinned FROM entity_prominence WHERE chat_id=?").all(chatId) as Array<Record<string, any>>)
@@ -2718,42 +3140,49 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/chats/:id/entities", (context) => context.json(readDashboardEntities(context.req.param("id"))));
   app.patch("/v1/chats/:id/entities/:entityId/color", async (context) => {
     const body = z.object({ color: EntityColorSchema }).safeParse(await context.req.json());
-    if (!body.success) return context.json({ error: "색상은 #RRGGBB 형식 또는 null이어야 해요.", code: "INVALID_ENTITY_COLOR", path: "color" }, 400);
-    const color = body.data.color?.toLowerCase() ?? null;
-    const changed = db.prepare("UPDATE entities SET color=? WHERE id=? AND chat_id=?")
-      .run(color, context.req.param("entityId"), context.req.param("id")).changes;
-    if (!changed) return context.json({ error: "Entity not found" }, 404);
-    // Appearance never changes canonical revisions or schedules memory/model work.
-    return context.json({ ok: true, color });
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body.success) return context.json({ error: "색상은 #RRGGBB 형식 또는 null이어야 해요.", code: "INVALID_ENTITY_COLOR", path: "color" }, 400);
+      const color = body.data.color?.toLowerCase() ?? null;
+      const changed = db.prepare("UPDATE entities SET color=? WHERE id=? AND chat_id=?")
+        .run(color, context.req.param("entityId"), context.req.param("id")).changes;
+      if (!changed) return context.json({ error: "Entity not found" }, 404);
+      // Appearance never changes canonical revisions or schedules memory/model work.
+      return context.json({ ok: true, color });
+    });
   });
   app.patch("/v1/chats/:id/entities/:entityId/prominence", async (context) => {
     const chatId = context.req.param("id");
     const entity = db.prepare("SELECT name FROM entities WHERE id=? AND chat_id=?").get(context.req.param("entityId"), chatId) as { name: string } | undefined;
     if (!entity) return context.json({ error: "Entity not found" }, 404);
     const body = await context.req.json() as { pinned?: unknown };
-    if (typeof body.pinned !== "boolean") return context.json({ error: "pinned must be boolean" }, 400);
-    db.prepare(`INSERT INTO entity_prominence(chat_id,entity_name,tier,scene_count,durable_links,pinned,updated_at) VALUES(?,?,?,0,0,?,?)
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (typeof body.pinned !== "boolean") return context.json({ error: "pinned must be boolean" }, 400);
+      db.prepare(`INSERT INTO entity_prominence(chat_id,entity_name,tier,scene_count,durable_links,pinned,updated_at) VALUES(?,?,?,0,0,?,?)
       ON CONFLICT(chat_id,entity_name) DO UPDATE SET pinned=excluded.pinned,tier=CASE WHEN excluded.pinned=1 THEN 'core' ELSE CASE WHEN entity_prominence.scene_count>=4 AND entity_prominence.durable_links>0 THEN 'core' WHEN entity_prominence.scene_count>=2 OR entity_prominence.durable_links>0 THEN 'recurring' ELSE 'incidental' END END,updated_at=excluded.updated_at`)
-      .run(chatId, entity.name, body.pinned ? "core" : "incidental", body.pinned ? 1 : 0, Date.now());
-    return context.json({ ok: true });
+        .run(chatId, entity.name, body.pinned ? "core" : "incidental", body.pinned ? 1 : 0, Date.now());
+      return context.json({ ok: true });
+    });
   });
   app.post("/v1/chats/:id/entities/:entityId/delete-preview", (context) => {
     try { return context.json(previewEntityDelete(db, context.req.param("id"), context.req.param("entityId"))); }
     catch (error: any) { return context.json({ error: error instanceof Error ? error.message : String(error), code: error?.code }, error?.code === "ENTITY_NOT_FOUND" ? 404 : 400); }
   });
   app.delete("/v1/chats/:id/entities/:entityId", (context) => {
-    const rawRevision = context.req.query("revision");
-    const revision = rawRevision === undefined || rawRevision.trim() === "" ? NaN : Number(rawRevision);
-    if (!Number.isSafeInteger(revision) || revision < 0) return context.json({ error: "preview revision is required" }, 400);
-    try {
-      deleteEntity(db, context.req.param("id"), context.req.param("entityId"), revision);
-      embeddings.stateIndex.prune(context.req.param("id"));
-      void embeddings.indexPending(context.req.param("id"));
-      return context.json({ ok: true });
-    } catch (error: any) {
-      const status = error?.code === "ENTITY_DELETE_STALE" || error?.code === "ENTITY_DELETE_BUSY" ? 409 : error?.code === "ENTITY_NOT_FOUND" ? 404 : 400;
-      return context.json({ error: error instanceof Error ? error.message : String(error), code: error?.code }, status);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      const rawRevision = context.req.query("revision");
+      const revision = rawRevision === undefined || rawRevision.trim() === "" ? NaN : Number(rawRevision);
+      if (!Number.isSafeInteger(revision) || revision < 0) return context.json({ error: "preview revision is required" }, 400);
+      try {
+        deleteEntity(db, context.req.param("id"), context.req.param("entityId"), revision);
+        embeddings.stateIndex.prune(context.req.param("id"));
+        void embeddings.indexPending(context.req.param("id"));
+        return context.json({ ok: true });
+      } catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        const status = error?.code === "ENTITY_DELETE_STALE" || error?.code === "ENTITY_DELETE_BUSY" ? 409 : error?.code === "ENTITY_NOT_FOUND" ? 404 : 400;
+        return context.json({ error: error instanceof Error ? error.message : String(error), code: error?.code }, status);
+      }
+    });
   });
   app.post("/v1/chats/:id/entities/merge-preview", async (context) => {
     const body = await context.req.json() as { sourceId?: string; targetId?: string };
@@ -2766,44 +3195,58 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/chats/:id/entities/merge", async (context) => {
     const body = await context.req.json() as { sourceId?: string; targetId?: string; revision?: number };
-    if (!body.sourceId || !body.targetId || !Number.isInteger(body.revision)) return context.json({ error: "sourceId, targetId, and preview revision are required" }, 400);
-    try { return context.json({ ok: true, ...mergeEntities(db, context.req.param("id"), body.sourceId, body.targetId, body.revision) }); }
-    catch (error: any) {
-      const status = error?.code === "ENTITY_MERGE_BUSY" || error?.code === "ENTITY_MERGE_STALE" ? 409 : error?.code === "ENTITY_NOT_FOUND" ? 404 : 400;
-      return context.json({ error: error instanceof Error ? error.message : String(error), code: error?.code }, status);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body.sourceId || !body.targetId || !Number.isInteger(body.revision)) return context.json({ error: "sourceId, targetId, and preview revision are required" }, 400);
+      try { return context.json({ ok: true, ...mergeEntities(db, context.req.param("id"), body.sourceId, body.targetId, body.revision) }); }
+      catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        const status = error?.code === "ENTITY_MERGE_BUSY" || error?.code === "ENTITY_MERGE_STALE" ? 409 : error?.code === "ENTITY_NOT_FOUND" ? 404 : 400;
+        return context.json({ error: error instanceof Error ? error.message : String(error), code: error?.code }, status);
+      }
+    });
   });
   app.get("/v1/chats/:id/reconciliation-reviews", (context) => context.json({ items: listReconciliationReviews(db, context.req.param("id")) }));
   app.patch("/v1/chats/:id/reconciliation-reviews/:reviewId", async (context) => {
     const body = ReconciliationReviewResolutionSchema.parse(await context.req.json());
-    resolveReconciliationReview(db, context.req.param("id"), context.req.param("reviewId"), body);
-    void embeddings.indexPending(context.req.param("id"));
-    return context.json({ ok: true });
+    return withChatWrite(db, context.req.param('id'), () => {
+      resolveReconciliationReview(db, context.req.param("id"), context.req.param("reviewId"), body);
+      void embeddings.indexPending(context.req.param("id"));
+      return context.json({ ok: true });
+    });
   });
   app.get("/v1/chats/:id/episodes/active", (context) => context.json(episodeOverview(db, context.req.param("id"))));
   app.post("/v1/chats/:id/episodes/:episodeId/release", (context) => {
-    try {
-      releaseManualEpisode(db, context.req.param("id"), context.req.param("episodeId"));
-      serverWorker.wake();
-      return context.json({ ok: true, ...episodeOverview(db, context.req.param("id")) });
-    } catch (error: any) { return context.json({ error: error.message }, 409); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        releaseManualEpisode(db, context.req.param("id"), context.req.param("episodeId"));
+        serverWorker.wake();
+        return context.json({ ok: true, ...episodeOverview(db, context.req.param("id")) });
+      } catch (error: any) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error.message }, 409);
+      }
+    });
   });
   app.post("/v1/chats/:id/episodes/:episodeId/retry", (context) => {
-    const automatic = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='episode' AND json_extract(payload_json,'$.episodeId')=? AND json_extract(payload_json,'$.batchId') IS NOT NULL")
-      .get(context.req.param('id'), context.req.param('episodeId'));
-    if (!automatic) return context.json({ error: '수동 보류는 해제한 뒤 원문 구간에서 정리해 줘' }, 409);
-    retryEpisode(db, context.req.param("id"), context.req.param("episodeId"));
-    serverWorker.wake();
-    return context.json({ ok: true, ...episodeOverview(db, context.req.param("id")) });
+    return withChatWrite(db, context.req.param('id'), () => {
+      const automatic = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='episode' AND json_extract(payload_json,'$.episodeId')=? AND json_extract(payload_json,'$.batchId') IS NOT NULL")
+        .get(context.req.param('id'), context.req.param('episodeId'));
+      if (!automatic) return context.json({ error: '수동 보류는 해제한 뒤 원문 구간에서 정리해 줘' }, 409);
+      retryEpisode(db, context.req.param("id"), context.req.param("episodeId"));
+      serverWorker.wake();
+      return context.json({ ok: true, ...episodeOverview(db, context.req.param("id")) });
+    });
   });
   app.post("/v1/chats/:id/backfill-runs/:runId/acknowledge", (context) => {
-    const chatId = context.req.param("id");
-    const runId = context.req.param("runId");
-    const exists = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND json_extract(payload_json,'$.backfillRunId')=? LIMIT 1").get(chatId, runId);
-    if (!exists) return context.json({ error: "Backfill run not found" }, 404);
-    db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-      .run(`backfill_ack:${chatId}:${runId}`, String(Date.now()));
-    return context.json({ ok: true });
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      const runId = context.req.param("runId");
+      const exists = db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND json_extract(payload_json,'$.backfillRunId')=? LIMIT 1").get(chatId, runId);
+      if (!exists) return context.json({ error: "Backfill run not found" }, 404);
+      db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(`backfill_ack:${chatId}:${runId}`, String(Date.now()));
+      return context.json({ ok: true });
+    });
   });
   // Every quiz operation can materialize quiz_state. Unknown chats must stop before ensureState.
   app.use("/v1/chats/:id/quiz/*", async (context, next) => {
@@ -2818,8 +3261,10 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.post("/v1/chats/:id/quiz/:itemId/answer", async (context) => {
     const body = QuizAnswerRequestSchema.parse(await context.req.json());
-    const result = answerQuiz(db, context.req.param("id"), context.req.param("itemId"), body.chosenIndex, body.attemptToken);
-    return result ? context.json(result) : context.json({ error: "퀴즈를 찾을 수 없어." }, 404);
+    return withChatWrite(db, context.req.param('id'), () => {
+      const result = answerQuiz(db, context.req.param("id"), context.req.param("itemId"), body.chosenIndex, body.attemptToken);
+      return result ? context.json(result) : context.json({ error: "퀴즈를 찾을 수 없어." }, 404);
+    });
   });
   app.put("/v1/quiz/enabled", async (context) => {
     z.object({ enabled: z.literal(false) }).parse(await context.req.json());
@@ -2828,19 +3273,24 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.put("/v1/chats/:id/quiz/enabled", async (context) => {
     const body = z.object({ enabled: z.boolean() }).parse(await context.req.json());
-    setQuizEnabled(db, context.req.param("id"), body.enabled);
-    const result = nextQuiz(db, context.req.param("id"));
-    if (quizStatus(db, context.req.param("id")).generating) serverWorker.wake();
-    return context.json(result);
+    return withChatWrite(db, context.req.param('id'), () => {
+      setQuizEnabled(db, context.req.param("id"), body.enabled);
+      const result = nextQuiz(db, context.req.param("id"));
+      if (quizStatus(db, context.req.param("id")).generating) serverWorker.wake();
+      return context.json(result);
+    });
   });
   app.get("/v1/chats/:id/quiz/status", (context) => context.json(quizStatus(db, context.req.param("id"))));
   app.post("/v1/chats/:id/quiz/regenerate", (context) => {
-    const result = regenerateQuizzes(db, context.req.param("id"));
-    if (result.enqueued) serverWorker.wake();
-    return context.json(result);
+    return withChatWrite(db, context.req.param('id'), () => {
+      const result = regenerateQuizzes(db, context.req.param("id"));
+      if (result.enqueued) serverWorker.wake();
+      return context.json(result);
+    });
   });
-  app.delete("/v1/chats/:id/quiz/stats", (context) => context.json(resetQuizStats(db, context.req.param("id"))));
+  app.delete("/v1/chats/:id/quiz/stats", (context) => withChatWrite(db, context.req.param('id'), () => context.json(resetQuizStats(db, context.req.param("id")))));
   function readDashboardStatus(chatId: string) {
+    const worker = serverWorker.statusForChat(chatId);
     const jobs = db.prepare(`SELECT
       SUM(CASE WHEN status IN ('queued','leased') AND type<>'quiz' THEN 1 ELSE 0 END) AS queued,
       SUM(CASE WHEN status IN ('done','archived') AND type<>'quiz' THEN 1 ELSE 0 END) AS completed,
@@ -2921,11 +3371,12 @@ export function createApp(dependencies: Dependencies): Hono {
     return {
       serverInstanceId, memoryLanguage: chat?.memory_language,
       translationRevision: JSON.stringify([chat?.revision, memoryUpdatedAt, derivedCounts.memories, derivedCounts.details, jobs.completed, jobs.lastCompleted]),
-      queuedJobs: Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts,
+      queuedJobs: worker.queuedJobs ?? Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts,
       pendingReconciliations,
       ...ingestion,
       pendingEmbeddings: embeddingJobs.pending, failedEmbeddings: embeddingFailures.count,
       embeddingError: embeddingFailures.lastError,
+      embeddingRetryAt: embeddingJobs.pending ? embeddings.status.retryAt : undefined,
       auxiliaryAuthFailed: (db.prepare("SELECT last_error FROM jobs WHERE chat_id=? AND status='failed'").all(chatId) as Array<{ last_error: string | null }>).some(job => isProviderAuthenticationError(job.last_error)),
       progress: { processedMessages: Number(sourceProgress.processed ?? 0), totalMessages: Number(sourceProgress.total ?? 0), excludedMessages: ingestion.excludedMessages,
         processedGroups: Number(groupProgress.processed ?? 0), totalGroups: Number(groupProgress.total ?? 0), failedGroups: Number(groupProgress.failed ?? 0),
@@ -2942,27 +3393,71 @@ export function createApp(dependencies: Dependencies): Hono {
         backfillRunId: latestBackfill?.runId },
       modelResponseDiagnostic: responseFailure ? JSON.parse(responseFailure.diagnostic) : undefined,
       initialCalibration: calibration,
-      worker: serverWorker.statusForChat(chatId),
+      upgrade: readUpgradeStatus(chatId),
+      worker,
       episode: (episodeOverview(db, chatId) as any).active,
       lineage: getChatLineage(db, chatId),
       ...sourceSnapshotStatus(db, chatId),
     };
   }
+  const upgradeDismissKey = (chatId: string) => `upgrade-dismissed:${chatId}`;
+  function readUpgradeStatus(chatId: string, withPreview = false) {
+    const run = activeUpgradeRun(db,chatId);
+    const summary = legacyMemorySummary(db,chatId);
+    const last = run ?? db.prepare("SELECT id,phase,status,error FROM regeneration_runs WHERE chat_id=? AND mode='upgrade' ORDER BY created_at DESC,rowid DESC LIMIT 1").get(chatId) as {id:string;phase:1|2;status:string;error?:string} | undefined;
+    return { summary, workEnabled:!isChatWorkHeld(db,chatId), ...(withPreview ? {preview:previewUpgrade(db,chatId)} : {}), lock:chatUpgradeLock(db,chatId),
+      lastRun:last ? {runId:last.id,phase:last.phase,status:last.status,error:last.error, ...(last.status === 'applied' ? {memories:summary.totalMemories} : {})} : undefined,
+      dismissed:!!db.prepare('SELECT 1 FROM server_meta WHERE key=?').get(upgradeDismissKey(chatId)) };
+  }
+  app.get('/v1/chats/:id/upgrade', context => context.json(readUpgradeStatus(context.req.param('id'),true)));
+  app.post('/v1/chats/:id/upgrade', async context => {
+    const body = z.object({backup:z.boolean(),resolvedSetup:z.unknown().optional(),identityHints:z.record(z.string(),z.unknown()).optional()}).parse(await context.req.json());
+    const chatId = context.req.param('id');
+    const result = startUpgrade(db,chatId,body as Parameters<typeof startUpgrade>[2]);
+    db.prepare('DELETE FROM server_meta WHERE key=?').run(upgradeDismissKey(chatId));
+    serverWorker.wake();
+    return context.json(result);
+  });
+  app.post('/v1/chats/:id/upgrade/:runId/cancel', context => {
+    cancelUpgrade(db,context.req.param('id'),context.req.param('runId'));
+    return context.json({ok:true});
+  });
+  app.post('/v1/chats/:id/upgrade/:runId/resume', context => {
+    resumeUpgrade(db,context.req.param('id'),context.req.param('runId')); serverWorker.wake();
+    return context.json({ok:true});
+  });
+  app.post('/v1/chats/:id/upgrade/:runId/finish-retry', context => {
+    // Run/phase validation happens synchronously; provider work continues after
+    // acceptance. Routine failures remain on the run for status readers.
+    void retryUpgradePhase2(db,context.req.param('id'),context.req.param('runId'))
+      .catch(()=>console.error('[RCM] Upgrade finishing task failed'));
+    return context.json({accepted:true},202);
+  });
+  app.post('/v1/chats/:id/upgrade/dismiss', context => {
+    db.prepare('INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(upgradeDismissKey(context.req.param('id')),'true');
+    return context.json({ok:true});
+  });
   app.get("/v1/chats/:id/status", (context) => context.json(readDashboardStatus(context.req.param("id"))));
-  app.get('/v1/chats/:id/source-head', (context) => context.json(sourceSnapshotStatus(db, context.req.param('id'))));
+  app.get('/v1/chats/:id/source-head', (context) => context.json({...sourceSnapshotStatus(db, context.req.param('id')),memoryEpoch:memoryEpoch(db,context.req.param('id')),upgradeLock:chatUpgradeLock(db,context.req.param('id'))}));
   app.patch("/v1/chats/:id/relationships", async (context) => {
     const body = await context.req.json() as Record<string, unknown>;
-    if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
-    const from = String(body.from ?? "").trim();
-    const to = String(body.to ?? "").trim();
-    if (!from || !to) return context.json({ error: "from and to are required" }, 400);
-    const chatId = context.req.param("id");
-    try {
-      const item = setRelationshipProjectionOverride(db, chatId, from, to, body);
-      if (flushRelationshipProjectionQueue(db, chatId) > 0) serverWorker.wake();
-      return context.json({ ok: true, item });
-    }
-    catch (error) { return context.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (body.clear === true) assertSourceSnapshotAccepted(db,context.req.param('id'));
+      if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
+      const from = String(body.from ?? "").trim();
+      const to = String(body.to ?? "").trim();
+      if (!from || !to) return context.json({ error: "from and to are required" }, 400);
+      const chatId = context.req.param("id");
+      try {
+        const item = setRelationshipProjectionOverride(db, chatId, from, to, body);
+        if (flushRelationshipProjectionQueue(db, chatId) > 0) serverWorker.wake();
+        return context.json({ ok: true, item });
+      }
+      catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        return context.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+      }
+    });
   });
   function readDashboardWorld(chatId: string, query: { atRevision?: string; atOrdinal?: string; includeHistory?: string } = {}) {
     const atRevision = Number(query.atRevision);
@@ -2989,7 +3484,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const item = withLastMention(row);
       const relation = parseSocialRelation(row.social_relation_json);
       return { ...item, stateKind: row.state_kind,
-        ...(["goal", "secret"].includes(String(row.state_kind)) ? publicKnowledgeScope(resolveAssertionHolders(db, chatId, row)) : {}),
+        ...(["goal", "secret"].includes(String(row.state_kind)) ? publicKnowledgeScope(resolveAssertionHolders(db, chatId, row) ?? []) : {}),
         ...(relation ? { socialRelation: { ...relation, ...publicKnowledgeScope(socialRelationKnowledge(db, chatId, relation) ?? []) } } : {}) };
     };
     const assertionSelect = `SELECT assertions.*,
@@ -3012,15 +3507,21 @@ export function createApp(dependencies: Dependencies): Hono {
       (SELECT story_time_normalized FROM memories WHERE id=promises.source_memory_id AND chat_id=promises.chat_id) AS last_mention_story_time
       FROM promises`;
     return {
+      seeds: dashboardStorySeeds(db,chatId),
       at: { revision: hasRevision ? atRevision : null, ordinal: hasOrdinal ? atOrdinal : null },
       assertions: (db.prepare(`${assertionSelect} WHERE ${clauses.join(" AND ")}`).all(...values) as LastMentionRow[]).map(assertionItem),
       beliefs: (db.prepare(`${beliefSelect} WHERE chat_id=? AND active=1`).all(chatId) as LastMentionRow[]).map(withLastMention),
-      promises: (db.prepare(`${promiseSelect} WHERE chat_id=?`).all(chatId) as LastMentionRow[]).map(row=>({...withLastMention(row),firstMade:promiseOrigins.get(String(row.id))})),
+      promises: (db.prepare(`${promiseSelect} WHERE chat_id=?`).all(chatId) as LastMentionRow[]).map(stored=>{
+        const row=projectPromiseRow(db,chatId,stored);
+        return {...withLastMention(row),firstMade:promiseOrigins.get(String(row.id)),access:memoryDetailAccess(db,chatId,String(row.id),"promise")};
+      }),
       ...(includeHistory ? {
         endedAssertions: (db.prepare(`${assertionSelect} WHERE chat_id=? AND valid_to_revision IS NOT NULL ORDER BY COALESCE(valid_to_ordinal,2147483647) DESC,created_at DESC`).all(chatId) as LastMentionRow[]).map(assertionItem),
         endedBeliefs: (db.prepare(`${beliefSelect} WHERE chat_id=? AND active=0 AND (source IS NULL OR source NOT LIKE 'user_deleted:%') ORDER BY COALESCE(valid_to_ordinal,2147483647) DESC,created_at DESC`).all(chatId) as LastMentionRow[]).map(withLastMention),
         userDeletedBeliefs: (db.prepare(`${beliefSelect} WHERE chat_id=? AND active=0 AND source LIKE 'user_deleted:%' ORDER BY created_at DESC`).all(chatId) as LastMentionRow[]).map(withLastMention),
-        promiseHistory: db.prepare("SELECT * FROM promise_events WHERE chat_id=? ORDER BY COALESCE(source_ordinal,2147483647),created_at").all(chatId),
+        promiseHistory: (db.prepare("SELECT * FROM promise_events WHERE chat_id=? ORDER BY COALESCE(source_ordinal,2147483647),created_at").all(chatId) as Record<string,any>[])
+          .filter(row=>!promiseContributionState(db,chatId,row.promise_id).rebuilt || row.active===1 && row.status!=='invalidated')
+          .map(row=>projectPromiseRow(db,chatId,row,row.id)),
       } : {}),
     };
   }
@@ -3028,192 +3529,232 @@ export function createApp(dependencies: Dependencies): Hono {
   app.post("/v1/chats/:id/world-state", async (context) => {
     const chatId = context.req.param("id");
     const body = await context.req.json() as { kind?: string; subject?: string; predicate?: string; holder?: string; promisor?: string; promisee?: string; value?: string; stateKind?: string; confidence?: number; polarity?: string; status?: string; content?: string; scope?: string; scheduledFor?: string; statusReason?: string; sourceMessageId?: string; socialRelation?: unknown; knownBy?: string[]; knownByEveryone?: boolean; locked?: boolean } & PromiseEditOptions;
-    if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
-    const promiseOptions = PromiseEditOptionsSchema.safeParse(body);
-    if (!promiseOptions.success) return context.json({ error: promiseOptions.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") }, 400);
-    const parsedSocial = body.socialRelation == null ? undefined : SocialRelationSchema.safeParse(body.socialRelation);
-    if (parsedSocial && !parsedSocial.success) return context.json({ error: "Invalid social relation" }, 400);
-    if (body.stateKind !== undefined && !STATE_KIND_VALUES.includes(body.stateKind as typeof STATE_KIND_VALUES[number])) return context.json({ error: "unsupported state kind" }, 400);
-    if (body.knownBy !== undefined && (!Array.isArray(body.knownBy) || body.knownBy.some(name => typeof name !== "string" || !name.trim()))) return context.json({ error: "knownBy must be character names" }, 400);
-    if (body.knownByEveryone !== undefined && typeof body.knownByEveryone !== "boolean") return context.json({ error: "knownByEveryone must be boolean" }, 400);
-    const manualSocial = parsedSocial?.success ? JSON.stringify({ ...parsedSocial.data, detailIds: [], manual: true, knownBy: body.knownBy ?? [], knownByEveryone: body.knownByEveryone ?? false }) : null;
-    const kind = body.kind;
-    const required = kind === "assertion" ? [body.subject, body.predicate, body.value] : kind === "belief" ? [body.holder, body.subject, body.predicate, body.value] : kind === "promise" ? [body.promisor, body.promisee, body.content] : [];
-    if (!kind || required.length === 0 || required.some((value) => !value?.trim())) return context.json({ error: "필수 영문 정본 필드를 입력하세요." }, 400);
-    const confidence = Math.max(0, Math.min(1, Number(body.confidence ?? (kind === "belief" ? 0.7 : 1))));
-    const source = body.sourceMessageId ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined : undefined;
-    if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했습니다." }, 400);
-    const ordinal = source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number | null }).ordinal;
-    const evidence = JSON.stringify(source ? [{ messageId: source.message_id }] : []);
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
-    if (!chat) return context.json({ error: "Chat not found" }, 404);
-    const assertionStateKind = kind === "assertion" ? (manualSocial ? "condition" : body.stateKind ?? "condition") : undefined;
-    const relationConflict = kind === "assertion" && parsedSocial?.success
-      ? findSocialRelationConflict(db, chatId, body.subject!.trim(), parsedSocial.data) : undefined;
-    if (relationConflict) return context.json(ledgerConflictResponse(relationConflict), 409);
-    const duplicate = kind === "assertion"
-      ? parsedSocial?.success
-        ? socialRelationPredicateCollisions(db, chatId, body.subject!.trim(), body.predicate!.trim(), parsedSocial.data)[0]
-        : assertionStateKind === "goal" || assertionStateKind === "secret"
-        ? db.prepare("SELECT id FROM assertions WHERE chat_id=? AND subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND value=? COLLATE NOCASE AND state_kind=? AND valid_to_revision IS NULL")
-          .get(chatId, body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), assertionStateKind) as { id: string } | undefined
-        : db.prepare("SELECT id FROM assertions WHERE chat_id=? AND subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND valid_to_revision IS NULL").get(chatId, body.subject!.trim(), body.predicate!.trim()) as { id: string } | undefined
-      : kind === "belief"
-        ? db.prepare("SELECT id FROM beliefs WHERE chat_id=? AND holder=? COLLATE NOCASE AND subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND active=1").get(chatId, body.holder!.trim(), body.subject!.trim(), body.predicate!.trim()) as { id: string } | undefined
-        : db.prepare("SELECT id FROM promises WHERE chat_id=? AND promisor=? COLLATE NOCASE AND promisee=? COLLATE NOCASE AND content=? COLLATE NOCASE").get(chatId, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim()) as { id: string } | undefined;
-    if (duplicate) return context.json(ledgerConflictResponse({ code: "DUPLICATE_LEDGER_ITEM", existingId: duplicate.id }), 409);
-    const id = randomUUID();
-    const revision = chat.revision + 1;
-    db.transaction(() => {
-      if (kind === "assertion") {
-        const stateKind = assertionStateKind!;
-        db.prepare(`INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,created_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'durable',?)`).run(id, chatId, body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), stateKind, confidence, revision, ordinal, evidence, Date.now());
-        if (stateKind === "goal" || stateKind === "secret") replaceItemAccess(db, chatId, "assertion", id,
-          (body.knownBy ?? []).map((holder) => ({ holder: holder.trim(), basis: "internal", evidence: [], confidence: 1 })), revision, Date.now());
-      }
-      else if (kind === "belief") db.prepare(`INSERT INTO beliefs(id,chat_id,holder,subject,predicate,value,polarity,confidence,source,evidence_json,active,status,retention_class,created_revision,valid_from_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,'active','durable',?,?,?)`).run(id, chatId, body.holder!.trim(), body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), body.polarity ?? "believes", confidence, "manual", evidence, revision, ordinal, Date.now());
-      else {
-        const key = `manual:${randomUUID()}`;
-        const status = ["open", "kept", "broken", "released", "offscreen"].includes(body.status ?? "") ? body.status! : "open";
-        const scope = ["future", "recurring"].includes(body.scope ?? "") ? body.scope! : "future";
-        db.prepare(`INSERT INTO promises(id,chat_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,retention_scope,updated_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)`).run(id, chatId, key, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim(), status, body.scheduledFor?.trim() || null, body.statusReason?.trim() || null, scope, revision, Date.now());
-        db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_ordinal,created_revision,created_at,user_authored) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,1)`).run(randomUUID(), chatId, id, key, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim(), status, body.scheduledFor?.trim() || null, body.statusReason?.trim() || null, ordinal, revision, Date.now());
-      }
-      if (kind === "assertion" && manualSocial) db.prepare("UPDATE assertions SET social_relation_json=? WHERE id=?").run(manualSocial, id);
-      if (kind === "promise") {
-        db.prepare("UPDATE promises SET pinned=? WHERE id=?").run(Number(body.pinned ?? false), id);
-        recordPromiseRecency(db, chatId, id, undefined, body.status ?? "open", body.recency ?? "already_past");
-        const event = db.prepare("SELECT id FROM promise_events WHERE promise_id=? ORDER BY created_revision DESC LIMIT 1").get(id) as { id: string };
-        snapshotPromiseRecency(db, event.id, id);
-      }
-      db.prepare(`UPDATE ${kind === "assertion" ? "assertions" : kind === "belief" ? "beliefs" : "promises"} SET user_edit_ordinal=?,auto_locked=? WHERE id=? AND chat_id=?`)
-        .run(committedEditOrdinal(db,chatId),Number(body.locked ?? false),id,chatId);
-      db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
-    })();
-    return context.json({ ok: true, id, userEdited:true,userEditOrdinal:committedEditOrdinal(db,chatId),locked:body.locked ?? false }, 201);
+    return withChatWrite(db, context.req.param('id'), () => {
+      if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
+      const promiseOptions = PromiseEditOptionsSchema.safeParse(body);
+      if (!promiseOptions.success) return context.json({ error: promiseOptions.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") }, 400);
+      const parsedSocial = body.socialRelation == null ? undefined : SocialRelationSchema.safeParse(body.socialRelation);
+      if (parsedSocial && !parsedSocial.success) return context.json({ error: "Invalid social relation" }, 400);
+      if (body.stateKind !== undefined && !STATE_KIND_VALUES.includes(body.stateKind as typeof STATE_KIND_VALUES[number])) return context.json({ error: "unsupported state kind" }, 400);
+      if (body.knownBy !== undefined && (!Array.isArray(body.knownBy) || body.knownBy.some(name => typeof name !== "string" || !name.trim()))) return context.json({ error: "knownBy must be character names" }, 400);
+      if (body.knownByEveryone !== undefined && typeof body.knownByEveryone !== "boolean") return context.json({ error: "knownByEveryone must be boolean" }, 400);
+      const manualSocial = parsedSocial?.success ? JSON.stringify({ ...parsedSocial.data, detailIds: [], manual: true, knownBy: body.knownBy ?? [], knownByEveryone: body.knownByEveryone ?? false }) : null;
+      const kind = body.kind;
+      const required = kind === "assertion" ? [body.subject, body.predicate, body.value] : kind === "belief" ? [body.holder, body.subject, body.predicate, body.value] : kind === "promise" ? [body.promisor, body.promisee, body.content] : [];
+      if (!kind || required.length === 0 || required.some((value) => !value?.trim())) return context.json({ error: "필수 영문 정본 필드를 입력해 주세요." }, 400);
+      const confidence = Math.max(0, Math.min(1, Number(body.confidence ?? (kind === "belief" ? 0.7 : 1))));
+      const source = body.sourceMessageId ? db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId, body.sourceMessageId) as { message_id: string; ordinal: number } | undefined : undefined;
+      if (body.sourceMessageId && !source) return context.json({ error: "연결할 수 있는 활성 원문을 찾지 못했어요." }, 400);
+      const ordinal = source?.ordinal ?? (db.prepare("SELECT MAX(ordinal) ordinal FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned')").get(chatId) as { ordinal: number | null }).ordinal;
+      const evidence = JSON.stringify(source ? [{ messageId: source.message_id }] : []);
+      const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
+      if (!chat) return context.json({ error: "Chat not found" }, 404);
+      const assertionStateKind = kind === "assertion" ? (manualSocial ? "condition" : body.stateKind ?? "condition") : undefined;
+      const relationConflict = kind === "assertion" && parsedSocial?.success
+        ? findSocialRelationConflict(db, chatId, body.subject!.trim(), parsedSocial.data) : undefined;
+      if (relationConflict) return context.json(ledgerConflictResponse(relationConflict), 409);
+      const duplicate = kind === "assertion"
+        ? parsedSocial?.success
+          ? socialRelationPredicateCollisions(db, chatId, body.subject!.trim(), body.predicate!.trim(), parsedSocial.data)[0]
+          : assertionStateKind === "goal" || assertionStateKind === "secret"
+          ? db.prepare("SELECT id FROM assertions WHERE chat_id=? AND subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND value=? COLLATE NOCASE AND state_kind=? AND valid_to_revision IS NULL")
+            .get(chatId, body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), assertionStateKind) as { id: string } | undefined
+          : db.prepare("SELECT id FROM assertions WHERE chat_id=? AND subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND valid_to_revision IS NULL").get(chatId, body.subject!.trim(), body.predicate!.trim()) as { id: string } | undefined
+        : kind === "belief"
+          ? db.prepare("SELECT id FROM beliefs WHERE chat_id=? AND holder=? COLLATE NOCASE AND subject=? COLLATE NOCASE AND predicate=? COLLATE NOCASE AND active=1").get(chatId, body.holder!.trim(), body.subject!.trim(), body.predicate!.trim()) as { id: string } | undefined
+          : db.prepare("SELECT id FROM promises WHERE chat_id=? AND promisor=? COLLATE NOCASE AND promisee=? COLLATE NOCASE AND content=? COLLATE NOCASE").get(chatId, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim()) as { id: string } | undefined;
+      if (duplicate) return context.json(ledgerConflictResponse({ code: "DUPLICATE_LEDGER_ITEM", existingId: duplicate.id }), 409);
+      const id = randomUUID();
+      const revision = chat.revision + 1;
+      db.transaction(() => {
+        if (kind === "assertion") {
+          const stateKind = assertionStateKind!;
+          db.prepare(`INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,created_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'durable',?)`).run(id, chatId, body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), stateKind, confidence, revision, ordinal, evidence, Date.now());
+          if (stateKind === "goal" || stateKind === "secret") replaceItemAccess(db, chatId, "assertion", id,
+            (body.knownBy ?? []).map((holder) => ({ holder: holder.trim(), basis: "internal", evidence: [], confidence: 1 })), revision, Date.now());
+        }
+        else if (kind === "belief") db.prepare(`INSERT INTO beliefs(id,chat_id,holder,subject,predicate,value,polarity,confidence,source,evidence_json,active,status,retention_class,created_revision,valid_from_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,'active','durable',?,?,?)`).run(id, chatId, body.holder!.trim(), body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), body.polarity ?? "believes", confidence, "manual", evidence, revision, ordinal, Date.now());
+        else {
+          const key = `manual:${randomUUID()}`;
+          const status = ["open", "kept", "broken", "released", "offscreen"].includes(body.status ?? "") ? body.status! : "open";
+          const scope = ["future", "recurring"].includes(body.scope ?? "") ? body.scope! : "future";
+          db.prepare(`INSERT INTO promises(id,chat_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,retention_scope,updated_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)`).run(id, chatId, key, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim(), status, body.scheduledFor?.trim() || null, body.statusReason?.trim() || null, scope, revision, Date.now());
+          db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_ordinal,created_revision,created_at,user_authored) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,1)`).run(randomUUID(), chatId, id, key, body.promisor!.trim(), body.promisee!.trim(), body.content!.trim(), status, body.scheduledFor?.trim() || null, body.statusReason?.trim() || null, ordinal, revision, Date.now());
+        }
+        if (kind === "assertion" && manualSocial) db.prepare("UPDATE assertions SET social_relation_json=? WHERE id=?").run(manualSocial, id);
+        if (kind === "promise") {
+          replaceItemAccess(db, chatId, "promise", id, [body.promisor!, body.promisee!].map(holder => ({ holder: holder.trim(), basis: "experienced",
+            evidence: JSON.parse(evidence), confidence: 1 })), revision, Date.now());
+          db.prepare("UPDATE promises SET pinned=? WHERE id=?").run(Number(body.pinned ?? false), id);
+          recordPromiseRecency(db, chatId, id, undefined, body.status ?? "open", body.recency ?? "already_past");
+          const event = db.prepare("SELECT id FROM promise_events WHERE promise_id=? ORDER BY created_revision DESC LIMIT 1").get(id) as { id: string };
+          snapshotPromiseRecency(db, event.id, id);
+        }
+        db.prepare(`UPDATE ${kind === "assertion" ? "assertions" : kind === "belief" ? "beliefs" : "promises"} SET user_edit_ordinal=?,auto_locked=? WHERE id=? AND chat_id=?`)
+          .run(committedEditOrdinal(db,chatId),Number(body.locked ?? false),id,chatId);
+        db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
+      })();
+      return context.json({ ok: true, id, userEdited:true,userEditOrdinal:committedEditOrdinal(db,chatId),locked:body.locked ?? false }, 201);
+    });
   });
   app.patch("/v1/chats/:id/world-state", async (context) => {
     const body = await context.req.json() as {
       kind?: string; id?: string; subject?: string; predicate?: string; holder?: string; promisor?: string; promisee?: string;
       value?: string; stateKind?: string; confidence?: number; polarity?: string; status?: string; content?: string; scheduledFor?: string; statusReason?: string; socialRelation?: unknown; knownBy?: string[]; knownByEveryone?: boolean; locked?: boolean;
     } & PromiseEditOptions;
-    const chatId = context.req.param("id");
-    const promiseOptions = PromiseEditOptionsSchema.safeParse(body);
-    if (!promiseOptions.success) return context.json({ error: promiseOptions.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") }, 400);
-    const parsedSocial = body.socialRelation == null ? undefined : SocialRelationSchema.safeParse(body.socialRelation);
-    if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
-    if (parsedSocial && !parsedSocial.success) return context.json({ error: "Invalid social relation" }, 400);
-    if (body.stateKind !== undefined && !STATE_KIND_VALUES.includes(body.stateKind as typeof STATE_KIND_VALUES[number])) return context.json({ error: "unsupported state kind" }, 400);
-    if (body.knownBy !== undefined && (!Array.isArray(body.knownBy) || body.knownBy.some(name => typeof name !== "string" || !name.trim()))) return context.json({ error: "knownBy must be character names" }, 400);
-    if (body.knownByEveryone !== undefined && typeof body.knownByEveryone !== "boolean") return context.json({ error: "knownByEveryone must be boolean" }, 400);
-    const manualSocial = parsedSocial?.success ? JSON.stringify({ ...parsedSocial.data, detailIds: [], manual: true, knownBy: body.knownBy ?? [], knownByEveryone: body.knownByEveryone ?? false }) : null;
-    if (!body.kind || !body.id) return context.json({ error: "kind and id are required" }, 400);
-    for (const key of ["subject", "predicate", "holder", "promisor", "promisee", "value", "content"] as const) {
-      if (body[key] !== undefined && !body[key]?.trim()) return context.json({ error: `${key} must not be empty` }, 400);
-    }
-    if (body.confidence !== undefined && (!Number.isFinite(body.confidence) || body.confidence < 0 || body.confidence > 1)) {
-      return context.json({ error: "confidence must be between 0 and 1" }, 400);
-    }
-    if (body.polarity !== undefined && !["believes", "suspects", "denies", "knows", "heard"].includes(body.polarity)) return context.json({ error: "unsupported polarity" }, 400);
-    if (body.status !== undefined && !["open", "kept", "broken", "released", "offscreen", "invalidated"].includes(body.status)) return context.json({ error: "unsupported promise status" }, 400);
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
-    if (!chat) return context.json({ error: "Chat not found" }, 404);
-    const currentAssertion = body.kind === "assertion"
-      ? db.prepare("SELECT * FROM assertions WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown> | undefined : undefined;
-    const oldRelation = parseSocialRelation(currentAssertion?.social_relation_json);
-    const nextRelation = body.socialRelation === null ? undefined : parsedSocial?.success ? parsedSocial.data : oldRelation;
-    let mergeIds: string[] = [];
-    if (currentAssertion && nextRelation) {
-      const subject = body.subject?.trim() ?? String(currentAssertion.subject);
-      const unchangedIdentity = !!oldRelation && sameSocialRelationIdentity(String(currentAssertion.subject), oldRelation, subject, nextRelation);
-      if (oldRelation?.direction === "directed" && nextRelation.direction === "mutual") {
-        mergeIds = activeSocialRelations(db, chatId).filter(row => row.id !== body.id && row.relation.direction === "directed"
-          && isReverseMutualSocialRelation(row, subject, nextRelation)).map(row => row.id);
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId = context.req.param("id");
+      const promiseOptions = PromiseEditOptionsSchema.safeParse(body);
+      if (!promiseOptions.success) return context.json({ error: promiseOptions.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") }, 400);
+      const parsedSocial = body.socialRelation == null ? undefined : SocialRelationSchema.safeParse(body.socialRelation);
+      if(!UserCorrectionEditSchema.safeParse(body).success) return context.json({error:"locked must be boolean"},400);
+      if (parsedSocial && !parsedSocial.success) return context.json({ error: "Invalid social relation" }, 400);
+      if (body.stateKind !== undefined && !STATE_KIND_VALUES.includes(body.stateKind as typeof STATE_KIND_VALUES[number])) return context.json({ error: "unsupported state kind" }, 400);
+      if (body.knownBy !== undefined && (!Array.isArray(body.knownBy) || body.knownBy.some(name => typeof name !== "string" || !name.trim()))) return context.json({ error: "knownBy must be character names" }, 400);
+      if (body.knownByEveryone !== undefined && typeof body.knownByEveryone !== "boolean") return context.json({ error: "knownByEveryone must be boolean" }, 400);
+      const manualSocial = parsedSocial?.success ? JSON.stringify({ ...parsedSocial.data, detailIds: [], manual: true, knownBy: body.knownBy ?? [], knownByEveryone: body.knownByEveryone ?? false }) : null;
+      if (!body.kind || !body.id) return context.json({ error: "kind and id are required" }, 400);
+      for (const key of ["subject", "predicate", "holder", "promisor", "promisee", "value", "content"] as const) {
+        if (body[key] !== undefined && !body[key]?.trim()) return context.json({ error: `${key} must not be empty` }, 400);
       }
-      const relationConflict = unchangedIdentity ? undefined : findSocialRelationConflict(db, chatId, subject, nextRelation, [body.id, ...mergeIds]);
-      if (relationConflict) return context.json(ledgerConflictResponse(relationConflict), 409);
-      const predicate = body.predicate?.trim() ?? String(currentAssertion.predicate);
-      const unchangedPredicate = predicate.toLocaleLowerCase() === String(currentAssertion.predicate).toLocaleLowerCase();
-      const duplicate = socialRelationPredicateCollisions(db, chatId, subject, predicate, nextRelation)
-        .find(row => row.id !== body.id && !mergeIds.includes(row.id) && (!row.relation || !unchangedIdentity || !unchangedPredicate));
-      if (duplicate) return context.json(ledgerConflictResponse({ code: "DUPLICATE_LEDGER_ITEM", existingId: duplicate.id }), 409);
-    }
-    const revision = chat.revision + 1;
-    let changed = 0;
-    let updatedItem: Record<string, unknown> | undefined;
-    db.transaction(() => {
-      if (body.kind === "assertion") {
-        const current = currentAssertion;
-        if (!current) return;
-        const priorHolders = resolveAssertionHolders(db, chatId, current);
-        db.prepare("UPDATE assertions SET automatic_closure_evidence_json=NULL,valid_to_revision=? WHERE id=?").run(revision - 1, body.id);
-        for (const id of mergeIds) db.prepare("UPDATE assertions SET automatic_closure_evidence_json=NULL,valid_to_revision=? WHERE id=?").run(revision - 1, id);
-        const nextId = randomUUID();
-        const nextStateKind = nextRelation ? "condition" : body.stateKind ?? current.state_kind ?? "condition";
-        db.prepare(`
-          INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,source_memory_id,evidence_json,created_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)
-        `).run(nextId, chatId, body.subject?.trim() ?? current.subject, body.predicate?.trim() ?? current.predicate, body.value?.trim() ?? current.value,
-          nextStateKind,
-          Math.max(0, Math.min(1, Number(body.confidence ?? current.confidence))), revision, null, "[]", Date.now());
-        if (nextStateKind === "goal" || nextStateKind === "secret") replaceItemAccess(db, chatId, "assertion", nextId,
-          (body.knownBy ?? priorHolders).map((holder) => ({ holder: holder.trim(), basis: "internal", evidence: [], confidence: 1 })), revision, Date.now());
-        const relationJson = body.socialRelation === null || !nextRelation ? null : JSON.stringify({ ...nextRelation, manual: true,
-          knownBy: body.knownBy ?? (oldRelation ? (socialRelationKnowledge(db, chatId, oldRelation) ?? []).filter(name => name !== EVERYONE_HOLDER) : []), knownByEveryone: body.knownByEveryone ?? (oldRelation ? (socialRelationKnowledge(db, chatId, oldRelation) ?? []).includes(EVERYONE_HOLDER) : false), detailIds: [] });
-        db.prepare("UPDATE assertions SET social_relation_json=? WHERE id=?").run(relationJson, nextId);
-        db.prepare("UPDATE assertions SET user_edit_ordinal=?,auto_locked=?,valid_from_ordinal=? WHERE id=?")
-          .run(committedEditOrdinal(db,chatId),Number(body.locked ?? current.auto_locked ?? false),committedEditOrdinal(db,chatId),nextId);
-        changed = 1;
-        updatedItem = db.prepare("SELECT * FROM assertions WHERE id=?").get(nextId) as Record<string, unknown>;
-        updatedItem.stateKind = updatedItem.state_kind;
-        if (nextStateKind === "goal" || nextStateKind === "secret") Object.assign(updatedItem, publicKnowledgeScope(resolveAssertionHolders(db, chatId, updatedItem)));
-      } else if (body.kind === "belief") {
-        rememberLedgerEditOrigin(db, chatId, "belief", body.id!);
-        changed = db.prepare(`UPDATE beliefs SET automatic_closure_evidence_json=NULL,holder=COALESCE(?,holder),subject=COALESCE(?,subject),predicate=COALESCE(?,predicate),value=COALESCE(?,value),confidence=COALESCE(?,confidence),polarity=COALESCE(?,polarity),status='active',active=1,superseded_by=NULL,valid_to_ordinal=NULL WHERE id=? AND chat_id=?`).run(
-          body.holder?.trim() ?? null, body.subject?.trim() ?? null, body.predicate?.trim() ?? null, body.value?.trim() ?? null,
-          body.confidence === undefined ? null : body.confidence, body.polarity ?? null, body.id, chatId,
-        ).changes;
-        if (changed) updatedItem = db.prepare("SELECT * FROM beliefs WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown>;
-      } else if (body.kind === "promise") {
-        const previous = db.prepare("SELECT status FROM promises WHERE id=? AND chat_id=?").get(body.id, chatId) as { status: string } | undefined;
-        rememberLedgerEditOrigin(db, chatId, "promise", body.id!);
-        changed = db.prepare(`UPDATE promises SET promisor=COALESCE(?,promisor),promisee=COALESCE(?,promisee),content=COALESCE(?,content),status=COALESCE(?,status),scheduled_for=COALESCE(?,scheduled_for),status_reason=COALESCE(?,status_reason),pinned=COALESCE(?,pinned),updated_revision=? WHERE id=? AND chat_id=?`).run(
-          body.promisor?.trim() ?? null, body.promisee?.trim() ?? null, body.content?.trim() ?? null, body.status ?? null, body.scheduledFor?.trim() ?? null, body.statusReason?.trim() ?? null, body.pinned === undefined ? null : Number(body.pinned), revision, body.id, chatId,
-        ).changes;
-        if (changed) {
-          recordPromiseRecency(db, chatId, body.id!, previous?.status, body.status ?? previous!.status, body.recency ?? "already_past");
-          updatedItem = db.prepare("SELECT * FROM promises WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown>;
-          const sourceOrdinal = committedEditOrdinal(db,chatId);
-          const eventId = randomUUID();
-          db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_ordinal,created_revision,created_at,user_authored)
-            VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,1)`).run(
-            eventId, chatId, body.id, updatedItem.promise_key, updatedItem.promisor, updatedItem.promisee,
-            updatedItem.content, updatedItem.status, updatedItem.scheduled_for, updatedItem.status_reason, sourceOrdinal, revision, Date.now(),
-          );
-          snapshotPromiseRecency(db, eventId, body.id!);
+      if (body.confidence !== undefined && (!Number.isFinite(body.confidence) || body.confidence < 0 || body.confidence > 1)) {
+        return context.json({ error: "confidence must be between 0 and 1" }, 400);
+      }
+      if (body.polarity !== undefined && !["believes", "suspects", "denies", "knows", "heard"].includes(body.polarity)) return context.json({ error: "unsupported polarity" }, 400);
+      if (body.status !== undefined && !["open", "kept", "broken", "released", "offscreen", "invalidated"].includes(body.status)) return context.json({ error: "unsupported promise status" }, 400);
+      const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
+      if (!chat) return context.json({ error: "Chat not found" }, 404);
+      const currentAssertion = body.kind === "assertion"
+        ? db.prepare("SELECT * FROM assertions WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown> | undefined : undefined;
+      const oldRelation = parseSocialRelation(currentAssertion?.social_relation_json);
+      const explicitKnowledge = body.knownBy !== undefined || body.knownByEveryone !== undefined;
+      const nextRelation = body.socialRelation === null ? undefined : parsedSocial?.success ? parsedSocial.data : oldRelation;
+      let mergeIds: string[] = [];
+      if (currentAssertion && nextRelation) {
+        const subject = body.subject?.trim() ?? String(currentAssertion.subject);
+        const unchangedIdentity = !!oldRelation && sameSocialRelationIdentity(String(currentAssertion.subject), oldRelation, subject, nextRelation);
+        if (oldRelation?.direction === "directed" && nextRelation.direction === "mutual") {
+          mergeIds = activeSocialRelations(db, chatId).filter(row => row.id !== body.id && row.relation.direction === "directed"
+            && isReverseMutualSocialRelation(row, subject, nextRelation)).map(row => row.id);
+        }
+        const relationConflict = unchangedIdentity ? undefined : findSocialRelationConflict(db, chatId, subject, nextRelation, [body.id, ...mergeIds]);
+        if (relationConflict) return context.json(ledgerConflictResponse(relationConflict), 409);
+        const predicate = body.predicate?.trim() ?? String(currentAssertion.predicate);
+        const unchangedPredicate = predicate.toLocaleLowerCase() === String(currentAssertion.predicate).toLocaleLowerCase();
+        const duplicate = socialRelationPredicateCollisions(db, chatId, subject, predicate, nextRelation)
+          .find(row => row.id !== body.id && !mergeIds.includes(row.id) && (!row.relation || !unchangedIdentity || !unchangedPredicate));
+        if (duplicate) return context.json(ledgerConflictResponse({ code: "DUPLICATE_LEDGER_ITEM", existingId: duplicate.id }), 409);
+      }
+      // A pin (including a full unchanged editor payload) is a preference, not
+      // a new authored occurrence or a correction boundary for old extraction.
+      if (body.kind === 'promise' && body.pinned !== undefined) {
+        const current=db.prepare('SELECT * FROM promises WHERE id=? AND chat_id=?').get(body.id,chatId) as Record<string,any>|undefined;
+        if (!current) return context.json({error:'State item not found or unsupported kind'},404);
+        const columns={promisor:'promisor',promisee:'promisee',content:'content',status:'status',scheduledFor:'scheduled_for',statusReason:'status_reason'} as const;
+        const authored=Object.entries(columns).some(([key,column])=>{
+          const value=body[key as keyof typeof columns];
+          return value !== undefined && (value?.trim() || null) !== (current[column] || null);
+        }) || explicitKnowledge || body.locked !== undefined && Number(body.locked)!==current.auto_locked
+          || body.recency === 'recent' || body.recency === 'already_past' && current.recency_until_turn != null;
+        if (!authored) {
+          if (current.pinned !== Number(body.pinned)) db.transaction(()=>{
+            db.prepare('UPDATE promises SET pinned=? WHERE id=? AND chat_id=?').run(Number(body.pinned),body.id,chatId);
+            db.prepare('UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?').run(Date.now(),chatId);
+          })();
+          return context.json({ok:true,item:{...current,pinned:Number(body.pinned),...correctionView(current)}});
         }
       }
-      if (changed && updatedItem) {
-        const table=body.kind==='assertion'?'assertions':body.kind==='belief'?'beliefs':'promises';
-        db.prepare(`UPDATE ${table} SET user_edit_ordinal=?,auto_locked=? WHERE id=? AND chat_id=?`)
-          .run(committedEditOrdinal(db,chatId),Number(body.locked ?? updatedItem.auto_locked ?? false),updatedItem.id,chatId);
-        Object.assign(updatedItem,{user_edit_ordinal:committedEditOrdinal(db,chatId),auto_locked:Number(body.locked ?? updatedItem.auto_locked ?? false)});
-        Object.assign(updatedItem,correctionView(updatedItem));
-      }
-      if (changed) db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
-    })();
-    return changed ? context.json({ ok: true, item: updatedItem }) : context.json({ error: "State item not found or unsupported kind" }, 404);
+      const revision = chat.revision + 1;
+      let changed = 0;
+      let updatedItem: Record<string, unknown> | undefined;
+      db.transaction(() => {
+        const current = body.kind === 'assertion' ? currentAssertion
+          : body.kind === 'belief' || body.kind === 'promise'
+            ? db.prepare(`SELECT * FROM ${body.kind === 'belief' ? 'beliefs' : 'promises'} WHERE id=? AND chat_id=?`).get(body.id,chatId) as Record<string,any>|undefined : undefined;
+        if (!current) return;
+        const support = body.kind === 'promise' ? promiseLinkedSupport(db,chatId,body.id!)
+          : current.linked_detail_ids_json != null && current.user_edit_ordinal == null
+            ? {ids:JSON.parse(String(current.linked_detail_ids_json)) as string[],holders:linkedDetailKnowledge(db,chatId,JSON.parse(String(current.linked_detail_ids_json))) ?? [PENDING_ACCESS_HOLDER]} : undefined;
+        let grants = snapshotKnowledgeGrants(db,chatId,body.kind as 'assertion'|'belief'|'promise',body.id!,support);
+        const priorHolders = support?.holders ?? (grants.length ? grants.map(grant=>grant.holder)
+          : body.kind === 'assertion' ? (oldRelation ? socialRelationKnowledge(db,chatId,oldRelation) : resolveAssertionHolders(db,chatId,current)) ?? [PENDING_ACCESS_HOLDER]
+          : body.kind === 'belief' ? [String(current.holder)] : []);
+        if (!grants.length && body.kind === 'assertion' && priorHolders.length)
+          grants = snapshotKnowledgeGrants(db,chatId,'assertion',body.id!,{ids:[],holders:priorHolders});
+        if (explicitKnowledge) {
+          const holders = body.knownByEveryone === true ? [EVERYONE_HOLDER] : body.knownBy?.map(holder=>holder.trim()) ?? publicKnowledgeScope(priorHolders).knownBy;
+          grants = (holders.length ? holders : [NARRATOR_ARCHIVE_HOLDER]).map(holder=>({holder,basis:'internal',evidence:[],confidence:1}));
+        }
+        const promiseDetails = body.kind === 'promise' ? support?.ids ?? correctedPromiseDetailIds(db,chatId,body.id!) : undefined;
+        const linkedDetails = explicitKnowledge ? null : body.kind === 'promise'
+          ? promiseDetails?.length ? JSON.stringify(promiseDetails) : null : current.linked_detail_ids_json ?? null;
+        if (body.kind === "assertion") {
+          db.prepare("UPDATE assertions SET automatic_closure_evidence_json=NULL,valid_to_revision=? WHERE id=?").run(revision - 1, body.id);
+          for (const id of mergeIds) db.prepare("UPDATE assertions SET automatic_closure_evidence_json=NULL,valid_to_revision=? WHERE id=?").run(revision - 1, id);
+          const nextId = randomUUID();
+          const nextStateKind = nextRelation ? "condition" : body.stateKind ?? current.state_kind ?? "condition";
+          db.prepare(`
+          INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,source_memory_id,evidence_json,created_at,linked_detail_ids_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        `).run(nextId, chatId, body.subject?.trim() ?? current.subject, body.predicate?.trim() ?? current.predicate, body.value?.trim() ?? current.value,
+            nextStateKind,
+            Math.max(0, Math.min(1, Number(body.confidence ?? current.confidence))), revision, null, "[]", Date.now(),linkedDetails);
+          if (grants.length) replaceItemAccess(db,chatId,'assertion',nextId,grants,revision,Date.now());
+          const relationJson = body.socialRelation === null || !nextRelation ? null : JSON.stringify({ ...nextRelation, manual: true,
+            ...publicKnowledgeScope(grants.map(grant=>grant.holder)), detailIds: explicitKnowledge ? [] : oldRelation?.detailIds ?? [] });
+          db.prepare("UPDATE assertions SET social_relation_json=? WHERE id=?").run(relationJson, nextId);
+          db.prepare("UPDATE assertions SET user_edit_ordinal=?,auto_locked=?,valid_from_ordinal=? WHERE id=?")
+            .run(committedEditOrdinal(db,chatId),Number(body.locked ?? current.auto_locked ?? false),committedEditOrdinal(db,chatId),nextId);
+          changed = 1;
+          updatedItem = db.prepare("SELECT * FROM assertions WHERE id=?").get(nextId) as Record<string, unknown>;
+          updatedItem.stateKind = updatedItem.state_kind;
+          if (nextStateKind === "goal" || nextStateKind === "secret") Object.assign(updatedItem, publicKnowledgeScope(resolveAssertionHolders(db, chatId, updatedItem) ?? []));
+        } else if (body.kind === "belief") {
+          rememberLedgerEditOrigin(db, chatId, "belief", body.id!);
+          changed = db.prepare(`UPDATE beliefs SET automatic_closure_evidence_json=NULL,holder=COALESCE(?,holder),subject=COALESCE(?,subject),predicate=COALESCE(?,predicate),value=COALESCE(?,value),confidence=COALESCE(?,confidence),polarity=COALESCE(?,polarity),status='active',active=1,superseded_by=NULL,valid_to_ordinal=NULL WHERE id=? AND chat_id=?`).run(
+            body.holder?.trim() ?? null, body.subject?.trim() ?? null, body.predicate?.trim() ?? null, body.value?.trim() ?? null,
+            body.confidence === undefined ? null : body.confidence, body.polarity ?? null, body.id, chatId,
+          ).changes;
+          if (changed) updatedItem = db.prepare("SELECT * FROM beliefs WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown>;
+        } else if (body.kind === "promise") {
+          const previous = db.prepare("SELECT status FROM promises WHERE id=? AND chat_id=?").get(body.id, chatId) as { status: string } | undefined;
+          rememberLedgerEditOrigin(db, chatId, "promise", body.id!);
+          changed = db.prepare(`UPDATE promises SET promisor=COALESCE(?,promisor),promisee=COALESCE(?,promisee),content=COALESCE(?,content),status=COALESCE(?,status),scheduled_for=COALESCE(?,scheduled_for),status_reason=COALESCE(?,status_reason),pinned=COALESCE(?,pinned),updated_revision=? WHERE id=? AND chat_id=?`).run(
+            body.promisor?.trim() ?? null, body.promisee?.trim() ?? null, body.content?.trim() ?? null, body.status ?? null, body.scheduledFor?.trim() ?? null, body.statusReason?.trim() ?? null, body.pinned === undefined ? null : Number(body.pinned), revision, body.id, chatId,
+          ).changes;
+          if (changed) {
+            recordPromiseRecency(db, chatId, body.id!, previous?.status, body.status ?? previous!.status, body.recency ?? "already_past");
+            updatedItem = db.prepare("SELECT * FROM promises WHERE id=? AND chat_id=?").get(body.id, chatId) as Record<string, unknown>;
+            const sourceOrdinal = committedEditOrdinal(db,chatId);
+            const eventId = randomUUID();
+            db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_ordinal,created_revision,created_at,user_authored,linked_detail_ids_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,1,?)`).run(
+              eventId, chatId, body.id, updatedItem.promise_key, updatedItem.promisor, updatedItem.promisee,
+              updatedItem.content, updatedItem.status, updatedItem.scheduled_for, updatedItem.status_reason, sourceOrdinal, revision, Date.now(),linkedDetails,
+            );
+            snapshotPromiseRecency(db, eventId, body.id!);
+          }
+        }
+        if (changed && updatedItem) {
+          if (body.kind !== 'assertion' && grants.length) replaceItemAccess(db,chatId,body.kind as 'belief'|'promise',String(updatedItem.id),grants,revision,Date.now());
+          if (body.kind === 'belief' && explicitKnowledge) {
+            db.prepare('UPDATE beliefs SET linked_detail_ids_json=NULL WHERE id=? AND chat_id=?').run(updatedItem.id,chatId);
+            updatedItem.linked_detail_ids_json=null;
+          }
+          const table=body.kind==='assertion'?'assertions':body.kind==='belief'?'beliefs':'promises';
+          db.prepare(`UPDATE ${table} SET user_edit_ordinal=?,auto_locked=? WHERE id=? AND chat_id=?`)
+            .run(committedEditOrdinal(db,chatId),Number(body.locked ?? updatedItem.auto_locked ?? false),updatedItem.id,chatId);
+          Object.assign(updatedItem,{user_edit_ordinal:committedEditOrdinal(db,chatId),auto_locked:Number(body.locked ?? updatedItem.auto_locked ?? false)});
+          Object.assign(updatedItem,correctionView(updatedItem));
+        }
+        if (changed) db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
+      })();
+      return changed ? context.json({ ok: true, item: updatedItem }) : context.json({ error: "State item not found or unsupported kind" }, 404);
+    });
   });
-  app.delete("/v1/chats/:id/world-state/:kind/:itemId", (context) => {
-    const chatId = context.req.param("id");
-    const kind = context.req.param("kind");
-    const itemId = context.req.param("itemId");
-    const mode = context.req.query("mode");
-    if (mode !== undefined && mode !== "end" && mode !== "delete") return context.json({ error: "mode must be end or delete" }, 400);
-    if (mode === "end" && kind === "promise") return context.json({ error: "Promises end through kept, broken, or released status" }, 400);
-    if (!["assertion", "belief", "promise"].includes(kind)) return context.json({ error: "unsupported kind" }, 400);
-    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
-    if (!chat) return context.json({ error: "Chat not found" }, 404);
+  function mutateLedger(chatId: string, kind: 'assertion'|'belief'|'promise', itemId: string, mode: 'end'|'delete'|undefined): boolean {
+    const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as {revision:number}|undefined;
+    if (!chat) return false;
     const revision = chat.revision + 1;
     let changed = 0;
     db.transaction(() => {
@@ -3231,9 +3772,9 @@ export function createApp(dependencies: Dependencies): Hono {
         const sourceOrdinal = committedEditOrdinal(db,chatId);
         changed = mode === "end"
           ? db.prepare("UPDATE beliefs SET automatic_closure_evidence_json=NULL,active=0,valid_to_ordinal=? WHERE id=? AND chat_id=? AND active=1").run(sourceOrdinal, itemId, chatId).changes
-          : db.prepare(`UPDATE beliefs SET automatic_closure_evidence_json=NULL,active=0,valid_to_ordinal=COALESCE(valid_to_ordinal,?),
+          : db.prepare(`UPDATE beliefs SET automatic_closure_evidence_json=NULL,active=0,valid_to_ordinal=COALESCE(valid_to_ordinal,?),deleted_through_ordinal=?,
           source=CASE WHEN source LIKE 'user_deleted:%' THEN source ELSE 'user_deleted:' || COALESCE(source,'') END
-          WHERE id=? AND chat_id=? AND active=1`).run(sourceOrdinal, itemId, chatId).changes;
+          WHERE id=? AND chat_id=? AND active=1`).run(sourceOrdinal, processedSourceWatermark(db, chatId), itemId, chatId).changes;
       }
       else changed = db.prepare("DELETE FROM promises WHERE id=? AND chat_id=?").run(itemId, chatId).changes;
       if (changed && (mode==='delete' || (mode!=='end' && kind!=='assertion'))) {
@@ -3243,7 +3784,52 @@ export function createApp(dependencies: Dependencies): Hono {
       if (changed) db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, Date.now(), chatId);
     })();
     if (changed && mode === "delete") embeddings.stateIndex.prune(chatId);
-    return changed ? context.json({ ok: true }) : context.json({ error: "State item not found" }, 404);
+    return changed > 0;
+  }
+  app.delete("/v1/chats/:id/world-state/:kind/:itemId", (context) => {
+    return withChatWrite(db, context.req.param('id'), () => {
+      const chatId=context.req.param('id'),kind=context.req.param('kind'),itemId=context.req.param('itemId'),mode=context.req.query('mode');
+      if (mode !== undefined && mode !== 'end' && mode !== 'delete') return context.json({error:'mode must be end or delete'},400);
+      if (!['assertion','belief','promise'].includes(kind) || mode === 'end' && kind === 'promise') return context.json({error:'Unsupported ledger action'},400);
+      return mutateLedger(chatId,kind as 'assertion'|'belief'|'promise',itemId,mode) ? context.json({ok:true}) : context.json({error:'State item not found'},404);
+    });
+  });
+  app.patch('/v1/chats/:id/seeds/:detailId', async context => {
+    const body=await context.req.json().catch(()=>null);
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body || !['close','reopen'].includes(body.action)) return context.json({error:'action must be close or reopen'},400);
+      return editStorySeed(db,context.req.param('id'),context.req.param('detailId'),body.action) ? context.json({ok:true}) : context.json({error:'Seed not found'},404);
+    });
+  });
+  app.delete('/v1/chats/:id/seeds/:detailId', context => withChatWrite(db, context.req.param('id'), () => editStorySeed(db,context.req.param('id'),context.req.param('detailId'),'delete')
+    ? context.json({ok:true}) : context.json({error:'Seed not found'},404)));
+  app.post('/v1/chats/:id/now/cleanup', async context => {
+    const body=await context.req.json().catch(()=>null);
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body || !['end','delete','reopen'].includes(body.action) || !Array.isArray(body.items) || !body.items.length || body.items.length>500)
+        return context.json({error:'Expected action and 1–500 items'},400);
+      const seedIds=body.items.filter((item:any)=>item?.kind === 'seed' && typeof item.id === 'string' && item.id).map((item:any)=>item.id) as string[];
+      let seedResults:Map<string,{ok:boolean;error?:string}>;
+      try { seedResults=new Map(editStorySeeds(db,context.req.param('id'),seedIds,body.action === 'end' ? 'close' : body.action).map(item=>[item.id,item])); }
+      catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        seedResults=new Map(seedIds.map(id=>[id,{ok:false,error:error instanceof Error ? error.message : String(error)}]));
+      }
+      const results=body.items.map((item: any) => {
+        const id=typeof item?.id === 'string' ? item.id : '',kind=item?.kind;
+        try {
+          if (!id || !['seed','assertion','belief'].includes(kind) || body.action === 'reopen' && kind !== 'seed')
+            return {id,kind,ok:false,error:'Unsupported cleanup item or action (promises are excluded)'};
+          if (kind === 'seed') return {id,kind,...seedResults.get(id)!};
+          const ok=mutateLedger(context.req.param('id'),kind,id,body.action);
+          return {id,kind,ok,...(ok ? {} : {error:'Record not found or already ended'})};
+        } catch (error) {
+          if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+          return {id,kind,ok:false,error:error instanceof Error ? error.message : String(error)};
+        }
+      });
+      return context.json({ok:results.every((item: any)=>item.ok),results});
+    });
   });
   function readDashboardConflicts(chatId: string) {
     return { items: db.prepare("SELECT * FROM conflicts WHERE chat_id=? AND kind<>'static_projection_changed' ORDER BY created_at DESC").all(chatId) };
@@ -3262,11 +3848,17 @@ export function createApp(dependencies: Dependencies): Hono {
         FROM extraction_audits WHERE chat_id=? AND job_id=? AND status IN ('pending_review','failed') ORDER BY updated_at DESC`).all(chatId, job.id) as Array<{ draft: string; source_ids: string }>;
       let withheld: ReturnType<typeof describeWithheldRecognitions> = [];
       let sourceMessageIds: string[] = [];
+      let withheldReviewable = false;
       for (const audit of audits) {
         try {
           const draft = JSON.parse(audit.draft) as any;
-          const found = describeWithheldRecognitions(draft);
-          if (found.length) { withheld = found; sourceMessageIds = JSON.parse(audit.source_ids || "[]"); break; }
+          const found = describeWithheldRecognitions(draft,buildEntityIdentityResolver(db,chatId));
+          if (found.length) {
+            withheld = found; sourceMessageIds = JSON.parse(audit.source_ids || "[]");
+            withheldReviewable = visibleSmallReviews(db, chatId, sourceMessageIds, readSmallReviews(draft))
+              .some(item => item.kind === "recognition" && item.status === "pending");
+            break;
+          }
         } catch { /* A malformed audit remains visible through the normal audit endpoint. */ }
       }
       if (!withheld.length) return failureMetadata;
@@ -3278,6 +3870,7 @@ export function createApp(dependencies: Dependencies): Hono {
         ...failureMetadata,
         memoriesSaved,
         withheldRecognitions: withheld,
+        withheldReviewable,
         ...(sourceRange ? { sourceRange: { id: sourceRange.id, startOrdinal: sourceRange.startOrdinal, endOrdinal: sourceRange.endOrdinal } } : {}),
       };
     };
@@ -3292,11 +3885,13 @@ export function createApp(dependencies: Dependencies): Hono {
   }
   app.get("/v1/chats/:id/jobs", (context) => context.json(readDashboardJobs(context.req.param("id"))));
   // Snapshot IDs for the confirmation; never include work queued after the user saw it.
-  const queuedReviewJobs = () => db.prepare("SELECT id FROM jobs WHERE status='queued' AND type IN ('extract','episode','social_backfill','memory_group')").all() as Array<{ id: string }>;
+  const queuedReviewJobs = () => db.prepare(`SELECT id FROM jobs WHERE status='queued' AND type IN ('extract','episode','social_backfill','memory_group')
+    AND json_extract(payload_json,'$.upgradeRunId') IS NULL AND NOT ${upgradeLockSql('jobs.chat_id')}`).all() as Array<{ id: string }>;
   app.get('/v1/jobs/extraction-review', context => context.json({ jobIds: queuedReviewJobs().map(job => job.id) }));
   app.put('/v1/jobs/extraction-review', async context => {
     const { jobIds, enabled } = z.object({ jobIds: z.array(z.string().min(1)), enabled: z.boolean() }).parse(await context.req.json());
     const updated = db.transaction(() => {
+      jobIds.forEach(id=>assertUpgradeJobWritable(db,id));
       const eligible = new Set(queuedReviewJobs().map(job => job.id));
       const update = db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.postExtractionReview',json(?)),updated_at=? WHERE id=? AND status='queued'");
       return [...new Set(jobIds)].reduce((count, id) => count + (eligible.has(id) ? update.run(JSON.stringify(enabled), Date.now(), id).changes : 0), 0);
@@ -3311,61 +3906,70 @@ export function createApp(dependencies: Dependencies): Hono {
       void embeddings.indexPending(chatId);
       return context.json({ retried });
     } catch (error) {
+      if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
       return context.json({ error: error instanceof Error ? error.message : "임베딩 재시도를 요청하지 못했어요." }, 409);
     }
   });
   app.get('/v1/chats/:id/jobs/retry-failed/estimate',context=>context.json(estimateFailedJobCalls(db,context.req.param('id'))));
   app.post("/v1/chats/:id/jobs/retry-failed", async (context) => {
     const body = await context.req.json().catch(() => ({}));
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return context.json({error:'Expected a retry request object'},400);
-    if (body.jobIds !== undefined && (!Array.isArray(body.jobIds) || !body.jobIds.every((id: unknown) => typeof id === 'string'))) return context.json({error:'jobIds must be an array of IDs'},400);
-    const selectedIds: Set<string> | undefined = body.jobIds ? new Set(body.jobIds) : undefined;
-    const chatId = context.req.param("id");
-    if (db.prepare(`SELECT id FROM jobs WHERE chat_id=? AND status='failed' AND type='initial_calibration'
+    return withChatWrite(db, context.req.param('id'), () => {
+      assertSourceSnapshotAccepted(db,context.req.param('id'));
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return context.json({error:'Expected a retry request object'},400);
+      if (body.jobIds !== undefined && (!Array.isArray(body.jobIds) || !body.jobIds.every((id: unknown) => typeof id === 'string'))) return context.json({error:'jobIds must be an array of IDs'},400);
+      const selectedIds: Set<string> | undefined = body.jobIds ? new Set(body.jobIds) : undefined;
+      const chatId = context.req.param("id");
+      if (db.prepare(`SELECT id FROM jobs WHERE chat_id=? AND status='failed' AND type='initial_calibration'
       AND COALESCE(json_array_length(payload_json,'$.resolvedSetup.messages'),0)=0`).all(chatId).some((row:any)=>!selectedIds||selectedIds.has(row.id))) {
-      return context.json({ code: "INITIAL_SETUP_REQUIRED", error: "초기 설정 입력은 보관하지 않아요. 인물 → 초기 설정에서 재료를 다시 선택해 주세요." }, 409);
-    }
-    const retriedRunIds = (db.prepare(`SELECT id,json_extract(payload_json,'$.backfillRunId') runId FROM jobs
-      WHERE chat_id=? AND status='failed' AND json_extract(payload_json,'$.backfillRunId') IS NOT NULL`).all(chatId) as Array<{ id:string;runId: string }>).filter(row=>!selectedIds||selectedIds.has(row.id)).map((row) => row.runId);
-    const result = db.transaction(() => {
-      const failed = db.prepare("SELECT id,payload_json FROM jobs WHERE chat_id=? AND status='failed'").all(chatId) as Array<{ id: string; payload_json: string }>;
-      const update = db.prepare(`UPDATE jobs SET status='queued',attempts=0,payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='failed'`);
-      let changes = 0;
-      for (const job of failed) {
-        if (selectedIds && !selectedIds.has(job.id)) continue;
-          const payload = manualRetryPayload(JSON.parse(job.payload_json || "{}"));
-        changes += update.run(JSON.stringify(payload), Date.now(), job.id).changes;
+        return context.json({ code: "INITIAL_SETUP_REQUIRED", error: "초기 설정 입력은 보관하지 않아요. 인물 → 초기 설정에서 재료를 다시 선택해 주세요." }, 409);
       }
-      return { changes };
-    })();
-    if (db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='initial_calibration' AND status='queued'").get(chatId)) {
-      db.prepare("UPDATE initial_calibrations SET status='queued',last_error=NULL,updated_at=? WHERE chat_id=?").run(Date.now(), chatId);
-    }
-    for (const runId of retriedRunIds) db.prepare("DELETE FROM server_meta WHERE key=?").run(`backfill_ack:${chatId}:${runId}`);
-    if (result.changes > 0) serverWorker.wake();
-    return context.json({ ok: true, retried: result.changes });
+      const retriedRunIds = (db.prepare(`SELECT id,json_extract(payload_json,'$.backfillRunId') runId FROM jobs
+      WHERE chat_id=? AND status='failed' AND json_extract(payload_json,'$.backfillRunId') IS NOT NULL`).all(chatId) as Array<{ id:string;runId: string }>).filter(row=>!selectedIds||selectedIds.has(row.id)).map((row) => row.runId);
+      const result = db.transaction(() => {
+        const failed = db.prepare("SELECT id,payload_json FROM jobs WHERE chat_id=? AND status='failed'").all(chatId) as Array<{ id: string; payload_json: string }>;
+        const update = db.prepare(`UPDATE jobs SET status='queued',attempts=0,payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='failed'`);
+        let changes = 0;
+        for (const job of failed) {
+          if (selectedIds && !selectedIds.has(job.id)) continue;
+            const payload = manualRetryPayload(JSON.parse(job.payload_json || "{}"));
+          changes += update.run(JSON.stringify(payload), Date.now(), job.id).changes;
+        }
+        return { changes };
+      })();
+      if (db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND type='initial_calibration' AND status='queued'").get(chatId)) {
+        db.prepare("UPDATE initial_calibrations SET status='queued',last_error=NULL,updated_at=? WHERE chat_id=?").run(Date.now(), chatId);
+      }
+      for (const runId of retriedRunIds) db.prepare("DELETE FROM server_meta WHERE key=?").run(`backfill_ack:${chatId}:${runId}`);
+      if (result.changes > 0) serverWorker.wake();
+      return context.json({ ok: true, retried: result.changes });
+    });
   });
   app.post("/v1/chats/:id/jobs/:jobId/resplit", (context) => {
-    try {
-      const result = resplitFailedExtractionJob(db, context.req.param("id"), context.req.param("jobId"));
-      if (result.queued > 0) serverWorker.wake();
-      return context.json({ ok: true, ...result });
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      return context.json({ error: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}) }, code === "ATOMIC_TURN_TOO_LARGE" ? 409 : 400);
-    }
+    return withChatWrite(db, context.req.param('id'), () => {
+      try {
+        const result = resplitFailedExtractionJob(db, context.req.param("id"), context.req.param("jobId"));
+        if (result.queued > 0) serverWorker.wake();
+        return context.json({ ok: true, ...result });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
+        const code = (error as { code?: string }).code;
+        return context.json({ error: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}) }, code === "ATOMIC_TURN_TOO_LARGE" ? 409 : 400);
+      }
+    });
   });
   app.delete("/v1/chats/:id/jobs/completed", (context) => {
-    const result = db.prepare(`
+    return withChatWrite(db, context.req.param('id'), () => {
+      const result = db.prepare(`
       UPDATE jobs SET status='archived',lease_owner=NULL,leased_until=NULL,updated_at=?
       WHERE chat_id=? AND status IN ('done','completed','cancelled','superseded')
     `).run(Date.now(), context.req.param("id"));
-    return context.json({ ok: true, archivedJobs: result.changes });
+      return context.json({ ok: true, archivedJobs: result.changes });
+    });
   });
-  app.delete("/v1/chats/:id/jobs", (context) => context.json({ ok: true, ...cancelExtractionJobs(db, context.req.param("id")) }));
-  app.post("/v1/chats/:id/jobs/requeue-cancelled", (context) => context.json({
+  app.delete("/v1/chats/:id/jobs", (context) => withChatWrite(db, context.req.param('id'), () => context.json({ ok: true, ...cancelExtractionJobs(db, context.req.param("id")) })));
+  app.post("/v1/chats/:id/jobs/requeue-cancelled", (context) => withChatWrite(db, context.req.param('id'), () => context.json({
     ok: true, restoredMessages: requeueCancelledMessages(db, context.req.param("id")),
-  }));
+  })));
   app.get("/v1/chats/:id/recall-logs", (context) => context.json({ items: db.prepare(`
     SELECT id,query,perspective,selected_json,elapsed_ms,created_at FROM recall_logs
     WHERE chat_id=? ORDER BY created_at DESC LIMIT 200
@@ -3381,26 +3985,31 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.patch("/v1/chats/:id/conflicts/:conflictId", async (context) => {
     const body = await context.req.json() as { resolution?: ConflictResolution; targetAssertionId?: unknown };
-    if (!body.resolution || !["accept_incoming", "keep_existing", "acknowledged"].includes(body.resolution)) {
-      return context.json({ error: "unsupported conflict resolution" }, 400);
-    }
-    if (body.targetAssertionId !== undefined && (typeof body.targetAssertionId !== "string" || !body.targetAssertionId.trim())) {
-      return context.json({ error: "targetAssertionId must be a non-empty string", code: "CONFLICT_TARGET_INVALID" }, 400);
-    }
-    const targetAssertionId = typeof body.targetAssertionId === "string" ? body.targetAssertionId.trim() : undefined;
-    return context.json({ ok: true, ...resolveConflict(db, context.req.param("id"), context.req.param("conflictId"), body.resolution, targetAssertionId) });
+    return withChatWrite(db, context.req.param('id'), () => {
+      if (!body.resolution || !["accept_incoming", "keep_existing", "acknowledged"].includes(body.resolution)) {
+        return context.json({ error: "unsupported conflict resolution" }, 400);
+      }
+      if (body.targetAssertionId !== undefined && (typeof body.targetAssertionId !== "string" || !body.targetAssertionId.trim())) {
+        return context.json({ error: "targetAssertionId must be a non-empty string", code: "CONFLICT_TARGET_INVALID" }, 400);
+      }
+      const targetAssertionId = typeof body.targetAssertionId === "string" ? body.targetAssertionId.trim() : undefined;
+      return context.json({ ok: true, ...resolveConflict(db, context.req.param("id"), context.req.param("conflictId"), body.resolution, targetAssertionId) });
+    });
   });
   app.delete("/v1/chats/:id/conflicts/:conflictId", (context) => {
-    const result = db.prepare("DELETE FROM conflicts WHERE id=? AND chat_id=? AND status='resolved'").run(context.req.param("conflictId"), context.req.param("id"));
-    return result.changes === 1 ? context.json({ ok: true }) : context.json({ error: "Resolved conflict not found" }, 404);
+    return withChatWrite(db, context.req.param('id'), () => {
+      const result = db.prepare("DELETE FROM conflicts WHERE id=? AND chat_id=? AND status='resolved'").run(context.req.param("conflictId"), context.req.param("id"));
+      return result.changes === 1 ? context.json({ ok: true }) : context.json({ error: "Resolved conflict not found" }, 404);
+    });
   });
 
   app.post("/v1/export", async (context) => {
     const body = await context.req.json() as { pluginSettings?: unknown; serverUrl?: string; serverToken?: string; chatId?:string; chatSettings?:any };
+    if (body.chatId) assertUserChat(db,body.chatId);
     const wasPaused = serverWorker.status.state === "paused";
     serverWorker.pause("Creating a consistent backup");
     try {
-      const archive = body.chatId ? exportChatArchive(db,body.chatId,body.chatSettings) : exportCompleteArchive(db, {
+      const archive = body.chatId ? exportChatArchive(db,body.chatId,body.chatSettings,albumPhotoStore) : exportCompleteArchive(db, {
         pluginSettings: body.pluginSettings,
         serverUrl: typeof body.serverUrl === "string" ? body.serverUrl : undefined,
         serverToken: config.token,
@@ -3408,7 +4017,7 @@ export function createApp(dependencies: Dependencies): Hono {
         secrets: existsSync(config.secretsPath) ? readFileSync(config.secretsPath, "utf8") : "",
         voyageApiKey: config.voyageApiKey || undefined,
         llmApiKeys: llmStore.backupApiKeys(),
-      });
+      }, albumPhotoStore);
       context.header("Content-Type", "application/zip");
       context.header("Content-Disposition", `attachment; filename="rcm-${body.chatId ? "chat" : "complete"}-backup-${Date.now()}.zip"`);
       return context.body(archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength) as ArrayBuffer);
@@ -3421,16 +4030,19 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json(inspection);
   });
   app.post("/v1/import/restore", async (context) => {
-    if (serverWorker.status.activeCalls > 0) return context.json({error:"보조 모델 처리가 끝난 뒤 복원해주세요."},409);
+    const archive = new Uint8Array(await context.req.arrayBuffer());
+    for (const row of db.prepare('SELECT id FROM chats').all() as {id:string}[]) assertChatUnlocked(db,row.id);
+    if (serverWorker.status.activeCalls > 0) return context.json({error:"보조 모델 처리가 끝난 뒤 복원해 주세요."},409);
     const wasPaused = serverWorker.status.state === "paused";
     serverWorker.pause("Restoring a complete backup");
-    const previousArchive = exportCompleteArchive(db);
+    let previousArchive: Uint8Array | undefined;
     const previousSecrets = existsSync(config.secretsPath) ? readFileSync(config.secretsPath, "utf8") : undefined;
     try {
-      const archive = new Uint8Array(await context.req.arrayBuffer());
+      previousArchive = exportCompleteArchive(db, {}, albumPhotoStore);
+      const stagingDirectory = mkdtempSync(join(dirname(config.dbPath), ".album-restore-check-"));
       const staged = openDatabase(":memory:").db;
       try {
-        restoreCompleteArchive(staged, archive);
+        restoreCompleteArchive(staged, archive, createAlbumPhotoStore(join(stagingDirectory, "albums")));
         const integrity = staged.pragma("integrity_check") as Array<{ integrity_check?: string }>;
         const foreignKeyErrors = staged.pragma("foreign_key_check") as unknown[];
         if (integrity.some((row) => row.integrity_check !== "ok") || foreignKeyErrors.length > 0) {
@@ -3438,8 +4050,9 @@ export function createApp(dependencies: Dependencies): Hono {
         }
       } finally {
         staged.close();
+        rmSync(stagingDirectory, { recursive: true, force: true });
       }
-      const result = restoreCompleteArchive(db, archive);
+      const result = restoreCompleteArchive(db, archive, albumPhotoStore);
       const liveIntegrity = db.pragma("integrity_check") as Array<{ integrity_check?: string }>;
       const liveForeignKeyErrors = db.pragma("foreign_key_check") as unknown[];
       if (liveIntegrity.some((row) => row.integrity_check !== "ok") || liveForeignKeyErrors.length > 0) {
@@ -3447,8 +4060,13 @@ export function createApp(dependencies: Dependencies): Hono {
       }
       if (typeof result.privateData.secrets === "string") writeFileSync(config.secretsPath, result.privateData.secrets, "utf8");
       if (typeof result.privateData.serverToken === "string") saveSecret(config.secretsPath,"RCM_TOKEN",config.token);
+      // Restore only preferences this install owns. A backup from another install (an updating stable
+      // package restored into one without an update channel, or an older version's setting) must not
+      // fail the whole restore; malformed values are still rejected.
+      const ownedSettings = backupServerSettings(config);
       for (const [name,value] of Object.entries(result.privateData.serverSettings??{})) {
-        if (!Object.hasOwn(backupServerSettings(config),name) || typeof value!=="string" || /[\r\n]/u.test(value)) throw new Error("Invalid backed up server preference");
+        if (typeof value!=="string" || /[\r\n]/u.test(value)) throw new Error("Invalid backed up server preference");
+        if (!Object.hasOwn(ownedSettings,name)) continue;
         saveSecret(config.secretsPath,name as `RCM_${string}`,value);
       }
       if (typeof result.privateData.voyageApiKey === "string") saveVoyageKey(config.secretsPath, result.privateData.voyageApiKey);
@@ -3458,7 +4076,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ ok: true, manifest: result.inspection.manifest, connection: result.inspection.privateData, pluginSettings: result.privateData.pluginSettings,
         vectorsRestored: result.vectorsRestored, restartRequired: true });
     } catch (error) {
-      restoreCompleteArchive(db, previousArchive);
+      if (previousArchive) restoreCompleteArchive(db, previousArchive, albumPhotoStore);
       if (previousSecrets !== undefined) writeFileSync(config.secretsPath, previousSecrets, "utf8");
       else if (existsSync(config.secretsPath)) unlinkSync(config.secretsPath);
       if (!wasPaused) serverWorker.resume("backup-restore-rollback");
@@ -3466,19 +4084,23 @@ export function createApp(dependencies: Dependencies): Hono {
     }
   });
   app.post("/v1/import/chat",async(context)=>{
-    if (serverWorker.status.activeCalls > 0) return context.json({error:"보조 모델 처리가 끝난 뒤 복원해주세요."},409);
+    const archive = new Uint8Array(await context.req.arrayBuffer());
+    for (const chat of inspectCompleteArchive(archive).manifest.chats) assertChatUnlocked(db,chat.id);
+    if (serverWorker.status.activeCalls > 0) return context.json({error:"보조 모델 처리가 끝난 뒤 복원해 주세요."},409);
     const wasPaused=serverWorker.status.state==="paused";
     serverWorker.pause("Restoring one chat backup");
     try {
-      const result=restoreChatArchive(db,new Uint8Array(await context.req.arrayBuffer()));
+      const result=restoreChatArchive(db,archive,albumPhotoStore);
       return context.json({ok:true,...result,serverInstanceId:serverInstanceId});
     } finally {if(!wasPaused)serverWorker.resume("chat-backup-restore");}
   });
   app.post("/v1/import/transplant", async (context) => {
-    if (serverWorker.status.activeCalls > 0) return context.json({error:"보조 모델 처리가 끝난 뒤 복원해주세요."},409);
+    if (serverWorker.status.activeCalls > 0) return context.json({error:"보조 모델 처리가 끝난 뒤 복원해 주세요."},409);
     const sourceChatId = context.req.query("sourceChatId") ?? "";
     const targetChatId = context.req.query("targetChatId") ?? "";
     if (!sourceChatId || !targetChatId) return context.json({ error: "sourceChatId and targetChatId are required" }, 400);
+    assertUserChat(db,sourceChatId); assertUserChat(db,targetChatId);
+    assertChatUnlocked(db,sourceChatId); assertChatUnlocked(db,targetChatId);
     const wasPaused = serverWorker.status.state === "paused";
     serverWorker.pause("Transplanting memory into the current chat");
     try {
@@ -3491,6 +4113,15 @@ export function createApp(dependencies: Dependencies): Hono {
   });
 
   app.onError(async (error, context) => {
+    if ((error as {code?:string}).code === 'INTERNAL_CHAT') return context.json({code:'INTERNAL_CHAT',error:error.message},403);
+    const upgradeCode = (error as {code?:string}).code;
+    if (upgradeCode && ['SOURCE_SNAPSHOT_HELD','CHAT_WORK_OFF','UPGRADE_ACTIVE','PHASE_LOCKED','SETUP_UNAVAILABLE','BACKUP_FAILED','SOURCE_MISSING','BUSY','ALREADY_CURRENT','RUN_NOT_FOUND','RUN_NOT_RESUMABLE','SOURCE_CHANGED','RUN_NOT_READY'].includes(upgradeCode)) {
+      const reasons: Record<string,string> = {SETUP_UNAVAILABLE:'초기 설정 자료를 선택한 뒤 다시 시도해 주세요.',BACKUP_FAILED:'이 채팅의 백업을 만들지 못해서 다시 만들기를 시작하지 않았어요.'};
+      return context.json({code:upgradeCode,error:reasons[upgradeCode] ?? error.message,lock:(error as any).lock,chatId:(error as any).chatId},upgradeCode === 'RUN_NOT_FOUND' ? 404 : upgradeCode === 'BACKUP_FAILED' ? 500 : 409);
+    }
+    if ((error as {code?:string}).code === 'CHAT_UPGRADING') {
+      return context.json({code:'CHAT_UPGRADING',lock:(error as any).lock},423);
+    }
     // Includes prepare failures from replayed audit checkpoints as well as completion.
     if (context.req.routePath.startsWith("/v1/jobs/:id/")) {
       const body = await context.req.json().catch(() => ({}));
@@ -3500,12 +4131,13 @@ export function createApp(dependencies: Dependencies): Hono {
     const summary = error instanceof ExtractionValidationError
       ? error.summary
       : error instanceof BackupValidationError ? `백업 검증 실패: ${error.message}`
-        : code === "LEASE_NOT_FOUND" ? "처리 작업의 임대가 만료되었습니다."
-          : "요청을 처리하지 못했습니다.";
+        : code === "LEASE_NOT_FOUND" ? "처리 작업의 임대가 만료됐어요."
+          : "요청을 처리하지 못했어요.";
     console.error(`[RCM] Request failed code=${code} path=${context.req.path}`);
     const status = code === "LEASE_NOT_FOUND" ? 409 : error instanceof ViewPreferencesStorageError ? 500 : 400;
     return context.json({
       error: error instanceof Error ? error.message : String(error), code, summary,
+      ...(Array.isArray((error as any).rejectedItems) ? {rejectedItems:(error as any).rejectedItems} : {}),
       ...(error instanceof ExtractionValidationError ? { issues: error.issues } : {}),
     }, status);
   });

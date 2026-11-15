@@ -1,3 +1,6 @@
+import { assertChatUnlocked } from './upgrade-lock.js';
+import { assertUpgradeJobWritable } from './upgrade-lock.js';
+import { assertUpgradeJobSource, refreshUpgradeRun } from './upgrade-run.js';
 import { auxiliaryInputBudgetMessage, ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { randomUUID } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, LedgerConsistencyResultSchema, type LedgerConsistencyResult, type LeasedJob, type MemoryLanguage, type RpProfile } from "@rcm/shared";
@@ -100,6 +103,7 @@ export interface FinalLedgerEnqueueResult {
 }
 
 export function enqueueFinalLedgerConsistency(db: RcmDatabase, chatId: string, runId: string): FinalLedgerEnqueueResult {
+  assertChatUnlocked(db,chatId);
   const remaining = db.prepare(`SELECT 1 FROM jobs WHERE chat_id=? AND type IN ('extract','episode') AND status IN ('queued','leased')
     AND json_extract(payload_json,'$.backfillRunId')=? LIMIT 1`).get(chatId, runId);
   if (remaining) return { state: "waiting", count: 0 };
@@ -161,6 +165,10 @@ export function recordLedgerInputs(db: RcmDatabase, chatId: string, payload: Rec
  * diverge in their completion ordering.
  */
 export function finalizeLedgerConsistencyRun(db: RcmDatabase, chatId: string, runId: string): boolean {
+  if (db.prepare("SELECT 1 FROM regeneration_runs WHERE id=? AND shadow_chat_id=? AND mode='upgrade'").get(runId,chatId)) {
+    refreshUpgradeRun(db,runId);
+    return false; // Story and projections belong to Task 3, after the live swap.
+  }
   if (!finalLedgerConsistencyRunReady(db, chatId, runId)) return false;
   flushRelationshipProjectionQueue(db, chatId, runId);
   maybeEnqueueStorySpine(db, chatId, runId);
@@ -218,7 +226,12 @@ You perform a final bounded consistency check on an already extracted roleplay l
 }
 
 export function completeLedgerConsistencyJob(db: RcmDatabase, job: LeasedJob, workerId: string, input: unknown): { chatId: string; warnings: string[]; pendingReconciliations: number } {
+  assertUpgradeJobWritable(db,job.id);
   if (!job.ledgerConsistency) throw new Error("Ledger consistency metadata is missing");
+  const stored = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND lease_owner=? AND status='leased'").get(job.id,job.chatId,workerId) as {payload_json:string}|undefined;
+  if (!stored) throw new Error("Lease not found while completing final ledger check");
+  const runPayload = JSON.parse(stored.payload_json) as {upgradeRunId?:string};
+  assertUpgradeJobSource(db,job.chatId,runPayload);
   const result = LedgerConsistencyResultSchema.parse(input);
   const supplied = new Map(job.ledgerConsistency.groups.map((group) => [group.itemRef, group]));
   if (result.groups.length !== supplied.size || result.groups.some((group) => !supplied.has(group.itemRef))) throw new Error("Final ledger check must return every supplied group exactly once");
@@ -259,5 +272,6 @@ export function completeLedgerConsistencyJob(db: RcmDatabase, job: LeasedJob, wo
     db.prepare("UPDATE jobs SET status='done',payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?")
       .run(JSON.stringify(payload), Date.now(), job.id);
   })();
+  if (runPayload.upgradeRunId) refreshUpgradeRun(db,runPayload.upgradeRunId);
   return { chatId: job.chatId, warnings, pendingReconciliations: 0 };
 }

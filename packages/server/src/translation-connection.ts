@@ -30,7 +30,7 @@ export class TranslationConnection {
     const extraction=this.llm.config;
     const sharesConnection=config.credentialSource==="shared"&&config.provider===extraction.provider&&config.endpoint===extraction.endpoint;
     const model=config.model||(sharesConnection?extraction.model:SERVER_LLM_DEFAULT_MODELS[config.provider]);
-    if(!model)throw new Error("이 프로바이더는 모델 ID를 입력해야 합니다.");
+    if(!model)throw new Error("이 프로바이더는 모델 ID를 입력해야 해요.");
     return {...config,model,thinking:normalizeDirectGeminiThinking(config.provider,model,config.thinking),llmTimeoutMs:TRANSLATION_TIMEOUT_MS};
   }
   private prepare(input:unknown) {

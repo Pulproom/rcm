@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertChatUnlocked } from './upgrade-lock.js';
 import type { RcmDatabase } from "./db.js";
 
 export const MEMORY_REF_SEQUENCE_PREFIX = "memory_ref_sequence:";
@@ -55,6 +56,7 @@ export class MemoryReferences {
     if (scope.issued.size >= 512) return;
     // Persist the high-water mark independently of request registries. A stale
     // model-visible address must never acquire a different target after restart.
+    assertChatUnlocked(this.db,chatId);
     const sequence = this.db.transaction(() => {
       const key = MEMORY_REF_SEQUENCE_PREFIX + chatId;
       const row = this.db.prepare("SELECT value FROM server_meta WHERE key=?").get(key) as { value: string } | undefined;
@@ -69,6 +71,7 @@ export class MemoryReferences {
   }
   deliver(chatId: string, generation: string, refs: string[]): void {
     if (!this.current(chatId, generation)) return;
+    assertChatUnlocked(this.db,chatId);
     for (const ref of refs) {
       const entry = this.scopes.get(chatId)!.issued.get(ref);
       if (!entry || entry.version !== this.version(chatId, entry.id)) continue;

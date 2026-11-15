@@ -21,6 +21,23 @@ export function sourceSnapshotStatus(db: RcmDatabase, chatId: string) {
     ...(held ? JSON.parse(held.value) : {}) };
 }
 
+/** A shadow consumes its live chat's sources, so it shares that freshness barrier. */
+export const sourceSnapshotHeldSql = (chatExpression: string): string => `EXISTS (
+  SELECT 1 FROM server_meta source_held WHERE source_held.key='source_snapshot_held:' || ${chatExpression}
+    OR source_held.key IN (SELECT 'source_snapshot_held:' || source_run.chat_id FROM regeneration_runs source_run
+      WHERE source_run.shadow_chat_id=${chatExpression} AND source_run.status NOT IN ('applied','discarded','stale'))
+)`;
+
+export function isSourceSnapshotHeld(db: RcmDatabase, chatId: string): boolean {
+  return Boolean((db.prepare(`SELECT ${sourceSnapshotHeldSql('source_chat.id')} held FROM (SELECT ? AS id) source_chat`).get(chatId) as { held: number }).held);
+}
+
+export function assertSourceSnapshotAccepted(db: RcmDatabase, chatId: string): void {
+  if (isSourceSnapshotHeld(db,chatId)) {
+    throw Object.assign(new Error('원문 확인 필요'), {code:'SOURCE_SNAPSHOT_HELD'});
+  }
+}
+
 /** Server-owned replay/evaluation inventory, read from its isolated SQLite snapshot. */
 export function storedSourceSnapshot(db: RcmDatabase, chatId: string): Pick<TurnPrepareRequest, 'sourceSnapshot' | 'messageVisibility'> {
   const items = db.prepare('SELECT message_id AS id,role,content_hash AS contentHash,host_visibility AS visibility FROM messages WHERE chat_id=? ORDER BY ordinal,message_id').all(chatId) as NonNullable<TurnPrepareRequest['messageVisibility']>;

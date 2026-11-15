@@ -1,4 +1,4 @@
-import { MemoryBudgetPresetSchema, defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
+import { MemoryBudgetPresetSchema, TurnPrepareRequestSchema, defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
 import type { PluginSettings, RuntimeLog } from "./types.js";
 
 export const SETTINGS_KEY = "rcm.settings.v1";
@@ -19,9 +19,11 @@ export const defaults: PluginSettings = {
   chatCatchUpPending: {},
   workerPaused: false,
   statusWidgetVisible: true,
+  majorAlerts: true,
   quizEnabled: true,
   defaultProfile: "companion",
   profiles: {},
+  narrationViewpoint: {},
   perspectives: {},
   detectedPerspectives: {},
   includeUserMessages: {},
@@ -53,7 +55,7 @@ export const defaults: PluginSettings = {
   dashboardTheme: "light",
   dashboardSkin: "phone",
   christmasSnow: true,
-  defaultMemoryBudget: 6_000,
+  defaultMemoryBudget: 8_000,
   memoryBudgets: {},
   mcpCap: 4_000,
   memoryToolsEnabled: true,
@@ -66,9 +68,20 @@ function parseStored<T>(value: unknown): T | undefined {
   try { return JSON.parse(value) as T; } catch { return undefined; }
 }
 
-/** Revisions 20/21 migrate optional per-chat injection preferences using their defaults. */
+/** Revisions 20/21 keep their existing additive defaults; narration is additive to revision 22. */
 export function supportedSettingsRevision(revision: unknown): boolean {
   return revision === defaults.settingsRevision || revision === 21 || revision === 20;
+}
+
+/** Retired perspective maps are never converted into narration viewpoints. */
+export function readNarrationViewpoints(stored: Partial<PluginSettings> | undefined): Record<string, string> {
+  const value = stored?.narrationViewpoint;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([id, name]) => {
+    if (name === "") return [[id, ""]]; // Explicit omniscient choice; never sent as a name.
+    const parsed = TurnPrepareRequestSchema.shape.narrationViewpoint.safeParse(name);
+    return parsed.success && parsed.data !== undefined ? [[id, parsed.data]] : [];
+  }));
 }
 
 export function normalizeMemoryOnlyInjection(value: unknown): Record<string, boolean> {
@@ -117,8 +130,12 @@ export async function loadSettings(): Promise<PluginSettings> {
     workerAttention: stored?.workerAttention,
     statusWidgetPosition: stored?.statusWidgetPosition,
     statusWidgetVisible: stored?.statusWidgetVisible !== false,
+    majorAlerts: stored?.majorAlerts !== false,
+    incidentCursor: Number.isSafeInteger(stored?.incidentCursor) && stored!.incidentCursor! >= 0 ? stored!.incidentCursor : undefined,
+    incidentServerUrl: stored?.incidentServerUrl,
     quizEnabled: stored?.quizEnabled ?? defaults.quizEnabled,
     profiles: stored?.profiles ?? {},
+    narrationViewpoint: readNarrationViewpoints(stored),
     perspectives: stored?.perspectives ?? {},
     detectedPerspectives: stored?.detectedPerspectives ?? {},
     includeUserMessages: stored?.includeUserMessages ?? {},
@@ -188,6 +205,9 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && JSON.stringify(left.workerAttention) === JSON.stringify(right.workerAttention)
     && JSON.stringify(left.statusWidgetPosition) === JSON.stringify(right.statusWidgetPosition)
     && (left.statusWidgetVisible !== false) === (right.statusWidgetVisible !== false)
+    && left.majorAlerts === right.majorAlerts
+    && left.incidentCursor === right.incidentCursor
+    && left.incidentServerUrl === right.incidentServerUrl
     && (left.quizEnabled === true) === (right.quizEnabled === true)
     && left.defaultProfile === right.defaultProfile
     && left.auxiliaryMode === right.auxiliaryMode
@@ -207,6 +227,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.memoryToolsEnabled === right.memoryToolsEnabled
     && JSON.stringify(left.storyOverviewBackups) === JSON.stringify(right.storyOverviewBackups)
     && JSON.stringify(left.profiles) === JSON.stringify(right.profiles)
+    && JSON.stringify(left.narrationViewpoint) === JSON.stringify(right.narrationViewpoint)
     && JSON.stringify(left.perspectives) === JSON.stringify(right.perspectives)
     && JSON.stringify(left.detectedPerspectives) === JSON.stringify(right.detectedPerspectives)
     && JSON.stringify(left.includeUserMessages) === JSON.stringify(right.includeUserMessages)

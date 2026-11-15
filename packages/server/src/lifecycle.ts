@@ -1,3 +1,7 @@
+import { assertChatUnlocked, upgradeLockSql } from './upgrade-lock.js';
+import { matchesCapturedYumiDisplay } from './lineage-matching.js';
+import { chatUpgradeLock } from './upgrade-lock.js';
+import { checkUpgradeSource, refreshChatUpgrade } from './upgrade-run.js';
 import type { SourceMutationPolicy } from './source-snapshot.js';
 import { resetProgress } from "./pair-progress.js";
 import { staticMetadata } from "./setup-storage.js";
@@ -277,6 +281,10 @@ export function syncChatTitle(db: RcmDatabase, chatId: string, title?: string): 
 
 export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutationPolicy?: SourceMutationPolicy): SyncStats {
   return db.transaction(() => {
+    // The host source ledger must stay current even while derived writers are
+    // locked. Use the ordinary invalidation path below, then retire a changed
+    // phase-1 shadow in this same transaction before it can ever be promoted.
+    const upgrade = chatUpgradeLock(db,request.chatId);
     const timestamp = now();
     const existingChat = db.prepare("SELECT revision,static_hash,static_json,ingestion_state,memory_language,pending_memory_language,completed_turn_count FROM chats WHERE id = ?").get(request.chatId) as
       | { revision: number; static_hash: string | null; static_json: string | null; ingestion_state: string; memory_language: string; pending_memory_language: string | null; completed_turn_count: number }
@@ -317,7 +325,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
     );
     db.prepare("UPDATE chats SET last_seen_at=?,engaged_at=CASE WHEN ? THEN COALESCE(engaged_at,?) ELSE engaged_at END WHERE id=?").run(timestamp, Number(request.forceBackfill || request.backfillApproved === true), timestamp, request.chatId);
     syncChatTitle(db,request.chatId,request.chatTitle);
-    writePersonaHint(db, request.chatId, request.identityHints?.userPersonaName);
+    if (!upgrade) writePersonaHint(db, request.chatId, request.identityHints?.userPersonaName);
     if (existingChat) {
       const derivedExists = hasDerivedState(db, request.chatId);
       if (requestedMemoryLanguage === existingChat.memory_language) {
@@ -422,10 +430,14 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
       // unchanged. This also treats image-only display replacements as
       // presentation changes. A real prose edit changes the fingerprint and is
       // processed as a normal source revision.
-      const preserveCapturedSource = Boolean(previous?.source_kind === "yumi_model"
+      const preserveCapturedSource = Boolean(previous?.role === message.role && (previous?.source_kind === "yumi_model"
         && incomingSourceKind === "risu_display"
         && previous.display_comparison_hash
-        && projection?.displayComparisonHash === previous.display_comparison_hash);
+        && projection?.displayComparisonHash === previous.display_comparison_hash
+        // Recovering a translation record must also preserve evidence anchored
+        // to an already captured display, including inherited source offsets.
+        || previous && ['committed', 'client_pruned'].includes(previous.lifecycle)
+          && incomingSourceKind === 'yumi_model' && matchesCapturedYumiDisplay(previous, projection)));
       const sourceKind = preserveCapturedSource ? previous!.source_kind : incomingSourceKind;
       const content = preserveCapturedSource && previous?.content != null ? previous.content : message.content;
       const hash = sha256(`${message.role}\0${content}`);
@@ -624,11 +636,15 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
     let waitingUsers: string[] = [];
     const assignTurn = db.prepare("UPDATE messages SET completed_turn_seq=? WHERE chat_id=? AND message_id=? AND completed_turn_seq IS NULL");
     for (const row of turnRows) {
+      if (!archiveEligibleVisibility(row.host_visibility) || !["committed", "client_pruned"].includes(row.lifecycle)) continue;
       if (row.completed_turn_seq !== null) {
-        if (row.role === "assistant") waitingUsers = [];
+        if (row.role === "assistant") {
+          // Repair an unassigned user from an earlier sync without advancing time.
+          for (const messageId of waitingUsers) assignTurn.run(row.completed_turn_seq, request.chatId, messageId);
+          waitingUsers = [];
+        }
         continue;
       }
-      if (!archiveEligibleVisibility(row.host_visibility) || !["committed", "client_pruned"].includes(row.lifecycle)) continue;
       if (row.role === "user") {
         waitingUsers.push(row.message_id);
         continue;
@@ -647,6 +663,8 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
     invalidateAutomaticTransitions(db,request.chatId,[...invalidatedMessages]).forEach(id=>invalidatedSupports.add(`promises:${id}`));
     syncManualCognition(db,request.chatId,invalidatedSupports);
     markStorySupportsInvalid(db,request.chatId,invalidatedSupports);
+    if (upgrade?.phase === 1) checkUpgradeSource(db,request.chatId,upgrade.runId);
+    if (upgrade?.phase === 2) refreshChatUpgrade(db,request.chatId);
     // Ordinary sync also resumes repairs left pending by an earlier source-only
     // sync, even when there are no new invalidations or extraction candidates.
     if (!request.deferExtraction) maybeEnqueueStorySpine(db,request.chatId,undefined,'source_change');
@@ -655,6 +673,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
 }
 
 export function recanonicalizeSourceLedger(db: RcmDatabase, chatId: string): number {
+  assertChatUnlocked(db,chatId);
   const chat = db.prepare("SELECT normalization_policy_json FROM chats WHERE id=?").get(chatId) as
     | { normalization_policy_json: string }
     | undefined;
@@ -703,17 +722,20 @@ export function purgeExpiredContent(db: RcmDatabase): number {
     const revisions = db.prepare(`
       UPDATE message_revisions SET content=NULL,canonical_content=NULL
       WHERE purge_after IS NOT NULL AND purge_after <= ? AND content IS NOT NULL
+        AND NOT ${upgradeLockSql('message_revisions.chat_id')}
     `).run(timestamp).changes;
     const messages = db.prepare(`
       UPDATE messages SET content=NULL,canonical_content=NULL
       WHERE lifecycle IN ('superseded','branch_truncated','deleted','hard_deleted')
         AND updated_at <= ? AND content IS NOT NULL
+        AND NOT ${upgradeLockSql('messages.chat_id')}
     `).run(timestamp - 30 * DAY).changes;
     return revisions + messages;
   })();
 }
 
 export function hardDeleteMessage(db: RcmDatabase, chatId: string, messageId: string): boolean {
+  assertChatUnlocked(db,chatId);
   return db.transaction(() => {
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
     const message = db.prepare("SELECT message_id FROM messages WHERE chat_id=? AND message_id=?").get(chatId, messageId);

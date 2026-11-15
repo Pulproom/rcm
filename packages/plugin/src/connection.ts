@@ -19,13 +19,16 @@ export class ServerCompatibilityError extends Error {
   }
 }
 
-export const SERVER_RESPONSE_DELAYED = "서버 응답이 잠시 늦어지고 있습니다. 다시 확인하고 있습니다.";
+export const SERVER_RESPONSE_DELAYED = "서버 응답이 잠시 늦어지고 있어요. 다시 확인하고 있어요.";
 
 type MutableConnectionState = {
   activityStatusError?: string;
   serverConnectionIssue?: ServerConnectionIssue;
   serverConnectionFailureCount?: number;
   serverConnectionLastFailureAt?: number;
+  heartbeatOutage?: {failures:number;firstFailureAt:number};
+  connectionOutageNotified?: boolean;
+  notifyConnectionOutage?: () => void;
 };
 
 export function isServerApiIncompatible(state: MutableConnectionState): boolean {
@@ -48,37 +51,39 @@ export function describeServerConnectionIssue(
 ): ServerConnectionIssue | undefined {
   if (!isServerConfigured(settings)) return {
     kind: "unconfigured",
-    title: "기억 서버 연결이 필요합니다",
-    detail: "설정에서 서버 주소와 토큰을 저장하면 기억 처리를 시작합니다.",
+    title: "기억 서버 연결이 필요해요",
+    detail: "설정에서 서버 주소와 토큰을 저장하면 기억 처리를 시작해요.",
   };
   if (error === undefined) return undefined;
   const technical = error instanceof Error ? error.message : String(error);
-  if (error instanceof ServerCompatibilityError || (error as { code?: string } | null)?.code === "API_REVISION_MISMATCH") {
+  const code = (error as { code?: string } | null)?.code;
+  const pluginUpdate = code === "PLUGIN_UPDATE_REQUIRED";
+  if (error instanceof ServerCompatibilityError || code === "API_REVISION_MISMATCH" || pluginUpdate) {
     const received = error instanceof ServerCompatibilityError ? error.receivedRevision
       : Number((error as { expectedApiRevision?: number }).expectedApiRevision);
     const expected = error instanceof ServerCompatibilityError ? error.expectedRevision : RCM_API_REVISION;
     const knownDirection = Number.isInteger(received) && received > 0 && received !== expected;
-    if (!knownDirection && previous?.kind === "incompatible" && previous.requiredUpdate) return previous;
-    const requiredUpdate = knownDirection ? received < expected ? "server" : "plugin" : undefined;
+    if (!pluginUpdate && !knownDirection && previous?.kind === "incompatible" && previous.requiredUpdate) return previous;
+    const requiredUpdate = pluginUpdate ? "plugin" : knownDirection ? received < expected ? "server" : "plugin" : undefined;
     const serverOlder = requiredUpdate === "server";
     return {
       kind: "incompatible",
       requiredUpdate,
       title: !requiredUpdate ? "서버·플러그인 업데이트 필요" : serverOlder ? "서버 업데이트 필요" : "플러그인 업데이트 필요",
-      detail: !requiredUpdate ? "서버와 플러그인 버전을 확인한 뒤 함께 업데이트해 주세요." : serverOlder ? "서버에는 연결되지만 서버 버전이 맞지 않습니다. 서버를 업데이트하면 다시 연결됩니다."
-        : "서버에는 연결되지만 플러그인 버전이 맞지 않습니다. Risu 플러그인 메뉴의 + 버튼으로 플러그인을 업데이트하면 다시 연결됩니다.",
+      detail: !requiredUpdate ? "서버와 플러그인 버전을 확인한 뒤 함께 업데이트해 주세요." : serverOlder ? "서버에는 연결되지만 서버 버전이 맞지 않아요. 서버를 업데이트하면 다시 연결돼요."
+        : "서버에는 연결되지만 플러그인 버전이 맞지 않아요. Risu 플러그인 메뉴의 + 버튼으로 플러그인을 업데이트하면 다시 연결돼요.",
       technical,
     };
   }
   if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden/i.test(technical)) return {
     kind: "unauthorized",
     title: "서버 연결 정보를 확인해 주세요",
-    detail: "서버 토큰이 맞지 않습니다. 설정에서 연결 정보를 확인해 주세요.",
+    detail: "서버 토큰이 맞지 않아요. 설정에서 연결 정보를 확인해 주세요.",
     technical,
   };
   return {
     kind: "unavailable",
-    title: "기억 서버에 연결할 수 없습니다",
+    title: "기억 서버에 연결할 수 없어요",
     detail: "서버 주소와 실행 상태를 확인해 주세요.",
     technical,
   };
@@ -104,6 +109,7 @@ export function noteServerConnectionFailure(
     return undefined;
   }
   if (issue.kind === "unconfigured" || issue.kind === "unauthorized" || issue.kind === "incompatible") {
+    if (issue.kind === "incompatible") notifyConnectionOutage(state);
     state.serverConnectionFailureCount = confirmationThreshold;
     state.serverConnectionLastFailureAt = now;
     state.serverConnectionIssue = issue;
@@ -122,4 +128,16 @@ export function noteServerConnectionFailure(
   state.serverConnectionIssue = issue;
   state.activityStatusError = issue.detail;
   return issue;
+}
+
+function notifyConnectionOutage(state: MutableConnectionState): void {
+  if (state.connectionOutageNotified) return;
+  state.connectionOutageNotified=true;
+  state.notifyConnectionOutage?.();
+}
+export function noteHeartbeatResult(state: MutableConnectionState, failed: boolean, now=Date.now()): void {
+  if (!failed) { state.heartbeatOutage=undefined; state.connectionOutageNotified=false; return; }
+  const outage=state.heartbeatOutage ??= {failures:0,firstFailureAt:now};
+  outage.failures++;
+  if (outage.failures>=3 && now-outage.firstFailureAt>=30_000) notifyConnectionOutage(state);
 }

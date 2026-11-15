@@ -1,3 +1,5 @@
+import { createEntityIdentityResolver, normalizeEntityName, type ResolvedEntityIdentity } from "@rcm/shared";
+export { normalizeEntityName, type ResolvedEntityIdentity } from "@rcm/shared";
 import { addressTermAliasGuard, syncManualCognition } from "./social-knowledge.js";
 import type { EntityBirthday, ExtractionResult } from "@rcm/shared";
 import { createHash } from "node:crypto";
@@ -9,7 +11,6 @@ import { updateSetupRecognition } from "./setup-recognition.js";
 import { invalidateStorySupports, storySupportScopes } from "./story-spine.js";
 import { readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits } from "./item-access.js";
 
-export const normalizeEntityName = (value: string): string => value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
 
 function parseJson<T>(value: string, fallback: T): T {
   try { return JSON.parse(value) as T; } catch { return fallback; }
@@ -134,7 +135,7 @@ function entityDeletionPlan(db: RcmDatabase, chatId: string, entityId: string) {
   const fingerprint = createHash("sha256").update(JSON.stringify({ revision, entity, names: [...names], assertions, beliefs, promises, memories, related,
     // These independently stored grants/participants also belong to the cleanup.
     access: about("item_access", ["holder"]),
-    details: rows("memory_details").filter(row => [...parseJson<string[]>(row.participants_json, []), ...parseJson<string[]>(row.known_by_json, [])].some(matches)),
+    details: rows("memory_details").filter(row => [...parseJson<string[]>(row.participants_json, []), ...parseJson<string[]>(row.known_by_json, []), ...parseJson<string[]>(row.hidden_from_json, [])].some(matches)),
     passages: rows("source_passages").filter(row => parseJson<Array<{ holder: string }>>(row.access_json, []).some(grant => matches(grant.holder))),
     memoryMetadata: rows("memories").filter(row => matches(row.perspective) || parseJson<Array<{ pair?: string[] }>>(row.landmark_kinds_json, []).some(item => item.pair?.some(matches))),
     traces: (db.prepare("SELECT t.* FROM memory_traces t JOIN memories m ON m.id=t.memory_id WHERE m.chat_id=?").all(chatId) as Array<{ character_name: string }>).filter(row => matches(row.character_name)),
@@ -195,9 +196,9 @@ export function deleteEntity(db: RcmDatabase, chatId: string, entityId: string, 
         .run(removeNames(row.participants_json), removeNames(row.known_by_json), plan.matches(row.perspective) ? null : row.perspective, JSON.stringify(landmarks), Date.now(), row.id);
       refreshMemoryFts(db, row.id);
     }
-    for (const row of db.prepare("SELECT id,participants_json,known_by_json,seed_json FROM memory_details WHERE chat_id=?").all(chatId) as Array<Record<string, any>>) {
+    for (const row of db.prepare("SELECT id,participants_json,known_by_json,hidden_from_json,seed_json FROM memory_details WHERE chat_id=?").all(chatId) as Array<Record<string, any>>) {
       const participants = removeNames(row.participants_json);
-      db.prepare("UPDATE memory_details SET participants_json=?,known_by_json=?,seed_json=?,updated_at=? WHERE id=?").run(participants, removeNames(row.known_by_json), row.seed_json ? JSON.stringify({...JSON.parse(row.seed_json),noticedBy:JSON.parse(removeNames(JSON.stringify(JSON.parse(row.seed_json).noticedBy)))}) : null, Date.now(), row.id);
+      db.prepare("UPDATE memory_details SET participants_json=?,known_by_json=?,hidden_from_json=?,seed_json=?,updated_at=? WHERE id=?").run(participants, removeNames(row.known_by_json), removeNames(row.hidden_from_json), row.seed_json ? JSON.stringify({...JSON.parse(row.seed_json),noticedBy:JSON.parse(removeNames(JSON.stringify(JSON.parse(row.seed_json).noticedBy)))}) : null, Date.now(), row.id);
       db.prepare("UPDATE memory_detail_fts SET participants=? WHERE detail_id=?").run(JSON.parse(participants).join(" "), row.id);
     }
     for (const row of db.prepare("SELECT id,holder FROM item_access WHERE chat_id=?").all(chatId) as Array<{ id: string; holder: string }>) {
@@ -243,34 +244,10 @@ export function deleteEntity(db: RcmDatabase, chatId: string, entityId: string, 
   })();
 }
 
-export interface ResolvedEntityIdentity {
-  canonical: string;
-  variants: string[];
-  ambiguous: boolean;
-}
-
 /** Resolve identity-bearing ledger fields without guessing ambiguous aliases. */
 export function buildEntityIdentityResolver(db: RcmDatabase, chatId: string): (value: string) => ResolvedEntityIdentity {
-  const byValue = new Map<string, EntityItem[]>();
-  const removed = aliasRemovalGuard(db, chatId);
-  for (const entity of listEntities(db, chatId)) {
-    for (const value of entityIdentityTerms(entity, removed)) {
-      const key = normalizeEntityName(value);
-      const matches = byValue.get(key) ?? [];
-      if (!matches.some((item) => item.id === entity.id)) matches.push(entity);
-      byValue.set(key, matches);
-    }
-  }
-  return (value: string): ResolvedEntityIdentity => {
-    const matches = byValue.get(normalizeEntityName(value)) ?? [];
-    if (matches.length !== 1) return { canonical: value, variants: [value], ambiguous: matches.length > 1 };
-    const entity = matches[0]!;
-    return {
-      canonical: entity.name,
-      variants: entityIdentityTerms(entity, removed).filter(term => byValue.get(normalizeEntityName(term))?.length === 1),
-      ambiguous: false,
-    };
-  };
+  const removed=aliasRemovalGuard(db,chatId);
+  return createEntityIdentityResolver(listEntities(db,chatId).map(entity=>({id:entity.id,name:entity.name,terms:entityIdentityTerms(entity,removed)})));
 }
 
 export function previewEntityMerge(db: RcmDatabase, chatId: string, sourceId: string, targetId: string): EntityMergePreview {
@@ -312,6 +289,7 @@ export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: 
   }
   const existingFor = (entity: ExtractionResult["entities"][number]) =>
     [entity.key, entity.name, ...entity.aliases].map(value => aliasMap.get(normalizeEntityName(value))).find(Boolean);
+  const incomingResolve=createEntityIdentityResolver(result.entities.map(entity=>({id:entity.key,name:entity.name,terms:[entity.key,entity.name,...entity.aliases]})));
   const replacements = new Map<string, string>();
   result.entities = result.entities.map((entity) => {
     const existing = existingFor(entity);
@@ -325,10 +303,11 @@ export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: 
     for (const value of [entity.key, entity.name, ...entity.aliases]) if (identifiers.has(normalizeEntityName(value)) || !removed(existing.id, value)) replacements.set(normalizeEntityName(value), existing.name);
     return { key: existing.key, name: existing.name, type: existing.type, aliases: [...new Set([...existing.aliases, entity.name, ...entity.aliases])].filter(alias => !removed(existing.id, alias)) };
   }).filter((entity, index, items) => items.findIndex((candidate) => candidate.key === entity.key) === index);
-  const canonical = (value: string): string => replacements.get(normalizeEntityName(value)) ?? aliasMap.get(normalizeEntityName(value))?.name ?? value;
+  const canonical = (value: string): string => resolve(value).ambiguous || incomingResolve(value).ambiguous ? value : aliasMap.get(normalizeEntityName(value))?.name ?? replacements.get(normalizeEntityName(value)) ?? value;
   for (const memory of result.memories) {
     memory.participants = memory.participants.map(canonical);
     memory.knownBy = memory.knownBy.map(canonical);
+    if (memory.cardShape === 1) memory.knownBy = [...new Set(memory.knownBy)];
     if (memory.perspective) memory.perspective = canonical(memory.perspective);
     for (const landmark of memory.landmarkKinds ?? []) {
       if (landmark.pair) landmark.pair = [canonical(landmark.pair[0]), canonical(landmark.pair[1])];
@@ -473,9 +452,9 @@ export function mergeEntities(db: RcmDatabase, chatId: string, sourceId: string,
       if(Array.isArray(relation.knownBy)) relation.knownBy=JSON.parse(replaceJsonNames(JSON.stringify(relation.knownBy),sourceNames,target.name));
       db.prepare("UPDATE assertions SET social_relation_json=? WHERE id=?").run(JSON.stringify(relation),assertion.id);
     }
-    const details = db.prepare("SELECT id,participants_json,known_by_json,seed_json FROM memory_details WHERE chat_id=?").all(chatId) as Array<{ id: string; participants_json: string; known_by_json: string; seed_json: string | null }>;
-    for (const detail of details) db.prepare("UPDATE memory_details SET participants_json=?,known_by_json=?,seed_json=?,updated_at=? WHERE id=?").run(
-      replaceJsonNames(detail.participants_json, sourceNames, target.name), replaceJsonNames(detail.known_by_json, sourceNames, target.name), detail.seed_json ? JSON.stringify({...JSON.parse(detail.seed_json),noticedBy:JSON.parse(replaceJsonNames(JSON.stringify(JSON.parse(detail.seed_json).noticedBy),sourceNames,target.name))}) : null, Date.now(), detail.id,
+    const details = db.prepare("SELECT id,participants_json,known_by_json,hidden_from_json,seed_json FROM memory_details WHERE chat_id=?").all(chatId) as Array<{ id: string; participants_json: string; known_by_json: string; hidden_from_json: string; seed_json: string | null }>;
+    for (const detail of details) db.prepare("UPDATE memory_details SET participants_json=?,known_by_json=?,hidden_from_json=?,seed_json=?,updated_at=? WHERE id=?").run(
+      replaceJsonNames(detail.participants_json, sourceNames, target.name), replaceJsonNames(detail.known_by_json, sourceNames, target.name), replaceJsonNames(detail.hidden_from_json, sourceNames, target.name), detail.seed_json ? JSON.stringify({...JSON.parse(detail.seed_json),noticedBy:JSON.parse(replaceJsonNames(JSON.stringify(JSON.parse(detail.seed_json).noticedBy),sourceNames,target.name))}) : null, Date.now(), detail.id,
     );
 
     const baselines = db.prepare("SELECT id,from_entity,to_entity FROM relationship_baselines WHERE chat_id=?").all(chatId) as Array<{ id: string; from_entity: string; to_entity: string }>;

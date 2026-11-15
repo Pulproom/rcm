@@ -1,3 +1,4 @@
+import { consumeIncidentFeed, type IncidentFeed, incidentCursorQuery } from './toasts.js';
 import type { ServerClient } from "./api-client.js";
 import { isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess, ServerCompatibilityError } from "./connection.js";
 import type { RuntimeState } from "./types.js";
@@ -22,10 +23,15 @@ export async function refreshUpdateStatus(
   if (state.updateCheckPromise) return state.updateCheckPromise;
   const now = options.now ?? Date.now();
   if (!options.force && (state.updateNextCheckAt ?? 0) > now) return state.updateStatus;
-  const path = options.remote === false ? "/v1/update/status" : "/v1/update/status?refresh=1";
+  const serverUrl=state.settings.serverUrl;
+  const requestedCursor=state.settings.incidentServerUrl===serverUrl ? state.settings.incidentCursor : undefined;
+  const cursorQuery=incidentCursorQuery(state.settings);
+  const path = (options.remote === false ? '/v1/update/status' : '/v1/update/status?refresh=1')
+    + (cursorQuery ? `${options.remote === false ? '?' : '&'}${cursorQuery}` : '');
   state.updateNextCheckAt = now + UPDATE_INTERVAL_MS;
-  const pending = client.request<NonNullable<RuntimeState["updateStatus"]>>(path, {}, 20_000)
-    .then((update) => {
+  const pending = client.request<NonNullable<RuntimeState["updateStatus"]> & Partial<IncidentFeed>>(path, {}, 20_000)
+    .then(async (update) => {
+      await consumeIncidentFeed(state,update,serverUrl,requestedCursor);
       state.updateStatus = update;
       observeServerUpdateVersion(state, update.currentServerVersion);
       state.publishActivity?.();
@@ -51,10 +57,10 @@ export async function installServerUpdate(
   const wait = options.wait ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   const staged = state.updateStatus?.restartRequired && state.updateStatus.stagedVersion
     ? state.updateStatus
-    : await client.request<NonNullable<RuntimeState["updateStatus"]>>("/v1/update/stage", { method: "POST" }, 130_000);
+    : await client.request<NonNullable<RuntimeState["updateStatus"]> & Partial<IncidentFeed>>("/v1/update/stage", { method: "POST" }, 130_000);
   state.updateStatus = staged;
   const targetVersion = staged.stagedVersion ?? staged.latestServerVersion;
-  if (!staged.restartRequired || !targetVersion) return { status: "failed", message: "설치할 서버 업데이트를 준비하지 못했습니다." };
+  if (!staged.restartRequired || !targetVersion) return { status: "failed", message: "설치할 서버 업데이트를 준비하지 못했어요." };
   if (!staged.canApplyAutomatically) {
     state.publishActivity?.();
     return { status: "manual", targetVersion };
@@ -86,7 +92,7 @@ export async function installServerUpdate(
       }
     } catch { /* The server is expected to be briefly unavailable. */ }
   }
-  state.updateApplying = { targetVersion, startedAt: state.updateApplying?.startedAt ?? Date.now(), error: "새 서버가 제한 시간 안에 준비되지 않았습니다." };
+  state.updateApplying = { targetVersion, startedAt: state.updateApplying?.startedAt ?? Date.now(), error: "새 서버가 제한 시간 안에 준비되지 않았어요." };
   state.updateNextCheckAt = 0;
   await refreshUpdateStatus(state, client, { remote: false, force: true });
   state.publishActivity?.();

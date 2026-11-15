@@ -1,3 +1,5 @@
+import { deletedMemoryKeys } from './user-deletions.js';
+import { availableMemoryKey } from './extraction-memory-keys.js';
 import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { randomUUID } from "node:crypto";
@@ -15,6 +17,7 @@ import { canAutomaticallyChange, type UserCorrection } from "./user-corrections.
 export function storeSetupRecognition(db: RcmDatabase, chatId: string, fingerprint: string,
   items: InitialCalibrationResult["socialKnowledge"], names: Map<string, {name:string}>, active: boolean): void {
   const timestamp = Date.now();
+  const reserved=deletedMemoryKeys(db,chatId);
   for (const item of items) {
     const holder = names.get(item.holderKey)?.name, subject = names.get(item.subjectKey)?.name;
     if (!holder || !subject || holder === subject) throw new Error("Invalid setup recognition pair");
@@ -25,7 +28,7 @@ export function storeSetupRecognition(db: RcmDatabase, chatId: string, fingerpri
       WHERE s.chat_id=? AND s.holder=? COLLATE NOCASE AND s.subject=? COLLATE NOCASE
         AND is_initial_calibration_memory(m.memory_key)`).get(chatId,holder,subject)) continue;
     const memoryId = randomUUID(), detailId = randomUUID();
-    const key = `${INITIAL_CALIBRATION_MEMORY_KEY_PREFIX}${fingerprint}:${item.holderKey}:${item.subjectKey}`;
+    const key = availableMemoryKey(`${INITIAL_CALIBRATION_MEMORY_KEY_PREFIX}${fingerprint}:${item.holderKey}:${item.subjectKey}`,reserved);
     const evidence = JSON.stringify(item.evidence.map(e => ({...e, sourceKind:"setup", setupFingerprint:fingerprint})));
     db.prepare(`INSERT INTO memories(id,chat_id,memory_key,type,title,content,participants_json,known_by_json,
       retention_class,atom_access_version,user_managed,active,created_revision,created_at,updated_at)

@@ -9,8 +9,8 @@ export function memoryAtomKey(kind: MemoryAtomKind, id: string, content: string)
 }
 
 export function memorySummaryAtomKey(item: MemoryContextItem): string | undefined {
-  if (!item.title && !item.content) return undefined;
-  return memoryAtomKey("summary", item.id, `${item.title}\0${item.content}`);
+  if (!item.content) return undefined;
+  return memoryAtomKey("summary", item.id, item.content);
 }
 
 export function memoryDetailAtomKey(detail: Pick<MemoryContextItem["details"][number], "id" | "text">): string {
@@ -26,7 +26,7 @@ export function memoryDialogueAtomKey(
 }
 
 export function memoryAtomKeys(item: MemoryContextItem): string[] {
-  const summary = item.atomAccessVersion > 0 ? undefined : memorySummaryAtomKey(item);
+  const summary = memorySummaryAtomKey(item);
   return [
     ...(summary ? [summary] : []),
     ...item.details.map(memoryDetailAtomKey),
@@ -51,7 +51,7 @@ export function filterMemoryAtoms(item: MemoryContextItem, excluded: ReadonlySet
   const summaryKey = memorySummaryAtomKey(item);
   return {
     ...item,
-    ...(summaryKey && excluded.has(summaryKey) ? { title: "", content: "" } : {}),
+    ...(summaryKey && excluded.has(summaryKey) ? { content: "" } : {}),
     details: item.details.filter((detail) => !excluded.has(memoryDetailAtomKey(detail))),
     keyDialogues: item.keyDialogues.filter((dialogue) => !excluded.has(memoryDialogueAtomKey(item.id, dialogue))),
   };

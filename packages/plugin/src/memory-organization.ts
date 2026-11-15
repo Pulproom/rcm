@@ -10,6 +10,7 @@ export interface OrganizationRange {
   reason: string | null; excerpt: string; rawTokens: number; memoryIds: string[]; groupIds: string[];
   memoryExcluded?: boolean; canExclude?: boolean; exclusionReason?: string | null;
   selectable?: boolean;
+  additionEligible?: boolean;
 }
 export interface OrganizationData { ranges: OrganizationRange[]; groups: any[]; regenerations: any[]; additions?: any[]; legacyHolds?: Array<{ id: string }> }
 export interface AdditionSource { id: string; role: string; content: string | null; ordinal: number; additionReason?: string | null; translatedContent?: string }
@@ -33,9 +34,9 @@ const rangeLabel = (range: OrganizationRange) => range.startOrdinal === range.en
 
 export function toggleOrganizationRange(ranges: OrganizationRange[], selected: string[], id: string): string[] {
   const range = ranges.find((row) => row.id === id);
-  if (!range || !(range.selectable ?? range.eligible)) throw new Error(range?.reason ?? '선택할 수 없는 구간입니다.');
+  if (!range || !(range.selectable ?? range.eligible)) throw new Error(range?.reason ?? '선택할 수 없는 구간이에요.');
   const next = selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
-  if (!contiguousSourceRangeSelection(ranges, next)) throw new Error('연속된 구간을 선택해 주세요. 중간 구간은 건너뛸 수 없습니다.');
+  if (!contiguousSourceRangeSelection(ranges, next)) throw new Error('연속된 구간을 선택해 주세요. 중간 구간은 건너뛸 수 없어요.');
   return ranges.filter((row) => next.includes(row.id)).map((row) => row.id);
 }
 
@@ -62,7 +63,7 @@ export function compareOrganizationMemories(before: any[], after: any[]) {
 
 function memoryList(memories: any[], translations: OrganizationTranslations = new Map(), display: TranslationDisplay = 'en'): string {
   const copy = (memory: any, field: 'title' | 'content') => displayText(String(memory[field] ?? ''), translations.get(`${memory.id}:${field}`), display);
-  if (!memories.length) return '<p class="sub">기억이 없습니다.</p>';
+  if (!memories.length) return '<p class="sub">기억이 없어요.</p>';
   return `<div class="org-mems">${memories.map((memory) => {
     const details = (memory.details ?? []).filter((detail:any)=>!detail.hidden);
     const lines = memory.keyDialogues ?? memory.dialogues ?? [];
@@ -96,7 +97,7 @@ function diffItemBody(item: any, view: any): string {
   const kind = ITEM_KIND[item.kind] ?? item.kind;
   const start = view?.source?.startOrdinal, end = view?.source?.endOrdinal;
   const where = Number.isInteger(start) ? (start === end || !Number.isInteger(end) ? `메시지 ${start + 1}` : `메시지 ${start + 1}–${end + 1}`) : '';
-  const meta = [where, view?.manualEdited ? '직접 고친 기록' : '', item.accessChanged ? '아는 사람이 달라짐' : ''].filter(Boolean);
+  const meta = [where, item.reason === 'new_card_shape' ? '새 카드 형식' : '', view?.manualEdited ? '직접 고친 기록' : '', item.accessChanged ? '아는 사람이 달라짐' : ''].filter(Boolean);
   return `<span class="rdiff__kind">${html(kind)}</span><span class="rdiff__text">${html(view?.text ?? '')}</span>${meta.length ? `<span class="rdiff__meta">${meta.map(html).join(' · ')}</span>` : ''}`;
 }
 
@@ -109,7 +110,7 @@ function regenerationItemDiff(run: any, selected: string[]): string {
   const tally = [['사라짐', lost.length, 'lost'], ['바뀜', changed.length, 'changed'], ['확인 필요', review.length, 'review'], ['새로 생김', added.length, 'new'], ['그대로', kept.length, 'kept']]
     .filter(([, n]) => Number(n) > 0).map(([label, n, tone]) => `<span class="rdiff__tally rdiff__tally--${tone}"><b>${n}</b>${label}</span>`).join('');
   const lostList = lost.length ? `<p class="rdiff__lead">새 결과에는 없는 기록이에요. 남길 것을 고르면 원래 근거 그대로 지켜요.</p><ul class="rdiff__list">${lost.map((item) => `<li><label class="rdiff__item${item.canKeep ? '' : ' is-locked'}"><input type="checkbox" name="keep-lost" value="${html(item.id)}"${item.canKeep && selected.includes(item.id) ? ' checked' : ''}${item.canKeep ? '' : ' disabled'}><span class="rdiff__body">${diffItemBody(item, item.before)}${item.canKeep ? '' : '<span class="rdiff__meta">원문이 바뀌어 남길 수 없어요</span>'}</span></label></li>`).join('')}</ul>` : '';
-  const pair = (item: any) => `<li class="rdiff__pair"><div class="rdiff__body">${diffItemBody(item, item.before)}</div>${item.after ? `<div class="rdiff__body rdiff__after">${icon('arrow-right')}<span class="rdiff__text">${html(item.after.text ?? '')}</span></div>` : ''}</li>`;
+  const pair = (item: any) => `<li class="rdiff__pair"><div class="rdiff__body">${diffItemBody(item, item.before)}</div>${item.after ? `<div class="rdiff__body rdiff__after">${icon('arrow-right')}<span class="rdiff__text">${html(item.after.text ?? '')}</span></div>` : ''}${item.changes?.length ? fold('카드 안의 변경', regenerationItemDiff({id:`${run.id}:${item.id}`,preview:{itemDiff:item.changes}}, selected), {count:item.changes.length,preserveKey:`rdiff-shape:${run.id}:${item.id}`}) : ''}</li>`;
   const changedFold = changed.length ? fold('바뀌는 기록', `<ul class="rdiff__list">${changed.map(pair).join('')}</ul>`, { count: changed.length, preserveKey: `rdiff-changed:${run.id}` }) : '';
   const reviewFold = review.length ? fold('짝을 찾지 못한 기록', `<p class="rdiff__lead">새 결과와 하나로 이어지지 않아 자동으로 판단하지 않았어요.</p><ul class="rdiff__list">${review.map((item) => `<li><div class="rdiff__body">${diffItemBody(item, item.before)}</div></li>`).join('')}</ul>`, { count: review.length, preserveKey: `rdiff-review:${run.id}` }) : '';
   return `<section class="rdiff" aria-label="달라지는 기록"><h3 class="org-h">달라지는 기록</h3><div class="rdiff__tallies">${tally}</div>${lostList}${changedFold}${reviewFold}</section>`;
@@ -134,7 +135,7 @@ function candidateDetail(view: OrganizationView, memories: any[], translations: 
   }
   const group = view.data.groups.find((row) => `group:${row.id}` === view.candidateId);
   const run = view.data.regenerations.find((row) => `regeneration:${row.id}` === view.candidateId);
-  if (!group && !run) return empty('확인할 후보를 선택하세요', '목록의 확인할 작업에서 결과를 고를 수 있습니다.');
+  if (!group && !run) return empty('확인할 후보를 선택해 주세요', '목록의 확인할 작업에서 결과를 고를 수 있어요.');
   const item = group ?? run, ready = item.status === 'ready';
   const kind = group ? 'group' : 'regeneration';
   const before = group ? memories.filter((memory) => group.memberIds.includes(memory.id)) : run.preview?.beforeCurrentMemories ?? (Array.isArray(run.preview?.before)
@@ -142,13 +143,13 @@ function candidateDetail(view: OrganizationView, memories: any[], translations: 
   const after = group ? [] : run.preview?.afterCurrentMemories ?? (Array.isArray(run.preview?.after) ? run.preview.after.flatMap((value: any) => value.memories) : run.preview?.after?.memories ?? []);
   const compared = compareOrganizationMemories(before, after);
   const title = group ? '묶기 결과' : run.mode === 'episode' ? '구간 재생성 결과' : '이후 기억 재생성 결과';
-  const status = item.status === 'failed' ? '작업을 끝내지 못했습니다.' : item.status === 'stale' ? '원문이나 기억이 바뀌어 이 결과를 사용할 수 없습니다.' : '후보를 만드는 중입니다.';
+  const status = item.status === 'failed' ? '작업을 끝내지 못했어요.' : item.status === 'stale' ? '원문이나 기억이 바뀌어 이 결과를 사용할 수 없어요.' : '후보를 만드는 중이에요.';
   const beforeColumn = () => `<div><div class="lab">현재 기억 ${before.length}개</div>${memoryList(group ? before : compared.before, translations, display)}${run?.mode === 'canonical_suffix' ? canonicalStates([run.preview.beforeStates]) : ''}</div>`;
   const afterColumn = () => `<div class="new"><div class="lab">${group ? '새 통합 에피소드' : `새 기억 ${after.length}개`}</div>${group ? groupingResult(group.candidate) : memoryList(compared.after, translations, display)}${run?.mode === 'canonical_suffix' ? canonicalStates([run.preview.afterStates]) : ''}</div>`;
   const compare = ready
-    ? `${run?.mode === 'canonical_suffix' ? regenerationItemDiff(run, view.keepLostItemIds[view.candidateId] ?? []) : ''}<div class="cmp org-cmp">${beforeColumn()}${afterColumn()}</div>${group ? notice('기존 세부·대사·접근 권한과 관계·사실·믿음·약속은 보존됩니다. 묶기는 표시 방식과 통합 요약을 바꿉니다.') : ''}`
+    ? `${run ? regenerationItemDiff(run, view.keepLostItemIds[view.candidateId] ?? []) : ''}<div class="cmp org-cmp">${beforeColumn()}${afterColumn()}</div>${group ? notice('기존 세부·대사·접근 권한과 관계·사실·믿음·약속은 보존돼요. 묶기는 표시 방식과 통합 요약을 바꿔요.') : ''}`
     : `<p class="sub">${status}</p>`;
-  const lead = ready ? '현재 기억은 아직 변경되지 않았습니다. 결과를 확인한 뒤 적용하세요.' : '기존 기억을 계속 사용합니다. 화면을 닫아도 작업은 유지됩니다.';
+  const lead = ready ? '현재 기억은 아직 변경되지 않았어요. 결과를 확인한 뒤 적용해 주세요.' : '기존 기억을 계속 사용해요. 화면을 닫아도 작업은 유지돼요.';
   const actions = `${action(`organization-discard-${kind}`, '후보 버리기', item.id)}${group && item.canRetry ? action('organization-retry-group', '실패 단계 다시 시도', item.id) : ''}${ready ? action(`organization-apply-${kind}`, '적용', item.id, false, true) : ''}`;
   return `<article class="reader"><div class="reader__bar">${back('organization-back-detail', '구간 상세')}</div><h2 class="reader__title">${title}</h2><p class="sub">${lead}</p>${item.error ? cutNotice(item.error) : ''}${compare}<div class="form__bar">${actions}</div></article>`;
 }
@@ -171,19 +172,19 @@ export function memoryOrganization(view: OrganizationView, memories: any[], tran
     ? view.detail.messages.map((message) => fold(`메시지 ${message.ordinal + 1} · ${role(message.role)}`, `<p class="rec">${html(message.content ?? '원문을 사용할 수 없어')}</p>`, { preserveKey: `organization-source:${focused.id}:${message.id}` })).join('')
     : '<p class="sub">원문을 불러오는 중…</p>';
   const details = focused
-    ? `<article class="reader"><div class="reader__bar">${back('organization-list', '구간 목록')}</div><h2 class="reader__title">${rangeLabel(focused)}</h2>${focused.reason ? notice(focused.reason) : ''}<div class="org-detail__action">${action('organization-add-memory', '기억 추가', focused.id, Boolean(view.busy))}${exclusionAction(focused)}</div><h3 class="org-h">연결된 기억</h3>${memoryList(memories.filter((memory) => focused.memoryIds.includes(memory.id)), translations, display)}<h3 class="org-h">원문</h3>${sources}</article>`
-    : empty('원문 구간을 선택하세요', '목록에서 내용을 확인하고 연속된 묶음을 선택할 수 있습니다.');
-  const holds = (view.data.legacyHolds ?? []).map((hold) => `<div class="msg msg--warning"><span class="msg__icon">${icon('alert')}</span><div><strong>이전 수동 보류가 남아 있습니다</strong><p>이미 처리된 기억은 유지하고, 미처리 원문만 다시 준비합니다.</p>${action('organization-release-hold', '수동 보류 해제', hold.id)}</div></div>`).join('');
+    ? `<article class="reader"><div class="reader__bar">${back('organization-list', '구간 목록')}</div><h2 class="reader__title">${rangeLabel(focused)}</h2>${focused.reason ? notice(focused.reason) : ''}<div class="org-detail__action">${action('organization-add-memory', '기억 추가', focused.id, Boolean(view.busy || !focused.additionEligible))}${exclusionAction(focused)}</div><h3 class="org-h">연결된 기억</h3>${memoryList(memories.filter((memory) => focused.memoryIds.includes(memory.id)), translations, display)}<h3 class="org-h">원문</h3>${sources}</article>`
+    : empty('원문 구간을 선택해 주세요', '목록에서 내용을 확인하고 연속된 묶음을 선택할 수 있어요.');
+  const holds = (view.data.legacyHolds ?? []).map((hold) => `<div class="msg msg--warning"><span class="msg__icon">${icon('alert')}</span><div><strong>이전 수동 보류가 남아 있어요</strong><p>이미 처리된 기억은 유지하고, 미처리 원문만 다시 준비해요.</p>${action('organization-release-hold', '수동 보류 해제', hold.id)}</div></div>`).join('');
   const pending = candidates.length ? `<section class="org-work"><h3 class="org-h">확인할 작업 <span class="n">${candidates.length}</span></h3>${candidates.map((item) => row({ title: item.label, end: `<span class="org-state">${candidateState(item.status)}</span>`, action: 'organization-candidate', data: { id: item.key }, current: item.key === view.candidateId })).join('')}</section>` : '';
   const applied = activeGroups.length ? fold('적용된 묶기', activeGroups.map((group) => `<div class="org-applied"><span>${html(group.title)}</span>${btn('묶기 해제', { kind: 'quiet', action: 'organization-ungroup', data: { id: group.id } })}</div>`).join(''), { count: activeGroups.length }) : '';
   const messageCount = selected.reduce((sum, row) => sum + row.sourceMessageIds.length, 0);
   const tokens = number(selected.reduce((sum, row) => sum + row.rawTokens, 0));
   const allEligible = selected.every(range => range.eligible);
-  const selection = `<div class="org-sel"><div class="org-sel__sum">${selected.length ? `<b>${selected.length}개 묶음 · 메시지 ${messageCount}개</b><span>${selected.some(range => range.eligible) ? `원문 약 ${tokens}토큰 · 실제 청구량과 다릅니다` : '기본 기억 처리가 끝난 원문에서만 기억을 추가할 수 있어요'}</span>` : '<b>구간을 선택하세요</b><span>연속된 구간을 묶거나 다시 만들고, 빠진 기억을 추가할 수 있습니다.</span>'}</div><div class="org-sel__acts">${action('organization-create-group', '선택한 구간 묶기', '', selected.length < 2 || !allEligible || view.busy)}${action('organization-add-memory', '기억 추가', '', !selected.some(range => range.eligible) || view.busy, true)}${action('regenerate-episode', '이 구간 다시 만들기', selected[0]?.id ?? '', selected.length !== 1 || !allEligible || view.busy)}${action('regenerate-canonical', '여기부터 다시 만들기', selected[0]?.id ?? '', selected.length !== 1 || !allEligible || view.busy)}</div></div>`;
+  const selection = `<div class="org-sel"><div class="org-sel__sum">${selected.length ? `<b>${selected.length}개 묶음 · 메시지 ${messageCount}개</b><span>${selected.some(range => range.additionEligible) ? `원문 약 ${tokens}토큰 · 실제 청구량과 달라요` : '기본 기억 처리가 끝난 원문에서만 기억을 추가할 수 있어요'}</span>` : '<b>구간을 선택해 주세요</b><span>연속된 구간을 묶거나 다시 만들고, 빠진 기억을 추가할 수 있어요.</span>'}</div><div class="org-sel__acts">${action('organization-create-group', '선택한 구간 묶기', '', selected.length < 2 || !allEligible || view.busy)}${action('organization-add-memory', '기억 추가', '', !selected.some(range => range.additionEligible) || view.busy, true)}${action('regenerate-episode', '이 구간 다시 만들기', selected[0]?.id ?? '', selected.length !== 1 || !allEligible || view.busy)}${action('regenerate-canonical', '여기부터 다시 만들기', selected[0]?.id ?? '', selected.length !== 1 || !allEligible || view.busy)}</div></div>`;
   const search = `<div class="org-find"><form id="organization-search-form" class="org-find__q"><label class="org-find__field">${icon('search')}<input name="query" type="search" enterkeyhint="search" value="${html(view.search ?? '')}" placeholder="원문 검색" maxlength="500" aria-label="원문 검색"></label>${view.search ? btn('지우기', { kind: 'quiet', action: 'organization-clear-search', data: { id: '' } }) : ''}</form><form id="organization-jump-form" class="org-find__n"><label class="org-find__field"><span aria-hidden="true">#</span><input name="ordinal" type="number" inputmode="numeric" enterkeyhint="go" min="1" step="1" value="${html(view.jump ?? '')}" placeholder="메시지" aria-label="메시지 번호로 이동"></label></form></div>${view.searchStatus ? `<p class="sub org-find__status" role="status">${html(view.searchStatus)}</p>` : ''}`;
-  const list = `<div class="listcol">${search}${holds}${pending}${applied}<div class="list tl-rows" data-preserve-scroll="organization-list">${rows || empty('아직 원문 구간이 없습니다', '원문이 동기화되면 여기에 구간이 나타납니다.')}</div>${selection}</div>`;
-  const busy = view.busy ? `<div class="notice" role="status">${icon('clock')}<span>처리 예상량을 확인하고 있습니다…</span></div>` : '';
-  return `<div class="organization${view.mobileDetail ? ' is-detail' : ''}">${lex().skin === 'phone' ? `<div class="intro org-intro">${back('organization-close', '타임라인')}<h1 class="pagetitle">기억 정리</h1><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p></div>` : `<div class="intro"><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용하세요.</p><div class="intro__acts">${btn('타임라인으로', { kind: 'quiet', icon: 'back', action: 'organization-close' })}</div></div>`}${busy}${view.error ? notice(view.error, { tone: 'cut', errorReport: view.errorReport }) : ''}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:organization:${escapeHtml(view.candidateId)}">${view.candidateId ? candidateDetail(view, memories, translations, display) : view.addition ? additionForm(view, display) : details}</div></div></div>`;
+  const list = `<div class="listcol">${search}${holds}${pending}${applied}<div class="list tl-rows" data-preserve-scroll="organization-list">${rows || empty('아직 원문 구간이 없어요', '원문이 동기화되면 여기에 구간이 나타나요.')}</div>${selection}</div>`;
+  const busy = view.busy ? `<div class="notice" role="status">${icon('clock')}<span>처리 예상량을 확인하고 있어요…</span></div>` : '';
+  return `<div class="organization${view.mobileDetail ? ' is-detail' : ''}">${lex().skin === 'phone' ? `<div class="intro org-intro">${back('organization-close', '타임라인')}<h1 class="pagetitle">기억 정리</h1><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용해 주세요.</p></div>` : `<div class="intro"><p class="sub">원문을 선택하고, 결과를 확인한 뒤 적용해 주세요.</p><div class="intro__acts">${btn('타임라인으로', { kind: 'quiet', icon: 'back', action: 'organization-close' })}</div></div>`}${busy}${view.error ? notice(view.error, { tone: 'cut', errorReport: view.errorReport }) : ''}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:organization:${escapeHtml(view.candidateId)}">${view.candidateId ? candidateDetail(view, memories, translations, display) : view.addition ? additionForm(view, display) : details}</div></div></div>`;
 }
 
 function additionForm(view: OrganizationView, display: TranslationDisplay): string {

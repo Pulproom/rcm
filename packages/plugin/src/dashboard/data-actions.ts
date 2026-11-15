@@ -3,7 +3,8 @@ import { sanitizeDiagnosticText, type ChatLineageStatus, type ManualLineagePrevi
 import type { ServerClient } from "../api-client.js";
 import type { RuntimeState } from "../types.js";
 import type { DashboardData } from "../dashboard.js";
-import { makePrepareRequest, readCurrentContext } from "../context.js";
+import { readCurrentContext, syncCompleteSourceLedger, syncCurrentSourceLedger } from "../context.js";
+export { syncCompleteSourceLedger, syncCurrentSourceLedger } from "../context.js";
 import { addLog, isChatMemoryEnabled, saveSettings } from "../settings.js";
 import { stopDeletedHostChatWork } from "../activity-state.js";
 import { exportChatSettings } from "../backup-settings.js";
@@ -53,21 +54,6 @@ export function withExtractionReviewOverride<T extends Record<string, unknown>>(
 }
 
 
-export async function syncCompleteSourceLedger(
-  client: Pick<ServerClient, "request">,
-  context: Awaited<ReturnType<typeof readCurrentContext>>,
-): Promise<{ expectedSourceMessages: number; serverInstanceId: string }> {
-  if (context.snapshotScope !== "full" || context.snapshot.length !== context.sourceMessageCount) {
-    throw new Error(`전체 원문을 불러오지 못했습니다 (${context.snapshot.length}/${context.sourceMessageCount}). 다시 시도해 주세요.`);
-  }
-  await client.request(`/v1/chats/${encodeURIComponent(context.chatId)}/source-sync`, {
-    method: "POST",
-    body: JSON.stringify(makePrepareRequest(context, 0, { deferExtraction: true })),
-  }, 120_000);
-  return { expectedSourceMessages: context.sourceMessageCount, serverInstanceId: "" };
-}
-
-
 export async function requestBackupArchive(
   client: Pick<ServerClient, "request" | "raw">,
   state: RuntimeState,
@@ -75,9 +61,7 @@ export async function requestBackupArchive(
   contextReader: typeof readCurrentContext = readCurrentContext,
 ): Promise<Response> {
   if (chatId && state.current?.chatId === chatId) {
-    const current = await contextReader(state, { snapshotMode: "full" });
-    if (current.chatId !== chatId) throw new Error("현재 채팅이 바뀌었습니다. 다시 시도해 주세요.");
-    await syncCompleteSourceLedger(client, current);
+    await syncCurrentSourceLedger(client,state,chatId,contextReader);
   }
   const characterId = !chatId ? undefined : state.current?.chatId === chatId ? state.current.characterId
     : (await client.request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats")).items.find(chat => chat.id === chatId)?.characterId;
@@ -146,10 +130,7 @@ export async function previewMemoryTransfer(
   } catch (error) {
     if (!isMissingLineageIdentityError(error)) throw error;
   }
-  if (current.snapshotScope !== "full" || current.snapshot.length !== current.sourceMessageCount) {
-    current = await contextReader(state, { snapshotMode: "full" });
-  }
-  await syncCompleteSourceLedger(client, current);
+  current = await syncCurrentSourceLedger(client,state,current.chatId,contextReader);
   request = manualMemoryLineageRequest(current, sourceChatId);
   const preview = await client.request<ManualLineagePreview>(`/v1/chats/${encodeURIComponent(current.chatId)}/memory-transplant/preview`, {
     method: "POST", body: JSON.stringify({ sourceChatId }),
@@ -225,7 +206,7 @@ export function triggerBackupDownload(
 
 export function requireChatMemoryEnabled(state: RuntimeState, chatId: string, characterId = state.current?.chatId === chatId ? state.current.characterId : undefined): void {
   if (!isChatMemoryEnabled(state.settings, chatId, characterId)) {
-    throw new Error("현재 채팅에서 RCM이 꺼져 있어 새 기억 작업을 만들 수 없습니다. Settings에서 이 채팅의 RCM을 먼저 켜세요.");
+    throw new Error("현재 채팅에서 RCM이 꺼져 있어 새 기억 작업을 만들 수 없어요. Settings에서 이 채팅의 RCM을 먼저 켜 주세요.");
   }
 }
 
@@ -259,9 +240,9 @@ export function invalidateRestoredChatState(state: RuntimeState,chatId:string):v
 
 export async function readHostChatInventory(): Promise<HostChatInventory> {
   const database = await risuai.getDatabase(["characters"]);
-  if (!database || !("characters" in database)) throw new Error("Risu 채팅 목록 권한을 사용할 수 없습니다");
+  if (!database || !("characters" in database)) throw new Error("Risu 채팅 목록 권한을 사용할 수 없어요");
   const raw = database?.characters;
-  if (!raw || typeof raw !== "object") throw new Error("Risu 캐릭터 목록을 읽지 못했습니다");
+  if (!raw || typeof raw !== "object") throw new Error("Risu 캐릭터 목록을 읽지 못했어요");
   const characters = Array.isArray(raw) ? raw : Object.values(raw);
   const items: HostChatInventoryItem[] = [];
   const characterIds = new Set<string>();
@@ -376,7 +357,7 @@ export async function cleanupDeletedHostChats(state: RuntimeState, client: Pick<
 }
 
 
-export async function setRetrievalDiagnostics(client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats" | "error">, chatId: string, enabled: boolean): Promise<boolean> {
+export async function setRetrievalDiagnostics(client: Pick<ServerClient, "request">, data: Pick<DashboardData, "adminChats" | "error" | "errorReport">, chatId: string, enabled: boolean): Promise<boolean> {
   if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return false;
   try {
     const result = await client.request<{ enabled: boolean }>(`/v1/admin/chats/${encodeURIComponent(chatId)}/retrieval-diagnostics`, {
@@ -385,9 +366,11 @@ export async function setRetrievalDiagnostics(client: Pick<ServerClient, "reques
     const chat = data.adminChats.find((item) => item.id === chatId);
     if (chat) chat.retrievalDiagnosticsEnabled = result.enabled;
     data.error = undefined;
+    data.errorReport = undefined;
     return result.enabled;
   } catch (error) {
     data.error = String(error);
+    data.errorReport = formatServerError(error);
     throw error;
   }
 }
@@ -513,8 +496,8 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
         if (state.settings.serverUrl !== serverUrl || state.current?.chatId !== targetChatId) return;
         await refresh({ forceApply: true });
         await alertDashboard(mode === "lineage"
-          ? "같은 대화 원문을 연결하고 기억을 가져왔어요. 확인된 원문은 다시 처리하지 않습니다."
-          : "보관된 기억을 독립 기록으로 가져왔어요. 현재 채팅 원문은 별도로 처리될 수 있습니다.");
+          ? "같은 대화 원문을 연결하고 기억을 가져왔어요. 확인된 원문은 다시 처리하지 않아요."
+          : "보관된 기억을 독립 기록으로 가져왔어요. 현재 채팅 원문은 별도로 처리될 수 있어요.");
       } catch (error) {
         addLog(state.logs, "error", `Memory transfer failed: ${String(error)}`);
         if (currentLineageOperation(state)) render();
@@ -536,7 +519,7 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
       const extractionReviewOverride = operation === "rebuild"
         ? await chooseExtractionReviewOverride(
           "전체 기억을 재검수할까요?",
-          "전체 원문을 다시 추출한 뒤 보조 모델이 각 그룹의 결과를 한 번 더 검토할 수 있습니다. 정확도는 높아질 수 있지만 호출량과 비용이 늘어납니다.",
+          "전체 원문을 다시 추출한 뒤 보조 모델이 각 그룹의 결과를 한 번 더 검토할 수 있어요. 정확도는 높아질 수 있지만 호출량과 비용이 늘어나요.",
           state.settings.postExtractionReview,
         )
         : undefined;
@@ -544,12 +527,8 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
       let rebuildContext: Awaited<ReturnType<typeof readCurrentContext>> | undefined;
       let expectedSourceMessages: number | undefined;
       if (operation === "rebuild" && state.current?.chatId === chatId) {
-        rebuildContext = await readCurrentContext(state, { snapshotMode: "full" });
-        const synced = await syncCompleteSourceLedger(client, rebuildContext);
-        expectedSourceMessages = synced.expectedSourceMessages;
-        const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
-        state.settings.serverInstances[serverUrl] = synced.serverInstanceId;
-        await saveSettings(state.settings);
+        rebuildContext = await syncCurrentSourceLedger(client,state,chatId);
+        expectedSourceMessages = rebuildContext.sourceMessageCount;
       }
       let result: any = {};
       if (operation === "delete") await deleteServerChatRecords(state, client, chatId);

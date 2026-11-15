@@ -6,9 +6,11 @@ import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
 import type { TranslationDisplay } from "../types.js";
 import { buildPairs, entityForName, entityProminence, PERSON_PROMINENCE_OPTIONS, relationshipLabelTranslationKey, type PairSummary } from "./pairs.js";
-import { avatar, btn, contactRow, field, fold, icon, iconBtn, menu, promiseEntry } from "./film/ui.js";
+import { accessLine, avatar, btn, contactRow, field, fold, icon, iconBtn, menu, promiseEntry, detailAccessLine } from "./film/ui.js";
 import { appListCard, appPromiseRow, pairSceneCount } from "./pair-detail.js";
 import { nameHtml } from "./film/names.js";
+
+export const SOCIAL_KNOWLEDGE_LEVEL_LABELS = { aware_of: "존재를 알고 있음", interacted: "직접 교류한 기록 있음" } as const;
 
 export type LedgerRow = {
   id?: string;
@@ -87,6 +89,7 @@ export type SocialEditorState = {
 };
 
 export type PersonDetailRenderOptions = {
+  accessEditing?: string;
   translations?: Map<string, string>;
   display?: TranslationDisplay;
   personaOverride?: string | null;
@@ -183,7 +186,7 @@ export function buildPersonDetail(data: DashboardData, name: string, personaEnti
   };
 }
 
-type RenderEssentials = Required<Pick<PersonDetailRenderOptions, "translations" | "display">> & Pick<PersonDetailRenderOptions, "sceneAt">;
+type RenderEssentials = Required<Pick<PersonDetailRenderOptions, "translations" | "display">> & Pick<PersonDetailRenderOptions, "sceneAt" | "accessEditing">;
 
 /**
  * A row's one link: the scene where it was last mentioned (or its source scene), opening that memory on the timeline.
@@ -205,7 +208,7 @@ const entry = (parts: { tag?: string; title?: string; who?: string; body: string
   const who = parts.who ? `<span class="entry__who">${parts.who}${parts.title || !parts.tag ? "" : ` · ${tag}`}</span>` : "";
   const title = parts.title ? `<span class="entry__title">${tag}${parts.title}</span>` : "";
   const bodyTag = parts.title || parts.who ? "" : tag;
-  const note = parts.note ? `<small>${parts.note}</small>` : "";
+  const note = parts.note ?? "";
   const src = parts.src ? `<div class="entry__src">${parts.src}</div>` : "";
   return `<li class="entry"><div class="entry__v">${who}${title}<span class="entry__body">${bodyTag}${parts.body}</span>${note}</div>${src}</li>`;
 };
@@ -229,12 +232,12 @@ const assertionRow = (item: LedgerRow, tag: string, options: RenderEssentials): 
   const value = displayText(String(item?.value ?? ""), options.translations.get(`assertion:${item?.id}`), options.display);
   const knownBy = Array.isArray(item?.knownBy) ? item.knownBy.map(String).filter(Boolean) : [];
   // 목표·비밀 is a small kind line above the state's name, like a promise's direction line.
-  return entry({ who: tag || undefined, title: predicate, body: value, src: sceneLink(item, options), note: knownBy.length ? `아는 인물 · ${escapeHtml(knownBy.join(" · "))}` : "" });
+  return entry({ who: tag || undefined, title: predicate, body: value, src: sceneLink(item, options), note: knownBy.length ? accessLine(escapeHtml(knownBy.join(" · "))) : "" });
 };
 
 const promiseRow = (item: PromiseRow, options: RenderEssentials): string => {
   const key = `promise:${item?.id ?? item?.promise_key ?? ""}`;
-  return promiseEntry({ direction: `${item?.promisor ?? ""} → ${item?.promisee ?? ""}`, scheduledFor: item?.scheduled_for, body: displayText(String(item?.content ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options) });
+  return promiseEntry({ direction: `${item?.promisor ?? ""} → ${item?.promisee ?? ""}`, scheduledFor: item?.scheduled_for, body: displayText(String(item?.content ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options), access: detailAccessLine("", item, options.accessEditing === item.id, "promise") });
 };
 
 const PROMISE_STATUS_LABELS: Record<string, string> = { kept: "지켜짐", broken: "깨짐", released: "취소됨", offscreen: "화면 밖에서 처리됨", cancelled: "취소됨", expired: "만료됨" };
@@ -242,7 +245,7 @@ const PROMISE_STATUS_LABELS: Record<string, string> = { kept: "지켜짐", broke
 const endedPromiseRow = (item: PromiseRow, options: RenderEssentials): string => {
   const key = `promise:${item?.id ?? item?.promise_key ?? ""}`;
   const status = String(item?.status ?? "");
-  return promiseEntry({ direction: `${item?.promisor ?? ""} → ${item?.promisee ?? ""}`, status: PROMISE_STATUS_LABELS[status] ?? status, body: displayText(String(item?.content ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options) });
+  return promiseEntry({ direction: `${item?.promisor ?? ""} → ${item?.promisee ?? ""}`, status: PROMISE_STATUS_LABELS[status] ?? status, body: displayText(String(item?.content ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options), access: detailAccessLine("", item, options.accessEditing === item.id, "promise") });
 };
 
 const endedAssertionRow = (item: LedgerRow, options: RenderEssentials): string => {
@@ -280,13 +283,13 @@ const beliefRow = (item: BeliefRow, lead: string, options: RenderEssentials): st
 
 export const socialEditorForm = (editor: SocialEditorState): string => {
   const input = (name: string, label: string, value: string, extra = "") => field({ id: `social-${name}`, label, control: `<input id="social-${name}" class="input" name="${name}" value="${escapeHtml(value)}"${extra}>` });
-  return `<form id="social-form" class="form social-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h4 class="subhead">${editor.editing ? `${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}` : "지인 관계 추가"}</h4><div class="form__row">${input("holder", "알고 있는 사람", editor.holder, " required")}${input("subject", "대상 인물", editor.subject, " required")}</div>${field({ id: "social-level", label: "상태", control: `<select id="social-level" class="select" name="level"><option value="aware_of" ${editor.level === "aware_of" ? "selected" : ""}>존재를 알고 있음</option><option value="interacted" ${editor.level === "interacted" ? "selected" : ""}>직접 교류한 기록 있음</option></select>` })}${input("knownAs", "알고 있는 이름·직함", editor.knownAs, ' placeholder="쉼표로 구분"')}${input("addressTerms", "부르는 이름", editor.addressTerms ?? "", ' placeholder="쉼표로 구분"')}${field({ id: "social-description", label: "인지 설명 · 사용자 편집", control: `<textarea id="social-description" class="textarea" name="description">${escapeHtml(editor.description ?? "")}</textarea>` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
+  return `<form id="social-form" class="form social-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h4 class="subhead">${editor.editing ? `${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}` : "지인 관계 추가"}</h4><div class="form__row">${input("holder", "알고 있는 사람", editor.holder, " required")}${input("subject", "대상 인물", editor.subject, " required")}</div>${field({ id: "social-level", label: "상태", control: `<select id="social-level" class="select" name="level"><option value="aware_of" ${editor.level === "aware_of" ? "selected" : ""}>${SOCIAL_KNOWLEDGE_LEVEL_LABELS.aware_of}</option><option value="interacted" ${editor.level === "interacted" ? "selected" : ""}>${SOCIAL_KNOWLEDGE_LEVEL_LABELS.interacted}</option></select>` })}${input("knownAs", "알고 있는 이름·직함", editor.knownAs, ' placeholder="쉼표로 구분"')}${input("addressTerms", "부르는 이름", editor.addressTerms ?? "", ' placeholder="쉼표로 구분"')}${field({ id: "social-description", label: "인지 설명 · 사용자 편집", control: `<textarea id="social-description" class="textarea" name="description">${escapeHtml(editor.description ?? "")}</textarea>` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
 };
 
 /** Edits directional names while preserving the record's cognition and lock state. */
 export const addressEditorForm = (editor: SocialEditorState): string => {
   const hidden = (name: string, value: string) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
-  return `<form id="social-form" class="form social-editor address-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h3 class="subhead">${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}</h3>${hidden("holder", editor.holder)}${hidden("subject", editor.subject)}${hidden("level", editor.level || "interacted")}${field({ id: "social-knownAs", label: "알고 있는 이름", control: `<input id="social-knownAs" class="input notranslate" translate="no" name="knownAs" value="${escapeHtml(editor.knownAs)}" placeholder="쉼표로 구분">` })}${field({ id: "social-addressTerms", label: "부르는 이름", control: `<input id="social-addressTerms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">`, hint: "대사에서 상대를 부를 때 쓰는 이름입니다." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
+  return `<form id="social-form" class="form social-editor address-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h3 class="subhead">${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}</h3>${hidden("holder", editor.holder)}${hidden("subject", editor.subject)}${hidden("level", editor.level || "interacted")}${field({ id: "social-knownAs", label: "알고 있는 이름", control: `<input id="social-knownAs" class="input notranslate" translate="no" name="knownAs" value="${escapeHtml(editor.knownAs)}" placeholder="쉼표로 구분">` })}${field({ id: "social-addressTerms", label: "부르는 이름", control: `<input id="social-addressTerms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">`, hint: "대사에서 상대를 부를 때 쓰는 이름이에요." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
 };
 
 /**
@@ -339,6 +342,7 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
     translations: options.translations ?? new Map<string, string>(),
     display: options.display ?? "en",
     sceneAt: options.sceneAt,
+    accessEditing: options.accessEditing,
   };
   const copy = (text: string, key: string) => displayText(text, renderOptions.translations.get(key), renderOptions.display);
   const prominence = PERSON_PROMINENCE_OPTIONS[entityProminence({ prominence: detail.prominence })]!.label;
@@ -421,7 +425,7 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
     : "";
   const sceneAt = (target: unknown) => renderOptions.sceneAt?.(target) ?? null;
   const promises = detail.openPromises.length || detail.endedPromises.length
-    ? section("약속", `<div class="stack">${detail.openPromises.length ? appListCard(byRecentMention(detail.openPromises).map((item) => appPromiseRow(item, copy, sceneAt)), `person-promises:${detail.name}`) : ""}${endedPromises}</div>`, detail.openPromises.length || undefined)
+    ? section("약속", `<div class="stack">${detail.openPromises.length ? appListCard(byRecentMention(detail.openPromises).map((item) => appPromiseRow(item, copy, sceneAt, options.accessEditing)), `person-promises:${detail.name}`) : ""}${endedPromises}</div>`, detail.openPromises.length || undefined)
     : "";
 
   // 인식: what this person thinks, and what others think of them — one section, two views.
@@ -447,7 +451,7 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
   const contactList = acquaintanceContacts(detail.name, [detail.name, ...detail.aliases], detail.acquaintances, renderOptions);
   const people = new Set(detail.acquaintances.map((item) => [item?.holder, item?.subject].map((name) => String(name ?? "").trim().toLocaleLowerCase()).sort().join("|"))).size;
   const acquaintances = detail.acquaintances.length || options.socialEditor || options.socialKnowledgeAvailable === true
-    ? `<section class="psec acquaintances"><div class="sec-head"><h2 class="sec">아는 사이 <span class="n">${people}</span></h2>${socialActions}</div>${socialBusy ? `<p class="sub">다시 찾는 중 · ${socialBusy}</p>` : ""}${options.socialEditor ? socialEditorForm(options.socialEditor) : ""}${contactList || (options.socialEditor ? "" : '<p class="sub">아직 아는 사이가 없습니다.</p>')}</section>`
+    ? `<section class="psec acquaintances"><div class="sec-head"><h2 class="sec">아는 사이 <span class="n">${people}</span></h2>${socialActions}</div>${socialBusy ? `<p class="sub">다시 찾는 중 · ${socialBusy}</p>` : ""}${options.socialEditor ? socialEditorForm(options.socialEditor) : ""}${contactList || (options.socialEditor ? "" : '<p class="sub">아직 아는 사이가 없어요.</p>')}</section>`
     : "";
 
   // Every person follows the same section order.

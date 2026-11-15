@@ -1,14 +1,20 @@
+import { normalizeAuxiliaryResponse } from "@rcm/shared";
+import { recordJobShapeNormalizations } from "./jobs.js";
+import { expandEventWritingFormat, extractionDraftSchema } from "@rcm/shared";
+import { recoverStateResponse, stateWritingContext, normalizeStateEnvelope, sanitizeStateResponseForStaging, type StateRecoveryReport } from "@rcm/shared";
+import { validateRelationshipProjection, validateExactItemSet, validateReconciliationResult, validateAuxiliarySourceIds, applyExtractionAuditPatchToDraft, validateQuizResult } from "@rcm/shared";
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage, auxiliaryRepairTooLargeError } from "@rcm/shared";
 import { isStructuredOutputTruncated, MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
 import { optionalSourceSelectorsOnly } from "@rcm/shared";
 import { parseExtractionAuditResponse } from "@rcm/shared";
 import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming, describeModelResponse, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
-import { sanitizeDiagnosticText, assertProviderOutputAllowed } from "@rcm/shared";
+import { sanitizeDiagnosticText, auxiliaryUsageMetadata, assertProviderOutputAllowed } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
 import { parseReconciliationResult } from "@rcm/shared";
-import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
+import { prepareAuxiliaryText, rescueDialogueEvidence, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch, type MemoryGroupingResult } from "@rcm/shared";
 import { createHash, randomUUID, sign } from "node:crypto";
+import { Agent } from 'undici';
 import { planExtractionFieldRepair, applyExtractionFieldRepair } from "@rcm/shared";
 import { applySourceAccessRepair, type SourceAccessRepairPlan } from "@rcm/shared";
 import {
@@ -20,8 +26,6 @@ import {
   normalizeEpisodeDraftInput,
   normalizeStructuredModelOptionals,
   parseStructuredModelJson,
-  StructuredJsonSyntaxError,
-  Api38ExtractionDraftResultSchema,
   buildAuxiliaryRepairMessages,
   isUnchangedStructuredRepair,
   validateStructuredRepairOrRegenerate,
@@ -58,7 +62,7 @@ import {
 import type { RcmDatabase } from "./db.js";
 import { saveSecret } from "./admin.js";
 import { normalizeAndValidateSetupEvidence } from "./initial-calibration.js";
-import { recordJobLlmCall, repairBudgetSpent, stateRepairBudgetSpent, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
+import { recordJobStateRecovery, recordJobLlmCall, repairBudgetSpent, stateRepairBudgetSpent, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, type CachedAuxiliaryPurpose } from "./auxiliary-page-cache.js";
 
 const CONFIG_KEY = "server_llm_config";
@@ -66,8 +70,11 @@ const providers: ServerLlmProvider[] = ["gemini_api", "vertex", "llm_gateway", "
 const secretName = (provider: ServerLlmProvider) => `RCM_LLM_API_KEY_${provider.toUpperCase()}` as const;
 type StoredServerLlmConfig = Omit<ServerLlmPublicConfig, "keyConfigured" | "configuredProviders">;
 
-function extractionCheckpointKey(job: LeasedJob): string {
+function extractionCheckpointKey(job: LeasedJob, config: StoredServerLlmConfig): string {
+  const { provider, endpoint, model, temperature, thinking, serviceTier, relaxAuxiliaryCensorship } = config;
   return createHash("sha256").update(JSON.stringify({
+    modelSettings: { provider, endpoint, model, temperature, thinking, serviceTier, relaxAuxiliaryCensorship },
+    promptContract: job.promptContract,
     profile: job.profile,
     memoryLanguage: job.memoryLanguage,
     prompt: job.prompt,
@@ -90,16 +97,17 @@ const defaults: StoredServerLlmConfig = {
   llmTimeoutMs: 300_000,
 };
 
-/** Gemini 3.7+ Flash replaced token budgets with LOW/MEDIUM/HIGH thinking
- * levels and rejects an explicit disabled/minimal level. Keep this narrow to
- * the documented Flash line instead of guessing capabilities for every model. */
-function usesGeminiFlashThinkingLevel(model: string): boolean {
+/** Gemini 4+ follows the level contract, including future numbered generations.
+ * Gemini 3.7+ Flash retains its existing level-based behavior. */
+function usesGeminiThinkingLevel(model: string): boolean {
+  const generation = /^gemini-(\d+)(?:[.-]|$)/i.exec(model.trim());
+  if (generation && Number(generation[1]) >= 4) return true;
   const match = /^gemini-3\.(\d+)-flash(?:$|[-@])/i.exec(model.trim());
   return Boolean(match && Number(match[1]) >= 7);
 }
 
 export function normalizeDirectGeminiThinking(provider: ServerLlmProvider, model: string, thinking: ThinkingLevel): ThinkingLevel {
-  return (provider === "vertex" || provider === "gemini_api") && usesGeminiFlashThinkingLevel(model) && thinking === "off"
+  return (provider === "vertex" || provider === "gemini_api") && usesGeminiThinkingLevel(model) && thinking === "off"
     ? "low"
     : thinking;
 }
@@ -220,6 +228,20 @@ export class ServerLlmStore {
     const payload = JSON.parse(row?.payload_json ?? "{}");
     return !(purpose === "state_response" ? stateRepairBudgetSpent(payload) : repairBudgetSpent(payload));
   }
+  recordShapeNormalizations(jobId:string,diagnostics:import("@rcm/shared").AuxiliaryShapeDiagnostic[]):void {
+    recordJobShapeNormalizations(this.db,jobId,diagnostics);
+  }
+  normalizeShape(jobId:string,value:unknown,purpose:string):unknown {
+    // State wire adaptation runs in normalizeStateEnvelope, before expansion.
+    if(purpose.startsWith("reconciliation")||purpose.startsWith("state_response"))return value;
+    const row=this.db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(jobId) as {payload_json:string}|undefined;
+    const payload=JSON.parse(row?.payload_json ?? "{}");
+    const contract=payload.promptContract;
+    const normalized=normalizeAuxiliaryResponse(value,{contract:contract ?? "legacy",purpose});
+    if(normalized.diagnostics.length)this.recordShapeNormalizations(jobId,normalized.diagnostics);
+    return normalized.value;
+  }
+  recordStateRecovery(jobId: string, report: StateRecoveryReport): void { recordJobStateRecovery(this.db, jobId, report); }
   stageOutput(jobId: string, output: string, storyValidationReason?: string): void { stageJobModelOutput(this.db, jobId, output, undefined, storyValidationReason); }
   settleCall(jobId: string, purpose: ServerLlmPurpose, outcome: "succeeded" | "failed", details?: { error?: unknown; usage?: Record<string, unknown> }): void { settleJobLlmCall(this.db, jobId, purpose, outcome, details); }
   cachedPage(jobId: string, purpose: CachedAuxiliaryPurpose, systemPrompt: string, userPrompt: string): unknown | undefined {
@@ -234,8 +256,8 @@ export class ServerLlmStore {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(job.id) as { payload_json: string } | undefined;
     if (!row) return undefined;
     const checkpoint = (JSON.parse(row.payload_json || "{}") as Record<string, any>).validatedExtractionCheckpoint;
-    if (!checkpoint || checkpoint.inputHash !== extractionCheckpointKey(job)) return undefined;
-    const parsed = Api38ExtractionDraftResultSchema.safeParse(checkpoint.result);
+    if (!checkpoint || checkpoint.inputHash !== extractionCheckpointKey(job, this.config)) return undefined;
+    const parsed = extractionDraftSchema(job.promptContract).safeParse(checkpoint.result);
     if (!parsed.success || parsed.data.language !== job.memoryLanguage) return undefined;
     try { return validateMemoryAdditionRequestOutcome(parsed.data, job.memoryAddition?.userRequest); }
     catch { return undefined; }
@@ -244,7 +266,7 @@ export class ServerLlmStore {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=? AND status='leased' AND lease_owner IS NOT NULL").get(job.id) as { payload_json: string } | undefined;
     if (!row) return result;
     const payload = JSON.parse(row.payload_json || "{}") as Record<string, any>;
-    payload.validatedExtractionCheckpoint = { inputHash: extractionCheckpointKey(job), result, validatedAt: Date.now() };
+    payload.validatedExtractionCheckpoint = { inputHash: extractionCheckpointKey(job, this.config), result, validatedAt: Date.now() };
     this.db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner IS NOT NULL")
       .run(JSON.stringify(payload), Date.now(), job.id);
     return result;
@@ -417,7 +439,7 @@ function openAiGenerationTuning(thinking: ThinkingLevel, temperature: number): R
 }
 
 function geminiGenerationTuning(model: string, thinking: ThinkingLevel, temperature: number): Record<string, unknown> {
-  if (usesGeminiFlashThinkingLevel(model)) {
+  if (usesGeminiThinkingLevel(model)) {
     const thinkingLevel = thinking === "default" ? undefined : thinking === "high" ? "HIGH" : thinking === "medium" ? "MEDIUM" : "LOW";
     return thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {};
   }
@@ -477,6 +499,10 @@ async function copilotFetchJson(url: string, init: RequestInit, signal: AbortSig
   }
 }
 
+// Only provider requests use this dispatcher. The per-call abort deadline covers
+// headers AND body; undici's independent 300-second parser timers must not cut first.
+const providerDispatcher = new Agent({headersTimeout:0,bodyTimeout:0});
+
 async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, timeoutMs: number): Promise<any> {
   const controller = new AbortController();
   const abort = () => controller.abort(signal.reason);
@@ -485,7 +511,8 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
   try {
     let response: Response;
     try {
-      response = await fetch(url, { ...init, signal: controller.signal });
+      const request = { ...init, signal: controller.signal, dispatcher: providerDispatcher };
+      response = await fetch(url, request);
     } catch (error) {
       if (controller.signal.aborted && controller.signal.reason instanceof Error) throw controller.signal.reason;
       throw new ProviderRequestError("transport", undefined, providerTransportFailureMessage(error));
@@ -524,7 +551,7 @@ export async function groupMemoriesWithServerLlm(store: ServerLlmStore, job: Lea
   const stage = job.memoryGrouping!;
   const messages = [{ role: 'system' as const, content: stage.systemPrompt }, { role: 'user' as const, content: stage.userPrompt }];
   const first = await callProvider(store, job.id, messages, signal, 'memory_group');
-  try { return validateGroupingResult(parseServerJson(first, 'memory_group'), stage); }
+  try { return validateGroupingResult(parseServerJson(store, job.id, first, 'memory_group'), stage); }
   catch (error) {
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
       originalMessages: messages, invalidOutput: first, validationError: error, request: { kind: "memory_group" },
@@ -533,7 +560,7 @@ export async function groupMemoriesWithServerLlm(store: ServerLlmStore, job: Lea
       original: first, repaired, purpose: "memory_group",
       regenerate: () => callProvider(store, job.id, messages, signal, "memory_group"),
       validate: (output, phase) => {
-        return validateGroupingResult(parseServerJson(output, phase === "repair" ? "memory_group_repair" : "memory_group"), stage);
+        return validateGroupingResult(parseServerJson(store, job.id, output, phase === "repair" ? "memory_group_repair" : "memory_group"), stage);
       },
     });
   }
@@ -552,14 +579,15 @@ function providerTransportFailureMessage(error: unknown): string {
   return `연결 요청에 실패했어요 · HTTP 상태를 받지 못했어요${suffix}`;
 }
 
-function parseServerJson(text: string, purpose: ServerLlmPurpose): unknown {
-  const parsed = parseStructuredModelJson(text);
+function parseServerJson(store:ServerLlmStore, jobId:string, text: string, purpose: ServerLlmPurpose, normalStop = false, onFix?: (fixes: string[]) => void): unknown {
+  const parsed = parseStructuredModelJson(text, { normalStop });
+  onFix?.(parsed.repairs);
   if (parsed.repaired) console.warn(`[RCM] Server LLM local JSON repair purpose=${purpose} repairs=${parsed.repairs.join(",")}${parsed.keyQuoteInsertions === undefined ? "" : ` keyQuoteInsertions=${parsed.keyQuoteInsertions}`}`);
-  return normalizeStructuredModelOptionals(parsed.value);
+  return normalizeStructuredModelOptionals(store.normalizeShape(jobId,parsed.value,purpose));
 }
 
 export class ServerLlmOutputError extends Error {
-  readonly retryable = true;
+  get retryable(): boolean { return this.reason !== "max_tokens"; }
   readonly code: string | undefined;
   constructor(readonly reason: "empty_output" | "max_tokens", message: string, readonly finishReason?:string) {
     super(message);
@@ -577,19 +605,20 @@ async function callRepairProvider(call: () => Promise<string>): Promise<string> 
   }
 }
 
-function ensureCompleteOutput(content: string, finishReason: unknown): string {
+function ensureCompleteOutput(content: string, finishReason: unknown, stateResponse = false): string {
   assertProviderOutputAllowed(finishReason, false);
   const normalized = String(finishReason ?? "").trim().toUpperCase();
-  if (["MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH"].includes(normalized) || isStructuredOutputTruncated(content)) {
+  let locallyComplete = false;
+  if (stateResponse && normalized === "STOP") {
+    try { parseStructuredModelJson(content, { normalStop: true }); locallyComplete = true; } catch { /* Preserve truncation handling. */ }
+  }
+  // A normal stop with malformed JSON is a syntax failure, not evidence that
+  // the provider exhausted its output allowance. Let structural repair handle it.
+  if (["MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH"].includes(normalized) || (normalized !== "STOP" && !locallyComplete && isStructuredOutputTruncated(content))) {
     throw new ServerLlmOutputError("max_tokens", `MODEL_OUTPUT_TRUNCATED: ${MODEL_OUTPUT_TRUNCATED_MESSAGE}`,normalized || undefined);
   }
   if (!content.trim()) throw new ServerLlmOutputError("empty_output", "Server LLM returned an empty response",normalized || undefined);
   return content;
-}
-
-function finiteTokenCount(value: unknown): number | undefined {
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 ? number : undefined;
 }
 
 async function callProvider(
@@ -598,60 +627,57 @@ async function callProvider(
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
   signal: AbortSignal,
   purpose: ServerLlmPurpose,
-  requestedOutputBudget?: number,
+  onNormalStop?: (normalStop: boolean) => void,
 ): Promise<string> {
-  messages = withAuxiliaryStoryFraming(messages, store.config.relaxAuxiliaryCensorship === true).map(message => ({ ...message, content: prepareAuxiliaryText(message.content) }));
-  // A job snapshot remains diagnostic history. Operational recovery settings
-  // are read at the start of every call so a queued retry can switch provider,
-  // model, service tier, limits or timeout without rebuilding the job.
+  // Recovery settings are current per call; the job snapshot is history only.
   const config = ServerLlmConfigSchema.omit({ apiKey: true }).parse(store.config);
   const apiKey = store.apiKeyFor(config.provider);
-  if (!apiKey) throw Object.assign(new Error(settingsFailureMessage({ code: "AUTH_FAILED" })), { code: "AUTH_FAILED" });
-  const measurement = measureAuxiliaryPrompt(messages, estimateTokens, config);
-  if (!measurement.fits) {
-    if (purpose === "extraction_repair") throw auxiliaryRepairTooLargeError();
-    throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(measurement.maxInputTokens)}`);
-  }
-  const startedAt = Date.now();
-  const timingId = randomUUID();
-  store.recordTiming({ id: timingId, jobId, purpose, startedAt, outcome: "running" });
-  const promptChars = messages.reduce((sum, message) => sum + message.content.length, 0);
-  const jsonBudget = Math.min(config.maxOutputTokens, requestedOutputBudget ?? config.maxOutputTokens);
-  const limit = jsonBudget;
-  console.log(`[RCM] Server LLM request start provider=${config.provider} model=${config.model} purpose=${purpose} promptChars=${promptChars} jsonBudget=${jsonBudget} maxTokens=${limit}`);
-  const finish = (content: string, metadata: { finishReason?: unknown; refusal?:boolean; usage?: any } = {}): string => {
-    const promptTokens = finiteTokenCount(metadata.usage?.prompt_tokens ?? metadata.usage?.promptTokenCount);
-    const completionTokens = finiteTokenCount(metadata.usage?.completion_tokens ?? metadata.usage?.candidatesTokenCount);
-    const reasoningTokens = finiteTokenCount(metadata.usage?.reasoning_tokens ?? metadata.usage?.completion_tokens_details?.reasoning_tokens ?? metadata.usage?.thoughtsTokenCount);
-    const cachedInputTokens = finiteTokenCount(metadata.usage?.cachedContentTokenCount ?? metadata.usage?.prompt_tokens_details?.cached_tokens ?? metadata.usage?.cached_tokens);
-    console.log([
-      `[RCM] Server LLM request complete provider=${config.provider} model=${config.model} purpose=${purpose}`,
-      `elapsedMs=${Date.now() - startedAt} contentChars=${content.length}`,
-      metadata.finishReason ? `finishReason=${String(metadata.finishReason)}` : "",
-      promptTokens === undefined ? "" : `promptTokens=${promptTokens}`,
-      completionTokens === undefined ? "" : `completionTokens=${completionTokens}`,
-      reasoningTokens === undefined ? "" : `reasoningTokens=${reasoningTokens}`,
-      cachedInputTokens === undefined ? "" : `cachedInputTokens=${cachedInputTokens}`,
-    ].filter(Boolean).join(" "));
-    store.stageOutput(jobId, content);
-    let completed: string;
-    try { assertProviderOutputAllowed(metadata.finishReason,metadata.refusal); completed = ensureCompleteOutput(content, metadata.finishReason); }
-    catch (error) {
-      store.settleCall(jobId, purpose, "failed", { error, usage: { promptTokens, completionTokens, reasoningTokens, cachedInputTokens } });
-      throw error;
-    }
-    store.settleCall(jobId, purpose, "succeeded", { usage: { promptTokens, completionTokens, reasoningTokens, cachedInputTokens } });
-    store.recordTiming({ id: timingId, jobId, purpose, startedAt, elapsedMs: Date.now() - startedAt, outcome: "succeeded" });
-    return completed;
+  const startedAt = Date.now(), timingId = randomUUID();
+  const limit = config.maxOutputTokens;
+  const thinkingConfig = config.provider === "gemini_api" || config.provider === "vertex"
+    ? geminiGenerationTuning(config.model, config.thinking, config.temperature).thinkingConfig ?? "provider_default"
+    : config.provider === "ollama_cloud" ? (config.thinking === "off" ? false : config.thinking)
+      : openAiGenerationTuning(config.thinking, config.temperature).reasoning_effort ?? "provider_default";
+  let dispatched = false;
+  let metadata: { finishReason?: unknown; usage?: any } = {};
+  let usage: Record<string, number> = {};
+  const logMetadata = (outcome: "complete" | "failed") => {
+    const reason = String(metadata.finishReason ?? "").toUpperCase();
+    const line = `[RCM] Server LLM request ${outcome} provider=${config.provider} model=${sanitizeDiagnosticText(config.model, [apiKey], 160)}`
+      + ` purpose=${purpose} elapsedMs=${Date.now() - startedAt} sentMaxOutputTokens=${dispatched ? limit : "not_sent"}`
+      + ` thinkingConfig=${JSON.stringify(thinkingConfig)} finishReason=${/^[A-Z0-9_]{1,80}$/.test(reason) ? reason : "unknown"}`
+      + ` promptTokens=${usage.promptTokens ?? "unknown"} completionTokens=${usage.completionTokens ?? "unknown"}`
+      + ` reasoningTokens=${usage.reasoningTokens ?? "unknown"} cachedInputTokens=${usage.cachedInputTokens ?? "unknown"}`;
+    if (outcome === "failed") console.warn(line); else console.log(line);
   };
+  store.recordTiming({ id: timingId, jobId, purpose, startedAt, outcome: "running" });
   try {
-    const result = await requestStructuredProvider(store, config, apiKey, messages, signal, limit, () => store.recordCall(jobId, purpose), purpose === "quiz" ? "text" : "json");
-    return finish(result.content, result);
+    if (!apiKey) throw Object.assign(new Error(settingsFailureMessage({ code: "AUTH_FAILED" })), { code: "AUTH_FAILED" });
+    messages = withAuxiliaryStoryFraming(messages, config.relaxAuxiliaryCensorship === true).map(message => ({ ...message, content: prepareAuxiliaryText(message.content) }));
+    const measurement = measureAuxiliaryPrompt(messages, estimateTokens, config);
+    if (!measurement.fits) {
+      if (purpose === "extraction_repair") throw auxiliaryRepairTooLargeError();
+      throw new Error(`AUXILIARY_INPUT_BUDGET_EXCEEDED: ${auxiliaryInputBudgetMessage(measurement.maxInputTokens)}`);
+    }
+    const promptChars = messages.reduce((sum, message) => sum + message.content.length, 0);
+    console.log(`[RCM] Server LLM request start provider=${config.provider} model=${sanitizeDiagnosticText(config.model, [apiKey], 160)} purpose=${purpose} promptChars=${promptChars} jsonBudget=${limit} maxTokens=${limit}`);
+    const result = await requestStructuredProvider(store, config, apiKey, messages, signal, limit, () => { store.recordCall(jobId, purpose); dispatched = true; }, purpose === "quiz" ? "text" : "json");
+    metadata = result;
+    usage = auxiliaryUsageMetadata(result.usage);
+    const staged = onNormalStop ? sanitizeStateResponseForStaging(result.content) : result.content;
+    if (staged !== undefined) store.stageOutput(jobId, staged);
+    assertProviderOutputAllowed(result.finishReason, result.refusal);
+    const completed = ensureCompleteOutput(result.content, result.finishReason, !!onNormalStop);
+    onNormalStop?.(String(result.finishReason ?? "").trim().toUpperCase() === "STOP");
+    store.settleCall(jobId, purpose, "succeeded", { usage });
+    store.recordTiming({ id: timingId, jobId, purpose, startedAt, elapsedMs: Date.now() - startedAt, outcome: "succeeded" });
+    logMetadata("complete");
+    return completed;
   } catch (error) {
-    const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 300);
-    store.settleCall(jobId, purpose, "failed", { error });
+    metadata.finishReason ??= (error as { finishReason?: unknown })?.finishReason;
+    logMetadata("failed");
+    store.settleCall(jobId, purpose, "failed", { error, usage });
     store.recordTiming({ id: timingId, jobId, purpose, startedAt, elapsedMs: Date.now() - startedAt, outcome: "failed" });
-    console.warn(`[RCM] Server LLM request failed provider=${config.provider} model=${config.model} purpose=${purpose} elapsedMs=${Date.now() - startedAt} error=${message}`);
     throw error;
   }
 }
@@ -666,7 +692,7 @@ export async function testProviderConnection(
   if (!apiKey) throw Object.assign(new Error("CONNECTION_KEY_REQUIRED"), { code: "AUTH_FAILED" });
   // Legacy Gemini counts an explicit thinking budget inside maxOutputTokens.
   // Preserve the selected tuning without making a healthy connection fail on a contradictory cap.
-  const limit = (config.provider === "gemini_api" || config.provider === "vertex") && !usesGeminiFlashThinkingLevel(config.model)
+  const limit = (config.provider === "gemini_api" || config.provider === "vertex") && !usesGeminiThinkingLevel(config.model)
     ? 512 + (thinkingBudget(config.thinking) ?? 0) : 512;
   let result;
   try { result = await requestStructuredProvider(store, { ...config, llmTimeoutMs: Math.min(config.llmTimeoutMs, 60_000) }, apiKey,
@@ -786,11 +812,13 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     : [{ role: "user", content: job.prompt }];
   const first = await callProvider(store, job.id, sourceMessages, signal, "extraction");
   store.stageOutput(job.id, first);
+  const expand = (raw: unknown) => (job.promptContract === 'e1d' || job.promptContract === 'e1e' || job.promptContract === 'e1f') ? expandEventWritingFormat(raw, undefined, undefined, job.sourceUnits, job.promptContract) : raw;
   const validate = (output: string, purpose: "extraction" | "extraction_repair"): ExtractionDraftResult => {
-    const parsed = Api38ExtractionDraftResultSchema.parse(normalizeExtractionDraftInput(job.sourceUnits
-      ? resolveModelSourceReferences(parseServerJson(output, purpose), job.sourceUnits)
-      : parseServerJson(output, purpose)), { reportInput: true });
+    const raw = expand(parseServerJson(store, job.id, output, purpose));
+    const parsed = extractionDraftSchema(job.promptContract).parse(normalizeExtractionDraftInput(job.sourceUnits
+      ? resolveModelSourceReferences(raw, job.sourceUnits) : raw), { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
+    validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
     return validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest);
   };
   const validateRepair = async (repaired: string): Promise<ExtractionDraftResult> => validateStructuredRepairOrRegenerate({
@@ -807,10 +835,11 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
   let raw: unknown;
   let resolved: unknown;
   try {
-    raw = parseServerJson(first, "extraction");
+    raw = expand(parseServerJson(store, job.id, first, "extraction"));
     resolved = normalizeExtractionDraftInput(job.sourceUnits ? resolveModelSourceReferences(raw, job.sourceUnits) : raw);
-    const parsed = Api38ExtractionDraftResultSchema.parse(resolved, { reportInput: true });
+    const parsed = extractionDraftSchema(job.promptContract).parse(resolved, { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
+    validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
     return store.cacheExtraction(job, validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest));
   } catch (firstError) {
     onRepair?.();
@@ -820,23 +849,22 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     if (fieldRepair) {
       const response = await callRepairProvider(() => callProvider(store, job.id, fieldRepair.messages, signal, "extraction_repair"));
       if (isUnchangedStructuredRepair(first, response)) return store.cacheExtraction(job, await validateRepair(response));
-      let fieldRepairOutput: unknown;
-      try {
-        fieldRepairOutput = parseServerJson(response, "extraction_repair");
-      } catch (error) {
-        if (error instanceof StructuredJsonSyntaxError) return store.cacheExtraction(job, await validateRepair(response));
-        throw error;
-      }
-      const corrected = applyExtractionFieldRepair(raw, fieldRepair, fieldRepairOutput);
-      const repaired = JSON.stringify(corrected);
-      store.stageOutput(job.id, repaired);
-      return store.cacheExtraction(job, await validateRepair(repaired));
+      const result = await validateStructuredRepairOrRegenerate({
+        original: first, repaired: response, purpose: "extraction",
+        regenerate: () => callProvider(store, job.id, sourceMessages, signal, "extraction"),
+        validate: (output, phase) => {
+          if (phase === "regeneration") return validate(output, "extraction");
+          const patch = parseServerJson(store, job.id, output, "extraction_repair");
+          return validate(JSON.stringify(applyExtractionFieldRepair(raw, fieldRepair, patch)), "extraction_repair");
+        },
+      });
+      return store.cacheExtraction(job, result);
     }
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages,
       invalidOutput: first,
       validationError: firstError,
-      request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids" },
+      request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids", promptContract: job.promptContract },
       inputBudget: { maxInputTokens: store.config.maxInputTokens, estimate: estimateTokens, relaxed: store.config.relaxAuxiliaryCensorship },
     }), signal, "extraction_repair"));
     store.stageOutput(job.id, repaired);
@@ -845,22 +873,23 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
 }
 
 export async function repairSourceEvidenceWithServerLlm(store: ServerLlmStore, job: LeasedJob, draft: ExtractionDraftResult, signal: AbortSignal): Promise<ExtractionDraftResult> {
+  draft = rescueDialogueEvidence(draft, job.auditSourceMessages ?? [], job.sourceUnits);
   const issues = inspectSourceReferences(draft, job.auditSourceMessages ?? []).filter((issue) => issue.reason !== "access_unverified");
   if (!issues.length || !job.sourceUnits || (!job.smallReviewRetry && optionalSourceSelectorsOnly(issues))) return draft;
   const messages = sourceRepairMessages(draft, issues, job.sourceUnits);
   if (!messages) return draft;
   const raw = await callProvider(store, job.id, messages, signal, "extraction_repair");
-  return applySourceRepairs(draft, parseServerJson(raw, "extraction_repair"), issues, job.sourceUnits);
+  return rescueDialogueEvidence(applySourceRepairs(draft, parseServerJson(store, job.id, raw, "extraction_repair"), issues, job.sourceUnits), job.auditSourceMessages ?? [], job.sourceUnits);
 }
 
 export async function repairPassageAccessWithServerLlm(store: ServerLlmStore, job: LeasedJob, draft: ExtractionDraftResult, plan: SourceAccessRepairPlan, signal: AbortSignal): Promise<ExtractionDraftResult> {
   const response = await callProvider(store, job.id, [{ role: "system", content: plan.systemPrompt }, { role: "user", content: plan.userPrompt }], signal, "extraction_repair");
-  return applySourceAccessRepair(draft, plan, parseServerJson(response, "extraction_repair"));
+  return applySourceAccessRepair(draft, plan, parseServerJson(store, job.id, response, "extraction_repair"));
 }
 
 export async function calibrateInitialSetupWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal): Promise<InitialCalibrationResult> {
   const validate = (raw: string, label: "initial_calibration" | "initial_calibration_repair"): InitialCalibrationResult => {
-    const parsed = InitialCalibrationResultSchema.parse(parseServerJson(raw, label));
+    const parsed = InitialCalibrationResultSchema.parse(parseServerJson(store, job.id, raw, label));
     return job.initialCalibration
       ? normalizeAndValidateSetupEvidence(job.initialCalibration.resolvedSetup, parsed, job.initialCalibration.identityHints)
       : parsed;
@@ -907,11 +936,13 @@ export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: L
   const validatePatch = (value: unknown): ExtractionAuditSubmission => {
     const resolved = resolveDirectDialogueEvidence(value, job.sourceUnits ?? [], Boolean(job.sourceRecovery));
     // Recovery is a restricted correction protocol, not a general additive audit.
-    return job.sourceRecovery
+    const submission = job.sourceRecovery
       ? { patch: validateSourceRecoveryPatch(ExtractionAuditPatchSchema.parse(resolved), draft) }
       : parseExtractionAuditResponse(resolved);
+    if (submission.patch) applyExtractionAuditPatchToDraft(job.sourceMessageIds, draft, submission.patch);
+    return submission;
   };
-  try { return validatePatch(parseServerJson(first, "audit")); }
+  try { return validatePatch(parseServerJson(store, job.id, first, "audit")); }
   catch (firstError) {
     onRepair?.();
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
@@ -921,7 +952,7 @@ export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: L
       original: first, repaired, purpose: "audit",
       regenerate: () => callProvider(store, job.id, messages, signal, "audit"),
       validate: (output, phase) => {
-        return validatePatch(parseServerJson(output, phase === "repair" ? "audit_repair" : "audit"));
+        return validatePatch(parseServerJson(store, job.id, output, phase === "repair" ? "audit_repair" : "audit"));
       },
     });
   }
@@ -935,7 +966,7 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
       { role: "system", content: draft.systemPrompt }, { role: "user", content: draft.userPrompt },
     ];
     const first = await callProvider(store, job.id, messages, signal, "episode_draft");
-    try { drafts.push(EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(first, "episode_draft"), draft.sourceMessageIds),job.sourceUnits??[]))); }
+    try { drafts.push(EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(store, job.id, first, "episode_draft"), draft.sourceMessageIds),job.sourceUnits??[]))); }
     catch (firstError) {
       const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
         originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "episode_draft" },
@@ -944,7 +975,7 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
         original: first, repaired, purpose: "episode_draft",
         regenerate: () => callProvider(store, job.id, messages, signal, "episode_draft"),
         validate: (output, phase) => {
-          return EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(output, phase === "repair" ? "episode_draft_repair" : "episode_draft"), draft.sourceMessageIds),job.sourceUnits??[]));
+          return EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(store, job.id, output, phase === "repair" ? "episode_draft_repair" : "episode_draft"), draft.sourceMessageIds),job.sourceUnits??[]));
         },
       }));
     }
@@ -958,7 +989,7 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
       ];
       const first = await callProvider(store, job.id, messages, signal, "episode_draft");
       const sourceIds = [...new Set(group.flatMap((draft) => draft.evidence.map((item) => item.messageId)))];
-      try { consolidated.push(EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(first, "episode_draft"), sourceIds),job.sourceUnits??[]))); }
+      try { consolidated.push(EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(store, job.id, first, "episode_draft"), sourceIds),job.sourceUnits??[]))); }
       catch (firstError) {
         const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
           originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "episode_draft" },
@@ -967,7 +998,7 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
           original: first, repaired, purpose: "episode_draft",
           regenerate: () => callProvider(store, job.id, messages, signal, "episode_draft"),
           validate: (output, phase) => {
-            return EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(output, phase === "repair" ? "episode_draft_repair" : "episode_draft"), sourceIds),job.sourceUnits??[]));
+            return EpisodeDraftResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeDraftInput(parseServerJson(store, job.id, output, phase === "repair" ? "episode_draft_repair" : "episode_draft"), sourceIds),job.sourceUnits??[]));
           },
         }));
       }
@@ -983,7 +1014,8 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
   ];
   const first = await callProvider(store, job.id, messages, signal, "episode_finalize");
   try {
-    const parsed = EpisodeCapsuleResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeCapsuleInput(parseServerJson(first, "episode_finalize"), job.sourceMessageIds),job.sourceUnits??[]));
+    const parsed = EpisodeCapsuleResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeCapsuleInput(parseServerJson(store, job.id, first, "episode_finalize"), job.sourceMessageIds),job.sourceUnits??[]));
+    validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
     return parsed;
   }
@@ -995,7 +1027,8 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
       original: first, repaired, purpose: "episode_finalize",
       regenerate: () => callProvider(store, job.id, messages, signal, "episode_finalize"),
       validate: (output, phase) => {
-        const parsed = EpisodeCapsuleResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeCapsuleInput(parseServerJson(output, phase === "repair" ? "episode_finalize_repair" : "episode_finalize"), job.sourceMessageIds),job.sourceUnits??[]));
+        const parsed = EpisodeCapsuleResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeCapsuleInput(parseServerJson(store, job.id, output, phase === "repair" ? "episode_finalize_repair" : "episode_finalize"), job.sourceMessageIds),job.sourceUnits??[]));
+        validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
         if (parsed.language !== job.memoryLanguage) throw new Error(`Canonical language is still ${parsed.language}; expected ${job.memoryLanguage}`);
         return parsed;
       },
@@ -1006,7 +1039,7 @@ export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob
 export async function reconcileWithServerLlm(
   store: ServerLlmStore,
   jobId: string,
-  prompts: { systemPrompt: string; userPrompt: string; stateExtraction?: boolean; sourceUnits?: import("@rcm/shared").SourceUnit[]; groundingDraft?: ExtractionDraftResult },
+  prompts: { reviewExemptItemRefs?: string[]; systemPrompt: string; userPrompt: string; stateExtraction?: boolean; sourceUnits?: import("@rcm/shared").SourceUnit[]; groundingDraft?: ExtractionDraftResult },
   signal: AbortSignal,
   onRepair?: () => void,
   accessRepair?: { plan: SourceAccessRepairPlan; onResponse: (value: unknown) => void },
@@ -1014,41 +1047,68 @@ export async function reconcileWithServerLlm(
   const sourceMessages = [{ role: "system" as const, content: prompts.systemPrompt + (accessRepair ? `\nAlso complete the independent source-access task. Keep decisions and sourceAccessCorrections as separate fields in the same JSON object.\n${accessRepair.plan.systemPrompt}` : "") },
     { role: "user" as const, content: accessRepair ? JSON.stringify({ ledger: JSON.parse(prompts.userPrompt), sourceAccess: JSON.parse(accessRepair.plan.userPrompt) }) : prompts.userPrompt }];
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
-  const first = await callProvider(store, jobId, sourceMessages, signal, purpose);
-  const validate = (output: string, label: ServerLlmPurpose): ReconciliationResult => {
-    const raw = parseServerJson(output, label);
-    const result = parseReconciliationResult(raw, prompts.sourceUnits);
-    if (prompts.stateExtraction && !result.state) throw new Error("State extraction response is missing state");
+  const stops = new Map<string, boolean>();
+  const call = async (messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, label: ServerLlmPurpose) => {
+    let normalStop = false;
+    const output = await callProvider(store, jobId, messages, signal, label, prompts.stateExtraction ? value => { normalStop = value; } : undefined);
+    stops.set(output, normalStop);
+    return output;
+  };
+  const first = await call(sourceMessages, purpose);
+  const localFixes: string[] = [];
+  let regenerated = false;
+  const parse = (output: string, label: ServerLlmPurpose = purpose) => parseServerJson(store, jobId, output, label, stops.get(output), fixes => localFixes.push(...fixes));
+  const writing = prompts.stateExtraction ? stateWritingContext(prompts.userPrompt) : undefined;
+  const validationNormalizations:import("@rcm/shared").AuxiliaryShapeDiagnostic[]=[];
+  const validateRaw = (raw: unknown): ReconciliationResult => {
+    const normalized=normalizeStateEnvelope(raw,writing,prompts.sourceUnits);
+    raw=normalized.value;
+    validationNormalizations.push(...(normalized.normalizations ?? []));
+    const result = parseReconciliationResult(raw, prompts.sourceUnits, writing);
+    validateReconciliationResult(result, prompts);
     accessRepair?.onResponse(raw);
     return result;
   };
-  let result: ReconciliationResult;
-  try { result = validate(first, purpose); } catch (firstError) {
+  const validate = (output: string, label: ServerLlmPurpose) => validateRaw(parse(output, label));
+  const wholeRepair = async (firstError: unknown): Promise<ReconciliationResult> => {
+    if (!store.canRepair(jobId, prompts.stateExtraction ? "state_response" : "general")) throw firstError;
     onRepair?.();
     const repairPurpose = prompts.stateExtraction ? "state_response_repair" : "reconciliation_repair";
     const reason = validationSummary(firstError);
     console.warn(`[RCM] Server LLM validation repair purpose=${repairPurpose} issue=${reason}`);
-    let repaired: string;
-    try { repaired = await callRepairProvider(() => callProvider(store, jobId, buildAuxiliaryRepairMessages({
+    const repaired = await callRepairProvider(() => call(buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages, invalidOutput: first, validationError: firstError, request: { kind: "reconciliation" },
-    }), signal, repairPurpose)); }
-    catch (error) { throw new Error(`State response repair failed: ${String(error)}; initial_validation=${reason}`); }
-    result = await validateStructuredRepairOrRegenerate({
+    }), repairPurpose));
+    return validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "reconciliation",
-      regenerate: () => callProvider(store, jobId, sourceMessages, signal, "reconciliation"),
+      regenerate: () => { regenerated = true; return call(sourceMessages, "reconciliation"); },
       validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
+  };
+  if (prompts.stateExtraction) {
+    const recovered = await recoverStateResponse({ first, parse, validate: validateRaw, sourceUnits: prompts.sourceUnits, writing, callModel: call, wholeRepair });
+    recovered.report.localFixes = [...new Set([...localFixes, ...recovered.report.localFixes])];
+    recovered.report.regenerated = regenerated;
+    if(validationNormalizations.length)recovered.report.normalizations=[...(recovered.report.normalizations ?? []),...validationNormalizations];
+    store.recordStateRecovery(jobId, recovered.report);
+    console.warn(`[RCM] State recovery localFixes=${recovered.report.localFixes.join(",")} fieldRepairCalls=${recovered.report.fieldRepairCalls} correctedFields=${recovered.report.correctedFields} drops=${recovered.report.drops.length} wholeRepair=${recovered.report.wholeRepair} regenerated=${recovered.report.regenerated}`);
+    return recovered.result;
   }
-  return result;
+  try { return validate(first, purpose); } catch (error) { return await wholeRepair(error); } finally { if(validationNormalizations.length)store.recordShapeNormalizations(jobId,validationNormalizations); }
 }
 
 export async function checkLedgerConsistencyWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal, onRepair?: () => void): Promise<LedgerConsistencyResult> {
   const parts = job.ledgerConsistency?.promptParts?.length ? job.ledgerConsistency.promptParts : [{ systemPrompt: job.systemPrompt ?? "", userPrompt: job.userPrompt ?? job.prompt }];
   const merged = new Map<string, LedgerConsistencyResult["groups"][number]>();
   for (const part of parts) {
+    const validate = (value: unknown) => {
+      const parsed = LedgerConsistencyResultSchema.parse(value, { reportInput: true });
+      validateExactItemSet(parsed.groups.map(group => group.itemRef), "itemRefs" in part ? part.itemRefs : job.ledgerConsistency?.groups.map(group => group.itemRef) ?? [], "groups.itemRef");
+      return parsed;
+    };
     const cached = store.cachedPage(job.id, "ledger_consistency", part.systemPrompt, part.userPrompt);
     if (cached !== undefined) {
-      for (const group of LedgerConsistencyResultSchema.parse(cached).groups) {
+      for (const group of validate(cached).groups) {
         const prior = merged.get(group.itemRef);
         merged.set(group.itemRef, prior ? { itemRef: group.itemRef, closures: [...prior.closures, ...group.closures] } : group);
       }
@@ -1057,7 +1117,7 @@ export async function checkLedgerConsistencyWithServerLlm(store: ServerLlmStore,
     const sourceMessages = part.systemPrompt ? [{ role: "system" as const, content: part.systemPrompt }, { role: "user" as const, content: part.userPrompt }] : [{ role: "user" as const, content: part.userPrompt }];
     const first = await callProvider(store, job.id, sourceMessages, signal, "ledger_consistency");
     let parsed: LedgerConsistencyResult;
-    try { parsed = LedgerConsistencyResultSchema.parse(parseServerJson(first, "ledger_consistency")); }
+    try { parsed = validate(parseServerJson(store, job.id, first, "ledger_consistency")); }
     catch (firstError) {
     onRepair?.();
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
@@ -1067,12 +1127,10 @@ export async function checkLedgerConsistencyWithServerLlm(store: ServerLlmStore,
       original: first, repaired, purpose: "ledger_consistency",
       regenerate: () => callProvider(store, job.id, sourceMessages, signal, "ledger_consistency"),
       validate: (output, phase) => {
-        return LedgerConsistencyResultSchema.parse(parseServerJson(output, phase === "repair" ? "ledger_consistency_repair" : "ledger_consistency"));
+        return validate(parseServerJson(store, job.id, output, phase === "repair" ? "ledger_consistency_repair" : "ledger_consistency"));
       },
     });
     }
-    const expected = new Set("itemRefs" in part ? part.itemRefs : job.ledgerConsistency?.groups.map((group) => group.itemRef) ?? []);
-    if (parsed.groups.length !== expected.size || new Set(parsed.groups.map((group) => group.itemRef)).size !== expected.size || parsed.groups.some((group) => !expected.has(group.itemRef))) throw new Error("Ledger page did not return every supplied group exactly once");
     store.cachePage(job.id, "ledger_consistency", part.systemPrompt, part.userPrompt, parsed);
     for (const group of parsed.groups) {
       const prior = merged.get(group.itemRef);
@@ -1087,7 +1145,14 @@ export async function projectRelationshipsWithServerLlm(store: ServerLlmStore, j
     ? [{ role: "system" as const, content: job.systemPrompt }, { role: "user" as const, content: job.userPrompt }]
     : [{ role: "user" as const, content: job.prompt }];
   const first = await callProvider(store, job.id, sourceMessages, signal, "relationship_projection");
-  try { return RelationshipProjectionResultSchema.parse(parseServerJson(first, "relationship_projection"), { reportInput: true }); }
+  const validate = (output: string, purpose: ServerLlmPurpose) => {
+    const parsed = RelationshipProjectionResultSchema.parse(parseServerJson(store, job.id, output, purpose), { reportInput: true });
+    // API99 servers already carry the exact requested pairs in their owned JSON envelope.
+    const pairs = job.relationshipProjection?.pairs ?? JSON.parse(job.userPrompt ?? "{}").pairs;
+    if (!Array.isArray(pairs)) throw new Error("Relationship projection metadata unavailable");
+    return validateRelationshipProjection(parsed, pairs);
+  };
+  try { return validate(first, "relationship_projection"); }
   catch (firstError) {
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages, invalidOutput: first, validationError: firstError, request: { kind: "relationship_projection" },
@@ -1096,7 +1161,7 @@ export async function projectRelationshipsWithServerLlm(store: ServerLlmStore, j
       original: first, repaired, purpose: "relationship_projection",
       regenerate: () => callProvider(store, job.id, sourceMessages, signal, "relationship_projection"),
       validate: (output, phase) => {
-        return RelationshipProjectionResultSchema.parse(parseServerJson(output, phase === "repair" ? "relationship_projection_repair" : "relationship_projection"), { reportInput: true });
+        return validate(output, phase === "repair" ? "relationship_projection_repair" : "relationship_projection");
       },
     });
   }
@@ -1116,7 +1181,7 @@ export async function consolidateStorySpineWithServerLlm(store: ServerLlmStore, 
     { role: "user", content: userPrompt },
   ], signal, "story_consolidation");
   store.stageOutput(job.id, first);
-  try { return validateGenerationShape(parseServerJson(first, "story_consolidation")); }
+  try { return validateGenerationShape(parseServerJson(store, job.id, first, "story_consolidation")); }
   catch (error) {
     store.stageOutput(job.id, first, validationSummary(error));
     const second = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
@@ -1130,7 +1195,7 @@ export async function consolidateStorySpineWithServerLlm(store: ServerLlmStore, 
       original: first, repaired: second, purpose: "story_consolidation",
       regenerate: () => callProvider(store, job.id, [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], signal, "story_consolidation"),
       validate: (output, phase) => {
-        return validateGenerationShape(parseServerJson(output, phase === "repair" ? "story_consolidation_repair" : "story_consolidation"));
+        return validateGenerationShape(parseServerJson(store, job.id, output, phase === "repair" ? "story_consolidation_repair" : "story_consolidation"));
       },
     });
   }
@@ -1138,8 +1203,13 @@ export async function consolidateStorySpineWithServerLlm(store: ServerLlmStore, 
 
 
 export async function quizWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal): Promise<unknown> {
-  const out = await callProvider(store, job.id, [{ role: "system", content: job.systemPrompt ?? "" },
-    { role: "user", content: job.userPrompt ?? "" }], signal, "quiz");
-  store.stageOutput(job.id, out);
-  return parseServerJson(out, "quiz");
+  const messages = [{ role: "system" as const, content: job.systemPrompt ?? "" }, { role: "user" as const, content: job.userPrompt ?? "" }];
+  const validate = (output: string, purpose: ServerLlmPurpose) => validateQuizResult(parseServerJson(store, job.id, output, purpose), new Set(Object.keys(job.quiz?.refs ?? {})));
+  const first = await callProvider(store, job.id, messages, signal, "quiz");
+  try { return validate(first, "quiz"); }
+  catch (error) {
+    const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({ originalMessages: messages, invalidOutput: first, validationError: error, request: { kind: "quiz" } }), signal, "quiz_repair"));
+    return validateStructuredRepairOrRegenerate({ original: first, repaired, purpose: "quiz", regenerate: () => callProvider(store, job.id, messages, signal, "quiz"),
+      validate: (output, phase) => validate(output, phase === "repair" ? "quiz_repair" : "quiz") });
+  }
 }

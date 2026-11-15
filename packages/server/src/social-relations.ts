@@ -1,5 +1,5 @@
-import { SocialRelationSchema, type SocialRelation } from "@rcm/shared";
-import { EVERYONE_HOLDER, intersectAccessKnowledge } from "./item-access.js";
+import { stateDetailSupport, type StateSupportRef, SocialRelationSchema, type SocialRelation } from "@rcm/shared";
+import { EVERYONE_HOLDER, linkedDetailKnowledge } from "./item-access.js";
 import type { RcmDatabase } from "./db.js";
 import { normalizeEntityName, type ResolvedEntityIdentity } from "./entities.js";
 
@@ -14,26 +14,29 @@ export function parseSocialRelation(value: unknown): StoredSocialRelation | unde
 /** Missing/revoked support hides the derived fact even from authorial retrieval. */
 export function socialRelationKnowledge(db: RcmDatabase, chatId: string, relation: StoredSocialRelation): string[] | undefined {
   if (relation.manual) return relation.knownByEveryone ? [EVERYONE_HOLDER] : relation.knownBy ?? [];
-  if (!relation.detailIds.length) return undefined;
-  let common: string[] | undefined;
-  for (const id of relation.detailIds) {
-    if (!db.prepare(`SELECT 1 FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
-      WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1`).get(id, chatId)) return undefined;
-    const holders = (db.prepare("SELECT holder FROM item_access WHERE chat_id=? AND item_kind='detail' AND item_id=? AND active=1").all(chatId, id) as { holder: string }[]).map(row => row.holder);
-    common = common === undefined ? holders : intersectAccessKnowledge(common, holders);
+  return linkedDetailKnowledge(db, chatId, relation.detailIds);
+}
+
+/** Resolve local typed keys only after all details have been stored. */
+export function resolveStateDetailLinks(db: RcmDatabase, chatId: string, item: {support?:StateSupportRef[];memoryKey?: string; detailKeys?: string[]}, memoryByKey: Map<string,string>): string[] | undefined {
+  // R9 promises already used memoryKey alone as their parent association.
+  const refs=stateDetailSupport(item);
+  if (refs === undefined) return undefined;
+  if (!refs.length) return [];
+  const ids:string[]=[];
+  for (const {memoryKey,detailKey:key} of refs) {
+    const memoryId = memoryByKey.get(memoryKey) ?? (db.prepare('SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1').get(chatId,memoryKey) as {id:string}|undefined)?.id;
+    const detail=db.prepare('SELECT id FROM memory_details WHERE chat_id=? AND memory_id=? AND detail_key=? AND active=1').get(chatId,memoryId ?? null,key) as {id:string}|undefined;
+    if (!detail) return [];
+    ids.push(detail.id);
   }
-  return common ?? [];
+  return [...new Set(ids)];
 }
 export const UNSUPPORTED_SOCIAL_RELATION = "Social relation requires active supporting details in its memory; review the memory and detail links";
-export function resolveSocialRelation(db: RcmDatabase, chatId: string, relation: SocialRelation & { memoryKey: string; detailKeys: string[] }, memoryByKey: Map<string, string>): StoredSocialRelation | undefined {
-  const memoryId = memoryByKey.get(relation.memoryKey) ?? (db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1").get(chatId, relation.memoryKey) as { id: string } | undefined)?.id;
-  const detailIds: string[] = [];
-  for (const key of relation.detailKeys) {
-    const row = db.prepare("SELECT id FROM visible_memory_details WHERE chat_id=? AND memory_id=? AND detail_key=? AND active=1").get(chatId, memoryId ?? null, key) as { id: string } | undefined;
-    if (!row) return undefined;
-    detailIds.push(row.id);
-  }
-  return { ...SocialRelationSchema.parse(relation), detailIds: [...new Set(detailIds)] };
+export function resolveSocialRelation(db: RcmDatabase, chatId: string, relation: SocialRelation & { memoryKey: string; detailKeys: string[]; support?:StateSupportRef[] }, memoryByKey: Map<string, string>): StoredSocialRelation | undefined {
+  const detailIds=resolveStateDetailLinks(db,chatId,relation,memoryByKey);
+  if (!detailIds?.length || detailIds.some(id=>!db.prepare('SELECT 1 FROM visible_memory_details WHERE id=? AND chat_id=? AND active=1').get(id,chatId))) return undefined;
+  return { ...SocialRelationSchema.parse(relation), detailIds };
 }
 
 /** Typed endpoints partition ledger properties; labels remain free text, never parsed. */

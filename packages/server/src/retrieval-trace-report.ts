@@ -1,12 +1,15 @@
+import type { PacketFloorUsage } from "./packet-budget.js";
 import Database from "better-sqlite3";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RETRIEVAL_TRACE_CHAT_PREFIX } from "./retrieval-trace.js";
+import type { CardEmissionTrace } from "./emission-plan.js";
 import type { RecallPathObservation } from "./recall-path.js";
 import type { AtomPath } from "./atom-path-search.js";
 
 export interface TraceEvent {
+  cardEmission?: CardEmissionTrace[];
   currentState?: import("./state-outcomes.js").StateOutcomeReport;
   selector?: import("./mcp-selector.js").SelectorDiagnostic;
   schema?: string;
@@ -74,6 +77,7 @@ const latencyLabels: Record<LatencyBand, string> = {
 };
 
 export interface TurnAnalysis {
+  cardEmission: Array<{ requestId?: string; kind: string; cards: CardEmissionTrace[] }>;
   chatId: string;
   turnKey: string;
   userTurn?: number;
@@ -112,10 +116,10 @@ export interface TurnAnalysis {
     mcpSearchIds: string[];
     mcpDeliverySearchRequestIds: string[];
   };
-  budget: { packetTokens?: number; preparedPacketTokens?: number; targetTokens: number; hardTokenCeiling: number;
+  budget: { storyGenerationMaximum?: number; storyOverviewRenderMaximum?: number; floors?: Record<string, PacketFloorUsage>; allocation?: Record<string, number>; packetTokens?: number; preparedPacketTokens?: number; targetTokens: number; hardTokenCeiling: number;
     alwaysInject?: Array<{memoryId:string;lane:string;outcome:string;estimatedTokens:number;delivered?:boolean}>;
     overflowTokens: number; estimatorHeadroomTokens: number; processedThrough?: number | null; latestProcessed?: number | null;
-    refillAdded?: number; unusedTokens?: number; unusedReason?: string; sectionTokens?: Record<string,number>; stateKinds?: Record<string,number>; stateInventory?: Record<string,number>; stateSearch?: {available:boolean;canonical:number;indexed:number;oversized:number}; sceneDelivery?: Array<{ref?:string;memoryId:string;details:number;dialogues:number}> };
+    refillAdded?: number; unusedTokens?: number; unusedReason?: string; sectionTokens?: Record<string,number>; stateKinds?: Record<string,number>; stateInventory?: Record<string,number>; stateSearch?: {available:boolean;canonical:number;indexed:number;oversized:number}; sceneDelivery?: Array<{ref?:string;memoryId:string;plots:number;exceptions:number;details:number;dialogues:number}> };
   tools: { opportunities: number; exposures: number; exposureEvents: number; unknownExposure: number; acknowledged: number; plannedEmpty: number; confirmedAbsent: number; calls: number; errors: number; registrations: Array<{ outcome?: string; diagnostics?: unknown }> };
   events: TraceEvent[];
 }
@@ -153,7 +157,7 @@ export function parseTrace(content: string): TraceParseResult {
   for (const line of content.split(/\r?\n/u).filter(Boolean)) {
     try {
       const event = JSON.parse(line) as TraceEvent;
-      if (event.schema !== "rcm.retrieval-trace.v19") { unsupportedLines += 1; continue; }
+      if (event.schema !== "rcm.retrieval-trace.v20") { unsupportedLines += 1; continue; }
       if (!event.chatId || !event.kind) { invalidLines += 1; continue; }
       events.push(event);
     } catch { invalidLines += 1; }
@@ -364,6 +368,8 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
       decisions: search.atomPreservation,
     } : undefined,
     currentState: search?.currentState,
+    cardEmission: events.filter(event => ["automatic_search", "mcp_search"].includes(event.kind ?? "") && event.cardEmission)
+      .map(event => ({ requestId: event.id, kind: event.kind!, cards: event.cardEmission! })),
     candidates, eligible, selected: selectedIds.length, packetTokens, preparedPacketTokens, targetTokens, hardTokenCeiling, toolSummary,
     elapsedMs: elapsedValues.length ? Math.max(...elapsedValues) : undefined,
     status: warnings.length ? "확인 필요" : "정상", warnings, selectedMemories: [...selectedCandidateMap.values()],
@@ -396,6 +402,8 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
       alwaysInject: Array.isArray(search?.budget?.alwaysInject) ? search.budget.alwaysInject.map((item:any)=>({...item,
         delivered:item.outcome==='prepared' && Array.isArray(injection?.manifest?.memoryIds) ? injection.manifest.memoryIds.includes(item.memoryId) : undefined})) : undefined,
       processedThrough: ordinal(search?.budget?.processedThrough), latestProcessed: ordinal(search?.budget?.latestProcessed),
+      storyGenerationMaximum: search?.budget?.storyMaximum, storyOverviewRenderMaximum: search?.budget?.storyOverviewRenderMaximum,
+      floors: search?.budget?.floors, allocation: search?.budget?.allocation,
       sectionTokens: search?.budget?.sectionTokens, stateKinds: search?.budget?.stateKinds, stateInventory: search?.budget?.stateInventory, stateSearch: search?.budget?.stateSearch, sceneDelivery: search?.budget?.sceneDelivery,
       refillAdded: nonnegativeNumber(search?.budget?.refillAdded), unusedTokens: nonnegativeNumber(search?.budget?.unusedTokens),
       unusedReason: typeof search?.budget?.unusedReason === "string" ? search.budget.unusedReason : undefined,
@@ -421,7 +429,7 @@ export function analyzeTrace(parsed: TraceParseResult, options: { source: string
   const turns = groupEvents(selectedEvents).map(analyzeTurn).sort((left, right) => right.at - left.at).slice(0, Math.max(1, options.turns ?? 12));
   const globalWarnings = [
     ...(parsed.invalidLines ? [`손상되거나 필수 필드가 없는 trace ${parsed.invalidLines}줄을 제외했습니다.`] : []),
-    ...(parsed.unsupportedLines ? [`지원하지 않는 trace ${parsed.unsupportedLines}줄을 제외했습니다.`] : []),
+    ...(parsed.unsupportedLines ? [`지원하지 않는 trace ${parsed.unsupportedLines}줄을 제외했습니다. 현재 rcm.retrieval-trace.v20만 지원하며 이전 trace는 변환하지 않습니다.`] : []),
   ];
   const warnings = [...globalWarnings, ...turns.flatMap((turn) => turn.warnings.map((warning) => `턴 ${turn.userTurn ?? turn.turnKey}: ${warning}`))];
   const selectedChats = [...new Set(turns.map(turn => turn.chatId))];
@@ -453,7 +461,7 @@ function presentationSummary(events: TraceEvent[]): string[] {
     const states = [...packet.matchAll(/<recorded_state\b[^>]*>([\s\S]*?)<\/recorded_state>/g)]
       .flatMap(match => match[1]!.split("\n").filter(line => line.startsWith("- ")));
     const compactScopes = states.filter(line => /^- .* \[[^\]]+\]: /u.test(line)).length;
-    lines.push(`- 실제 출력 표기: 지식 범위 ${(packet.match(/Known by |Authorial record;/g) ?? []).length + compactScopes}회 / Observed ${(packet.match(/Observed[: (]/g) ?? []).length}회 / 동일 상태 줄 중복 ${states.length - new Set(states).size}개`);
+    lines.push(`- 실제 출력 표기: 지식 범위 ${(packet.match(/[Kk]nown by |[Nn]o character knows/g) ?? []).length + compactScopes}회 / Observed ${(packet.match(/Observed[: (]/g) ?? []).length}회 / 동일 상태 줄 중복 ${states.length - new Set(states).size}개`);
   }
   for (const event of events.filter(event => event.kind === "mcp_delivery" && event.outcome !== "rejected" && typeof event.response === "string")) {
     lines.push(`- MCP 실제 반환: 상세 기록 ${(String(event.response).match(/^Record /gm) ?? []).length}개 / 정확 원문 ${(String(event.response).match(/^- Exact source/gm) ?? []).length}개 · 문맥 충분성은 본문 수동 검토`);
@@ -507,11 +515,15 @@ function assemblySummary(budget: TurnAnalysis["budget"]): string[] {
   return [
     ...(budget.alwaysInject?.length ? [`- always_inject lane: 준비 ${budget.alwaysInject.filter(item=>item.outcome==='prepared').length}개 / 실제 전달 확인 ${budget.alwaysInject.filter(item=>item.delivered===true).length}개 / 전달 미확인 ${budget.alwaysInject.filter(item=>item.outcome==='prepared' && item.delivered===undefined).length}개`,
       ...budget.alwaysInject.map(item=>`  - ${item.memoryId}: ${item.outcome}, 약 ${item.estimatedTokens}토큰${item.delivered===undefined ? '' : item.delivered ? ', delivered' : ', not delivered'}`)] : []),
+    ...(budget.storyGenerationMaximum !== undefined || budget.storyOverviewRenderMaximum !== undefined
+      ? [`- Story 상한: 새 생성 ${budget.storyGenerationMaximum ?? "미기록"} / 저장 Overview ${budget.storyOverviewRenderMaximum ?? "미기록"}토큰`] : []),
+    ...(budget.allocation ? [`- 구역별 목표 몫: ${Object.entries(budget.allocation).map(([key,value])=>`${key}=${value}`).join(", ")}`] : []),
+    ...(budget.floors ? Object.entries(budget.floors).map(([key,value])=>`- ${key} floor${value.inactive === "cadence" ? ": inactive (cadence)" : ""} (charged): 예약 ${value.reserved} / 사용 ${value.used} / 반환 ${value.returned}토큰 (서버 준비)`) : []),
     ...(budget.sectionTokens ? [`- 구역별 추정 토큰: ${Object.entries(budget.sectionTokens).map(([key,value])=>`${key}=${value}`).join(", ")}`] : []),
     ...(budget.stateInventory ? [`- 유효한 상태 검색 원본(과거·권한 제한 포함): ${Object.entries(budget.stateInventory).map(([key,value])=>`${key}=${value}`).join(", ")}`] : []),
     ...(budget.stateSearch ? [`- 상태 의미 색인: ${budget.stateSearch.indexed}/${budget.stateSearch.canonical}, ${budget.stateSearch.available ? "사용 가능" : "장애"}, 길이 제한 제외 ${budget.stateSearch.oversized}`] : []),
     ...(budget.stateKinds ? [`- 전달된 상태 종류: ${Object.entries(budget.stateKinds).map(([key,value])=>`${key}=${value}`).join(", ")}`] : []),
-    ...(budget.sceneDelivery ? [`- 장면별 detail/대사: ${budget.sceneDelivery.map(item=>`${item.ref ?? item.memoryId}: ${item.details}/${item.dialogues}`).join(", ")}`] : []),
+    ...(budget.sceneDelivery ? [`- 장면별 Plot/예외/detail/대사 (서버 준비): ${budget.sceneDelivery.map(item=>`${escapeCell(item.ref ?? item.memoryId)}: ${item.plots}/${item.exceptions}/${item.details}/${item.dialogues}`).join(", ")}`] : []),
     `- 처리 완료 원문 위치(서버 ordinal, 0부터): 연속 완료 ${position(budget.processedThrough)} / 개별 완료 마지막 ${position(budget.latestProcessed)}${gap ? " · 중간 미처리 구간 있음" : ""}`,
     `- 서버 조립: 온전한 근거·묶음 ${amount(budget.refillAdded, "개")} 보충 / 준비 후 미사용 예산 ${amount(budget.unusedTokens, "토큰")} / 사유: ${reason}`,
   ];
@@ -550,7 +562,7 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
     analysis.sourceRecovery ? `- 원문 발췌 보완(선택 채팅의 보존된 전체 작업): 작업 ${analysis.sourceRecovery.jobs}개 / 발췌 추가 ${analysis.sourceRecovery.withAdditions}개 / 추가 없음 ${analysis.sourceRecovery.noOp}개 / 실패 ${analysis.sourceRecovery.failed}개 / 결과 미기록 ${analysis.sourceRecovery.unreported}개` : "- 원문 발췌 보완: 작업 메타데이터 미기록",
     "- 지연 관찰: 완료된 클라이언트 요청은 5초 이내 / 5~10초 지연 관찰 / 10초 초과 경고로 구분합니다. 실패·중단은 별도이며, 개별 관측으로 p50·p95 목표 달성을 판정하지 않습니다.", "",
   ];
-  if (!analysis.turns.length) return [...lines, "분석할 진단 기록이 없습니다.", ""].join("\n");
+  if (!analysis.turns.length) return [...lines, ...analysis.warnings.map(warning => `- ${warning}`), "분석할 진단 기록이 없습니다.", ""].join("\n");
   const healthyTurns = analysis.turns.filter((turn) => turn.status === "정상").length;
   const linkedTurns = analysis.turns.filter((turn) => turn.searchInjection === "정상").length;
   lines.push("## 정상 항목", "",
@@ -571,7 +583,7 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
       ...(matchedSearch?.selection?.seedCounts ? [`- Seed 상태: open=${matchedSearch.selection.seedCounts.open}, fulfilled=${matchedSearch.selection.seedCounts.fulfilled}, abandoned=${matchedSearch.selection.seedCounts.abandoned}`] : []),
       ...(matchedSearch?.selection?.roleCounts ? [`- 역할별 서버 준비 기억 수: ${Object.entries(matchedSearch.selection.roleCounts).map(([role,count]) => `${role}=${count}`).join(", ")}`] : []),
       ...(Array.isArray(matchedSearch?.selection?.memories) ? matchedSearch.selection.memories.map((item: any) =>
-        `- ${escapeCell(item.memoryId)} · ${escapeCell(item.role)} · ${escapeCell(item.reason?.kind ?? "미기록")}${typeof item.reason?.score === "number" ? ` (raw=${item.reason.score.toFixed(3)}${typeof item.reason.adjustedScore === "number" ? `, adjusted=${item.reason.adjustedScore.toFixed(3)}` : ""})` : ""}${item.reason?.kind === "open_seed" ? ` (type=${escapeCell(item.reason.seedType)}; detail=${escapeCell(item.reason.detailId)})` : ""}${item.reason?.kind === "not_recalled_for" ? ` (같은 인물: ${escapeCell((item.reason.participants ?? []).join(", "))}; ${item.reason.turns === null ? "전달 이력 없음" : `${item.reason.turns}개 완결 턴 동안 미전달`})` : ""}`) : []),
+        `- ${escapeCell(item.memoryId)} · ${escapeCell(item.role)} · ${escapeCell(item.reason?.kind ?? "미기록")}${typeof item.reason?.score === "number" ? ` (raw=${item.reason.score.toFixed(3)}${typeof item.reason.adjustedScore === "number" ? `, adjusted=${item.reason.adjustedScore.toFixed(3)}` : ""})` : ""}${item.reason?.kind === "open_seed" ? ` (${item.reason.seedType ? `type=${escapeCell(item.reason.seedType)}; ` : ""}detail=${escapeCell(item.reason.detailId)})` : ""}${item.reason?.kind === "not_recalled_for" ? ` (같은 인물: ${escapeCell((item.reason.participants ?? []).join(", "))}; ${item.reason.turns === null ? "전달 이력 없음" : `${item.reason.turns}개 완결 턴 동안 미전달`})` : ""}`) : []),
       ...(story ? [`- 줄거리: 후보 ${story.eligibleNodeCount ?? "미기록"}개 / 선택 ${idList(story.selectedNodeIds).length}개${(story.nodes ?? []).filter((node: Record<string, any>) => node.trimmedBeatCount !== undefined).map((node: Record<string, any>) => ` / ${escapeCell(node.id)} 예산으로 생략한 beat ${node.trimmedBeatCount}개 (trimmedBeatCount)`).join("")}`] : []),
       `- 서버 준비 ${turn.preparedPacketTokens === undefined ? "기록 없음" : `${turn.preparedPacketTokens}토큰`} / 실제 주입 ${turn.packetTokens === undefined ? "기록 없음" : `${turn.packetTokens}토큰`}`,
       `- 준비 결과: ${turn.prepare.outcome ?? "미기록"} / 요청 제한: ${turn.prepare.timeoutMs === undefined ? "미기록" : `${turn.prepare.timeoutMs}ms`} / fallback: ${turn.prepare.fallbackTokens === undefined ? "미기록" : `${turn.prepare.fallbackTokens}토큰`}`,
@@ -589,6 +601,8 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
       `- sync 세부 단계(ms): ${["requestBodyReadMs", "requestParseMs", "lineageMs", "snapshotMs", "calibrationMs", "inheritedEnqueueMs", "episodeMembershipMs", "ingestionMs", "extractionEnqueueMs", "projectionQueueMs", "workerWakeMs", "maintenanceMs"].map((key) => `${key}=${typeof turn.syncTimings?.[key] === "number" ? turn.syncTimings[key]!.toFixed(2) : "미기록"}`).join(", ")}`,
       `- 기본 예산 ${turn.targetTokens || "-"} / 허용 최대 ${turn.hardTokenCeiling || "-"}토큰`,
       ...assemblySummary(turn.budget),
+      ...turn.cardEmission.flatMap(event => event.cards.map(card =>
+        `- 카드 ${escapeCell(event.requestId)} · ${event.kind} · ${escapeCell(card.memoryId)}: shape=${card.shape}, Plot=${card.plot} (${card.plotReason}); 필수 예외=${card.requiredExceptionIds.map(id=>escapeCell(id, Infinity)).join(", ") || "없음"}; hit facts=${card.hitFacts.map(fact=>`${escapeCell(fact.id, Infinity)} (${fact.reasons.join(", ")})`).join("; ") || "없음"} (서버 준비)`)),
       ...presentationSummary(turn.events),
       ...(turn.budget.overflowTokens > 0 && (turn.packetTokens ?? 0) <= turn.hardTokenCeiling ? [`- 실제 주입은 내부 추정기로 설정 예산보다 ${turn.budget.overflowTokens}토큰 높으며, 15% 토크나이저 보정 범위 안입니다.`] : []),
       `- 기억 도구: ${turn.toolSummary}`,

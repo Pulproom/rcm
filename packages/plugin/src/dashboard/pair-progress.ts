@@ -1,6 +1,7 @@
 import type { PairProgress, PairProgressItem, PairProgressUnavailableReason } from "@rcm/shared";
 import { btn, escapeHtml, fold, icon, menu } from "./film/ui.js";
 import { sceneNumbers } from "./scenes.js";
+import { avatarColorStyle } from "./person-colors.js";
 
 export function renderProgress(pair: PairProgress | undefined, memories: any[], reason?: PairProgressUnavailableReason): string {
   if (!pair) {
@@ -24,16 +25,20 @@ export function renderProgress(pair: PairProgress | undefined, memories: any[], 
   const row = (item: PairProgressItem) => {
     // Show the shared unknown state once when neither side has been confirmed.
     const allUnknown = item.cells.every(cell => cell.state === "unknown");
-    const sources = allUnknown ? ["확인 전"] : item.cells.filter(cell => cell.state !== "not_yet").map(cell => {
-      const side = item.mode === "each" ? `${escapeHtml(cell.side)}의 · ` : "";
-      if (cell.state === "unknown") return `${side}확인 전`;
-      if (cell.source === "user") return `${side}직접 체크`;
-      if (cell.source === "setup") return `${side}처음 설정`;
+    const sourceCells = item.cells.filter(cell => cell.state !== "not_yet");
+    const sourceText = (cell: PairProgressItem["cells"][number]) => {
+      if (cell.state === "unknown") return "확인 전";
+      if (cell.source === "user") return "직접 체크";
+      if (cell.source === "setup") return "처음 설정";
       const memory = memories.find(candidate => candidate.id === cell.memoryId);
       return memory
-        ? `${side}<button type="button" class="prog__source" data-action="open-timeline-memory" data-memory-id="${escapeHtml(memory.id)}">S#${numbers.get(String(memory.id)) ?? "?"} 「${escapeHtml(memory.title)}」</button>`
-        : `${side}장면 기록`;
-    });
+        ? `<button type="button" class="prog__source" data-action="open-timeline-memory" data-memory-id="${escapeHtml(memory.id)}">S#${numbers.get(String(memory.id)) ?? "?"} 「${escapeHtml(memory.title)}」</button>`
+        : "장면 기록";
+    };
+    const sameSource = item.mode === "each" && sourceCells.length === 2 && sourceCells.every(cell =>
+      cell.state === sourceCells[0]!.state && cell.source === sourceCells[0]!.source && cell.memoryId === sourceCells[0]!.memoryId);
+    const sources = allUnknown ? ["확인 전"] : sameSource ? [`둘 다 ${sourceText(sourceCells[0]!)}`]
+      : sourceCells.map(cell => `${item.mode === "each" ? `${escapeHtml(cell.side)}의 · ` : ""}${sourceText(cell)}`);
     const tick = (side: string) => {
       const cell = item.cells.find(candidate => candidate.side === side)!;
       const on = cell.state === "done";
@@ -50,7 +55,8 @@ export function renderProgress(pair: PairProgress | undefined, memories: any[], 
   };
   const form = `<details class="prog__add" data-preserve-open="progress-add"><summary class="btn btn--quiet hit">${icon("add")}추가</summary><form id="pair-progress-form" class="form" data-persona="${escapeHtml(pair.persona)}" data-character="${escapeHtml(pair.character)}"><label class="field"><span>진도 이름</span><input class="input" name="label" maxlength="120" required placeholder="예: 처음 손잡기"></label><p class="hint prog__hint">이름 그대로 메인 모델에게 전해지고, 보조 모델이 장면을 보고 체크해요.</p><fieldset class="anniversary-kind"><legend class="label">방식</legend><div class="seg"><label><input type="radio" name="mode" value="each" checked><span>각자</span></label><label><input type="radio" name="mode" value="mutual"><span>서로</span></label></div></fieldset><div class="form__bar">${btn("추가", { kind: "primary", action: "submit-form", data: { formId: "pair-progress-form" } })}</div></form></details>`;
   const restore = hidden.length ? fold("숨긴 항목", hidden.map(item => `<div class="prog__restore"><span>${escapeHtml(item.label)}</span>${btn("복원", { kind: "quiet", action: "progress-restore", data: { ...data, itemId: item.id } })}</div>`).join(""), { count: hidden.length }) : "";
-  const columns = items.length ? `<div class="prog__cols"><span></span><span>${escapeHtml(pair.persona)}의</span><span>${escapeHtml(pair.character)}의</span><span></span></div>` : "";
+  const column = (name: string) => `<span class="prog__person" title="${escapeHtml(name)}"><i style="${avatarColorStyle(name)}" aria-hidden="true"></i><span>${escapeHtml(name)}</span></span>`;
+  const columns = items.length ? `<div class="prog__cols"><span></span>${column(pair.persona)}${column(pair.character)}<span></span></div>` : "";
   const completed = done.length ? `<details class="prog__fold" open data-preserve-open="progress-done"><summary>모두 했음 <span class="n">${done.length}</span></summary>${done.map(row).join("")}</details>` : "";
   const confirm = hasUnknown ? `<div class="prog__actions">${btn("나머지는 아직", { kind: "quiet", action: "progress-remaining_not_yet", data })}</div>` : "";
   const card = `<div class="prog__card">${items.length ? `${columns}${pending.map(row).join("")}${completed}` : '<p class="sub">표시할 항목이 없어요.</p>'}${confirm}</div>`;

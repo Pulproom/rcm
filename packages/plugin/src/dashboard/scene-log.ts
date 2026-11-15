@@ -4,9 +4,9 @@ import { formatStoryTime, parseStoryTime, storyScenes, sceneNumbers } from "@rcm
 import type { DashboardData } from "../dashboard.js";
 import { buildAnniversaries, landmarkLabel } from "./diary.js";
 import { isRecognitionMemory } from "@rcm/shared";
-import { MILESTONE_LABELS, type PairSummary } from "./pairs.js";
+import { intimacyLabelTranslationKey, milestoneLabel, type PairSummary } from "./pairs.js";
 
-export type SceneChip = { kind: "landmark" | "love" | "up" | "down" | "promise_made" | "promise_kept" | "promise_broken" | "bookmark" | "secret_ended" | "minor"; label: string; trend?: "up" | "down" };
+export type SceneChip = { kind: "landmark" | "love" | "up" | "down" | "promise_made" | "promise_kept" | "promise_broken" | "bookmark" | "secret_ended" | "minor"; label: string; translationKey?: string; trend?: "up" | "down" };
 export type SceneCard = { memoryId: string; slate: { no: number; time: string | null; place: string | null }; date: string | null; title: string; chips: SceneChip[]; key: boolean };
 export type SceneDay = { date: string | null; weekday: string | null; scenes: SceneCard[] };
 
@@ -83,10 +83,6 @@ const sceneTime = (memory: any, storyTime: string | null): string | null => {
   return text.startsWith(`${date} `) ? text.slice(date.length + 1) : text;
 };
 
-const intimacyLabel = (item: any): string => {
-  const key = String(item?.milestoneKey ?? item?.kind ?? item?.act ?? "");
-  return String(item?.customLabel ?? "").trim() || MILESTONE_LABELS[key] || key || "스킨십 기록";
-};
 export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "all" | "key" | "intimacy" | "heart" | "promise" | "bookmark", sort: "newest" | "oldest" = "newest"): SceneDay[] {
   const direction = sort === "oldest" ? 1 : -1;
   const allMemories = (data.memories ?? []).filter((memory: any) => !isRecognitionMemory(memory));
@@ -168,7 +164,8 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
 
   for (const item of data.physicalIntimacy ?? []) {
     if (!itemMatchesPair(item, pair)) continue;
-    addChip(targetScene(item), { kind: "love", label: intimacyLabel(item) });
+    const translationKey = intimacyLabelTranslationKey(item);
+    addChip(targetScene(item), { kind: "love", label: milestoneLabel(item), ...(translationKey ? { translationKey } : {}) });
   }
 
   for (const item of data.relationshipEvents ?? []) {

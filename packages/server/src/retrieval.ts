@@ -1,22 +1,28 @@
-import { promiseFirstMade, promiseMadeLabel } from "./promise-recency.js";
+import { assertChatUnlocked } from './upgrade-lock.js';
+import { escapeMemoryText, escapeMemoryAttribute as escapeXml } from "@rcm/shared";
+import { backfillLegacyParticipantAccess } from "./access-migration.js";
+import { standaloneViewpoint } from "./standalone-lanes.js";
+import { chatPacketPricing, type PacketPricing, chargedCardTokens, chargedMemorySectionTokens, chargedPacketTokens, chargedSectionTokens } from "./charged-cost.js";
+import { fitAutomaticCard, plotBundleDetailIds } from "./automatic-packet.js";
+import { buildEmissionPlan, buildManifest, emittedMemoryItems, emittedMemoryRecords, memoryCardHasContent, memoryFactReasons, prependAlwaysCards, renderEmissionCards, type EmissionPlan, type FactReason } from "./emission-plan.js";
 import { clipLandmarkDisplayText } from "@rcm/shared";
 import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { StateOutcomeCapture } from "./state-outcomes.js";
 import { accessibleStorySeed } from "./story-seeds.js";
-import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
+import { loadPlotKnowers, validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, publicKnowledgeScope } from "./item-access.js";
 import { knownByLabels } from "./item-access.js";
 import { collectStateEvidence, selectStateEvidence, stateMcpEvidence } from "./state-evidence.js";
 import { renderStateLine, sharedStateBudget } from "./automatic-state.js";
 import { parseSocialRelation, socialRelationKnowledge } from "./social-relations.js";
-import { projectMemoryScene, renderMemoryScene } from "@rcm/shared";
-import { loadResidualActivations, type AutomaticActivationObservation } from "./recall-activation.js";
+import { emitsMemoryPlot, includesPerson, isAuthorCard, isException, scopeOf, scopeRelation, standaloneScopeText, formatTagNames, type KnowledgeScope, projectMemoryScene, renderMemoryScene } from "@rcm/shared";
+import { AUTHOR_ACTIVATION_KEY, loadResidualActivations, type AutomaticActivationObservation } from "./recall-activation.js";
 import { orderEventContext, type EventConnection } from "./event-context.js";
 import { proposeAtomPathRoots } from "./atom-path-roots.js";
 import { compareAtomPaths, type AtomPath } from "./atom-path-search.js";
 import { searchStoredAtomPaths, type StoredAtomPathSearchStats } from "./atom-path-snapshot.js";
 import { automaticMemoryLimit, automaticDetailLimit, automaticHistoryLimit, AUTOMATIC_ROLE_SHARES, ASSOCIATION_RELATIVE_THRESHOLD, ASSOCIATION_SEMANTIC_MAX, type AutomaticAtomPriority, type AutomaticPortfolioCandidate, type AutomaticRoleReason } from "./automatic-packet.js";
 import { extendRecallPath, startRecallPath, observeRootEvidence, type RecallPath, type RecallPathCapture, type RecallPathObservation } from "./recall-path.js";
-import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
+import { isUserOwnedMemoryDetail, preservedLegacyParentIds, recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { invalidateChangedMemoryGroups } from "./memory-grouping.js";
 import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "./packet-manifest.js";
 import { randomUUID } from "node:crypto";
@@ -70,6 +76,7 @@ interface MemoryRow {
   last_recalled_revision: number | null;
   pinned: number;
   atom_access_version: number;
+  card_shape: 0 | 1;
   created_revision: number;
   created_at: number;
   source_ordinal?: number | null;
@@ -77,6 +84,7 @@ interface MemoryRow {
 }
 
 interface Ranked extends MemoryContextItem {
+  [memoryFactReasons]?: Map<string, FactReason[]>;
   raw: MemoryRow;
   directSignal: number;
   directDetailSignal: number;
@@ -95,6 +103,17 @@ interface Ranked extends MemoryContextItem {
   baseDirect: number;
   cognitiveBonus: number;
   viewAuthority: number;
+}
+
+/** The sole fact-hit decision: retention, role and spare budget confer no reason.
+ * Later seed/MCP selections use this same decision with their explicit typed ID. */
+export function selectFactReasons(selection: { directRelevance?: number; openSeed?: boolean; atomPath?: boolean; mcpAtomRef?: boolean }): FactReason[] {
+  return [
+    ...(selection.directRelevance && selection.directRelevance > 0 ? ["direct" as const] : []),
+    ...(selection.openSeed ? ["open_seed" as const] : []),
+    ...(selection.atomPath ? ["atom_path" as const] : []),
+    ...(selection.mcpAtomRef ? ["mcp_atom_ref" as const] : []),
+  ];
 }
 
 export type RetrievalCandidateClass = "core" | "associative" | "continuity" | "unclassified";
@@ -136,6 +155,7 @@ export interface RetrievalCandidateTrace {
 }
 
 export interface RetrievalDiagnostics {
+  audience?: RetrievalAudience;
   alwaysInject?: ReturnType<typeof prepareAlwaysInject>['diagnostics'];
   currentState?: import("./state-outcomes.js").StateOutcomeReport;
   mcpQuestions?: Array<{question:string; candidates:Array<{memoryId:string; rankScore:number; detailIds:string[]; dialogueKeys:string[]; rawAtomHits:SemanticMemoryHit[]}>}>;
@@ -245,23 +265,47 @@ function isFullyPromptCovered(evidenceJson: string | null | undefined, coverage?
   return activeEvidence.length > 0 && activeEvidence.every((id) => coverage.covered.has(id));
 }
 
-type AlwaysInjectRow = Pick<MemoryRow,'id'|'title'|'content'|'known_by_json'|'type'|'evidence_json'> & {active:number;capsule_parent_id:string|null};
-const compactAlwaysMemory = (row:AlwaysInjectRow):string => `<memory id="${escapeXml(row.id)}" title="${escapeXml(row.title)}" known_by="${escapeXml(parseList(row.known_by_json).map(name=>name===EVERYONE_HOLDER ? 'everyone' : name).join(', '))}">${escapeXml(row.content)}</memory>`;
-
+type AlwaysInjectRow = Pick<MemoryRow,'id'|'title'|'content'|'known_by_json'|'type'|'evidence_json'|'card_shape'> & {active:number;capsule_parent_id:string|null};
 export function alwaysInjectEstimate(db:RcmDatabase,chatId:string):import('@rcm/shared').AlwaysInjectEstimate {
-  const rows=db.prepare('SELECT * FROM memories WHERE chat_id=? AND always_inject=1 ORDER BY id').all(chatId) as AlwaysInjectRow[];
-  const items=rows.map(row=>({memoryId:row.id,estimatedTokens:estimateTokens(compactAlwaysMemory(row))}));
-  return {items,estimatedTokens:items.length ? estimateTokens(`<always_inject>\n${rows.map(compactAlwaysMemory).join('\n')}\n</always_inject>`) : 0};
+  const pricing = chatPacketPricing(db,chatId);
+  const prepared = prepareAlwaysInject(db,chatId,"companion",["narrator"],[],true,pricing);
+  return {items:emittedMemoryItems(prepared.plan).map(item => ({memoryId:item.id,
+    estimatedTokens:estimateTokens(renderMemoryScene(projectMemoryScene(item),{plot:item.content ? "emit" : "omit",clarity:item.clarity,compact:!isAuthorCard(item)})),
+    chargedTokens:chargedCardTokens(projectMemoryScene(item),{plot:item.content ? "emit" : "omit",clarity:item.clarity,compact:!isAuthorCard(item)}, pricing)})),
+    estimatedTokens:prepared.estimatedTokens,chargedTokens:prepared.chargedTokens};
+}
+
+type AlwaysInjectDiagnostic = {memoryId:string;lane:'always_inject';outcome:'prepared'|'inactive'|'stale'|'perspective_blocked'|'prompt_covered';estimatedTokens:number;chargedTokens:number};
+
+function finalizeAlwaysInject(plan: EmissionPlan, diagnostics: AlwaysInjectDiagnostic[], pricing: PacketPricing) {
+  for (const card of plan.cards) {
+    card.alwaysInject = true;
+    // The released mandatory compact summary is independent of atom access.
+    if (card.shape === 0) card.plot = card.item.content.trim() ? "emit" : "omit";
+  }
+  const items = emittedMemoryItems(plan);
+  for (const diagnostic of diagnostics) {
+    const item = items.find(item => item.id === diagnostic.memoryId);
+    if (!item) continue;
+    const scene = projectMemoryScene(item);
+    const options = {plot:item.content ? "emit" as const : "omit" as const,clarity:item.clarity,compact:!isAuthorCard(item)};
+    diagnostic.estimatedTokens = estimateTokens(renderMemoryScene(scene,options));
+    diagnostic.chargedTokens = chargedCardTokens(scene,options, pricing);
+  }
+  const xml = renderAlwaysInjectPlan(plan);
+  return {xml,manifest:buildManifest(plan),items,plan,diagnostics,
+    estimatedTokens:xml ? estimateTokens(xml) : 0,chargedTokens:xml ? chargedMemorySectionTokens(xml,plan, pricing) : 0};
 }
 
 /** A separate automatic lane: no score, memory cap, similarity or decay gate.
  * Access and current evidence remain mandatory even for a user-selected record. */
-export function prepareAlwaysInject(db:RcmDatabase,chatId:string,profile:RpProfile,perspectives:string[],promptSourceMessageIds:string[]=[]) {
+export function prepareAlwaysInject(db:RcmDatabase,chatId:string,profile:RpProfile,perspectives:string[],promptSourceMessageIds:string[]=[],author=false, pricing: PacketPricing = chatPacketPricing(db,chatId)) {
   const rows=db.prepare('SELECT * FROM memories WHERE chat_id=? AND always_inject=1 ORDER BY id').all(chatId) as AlwaysInjectRow[];
+  const plotHolders=loadPlotKnowers(db,chatId,rows);
   const active=new Set<string>();
   if (rows.length && promptSourceMessageIds.length) for (const row of db.prepare("SELECT message_id FROM messages WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL").all(chatId) as Array<{message_id:string}>) active.add(row.message_id);
   const coverage={active,covered:new Set(promptSourceMessageIds)};
-  const diagnostics:Array<{memoryId:string;lane:'always_inject';outcome:'prepared'|'inactive'|'stale'|'perspective_blocked'|'prompt_covered';estimatedTokens:number}>=[];
+  const diagnostics:AlwaysInjectDiagnostic[]=[];
   const selected=rows.filter(row=>{
     let outcome:typeof diagnostics[number]['outcome']='prepared';
     const evidence=JSON.parse(row.evidence_json || '[]') as Array<{messageId:string;canonicalHash?:string}>;
@@ -270,22 +314,46 @@ export function prepareAlwaysInject(db:RcmDatabase,chatId:string,profile:RpProfi
       const source=db.prepare("SELECT canonical_hash FROM messages WHERE chat_id=? AND message_id=? AND memory_excluded=0 AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')").get(chatId,item.messageId) as {canonical_hash:string}|undefined;
       return !source || item.canonicalHash!==undefined && item.canonicalHash!==source.canonical_hash;
     })) outcome='stale';
-    else if (!perspectives.some(name=>{
+    else if (!author && !perspectives.some(name=>{
       const resolved=resolvePerspective(db,chatId,name);
-      return ['omniscient','omniscient narrator'].includes(name.trim().toLowerCase().replace(/[\s_-]+/g,' ')) || allowedByPerspective(row,profile,resolved);
+      return ['omniscient','omniscient narrator'].includes(name.trim().toLowerCase().replace(/[\s_-]+/g,' ')) || allowedByPerspective(row,profile,resolved,plotHolders.get(row.id));
     })) outcome='perspective_blocked';
     else if (isFullyPromptCovered(row.evidence_json,coverage)) outcome='prompt_covered';
-    diagnostics.push({memoryId:row.id,lane:'always_inject',outcome,estimatedTokens:estimateTokens(compactAlwaysMemory(row))});
+    diagnostics.push({memoryId:row.id,lane:'always_inject',outcome,estimatedTokens:0,chargedTokens:0});
     return outcome==='prepared';
   });
-  const xml=selected.length ? `<always_inject>\n${selected.map(compactAlwaysMemory).join('\n')}\n</always_inject>` : '';
-  const manifest=emptyPacketManifest();
-  manifest.memoryIds=selected.map(row=>row.id);
-  manifest.alwaysInjectMemoryIds=[...manifest.memoryIds];
-  manifest.atomKeys=selected.map(row=>memoryAtomKey('summary',row.id,`${row.title}\0${row.content}`));
-  const items=selected.map(row=>MemoryContextItemSchema.parse({id:row.id,type:row.type,title:row.title,content:row.content,knownBy:parseList(row.known_by_json),detail:'clear',score:0,
+  if (author || selected.some(row=>row.card_shape === 1)) {
+    // Reuse the source/access materializer with an explicit seed and no delivery
+    // side effects. Deferred automatic mode prevents recursion into this lane.
+    const items = selected.flatMap(row => {
+      const result = retrieve(db, { chatId, query: "", perspective: "narrator", audience: { kind: "author", sceneCharacters: [] },
+        seedMemoryId: row.id, tokenBudget: 128_000, reinforce: true, deferReinforcement: true, deferAutomaticBudget: true,
+        followAllDetails: true, mcpCandidatesOnly: true, memoryOnlyInjection: true, promptSourceMessageIds });
+      const item = result.eligibleCandidates.find(item => item.id === row.id);
+      if (!item) return [];
+      return [{...item, details:isAuthorCard(item) ? item.details.filter(detail=>isException(detail,item.knownBy)) : [],keyDialogues:[]}];
+    });
+    const plan = buildEmissionPlan(items,{promptSourceMessageIds});
+    for (const card of plan.cards) {
+      card.detailIds = card.detailIds.filter(id => card.minimumUnitIds.includes(id));
+      card.dialogueIds = [];
+    }
+    plan.laneRows.push(...items.map(item => ({lane:'alwaysInjectMemoryIds',id:item.id})));
+    // A wholly covered record has no emitted plot or line.
+    plan.cards = plan.cards.filter(card => card.plot === 'emit' || card.detailIds.length || card.dialogueIds.length || card.plotOmitReason !== 'covered');
+    plan.laneRows = plan.laneRows.filter(row => plan.cards.some(card => card.memoryId === row.id));
+    return finalizeAlwaysInject(plan,diagnostics,pricing);
+  }
+  const items=selected.map(row=>MemoryContextItemSchema.parse({id:row.id,type:row.type,title:row.title,content:row.content,cardShape:row.card_shape,...(row.card_shape === 1 ? {plotKnowers:plotHolders.get(row.id)!} : {}),...publicKnowledgeScope(parseList(row.known_by_json)),detail:'clear',score:0,
     evidence:JSON.parse(row.evidence_json || '[]'),evidenceMessageIds:parseEvidence(row.evidence_json).map(item=>item.messageId)}));
-  return {xml,manifest,items,diagnostics,estimatedTokens:xml ? estimateTokens(xml) : 0};
+  const plan=buildEmissionPlan(items);
+  plan.laneRows.push(...items.map(item=>({lane:'alwaysInjectMemoryIds',id:item.id})));
+  return finalizeAlwaysInject(plan,diagnostics,pricing);
+}
+
+export function renderAlwaysInjectPlan(plan: EmissionPlan, viewpoint?: string): string {
+  const body = renderEmissionCards({...plan,cards:plan.cards.filter(card=>card.alwaysInject)},undefined,undefined,viewpoint);
+  return body ? `<always_inject>\n${body}\n</always_inject>` : '';
 }
 
 export function prependAlwaysInject(packet:string,xml:string):string {
@@ -295,11 +363,6 @@ export function prependAlwaysInject(packet:string,xml:string):string {
   return `<rp_memory_context>${xml}</rp_memory_context>`;
 }
 
-const escapeXml = (value: string): string => value
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;");
 
 
 function safeExcerpt(value: string, maxLength: number): string {
@@ -624,7 +687,10 @@ function publicMemoryContext(item: Ranked): MemoryContextItem {
     viewAuthority: _viewAuthority,
     ...publicItem
   } = item;
-  return publicItem;
+  return { ...publicItem, ...publicKnowledgeScope(publicItem.knownBy, publicItem.knownByEveryone),
+    details: publicItem.details.map(detail => ({ ...detail, ...publicKnowledgeScope(detail.knownBy, detail.knownByEveryone) })),
+    keyDialogues: publicItem.keyDialogues.map(dialogue => ({ ...dialogue, ...publicKnowledgeScope(dialogue.knownBy, dialogue.knownByEveryone) })),
+  };
 }
 
 function tierAllowsRecall(item: Ranked, seedMemoryId?: string): boolean {
@@ -636,7 +702,12 @@ function tierAllowsRecall(item: Ranked, seedMemoryId?: string): boolean {
   return direct >= 0.28 || connectedSupport >= 0.2;
 }
 
-export function allowedByPerspective(row: Pick<MemoryRow, "known_by_json" | "type">, profile: RpProfile, perspective: string): boolean {
+export function allowedByPerspective(row: Pick<MemoryRow, "known_by_json" | "type"> & Partial<Pick<MemoryRow, "card_shape">>, profile: RpProfile, perspective: string, plotHolders?: readonly string[]): boolean {
+  if (row.card_shape === 1) {
+    const scope = scopeOf({knownBy:plotHolders ?? []});
+    if (perspective === "narrator") return profile === "simulation" || scope.kind === "narrator";
+    return includesPerson(scope, perspective);
+  }
   const knownBy = parseList(row.known_by_json);
   if (perspective === "narrator") return profile === "simulation" || knownBy.length === 0;
   if (knownBy.length === 0) return row.type !== "secret";
@@ -667,7 +738,7 @@ function joinAccessScopedDialogues(items: KeyDialogue[]): KeyDialogue[] {
 
 /** One semantic vocabulary for automatic context and archive results. Access is resolved before rendering. */
 function renderMemoryContent(item: MemoryContextItem, _archive: boolean): string {
-  return renderMemoryScene(projectMemoryScene(item));
+  return renderMemoryScene(projectMemoryScene(item), { plot: emitsMemoryPlot(item) ? "emit" : "omit", clarity: item.clarity });
 }
 
 export function renderMemoryItem(item: MemoryContextItem, _intent: RecallIntent = "recall"): string {
@@ -691,7 +762,7 @@ export function mergeMemoryContextItems(left: MemoryContextItem, right: MemoryCo
   for (const dialogue of [...base.keyDialogues, ...other.keyDialogues]) {
     const key = `${dialogue.messageId}\0${dialogue.speaker}\0${dialogue.text}`;
     const existing = dialogueMap.get(key);
-    dialogueMap.set(key, existing ? { ...existing, knownBy: union([...existing.knownBy, ...dialogue.knownBy]) } : dialogue);
+    dialogueMap.set(key, existing ? { ...existing, knownBy: union([...existing.knownBy, ...dialogue.knownBy]), knownByEveryone: existing.knownByEveryone || dialogue.knownByEveryone } : dialogue);
   }
   const evidenceMap = new Map([...base.evidence, ...other.evidence]
     .map((evidence) => [`${evidence.messageId}\0${evidence.quote ?? ""}`, evidence]));
@@ -700,6 +771,7 @@ export function mergeMemoryContextItems(left: MemoryContextItem, right: MemoryCo
     atomAccessVersion: Math.max(left.atomAccessVersion, right.atomAccessVersion),
     score: Math.max(left.score, right.score),
     knownBy: union([...left.knownBy, ...right.knownBy]),
+    knownByEveryone: left.knownByEveryone || right.knownByEveryone,
     participants: union([...left.participants, ...right.participants]),
     locations: union([...left.locations, ...right.locations]),
     evidenceMessageIds: union([...left.evidenceMessageIds, ...right.evidenceMessageIds]),
@@ -709,99 +781,95 @@ export function mergeMemoryContextItems(left: MemoryContextItem, right: MemoryCo
   };
 }
 
-// Source-order subqueries use CROSS JOIN to keep the small evidence list first.
-// Otherwise SQLite can scan every message in the chat for each memory instead
-// of looking up each evidence message by its (chat_id,message_id) primary key.
-function renderLandmarks(db: RcmDatabase, chatId: string, perspective: string, profile: RpProfile, tokenBudget: number, coverage?: PromptCoverage): string {
-  if (tokenBudget <= 0) return "";
-  const rows = db.prepare(`
-    SELECT * FROM memories WHERE chat_id=? AND active=1 AND ${searchableMemoryParentSql()} AND landmark=1
-    ORDER BY COALESCE((SELECT MAX(msg.ordinal) FROM json_each(memories.evidence_json) ev CROSS JOIN messages msg ON msg.chat_id=memories.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')),created_revision) DESC LIMIT 80
-  `).all(chatId) as MemoryRow[];
-  const visible = rows.filter((row) => allowedByPerspective(row, profile, perspective) && !isFullyPromptCovered(row.evidence_json, coverage)).slice(0, 2).reverse();
-  const accepted: string[] = [];
-  for (const row of visible) {
-    const storyTime = row.story_time ? ` time="${escapeXml(row.story_time)}"` : "";
-    const locations = parseList(row.locations_json);
-    const location = locations.length ? ` location="${escapeXml(locations.join(", "))}"` : "";
-    const kinds = parseLandmarkKinds(row.landmark_kinds_json);
-    const kind = kinds.length ? ` kinds="${escapeXml(kinds.map((entry) => entry.kind === "other" ? entry.label ?? "other" : entry.kind).join(", "))}"` : "";
-    const line = `<landmark${kind}${storyTime}${location}>${escapeXml(row.title)}: ${escapeXml(safeExcerpt(row.content, 220))}</landmark>`;
-    const section = `<landmarks>\n${accepted.concat(line).join("\n")}\n</landmarks>`;
-    if (estimateTokens(section) > tokenBudget) break;
-    accepted.push(line);
-  }
-  return accepted.length ? `<landmarks>\n${accepted.join("\n")}\n</landmarks>` : "";
-}
-
 type LedgerRelevance = (text: string, sourceId?: string | null) => number;
-interface StructuredRender { xml: string; atomKeys: string[]; ids: string[]; hits?: StateEvidenceHit[] }
+interface StructuredRender { xml: string; atomKeys: string[]; ids: string[]; hits?: StateEvidenceHit[]; scopes?: KnowledgeScope[] }
 
-function renderPhysicalIntimacy(db: RcmDatabase, chatId: string, perspective: string, peers: string[], tokenBudget: number, detailed = false, archiveView = false, excluded = new Set<string>(), signals: SearchQuerySignal[] = [], relevance: LedgerRelevance = (text) => weightedOverlap(signals, text)): StructuredRender {
+function renderPhysicalIntimacy(db: RcmDatabase, chatId: string, perspective: string, peers: string[], tokenBudget: number, detailed = false, archiveView = false, excluded = new Set<string>(), signals: SearchQuerySignal[] = [], relevance: LedgerRelevance = (text) => weightedOverlap(signals, text), author = false, pricing: PacketPricing = chatPacketPricing(db,chatId)): StructuredRender {
   if (tokenBudget <= 0) return { xml: "", atomKeys: [], ids: [] };
   type PhysicalRow = { id: string; participant_a: string; participant_b: string; milestone_key: string; act: string; custom_label: string | null; initiator: string | null; interaction_context: string; circumstance: string | null; source_memory_id: string | null; source_start_ordinal: number | null; auto_inject: number; created_at: number; access: ItemAccessScope };
-  const siblingRows = db.prepare(`SELECT id,participant_a,participant_b,milestone_key,act FROM physical_intimacy_milestones
-    WHERE chat_id=? ORDER BY COALESCE(source_start_ordinal,2147483647),created_at ${detailed ? "" : "LIMIT 128"}`).all(chatId) as Array<Pick<PhysicalRow, "id" | "participant_a" | "participant_b" | "milestone_key" | "act">>;
   const candidates = db.prepare(`SELECT id,participant_a,participant_b,milestone_key,act,custom_label,initiator,interaction_context,circumstance,source_memory_id,source_start_ordinal,auto_inject,created_at
-    FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND deleted_by_user=0 ORDER BY COALESCE(source_start_ordinal,2147483647),created_at ${detailed ? "" : "LIMIT 64"}`).all(chatId) as Array<Omit<PhysicalRow, "access">>;
+    FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND deleted_by_user=0
+    ORDER BY (participant_a COLLATE NOCASE IN (SELECT value FROM json_each(?)) AND participant_b COLLATE NOCASE IN (SELECT value FROM json_each(?))) DESC,
+      COALESCE(source_start_ordinal,-1) DESC,created_at DESC,id`)
+    .all(chatId, JSON.stringify(peers), JSON.stringify(peers)) as Array<Omit<PhysicalRow, "access">>;
   const access = loadItemAccess(db, chatId, candidates.map((row) => ({ kind: "physical_milestone", id: row.id })));
   const hits: StateEvidenceHit[] = [];
-  const rows: PhysicalRow[] = candidates.flatMap((row) => {
-    const scope = resolveItemAccess(access, "physical_milestone", row.id, [row.participant_a, row.participant_b]);
+  const eligible: PhysicalRow[] = candidates.flatMap((row) => {
+    const scope = resolveItemAccess(access, "physical_milestone", row.id, author ? [] : [row.participant_a, row.participant_b]);
+    if (author && (!scope.explicit || !validItemAccessScope(scope))) return [];
     if (!visibleTo(scope, perspective, archiveView || perspective === "narrator")) return [];
     if (!detailed && row.auto_inject !== 1) return [];
     if (detailed && signals.length && relevance(`${row.participant_a} ${row.participant_b} ${row.milestone_key.replaceAll("_", " ")} ${row.act} ${row.circumstance ?? ""}`, row.source_memory_id) < 0.2) return [];
-    if (row.milestone_key === "first_physical_intimacy" && siblingRows.some((candidate) => candidate.id !== row.id && candidate.participant_a === row.participant_a && candidate.participant_b === row.participant_b && candidate.act === row.act && candidate.milestone_key !== "first_physical_intimacy")) return [];
-    const atomKey = detailed ? physicalDetailAtomKey(row) : physicalOccurrenceAtomKey(row);
-    hits.push({knownBy: scope.narratorOnly ? [] : itemAccessKnowledge(scope), presentation: `${row.participant_a}, ${row.participant_b}: ${row.act}; ${row.circumstance ?? "Occurred."}`, text:`${row.milestone_key.replaceAll("_", " ")} ${row.act} ${row.circumstance ?? ""}`,atomKey,delivered:false,alreadyPresent:excluded.has(atomKey),section:"physical_intimacy",
-      ...(row.source_memory_id ? { sourceId: row.source_memory_id } : {})});
-    return excluded.has(atomKey) ? [] : [{ ...row, access: scope }];
+    return [{ ...row, access: scope }];
   });
+  const occurrenceKey = (row: PhysicalRow) => JSON.stringify([row.participant_a,row.participant_b,row.act]);
+  // Only a specific occurrence eligible for this response can suppress a
+  // generic one. Deleted/inactive, missing access and disabled rows cannot.
+  // Already delivered specific occurrences still suppress their generic alias:
+  // delta omission must not manufacture a second delivery of the same fact.
+  const specific = new Set(eligible.filter(row => row.milestone_key !== "first_physical_intimacy").map(occurrenceKey));
+  const distinct = eligible.filter(row => row.milestone_key !== "first_physical_intimacy" || !specific.has(occurrenceKey(row)));
+  const rows = distinct.filter(row => !excluded.has(detailed ? physicalDetailAtomKey(row) : physicalOccurrenceAtomKey(row)))
+    .slice(0, detailed ? undefined : 64);
+  for (const row of distinct) {
+    const atomKey = detailed ? physicalDetailAtomKey(row) : physicalOccurrenceAtomKey(row);
+    if (!rows.includes(row) && !excluded.has(atomKey)) continue;
+    hits.push({knownBy: row.access.narratorOnly ? [] : itemAccessKnowledge(row.access), presentation: `${row.participant_a} & ${row.participant_b}: ${row.act.replaceAll("_", " ")}; ${row.circumstance ?? "Occurred."}`, text:`${row.milestone_key.replaceAll("_", " ")} ${row.act} ${row.circumstance ?? ""}`,atomKey,delivered:false,alreadyPresent:excluded.has(atomKey),section:"physical_intimacy",
+      ...(row.source_memory_id ? { sourceId: row.source_memory_id } : {})});
+  }
   if (rows.length === 0) return { xml: "", atomKeys: [], ids: [], hits };
   const peerNames = new Set(peers.map(normalizeEntityName));
   const preferredRows = peerNames.size >= 2
     ? rows.filter((row) => peerNames.has(normalizeEntityName(row.participant_a)) && peerNames.has(normalizeEntityName(row.participant_b)))
     : [];
-  const visibleRows = preferredRows.length > 0 ? preferredRows : rows;
+  const visibleRows = author ? [...preferredRows, ...rows.filter(row => !preferredRows.includes(row))] : preferredRows.length > 0 ? preferredRows : rows;
+  const pairKey = (row: PhysicalRow) => [normalizeEntityName(row.participant_a), normalizeEntityName(row.participant_b)].sort();
+  const allowedPairs = new Set([...new Set(visibleRows.map(row => JSON.stringify(pairKey(row))))].slice(0, author ? undefined : 2));
   const groups = new Map<string, typeof visibleRows>();
   for (const row of visibleRows) {
-    const key = [normalizeEntityName(row.participant_a), normalizeEntityName(row.participant_b)].sort().join("\0");
+    if (!allowedPairs.has(JSON.stringify(pairKey(row)))) continue;
+    const key = JSON.stringify([pairKey(row), itemAccessKnowledge(row.access).map(normalizeEntityName).sort()]);
     const group = groups.get(key) ?? [];
     group.push(row);
     groups.set(key, group);
   }
-  const rendered: Array<{ xml: string; rows: PhysicalRow[] }> = [...groups.values()].slice(0, 2).map((group) => {
+  const rendered: Array<{ xml: string; rows: PhysicalRow[] }> = [...groups.values()].map((group) => {
     const first = group[0]!;
-    if (!detailed) {
-      const firsts = [...new Set(group.map((row) => intimacyMilestonePacketType(row.milestone_key)))];
+    const scope = scopeOf(publicKnowledgeScope(itemAccessKnowledge(first.access)));
+    const tag = scopeRelation(scopeOf({knownBy:[first.participant_a,first.participant_b]}),scope) === "equal" ? "" : ` [${escapeMemoryText(standaloneScopeText(scope))}]`;
+    const participants = [first.participant_a, first.participant_b];
+
+    const pairNames = new Set(participants.map(normalizeEntityName));
+    const observedByOthers = itemAccessKnowledge(first.access).some(name => !pairNames.has(normalizeEntityName(name)));
+    if (!detailed && !observedByOthers) {
       const acts = [...new Set(group.map(row => row.act))];
-      const actAttribute = acts.join(", ") === firsts.join(", ") ? "" : ` acts="${escapeXml(acts.join(", "))}"`;
-      return { rows: group, xml: `- ${escapeXml(first.participant_a)} and ${escapeXml(first.participant_b)} have shared: ${escapeXml(acts.map(act => act === "other" ? "physical intimacy" : act.replaceAll("_", " ")).join(", "))}. Past occurrence does not establish current consent.` };
+      return { rows: group, xml: `- ${escapeMemoryText(participants.join(" & "))}${tag}: have shared ${escapeMemoryText(acts.map(act => act === "other" ? "physical intimacy" : act.replaceAll("_", " ")).join(", "))}.` };
     }
     const milestoneGroups = new Map<string, typeof group>();
     for (const row of group) {
-      const key = JSON.stringify([row.source_memory_id ?? row.id, row.source_start_ordinal, row.act, row.circumstance, row.interaction_context, row.initiator, row.access]);
+      const key = JSON.stringify([row.source_memory_id ?? row.id, row.source_start_ordinal, row.act, row.custom_label, row.circumstance, row.interaction_context, row.initiator, row.access]);
       const same = milestoneGroups.get(key) ?? []; same.push(row); milestoneGroups.set(key, same);
     }
     const milestones = [...milestoneGroups.values()].map((same) => {
       const row = same[0]!;
-      const accessAttrs = row.access.narratorOnly ? ` narrator_only="true"` : ` known_by="${escapeXml(knownByLabels(db,chatId,"physical_milestone",row.id,itemAccessKnowledge(row.access)).join(", "))}"`;
-      const type = same.map(item => intimacyMilestonePacketType(item.milestone_key)).join(", ");
-      const act = row.act === "other" ? row.custom_label ?? "other" : row.act;
-      const source = "";
-      return `<first type="${escapeXml(type)}" act="${escapeXml(act)}" context="${escapeXml(row.interaction_context)}"${row.initiator ? ` initiator="${escapeXml(row.initiator)}"` : ""}${accessAttrs}>${escapeXml(safeExcerpt(row.circumstance ?? "Occurred.", 320))}${source}</first>`;
+      const act = (row.act === "other" ? row.custom_label ?? "other" : row.act).replaceAll("_", " ");
+      const type = [...new Set(same.map(item => intimacyMilestonePacketType(item.milestone_key).replaceAll("_", " ")))]
+        .filter(label => label !== act).join(", ");
+      const label = [type,act].filter(Boolean).join(" ");
+      return `- ${escapeMemoryText(participants.join(" & "))}${tag}: ${escapeMemoryText(label)} (${escapeMemoryText(row.interaction_context)}${row.initiator ? `; initiated by ${escapeMemoryText(row.initiator)}` : ""}) — ${escapeMemoryText(safeExcerpt(row.circumstance ?? "Occurred.", 320))}`;
     });
-    return { rows: group, xml: `<pair participants="${escapeXml(first.participant_a)} | ${escapeXml(first.participant_b)}">\n${milestones.join("\n")}\n</pair>` };
+    return { rows: group, xml: milestones.join("\n") };
   });
-  while (rendered.length && estimateTokens(`<physical_intimacy occurrence_only="true">\n${rendered.map((item) => item.xml).join("\n")}\n</physical_intimacy>`) > tokenBudget) rendered.pop();
+  while (rendered.length && chargedSectionTokens(`<physical_intimacy>\n${rendered.map((item) => item.xml).join("\n")}\n</physical_intimacy>`, pricing) > tokenBudget) rendered.pop();
   const kept = rendered.flatMap((item) => item.rows);
   const delivered = new Set(kept.map((row) => detailed ? physicalDetailAtomKey(row) : physicalOccurrenceAtomKey(row)));
   for (const hit of hits) hit.delivered = delivered.has(hit.atomKey);
   return kept.length ? {
     hits,
-    xml: `<physical_intimacy occurrence_only="true">\n${rendered.map((item) => item.xml).join("\n")}\n</physical_intimacy>`,
+    xml: `<physical_intimacy>\n${rendered.map((item) => item.xml).join("\n")}\n</physical_intimacy>`,
     atomKeys: kept.map((row) => detailed ? physicalDetailAtomKey(row) : physicalOccurrenceAtomKey(row)),
     ids: kept.map((row) => row.id),
+    scopes: kept.map(row => scopeOf(publicKnowledgeScope(itemAccessKnowledge(row.access)))),
   } : { xml: "", atomKeys: [], ids: [], hits };
 }
 
@@ -817,13 +885,17 @@ function renderRelationshipLandmarks(
   excluded = new Set<string>(),
   signals: SearchQuerySignal[] = [],
   relevance: LedgerRelevance = (text) => weightedOverlap(signals, text),
+  author = false,
+  pricing: PacketPricing = chatPacketPricing(db,chatId),
 ): StructuredRender {
   if (tokenBudget <= 0) return { xml: "", atomKeys: [], ids: [] };
   const rows = db.prepare(`SELECT * FROM memories WHERE chat_id=? AND active=1 AND landmark_kinds_json<>'[]' AND ${searchableMemoryParentSql()} ORDER BY created_revision DESC LIMIT 80`).all(chatId) as MemoryRow[];
+  const plotHolders = loadPlotKnowers(db, chatId, rows);
+  const knowers = (row: MemoryRow) => plotHolders.get(row.id) ?? parseList(row.known_by_json);
   const peerNames = new Set(peers.map(normalizeEntityName));
   const hits: StateEvidenceHit[] = [];
   const events = rows.flatMap((row) => {
-    if (!allowedByPerspective(row, profile, perspective)) return [];
+    if (!author && !allowedByPerspective(row, profile, perspective, plotHolders.get(row.id))) return [];
     return parseStoredLandmarkKinds(row.landmark_kinds_json).flatMap((landmark, index) => {
       if (!landmark.pair) return [];
       if (detailed ? !RELATIONSHIP_LANDMARK_KINDS.has(landmark.kind) && landmark.kind !== "confession" : !landmarkAlwaysInjected(landmark)) return [];
@@ -831,7 +903,7 @@ function renderRelationshipLandmarks(
       const evidence = landmark.evidence?.length ? landmark.evidence : parseEvidence(row.evidence_json);
       if (!detailed && isFullyPromptCovered(JSON.stringify(evidence), coverage)) return [];
       const atomKey = relationshipLandmarkAtomKey(row.id, index, landmark);
-      hits.push({ knownBy: parseList(row.known_by_json), presentation: `${landmark.pair.join(", ")}: ${landmark.kind.replaceAll("_", " ")}; ${row.story_time ?? ""}`, text: `${row.title} ${row.content} ${landmark.kind.replaceAll("_", " ")} ${landmark.pair.join(" ")}`,
+      hits.push({ knownBy: [], presentation: `${landmark.pair.join(" & ")}: ${landmark.label || landmark.kind.replaceAll("_", " ")} (${landmark.storyTime ?? row.story_time ?? "date not recorded"})`, text: `${row.title} ${row.content} ${landmark.kind.replaceAll("_", " ")} ${landmark.pair.join(" ")}`,
         atomKey, delivered: false, alreadyPresent: excluded.has(atomKey), section: "relationship_landmarks", sourceId: row.id });
       if (excluded.has(atomKey)) return [];
       const exactPair = peerNames.size >= 2 && landmark.pair.every((name) => peerNames.has(normalizeEntityName(name)));
@@ -849,14 +921,11 @@ function renderRelationshipLandmarks(
     const pair = group[0]!.landmark.pair!;
     const lines = group.map(({ row, landmark }) => {
       const date = landmark.storyTime ?? row.story_time;
-      const source = "";
-      const label = landmark.kind === "other" && landmark.label ? ` label="${escapeXml(landmark.label)}"` : "";
-      const known = detailed ? ` known_by="${escapeXml(parseList(row.known_by_json).join(", "))}"` : "";
-      return `- ${escapeXml(landmark.label || landmark.kind.replaceAll("_", " "))}${date ? `: ${escapeXml(date)}` : " (date not recorded)"}${detailed ? ` [Known by ${escapeXml(parseList(row.known_by_json).join(", "))}]` : ""}`;
+      return `- ${escapeMemoryText(pair.join(" & "))}: ${escapeMemoryText(landmark.label || landmark.kind.replaceAll("_", " "))}${date ? ` (${escapeMemoryText(date)})` : " (date not recorded)"}`;
     });
-    return { events: group, xml: `<pair participants="${escapeXml(pair[0])} | ${escapeXml(pair[1])}">\n${lines.join("\n")}\n</pair>` };
+    return { events: group, xml: lines.join("\n") };
   });
-  while (pairXml.length && estimateTokens(`<relationship_landmarks>\n${pairXml.map((item) => item.xml).join("\n")}\n</relationship_landmarks>`) > tokenBudget) pairXml.pop();
+  while (pairXml.length && chargedSectionTokens(`<relationship_landmarks>\n${pairXml.map((item) => item.xml).join("\n")}\n</relationship_landmarks>`, pricing) > tokenBudget) pairXml.pop();
   const kept = pairXml.flatMap((item) => item.events);
   const delivered = new Set(kept.map((item) => item.atomKey));
   for (const hit of hits) hit.delivered = delivered.has(hit.atomKey);
@@ -865,35 +934,8 @@ function renderRelationshipLandmarks(
     xml: `<relationship_landmarks>\n${pairXml.map((item) => item.xml).join("\n")}\n</relationship_landmarks>`,
     atomKeys: kept.map((item) => item.atomKey),
     ids: kept.map((item) => item.row.id),
+    scopes: [],
   } : { xml: "", atomKeys: [], ids: [], hits };
-}
-
-function renderLatestContinuity(db: RcmDatabase, chatId: string, perspective: string, profile: RpProfile, tokenBudget: number, coverage?: PromptCoverage): string {
-  if (tokenBudget <= 0) return "";
-  const rows = db.prepare(`SELECT memories.*,
-    COALESCE((SELECT MAX(msg.ordinal) FROM json_each(memories.evidence_json) ev CROSS JOIN messages msg ON msg.chat_id=memories.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')),memories.created_revision) AS source_ordinal
-    FROM memories WHERE chat_id=? AND active=1 AND ${searchableMemoryParentSql()} AND type='episode'
-    ORDER BY source_ordinal DESC LIMIT 40`).all(chatId) as MemoryRow[];
-  const latest = rows.find((row) => allowedByPerspective(row, profile, perspective) && !isFullyPromptCovered(row.evidence_json, coverage));
-  if (!latest) return "";
-  const story = latest.story_time ? ` time="${escapeXml(latest.story_time)}"` : "";
-  const locations = parseList(latest.locations_json);
-  const location = locations.length ? ` location="${escapeXml(locations.join(", "))}"` : "";
-  const line = `<latest_past_episode${story}${location}>${escapeXml(latest.title)}: ${escapeXml(safeExcerpt(latest.content, 320))}</latest_past_episode>`;
-  return estimateTokens(line) <= tokenBudget ? line : "";
-}
-
-function renderOpenThreads(db: RcmDatabase, chatId: string, perspective: string, tokenBudget: number, manifest = emptyPacketManifest()): string {
-  if (tokenBudget <= 0) return "";
-  const candidates = db.prepare("SELECT id,promisor,promisee,content,scheduled_for AS scheduledFor FROM promises WHERE chat_id=? AND status='open' ORDER BY updated_revision DESC LIMIT 16")
-    .all(chatId) as Array<{ id: string; promisor: string; promisee: string; content: string; scheduledFor: string | null }>;
-  const access = loadItemAccess(db, chatId, candidates.map((row) => ({ kind: "promise", id: row.id })));
-  const promises = candidates.filter((row) => visibleTo(resolveItemAccess(access, "promise", row.id, [row.promisor, row.promisee]), perspective, perspective === "narrator")).slice(0, 3);
-  const origins=promiseFirstMade(db,chatId);
-  const lines = promises.map((item) => `<open_commitment promisor="${escapeXml(item.promisor)}" promisee="${escapeXml(item.promisee)}"${item.scheduledFor ? ` scheduled_for="${escapeXml(item.scheduledFor)}"` : ""}${origins.has(item.id) ? ` first_made="${escapeXml(promiseMadeLabel(origins.get(item.id)!))}"` : ""}>${escapeXml(safeExcerpt(item.content, 220))}</open_commitment>`);
-  while (lines.length && estimateTokens(`<open_threads>\n${lines.join("\n")}\n</open_threads>`) > tokenBudget) lines.pop();
-  manifest.promiseIds.push(...promises.slice(0, lines.length).map((item) => item.id));
-  return lines.length ? `<open_threads>\n${lines.join("\n")}\n</open_threads>` : "";
 }
 
 function intentCandidateIds(db: RcmDatabase, chatId: string, intent: RecallIntent): string[] {
@@ -963,6 +1005,7 @@ function stableAnchors(
   archiveView = false, manifest = emptyPacketManifest(), excluded: ReadonlySet<string> = new Set(),
   stateHits: StateEvidenceHit[] = [], relevance?: LedgerRelevance, semantic?: Map<string, number>, trace?: StateOutcomeCapture,
 ): string {
+  const pricing = chatPacketPricing(db,chatId);
   const candidates = selectStateEvidence(collectStateEvidence(db, chatId, trace, perspective), signals.map(signal => signal.text).join("\n"), {
     trace, perspective, archive: archiveView, continuity: !answerOnly, history: answerOnly || intent === "promise" || intent === "relationship", activeNames: activePerspectives, semantic,
   });
@@ -978,7 +1021,7 @@ function stableAnchors(
       trace?.record(perspective, item, "prompt_covered", { rank, ...(hit.alreadyPresent ? { reason: "excluded_atom" } : {}) }); continue;
     }
     const line = renderStateLine(item);
-    if (estimateTokens(lines.concat(line).join("\n")) > tokenBudget) { trace?.record(perspective, item, "budget", { rank }); continue; }
+    if (chargedSectionTokens(lines.concat(line).join("\n"), pricing) > tokenBudget) { trace?.record(perspective, item, "budget", { rank }); continue; }
     trace?.record(perspective, item, "delivered", { rank });
     trace?.emitted(perspective, item.id, line);
     lines.push(line); hit.delivered = true; manifest.atomKeys.push(hit.atomKey); manifest.stateEvidenceIds.push(item.id);
@@ -989,10 +1032,10 @@ function stableAnchors(
     if (item.relationship) manifest.relationshipPairs.push(item.relationship);
   }
   trace?.budget(perspective, tokenBudget, estimateTokens(lines.join("\n")));
-  return lines.length ? `<recorded_state as_of="last_processed_history">\n${lines.join("\n")}\n</recorded_state>` : "";
+  return lines.length ? `<recorded_state>\n${lines.join("\n")}\n</recorded_state>` : "";
 }
 
-function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuerySignal[], language: MemoryLanguage): LexicalSearchResult {
+export function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuerySignal[], language: MemoryLanguage): LexicalSearchResult {
   const peak = new Map<string, number>();
   const consensus = new Map<string, number>();
   const detailHits = new Map<string, SemanticMemoryHit>();
@@ -1127,7 +1170,16 @@ function candidateIds(
   return [...ids].slice(0, 400);
 }
 
+export type RetrievalAudience = { kind: "author"; sceneCharacters: string[] };
+
+export function mcpRetrievalAudience(sceneCharacters: string[] = []): RetrievalAudience {
+  return { kind: "author", sceneCharacters };
+}
+
 export interface RetrieveOptions {
+  pricing?: PacketPricing;
+  audience?: RetrievalAudience;
+  lexicalSearch?: LexicalSearchResult;
   /** Stored provenance needed by the global automatic portfolio, never a direct-search seed. */
   automaticSupportMemoryIds?: string[];
   memoryOnlyInjection?: boolean;
@@ -1183,6 +1235,7 @@ export function automaticHardTokenCeiling(tokenBudget: number): number {
 export interface PerspectivePacketPart {
   name: string;
   data: string;
+  standaloneScopes?: KnowledgeScope[];
 }
 
 function projectAtomMemory(
@@ -1203,102 +1256,21 @@ function projectAtomMemory(
   };
 }
 
-function partitionTurnMemories(memories: MemoryContextItem[], activePerspectives: string[]): {
-  shared: MemoryContextItem[];
-  scoped: Map<string, MemoryContextItem[]>;
-} {
-  const active = [...new Map(activePerspectives
-    .filter((name) => name && !["shared", "__shared__", "narrator", "omniscient narrator"].includes(name.toLocaleLowerCase()))
-    .map((name) => [normalizeEntityName(name), name])).values()];
-  const shared: MemoryContextItem[] = [];
-  const scoped = new Map(active.map((name) => [name, [] as MemoryContextItem[]]));
-  const viewersFor = (knownBy: string[]): string[] => active.filter((name) => knownBy.includes(EVERYONE_HOLDER) || knownBy.some((holder) => normalizeEntityName(holder) === normalizeEntityName(name)));
-
-  for (const item of memories) {
-    if (item.atomAccessVersion === 0) {
-      if (active.length === 0 || item.knownBy.length === 0) {
-        shared.push(item);
-        continue;
-      }
-      const viewers = viewersFor(item.knownBy);
-      if (viewers.length === active.length) shared.push(item);
-      else for (const viewer of viewers) scoped.get(viewer)!.push(item);
-      continue;
-    }
-
-    if (active.length === 0) continue;
-    const sharedDetails: MemoryContextItem["details"] = [];
-    const sharedDialogues: MemoryContextItem["keyDialogues"] = [];
-    const scopedAtoms = new Map(active.map((name) => [name, {
-      details: [] as MemoryContextItem["details"],
-      dialogues: [] as MemoryContextItem["keyDialogues"],
-    }]));
-    for (const detail of item.details) {
-      const viewers = viewersFor(detail.knownBy);
-      if (viewers.length === active.length) sharedDetails.push(detail);
-      else for (const viewer of viewers) scopedAtoms.get(viewer)!.details.push(detail);
-    }
-    for (const dialogue of item.keyDialogues) {
-      const viewers = viewersFor(dialogue.knownBy);
-      if (viewers.length === active.length) sharedDialogues.push(dialogue);
-      else for (const viewer of viewers) scopedAtoms.get(viewer)!.dialogues.push(dialogue);
-    }
-    if (sharedDetails.length || sharedDialogues.length) shared.push(projectAtomMemory(item, sharedDetails, sharedDialogues));
-    for (const [viewer, atoms] of scopedAtoms) {
-      if (atoms.details.length || atoms.dialogues.length) scoped.get(viewer)!.push(projectAtomMemory(item, atoms.details, atoms.dialogues));
-    }
-  }
-  return { shared, scoped };
-}
-
 function renderRelevantNameHints(db: RcmDatabase, chatId: string, memories: MemoryContextItem[]): string {
-  const involved = new Set(memories.flatMap((item) => [
+  // Use the newest emitted scene first, rather than the entity display-name
+  // ordering. This bounds hints without starving a later named participant.
+  const involved = [...new Set([...memories].sort((a,b) => (b.sourceOrdinal ?? -1) - (a.sourceOrdinal ?? -1)).flatMap((item) => [
     ...item.participants, ...item.knownBy, item.perspective ?? "",
     ...item.keyDialogues.map((dialogue) => dialogue.speaker),
     ...item.details.flatMap((detail) => [...detail.participants, ...detail.knownBy]),
-  ]).filter(Boolean).map(normalizeEntityName));
+  ]).filter(Boolean).map(normalizeEntityName))];
   const rows = listEntities(db, chatId).filter((entity) => entity.displayName !== entity.name
-    && [entity.key, entity.name, entity.displayName, ...entity.aliases].some((name) => involved.has(normalizeEntityName(name))));
+    && [entity.key, entity.name, entity.displayName, ...entity.aliases].some((name) => involved.includes(normalizeEntityName(name))));
+  const involvement = (entity: typeof rows[number]) => Math.min(...[entity.key, entity.name, entity.displayName, ...entity.aliases]
+    .map(name => involved.indexOf(normalizeEntityName(name))).filter(index => index >= 0));
+  rows.sort((a,b) => involvement(a) - involvement(b));
   if (!rows.length) return "";
   return `<name_hints>\n${rows.slice(0, 12).map((entity) => `<name archive_name="${escapeXml(entity.name)}" preferred_name="${escapeXml(entity.displayName)}" />`).join("\n")}\n</name_hints>`;
-}
-
-function cleanEmptyContinuityBlocks(data: string): string {
-  return data
-    .replace(/<open_threads>\s*<\/open_threads>/g, "")
-    .replace(/<continuity_spine>\s*<\/continuity_spine>/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function withKnownBy(commitment: string, viewers: string[]): string {
-  const withoutKnownBy = commitment.replace(/\s+known_by="[^"]*"/, "");
-  return withoutKnownBy.replace("<open_commitment", `<open_commitment known_by="${escapeXml(viewers.join(", "))}"`);
-}
-
-function hoistSharedOpenCommitments(combinedPerspectives: Map<string, string>, activeNames: string[]): string {
-  if (activeNames.length < 2) return "";
-  const perspectiveEntries = new Map<string, [string, string]>();
-  for (const activeName of activeNames) {
-    const entry = [...combinedPerspectives].find(([name]) => normalizeEntityName(name) === normalizeEntityName(activeName));
-    if (entry) perspectiveEntries.set(activeName, entry);
-  }
-  const commitments = new Map<string, string[]>();
-  for (const [activeName, entry] of perspectiveEntries) {
-    const matches = [...new Set(entry[1].match(/<open_commitment\b[^>]*>[\s\S]*?<\/open_commitment>/g) ?? [])];
-    for (const commitment of matches) commitments.set(commitment, [...(commitments.get(commitment) ?? []), activeName]);
-  }
-  const shared: string[] = [];
-  for (const [commitment, viewers] of commitments) {
-    if (viewers.length < 2) continue;
-    shared.push(withKnownBy(commitment, viewers));
-    for (const viewer of viewers) {
-      const entry = perspectiveEntries.get(viewer);
-      if (!entry) continue;
-      combinedPerspectives.set(entry[0], cleanEmptyContinuityBlocks((combinedPerspectives.get(entry[0]) ?? "").split(commitment).join("")));
-    }
-  }
-  return shared.length ? `<continuity_spine>\n<open_threads>\n${shared.join("\n")}\n</open_threads>\n</continuity_spine>` : "";
 }
 
 /** Processing positions are diagnostics, not story dates or character knowledge. */
@@ -1325,6 +1297,8 @@ export function consolidateMemoryPacket(
   latestStoryTime?: number,
   sceneNames = "",
   stateTrace?: StateOutcomeCapture,
+  emissionPlan?: EmissionPlan,
+  narrationViewpoint?: string,
 ): string {
   const language = (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(chatId) as { memory_language?: string } | undefined)?.memory_language ?? "en";
   const recalledMap = new Map<string, MemoryContextItem>();
@@ -1333,12 +1307,15 @@ export function consolidateMemoryPacket(
     const existing = recalledMap.get(key);
     recalledMap.set(key, existing ? mergeMemoryContextItems(existing, item) : item);
   }
-  const allRecalled = [...recalledMap.values()]
+  const requestedIds = new Set(memories.map(item => item.id));
+  const historyPlan = emissionPlan ? {...emissionPlan,cards:emissionPlan.cards.filter(card=>!card.alwaysInject)} : undefined;
+  const allRecalled = (historyPlan ? emittedMemoryItems(historyPlan).filter(item => requestedIds.has(item.id)) : [...recalledMap.values()])
     .sort((left, right) => (left.sourceOrdinal ?? Number.MAX_SAFE_INTEGER) - (right.sourceOrdinal ?? Number.MAX_SAFE_INTEGER)
       || String(left.storyTime ?? "").localeCompare(String(right.storyTime ?? "")) || right.score - left.score);
+  const plan = historyPlan ?? buildEmissionPlan(allRecalled);
   if (mode === "deep_recall") {
-    const nameHints = renderRelevantNameHints(db, chatId, allRecalled);
-    const recalled = allRecalled.map((item) => renderArchiveMemoryItem(item, intent)).filter(Boolean).join("\n");
+    const nameHints = renderRelevantNameHints(db, chatId, emittedMemoryItems(emissionPlan ?? plan));
+    const recalled = emittedMemoryItems(plan).filter(item => requestedIds.has(item.id)).map((item) => renderArchiveMemoryItem(item, intent)).filter(Boolean).join("\n");
     const directState = perspectives.map((item) => item.data.trim()).filter(Boolean).join("\n");
     const body = [
       `<archive lang="${escapeXml(language)}">`,
@@ -1350,22 +1327,17 @@ export function consolidateMemoryPacket(
     return recalled || directState ? body : "";
   }
   const inferredPerspectives = activePerspectives.length ? activePerspectives : perspectives.map((item) => item.name);
-  const partitioned = partitionTurnMemories(allRecalled, inferredPerspectives);
-  if (manifest) for (const item of [...partitioned.shared, ...[...partitioned.scoped.values()].flat()]) {
-    if (!renderMemoryItem(item, intent)) continue;
-    manifest.memoryIds.push(item.id);
-    if (item.atomAccessVersion > 0 || item.details.length > 0 || item.keyDialogues.length > 0 || !["deja_vu", "fragment"].includes(item.detail)) {
-      manifest.atomKeys.push(...memoryAtomKeys(item));
-      manifest.detailIds.push(...item.details.map((detail) => detail.id));
-    }
-  }
-  const nameHints = renderRelevantNameHints(db, chatId, [...partitioned.shared, ...[...partitioned.scoped.values()].flat()]);
+
+  if (manifest) Object.assign(manifest, mergePacketManifests([manifest,buildManifest(plan)]));
+  const historyIds = new Set(allRecalled.map(item => item.id));
+  const nameHints = renderRelevantNameHints(db, chatId, emittedMemoryItems(emissionPlan ?? plan));
   const perspectiveData = new Map<string, string[]>();
   const appendPerspective = (name: string, data: string): void => {
     if (!data.trim()) return;
     perspectiveData.set(name, [...(perspectiveData.get(name) ?? []), data.trim()]);
   };
-  for (const perspective of perspectives) appendPerspective(perspective.name, perspective.data);
+  for (const perspective of perspectives) appendPerspective(perspective.name,
+    standaloneViewpoint(perspective.data, perspective.standaloneScopes ?? [], narrationViewpoint));
   const combinedPerspectives = new Map([...perspectiveData].map(([name, data]) => [name, data.join("\n")]));
   const activeNames = [...new Map(inferredPerspectives
     .filter((name) => name && !["shared", "__shared__", "narrator", "omniscient narrator"].includes(name.toLocaleLowerCase()))
@@ -1380,14 +1352,13 @@ export function consolidateMemoryPacket(
     for (const [name, data] of entries as Array<[string, string]>) combinedPerspectives.set(name, data.replace(matches[0]!, "").trim());
     return matches[0]!;
   };
-  const sharedSpine = hoistSharedOpenCommitments(combinedPerspectives, activeNames);
   const sharedPhysical = hoistCommonBlock(/<physical_intimacy\b[\s\S]*?<\/physical_intimacy>/);
   const sharedLandmarks = hoistCommonBlock(/<relationship_landmarks\b[\s\S]*?<\/relationship_landmarks>/);
   // Parse only renderer-owned envelopes. Each anchor line already carries its
   // own knowledge scope. Deduplication never inherits the viewing perspective.
   const anchors = new Set<string>();
   for (const [name, data] of combinedPerspectives) {
-    combinedPerspectives.set(name, data.replace(/<recorded_state as_of="last_processed_history">\n([\s\S]*?)\n<\/recorded_state>/g, (_block, lines: string) => {
+    combinedPerspectives.set(name, data.replace(/<recorded_state>\n([\s\S]*?)\n<\/recorded_state>/g, (_block, lines: string) => {
       for (const line of lines.split("\n")) if (line.trim()) {
         stateTrace?.assembled(name, line, anchors.has(line));
         anchors.add(line);
@@ -1395,18 +1366,18 @@ export function consolidateMemoryPacket(
       return "";
     }).trim());
   }
-  const sections = [...combinedPerspectives].filter(([, data]) => data).map(([name, data]) =>
-    `<recorded_state perspective="${escapeXml(name)}">\n${data}\n</recorded_state>`);
+  const sections = [...combinedPerspectives.values()].filter(Boolean);
   const sharedAnchors = anchors.size ? `<recorded_state>\n${[...anchors].join("\n")}\n</recorded_state>` : "";
-  const state = [sharedAnchors, sharedSpine, sharedPhysical, sharedLandmarks, ...sections].filter(Boolean).join("\n");
-  const history = [storySpine, allRecalled.map(item => renderMemoryScene(projectMemoryScene(item), latestStoryTime)).filter(Boolean).join("\n")].filter(Boolean).join("\n");
+  const state = [sharedAnchors, sharedPhysical, sharedLandmarks, ...sections].filter(Boolean).join("\n");
+  const history = [storySpine, renderEmissionCards(plan,historyIds,latestStoryTime,narrationViewpoint)].filter(Boolean).join("\n");
   const payload = [sceneNames, nameHints,
     history ? `<past_records>\n${history}\n</past_records>` : "",
-    state ? `<current_state>\nFrom processed history; newer explicit events take precedence.\n${state}\n</current_state>` : "",
+    state ? `<current_state>\n${latestStoryTime === undefined ? "Last recorded state; newer chat events win.\n" : ""}${state}\n</current_state>` : "",
   ].filter(Boolean);
   if (payload.length === 0) return "";
   const body = [
     memoryGuidanceBlock,
+    latestStoryTime !== undefined ? `Recorded up to ${new Intl.DateTimeFormat("en-GB",{day:"numeric",month:"long",year:"numeric",timeZone:"UTC"}).format(latestStoryTime)}; newer chat events win.` : "",
     ...payload,
   ].filter(Boolean).join("\n");
   return body ? `<rp_memory_context>\n${body}\n</rp_memory_context>` : "";
@@ -1433,9 +1404,11 @@ export function resolvePerspective(db: RcmDatabase, chatId: string, value: strin
 }
 
 export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
+  emissionPlan: EmissionPlan;
   packet: string;
   stableAnchors: string;
   perspectiveData: string;
+  standaloneScopes?: KnowledgeScope[];
   estimatedTokens: number;
   selected: MemoryContextItem[];
   eligibleCandidates: MemoryContextItem[];
@@ -1465,10 +1438,14 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     | { profile: RpProfile; revision: number; memory_language: MemoryLanguage; completed_turn_count: number }
     | undefined;
   const aspects = options.aspects?.length ? options.aspects : [options.query];
-  if (!chat || options.tokenBudget <= 0) return { packet: "", stableAnchors: "", perspectiveData: "", estimatedTokens: 0, selected: [], eligibleCandidates: [], directAtomKeys: [], structuredManifest: emptyPacketManifest(), coverage: aspects.map((aspect) => ({ aspect, status: "no_grounded_hit" })), alreadyProvidedIds: [], recentMemoryIds: [], focusLeaderIds: [], continuityBridgeIds: [], selectedCandidateClasses: {}, selectedRoles: {}, activationObservations: [], deliveredAtomKeys: [] };
+  if (!chat || options.tokenBudget <= 0) return { emissionPlan: buildEmissionPlan([]), packet: "", stableAnchors: "", perspectiveData: "", estimatedTokens: 0, selected: [], eligibleCandidates: [], directAtomKeys: [], structuredManifest: emptyPacketManifest(), coverage: aspects.map((aspect) => ({ aspect, status: "no_grounded_hit" })), alreadyProvidedIds: [], recentMemoryIds: [], focusLeaderIds: [], continuityBridgeIds: [], selectedCandidateClasses: {}, selectedRoles: {}, activationObservations: [], deliveredAtomKeys: [] };
+  const pricing = options.pricing ?? chatPacketPricing(db,options.chatId);
   const requestedPerspective = options.perspective.trim().toLocaleLowerCase().replace(/[\s_-]+/g, " ");
   const omniscient = requestedPerspective === "omniscient" || requestedPerspective === "omniscient narrator";
-  const perspective = resolvePerspective(db, options.chatId, options.perspective);
+  const author = options.audience?.kind === "author";
+  if (author) backfillLegacyParticipantAccess(db, options.chatId);
+  const sceneCharacters = options.audience?.kind === "author" ? options.audience.sceneCharacters : [];
+  const perspective = author ? "narrator" : resolvePerspective(db, options.chatId, options.perspective);
   const entities = listEntities(db, options.chatId);
   const coveredIds = new Set(options.promptSourceMessageIds ?? []);
   const activeIds = coveredIds.size === 0 ? new Set<string>() : new Set((db.prepare(`
@@ -1494,16 +1471,17 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const intent = options.intent ?? "recall";
   const mcpAnswerMode = options.reinforce === true;
   const directAlways = !mcpAnswerMode && !options.deferAutomaticBudget
-    ? prepareAlwaysInject(db,options.chatId,chat.profile,[options.perspective],options.promptSourceMessageIds) : undefined;
-  if (directAlways?.xml) options={...options,tokenBudget:Math.max(1,options.tokenBudget-directAlways.estimatedTokens),
-    excludeMemoryIds:[...(options.excludeMemoryIds ?? []),...directAlways.manifest.memoryIds]};
+    ? prepareAlwaysInject(db,options.chatId,chat.profile,[options.perspective],options.promptSourceMessageIds, author, pricing) : undefined;
+  if (directAlways?.xml) options={...options,tokenBudget:Math.max(1,options.tokenBudget-directAlways.chargedTokens),
+    ...(author ? {excludeAtomKeys:[...(options.excludeAtomKeys ?? []),...directAlways.manifest.atomKeys]}
+      : {excludeMemoryIds:[...(options.excludeMemoryIds ?? []),...directAlways.manifest.memoryIds]})};
   const excludedAtomKeys = new Set([...(options.alreadyPresentAtomKeys ?? []), ...(options.excludeAtomKeys ?? [])]);
-  const archiveView = mcpAnswerMode && omniscient;
+  const archiveView = mcpAnswerMode && (author || omniscient);
   const physicalMcpAnswer = mcpAnswerMode;
   const structuredMcpAnswer = mcpAnswerMode;
   const lexicalSearch = options.mcpCandidatesOnly && options.seedMemoryId
     ? { scores: new Map<string, number>(), detailHits: new Map<string, SemanticMemoryHit>(), atomHits: [], views: [] }
-    : lexicalCandidates(db, options.chatId, signals, chat.memory_language);
+    : options.lexicalSearch ?? lexicalCandidates(db, options.chatId, signals, chat.memory_language);
   const fts = lexicalSearch.scores;
   const aspectLexicalHits = new Map<string, Map<string, SemanticMemoryHit>>();
   const aspectSemanticEvidence = new Map(aspects.map((aspect) => [aspect, relativeViewEvidence(options.aspectSemanticScores?.get(aspect))]));
@@ -1531,7 +1509,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const candidates = options.mcpCandidatesOnly && options.seedMemoryId ? [options.seedMemoryId] : candidateIds(db, options.chatId, fts, semanticCandidateScores, options.seedMemoryId, intent, mcpAnswerMode);
   const directCandidateIds = new Set(candidates);
   const pathSnapshot = !mcpAnswerMode ? searchStoredAtomPaths(db, {
-    chatId: options.chatId, perspective,
+    chatId: options.chatId, perspective, audience: options.audience,
     roots: proposeAtomPathRoots(signals, [...(options.semanticAtomHits?.values() ?? [])].flat(), lexicalSearch.atomHits),
     excludedMemoryIds: options.excludeMemoryIds,
     excludedMemorySignatures: options.excludeMemorySignatures,
@@ -1579,12 +1557,12 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     const historyCandidates = db.prepare(`SELECT m.id FROM memories m
       LEFT JOIN memory_activation_state h ON h.chat_id=m.chat_id AND h.memory_id=m.id AND h.perspective='__automatic_delivery__'
       WHERE m.chat_id=? AND m.active=1 AND ${searchableMemoryParentSql("m")}
-        AND EXISTS (SELECT 1 FROM json_each(m.participants_json) p JOIN json_each(?) person ON p.value=person.value COLLATE NOCASE)
-      ORDER BY h.last_turn_seq IS NOT NULL,h.last_turn_seq,m.created_revision,m.id LIMIT 256`).all(options.chatId, JSON.stringify(people)) as Array<{id:string}>;
+        AND (? OR EXISTS (SELECT 1 FROM json_each(m.participants_json) p JOIN json_each(?) person ON p.value=person.value COLLATE NOCASE))
+      ORDER BY h.last_turn_seq IS NOT NULL,h.last_turn_seq,m.created_revision,m.id LIMIT 256`).all(options.chatId, Number(author), JSON.stringify(people)) as Array<{id:string}>;
     const seedCandidates=db.prepare(`SELECT DISTINCT d.memory_id id FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND json_extract(d.seed_json,'$.status')='open'
-      AND EXISTS(SELECT 1 FROM json_each(d.seed_json,'$.noticedBy') observer JOIN json_each(?) actor ON observer.value=actor.value COLLATE NOCASE)
-      ORDER BY d.source_start_ordinal,d.id`).all(options.chatId,JSON.stringify(options.activePerspectives ?? [perspective])) as Array<{id:string}>;
+      AND (? OR EXISTS(SELECT 1 FROM json_each(d.seed_json,'$.noticedBy') observer JOIN json_each(?) actor ON observer.value=actor.value COLLATE NOCASE))
+      ORDER BY d.source_start_ordinal,d.id`).all(options.chatId,Number(author),JSON.stringify(options.activePerspectives ?? [perspective])) as Array<{id:string}>;
     for (const id of [...(options.automaticSupportMemoryIds ?? []), ...seedCandidates.map(row=>row.id), ...historyCandidates.map(row => row.id),
       ...[...(options.semanticAtomHits?.keys() ?? [])]]) if (!candidates.includes(id)) candidates.push(id);
   }
@@ -1600,9 +1578,13 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         CROSS JOIN messages msg ON msg.chat_id=memories.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')),0) AS source_turn_seq
     FROM memories WHERE chat_id=? AND active=1 AND ${searchableMemoryParentSql()} AND id IN (${placeholders})
   `).all(options.chatId, ...candidates) as MemoryRow[] : [];
+  const preservedParents = preservedLegacyParentIds(db,options.chatId);
+  // Project only protected lines; stored summaries and sibling rows stay intact.
+  for (const row of rows) if (preservedParents.has(row.id)) row.content = "";
+  const plotHolders = loadPlotKnowers(db, options.chatId, rows);
   const groupParents = new Set((db.prepare("SELECT memory_id FROM episodes WHERE chat_id=? AND resolution='group' AND status='capsuled'").all(options.chatId) as Array<{ memory_id: string }>).map((row) => row.memory_id));
   const representedParents = new Set(rows.filter((row) => groupParents.has((row as MemoryRow & { capsule_parent_id?: string }).capsule_parent_id ?? '')
-    && (omniscient || allowedByPerspective(row, chat.profile, perspective))).map((row) => (row as MemoryRow & { capsule_parent_id: string }).capsule_parent_id));
+    && (author || omniscient || allowedByPerspective(row, chat.profile, perspective, plotHolders.get(row.id)))).map((row) => (row as MemoryRow & { capsule_parent_id: string }).capsule_parent_id));
   for (let index = rows.length - 1; index >= 0; index--) if (representedParents.has(rows[index]!.id)) rows.splice(index, 1);
   for (const row of rows) {
     const signature = memoryContextSignature(row);
@@ -1612,11 +1594,11 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     }
   }
   const dialogueRows = candidates.length > 0 ? db.prepare(`
-    SELECT id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal FROM memory_dialogues
+    SELECT id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal,user_hidden,user_edited FROM memory_dialogues
     WHERE chat_id=? AND memory_id IN (${placeholders}) ORDER BY memory_id,ordinal
-  `).all(options.chatId, ...candidates) as Array<{ id: string; memory_id: string; speaker: string; text: string; message_id: string; evidence_json: string; kind: KeyDialogue["kind"]; ordinal: number }> : [];
-  const detailRows = candidates.length > 0 ? db.prepare(`SELECT id,memory_id,detail_key,kind,role,seed_json,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal
-    FROM visible_memory_details d WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) AND NOT ${recognitionDetailSql('d')}
+  `).all(options.chatId, ...candidates) as Array<{ id: string; memory_id: string; speaker: string; text: string; message_id: string; evidence_json: string; kind: KeyDialogue["kind"]; ordinal: number; user_hidden: number; user_edited:number }> : [];
+  const detailRows = candidates.length > 0 ? db.prepare(`SELECT id,memory_id,detail_key,kind,role,seed_json,text,user_hidden,user_edited,original_text,participants_json,known_by_json,hidden_from_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal
+    FROM memory_details d WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) AND NOT ${recognitionDetailSql('d')}
     ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`).all(options.chatId, ...candidates) as Array<Record<string, any>> : [];
   const accessByItem = loadItemAccess(db, options.chatId, [
     ...dialogueRows.map((row) => ({ kind: "dialogue" as const, id: row.id })),
@@ -1624,20 +1606,25 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   ]);
   const rowsById = new Map(rows.map((row) => [row.id, row]));
   const atomVisible = (scope: ItemAccessScope, atomAccessVersion: number): boolean => {
+    if (scope.pending) return false;
     if (atomAccessVersion > 0 && !scope.explicit) return false;
-    if (archiveView || perspective === "narrator") return true;
+    if (author || archiveView || perspective === "narrator") return true;
     return visibleTo(scope, perspective);
   };
+  const scopedMemoryIds = new Set<string>();
   const promptCoveredDialogueIds = new Set<string>();
   const promptCoveredDetailIds = new Set<string>();
   const dialoguesByMemory = new Map<string, Array<KeyDialogue & { __arcSelected?: boolean }>>();
   for (const dialogue of dialogueRows) {
+    if (preservedParents.has(dialogue.memory_id) && !dialogue.user_edited) continue;
     const parent = rowsById.get(dialogue.memory_id);
     const atomAccessVersion = parent?.atom_access_version ?? 0;
     const access = resolveItemAccess(accessByItem, "dialogue", dialogue.id, []);
     if (!atomVisible(access, atomAccessVersion)) continue;
+    if (dialogue.user_hidden) { scopedMemoryIds.add(dialogue.memory_id); continue; }
     const dialogueEvidence = JSON.parse(dialogue.evidence_json) as KeyDialogue["evidence"];
     if (!mcpAnswerMode && dialogueEvidence.length > 0 && dialogueEvidence.every((evidence) => coverage?.covered.has(evidence.messageId) && coverage.active.has(evidence.messageId))) {
+      scopedMemoryIds.add(dialogue.memory_id);
       if (options.collectDiagnostics) promptCoveredDialogueIds.add(dialogue.id);
       continue;
     }
@@ -1649,6 +1636,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       });
       if (!valid) continue;
     }
+    scopedMemoryIds.add(dialogue.memory_id);
     const list = dialoguesByMemory.get(dialogue.memory_id) ?? [];
     list.push({ id: dialogue.id, ordinal: dialogue.ordinal, speaker: dialogue.speaker, text: dialogue.text, messageId: dialogue.message_id, evidence: dialogueEvidence, kind: dialogue.kind, knownBy: itemAccessKnowledge(access), knownByLabels:knownByLabels(db,options.chatId,"dialogue",dialogue.id,itemAccessKnowledge(access)),
       __arcSelected: options.arcDialogueIds?.has(dialogue.id) });
@@ -1656,18 +1644,24 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   }
   const detailsByMemory = new Map<string, MemoryContextItem["details"]>();
   for (const detail of detailRows) {
+    if (preservedParents.has(String(detail.memory_id)) && !isUserOwnedMemoryDetail(detail)) continue;
     const parent = rowsById.get(String(detail.memory_id));
     const atomAccessVersion = parent?.atom_access_version ?? 0;
     const access = resolveItemAccess(accessByItem, "detail", String(detail.id), []);
     const knownBy = itemAccessKnowledge(access);
     if (!atomVisible(access, atomAccessVersion)) continue;
-    if (!mcpAnswerMode && isFullyPromptCovered(String(detail.evidence_json ?? ""), coverage)) {
+    scopedMemoryIds.add(String(detail.memory_id));
+    if (detail.user_hidden) continue;
+    const exception = parent?.card_shape === 1 && Boolean(parent.content.trim()) && isException({
+      ...publicKnowledgeScope(knownBy),hiddenFrom:parseList(detail.hidden_from_json),
+    },parseList(parent.known_by_json));
+    if (!mcpAnswerMode && !exception && isFullyPromptCovered(String(detail.evidence_json ?? ""), coverage)) {
       if (options.collectDiagnostics) promptCoveredDetailIds.add(String(detail.id));
       continue;
     }
     const list = detailsByMemory.get(detail.memory_id) ?? [];
     list.push({ id: detail.id, seed: accessibleStorySeed(detail.seed_json, knownBy), sourceOrdinal: detail.source_start_ordinal ?? undefined, key: detail.detail_key, kind: detail.kind, role: detail.role, text: detail.text, epistemic: detail.epistemic,
-      participants: parseList(detail.participants_json), knownBy, knownByLabels:knownByLabels(db,options.chatId,"detail",detail.id,knownBy), locations: parseList(detail.locations_json), salience: detail.salience, retention: detail.retention_class });
+      participants: parseList(detail.participants_json), knownBy, hiddenFrom: parseList(detail.hidden_from_json), knownByLabels:knownByLabels(db,options.chatId,"detail",detail.id,knownBy), locations: parseList(detail.locations_json), salience: detail.salience, retention: detail.retention_class });
     detailsByMemory.set(detail.memory_id, list);
   }
   const associationScores = new Map<string, number>();
@@ -1691,7 +1685,13 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     : db.prepare(`SELECT memory_id,strength,salience,recall_count,last_recalled_turn_seq,detail_level FROM memory_traces
       WHERE character_name=? AND memory_id IN (${placeholders})`).all(perspective, ...candidates) as TraceRow[];
   const traces = new Map(traceRows.map((trace) => [trace.memory_id, trace]));
-  const residualActivations = loadResidualActivations(db, options.chatId, perspective, candidates,
+  const sceneTraceRows = author && sceneCharacters.length && candidates.length ? db.prepare(`
+    SELECT memory_id,character_name,strength,salience,recall_count,last_recalled_turn_seq,detail_level FROM memory_traces
+    WHERE memory_id IN (${placeholders}) AND character_name IN (SELECT value FROM json_each(?)) COLLATE NOCASE`)
+    .all(...candidates, JSON.stringify(sceneCharacters)) as Array<TraceRow & { character_name: string }> : [];
+  const sceneTraces = new Map(sceneTraceRows.map(trace => [`${trace.memory_id}\0${normalizeEntityName(trace.character_name)}`, trace]));
+  const activationKey = author ? AUTHOR_ACTIVATION_KEY : perspective;
+  const residualActivations = loadResidualActivations(db, options.chatId, activationKey, candidates,
     chat.completed_turn_count, !mcpAnswerMode);
   const isoStoryDates = rows.flatMap((row) => row.story_time_normalized
     ? [Date.parse(row.story_time_normalized.replace(" ", "T"))] : []).filter(Number.isFinite);
@@ -1701,23 +1701,34 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     ? rows.filter((row) => isFullyPromptCovered(row.evidence_json, coverage) && !(detailsByMemory.get(row.id)?.length || dialoguesByMemory.get(row.id)?.length)).map((row) => row.id)
     : []);
   for (const row of rows) {
+    if (!mcpAnswerMode && isAuthorCard({cardShape:row.card_shape,content:row.content}) && isFullyPromptCovered(row.evidence_json,coverage)) continue;
     if (excludedIds.has(row.id) && row.id !== options.seedMemoryId) continue;
     const semanticSignature = memoryContextSignature(row);
     if (excludedSignatures.has(semanticSignature) && row.id !== options.seedMemoryId) continue;
-    const parentVisible = omniscient || allowedByPerspective(row, chat.profile, perspective);
+    const parentVisible = author || omniscient || allowedByPerspective(row, chat.profile, perspective, plotHolders.get(row.id));
     const allDetails = detailsByMemory.get(row.id) ?? [];
     const visibleDialogues = dialoguesByMemory.get(row.id) ?? [];
     const atomView = row.atom_access_version > 0;
     if ((!parentVisible && allDetails.length === 0 && visibleDialogues.length === 0)
       || (!mcpAnswerMode && row.atom_access_version === 0 && !allDetails.length && !visibleDialogues.length && isFullyPromptCovered(row.evidence_json, coverage))) continue;
-    if (atomView && allDetails.length === 0 && visibleDialogues.length === 0) continue;
+    if (atomView && allDetails.length === 0 && visibleDialogues.length === 0) {
+      // Keep an authorized plot even when every child line was covered/hidden.
+      // Missing atom access still cannot create an author candidate.
+      const plot = author && (scopedMemoryIds.has(row.id) || emitsMemoryPlot({cardShape:row.card_shape,content:row.content,atomAccessVersion:row.atom_access_version})) && buildEmissionPlan([MemoryContextItemSchema.parse({
+        id:row.id,type:row.type,title:row.title,content:row.content,cardShape:row.card_shape,...(row.card_shape === 1 ? {plotKnowers:plotHolders.get(row.id)!} : {}),atomAccessVersion:row.atom_access_version,
+        detail:'clear',score:0,summaryEvidence:parseEvidence(row.evidence_json),
+      })],{promptSourceMessageIds:options.promptSourceMessageIds,excludedAtomKeys}).cards[0]?.plot;
+      if (plot !== 'emit' && !(author && row.card_shape === 0 && 'always_inject' in row && row.always_inject === 1 && row.content.trim())) continue;
+    }
     const agedDetail = detailFor(row, chat.completed_turn_count, traces.get(row.id));
-    const detail = mcpAnswerMode
+    const detail = author
+      ? { detail: "clear" as const, effective: 1 }
+      : mcpAnswerMode
       ? { detail: "clear" as const, effective: Math.max(0.78, agedDetail.effective) }
       : agedDetail;
-    const participants = parentVisible && !atomView ? parseList(row.participants_json) : [...new Set(allDetails.flatMap((entry) => entry.participants))];
+    const participants = parentVisible && (author || !atomView) ? parseList(row.participants_json) : [...new Set(allDetails.flatMap((entry) => entry.participants))];
     const locations = atomView || parentVisible ? parseList(row.locations_json) : [...new Set(allDetails.flatMap((entry) => entry.locations))];
-    const knownBy = parentVisible && (!atomView || archiveView)
+    const knownBy = parentVisible && (author || !atomView || archiveView)
       ? parseList(row.known_by_json)
       : [...new Set([...allDetails.flatMap((entry) => entry.knownBy), ...visibleDialogues.flatMap((entry) => entry.knownBy)])];
     const allDialogues = parentVisible || atomView ? visibleDialogues : [];
@@ -1756,18 +1767,27 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     const directDetailSignal = directCandidateIds.has(row.id)
       ? rankedDetails.reduce((best, entry) => Math.max(best, entry.directRelevance), 0) : 0;
     const perMemoryDetailLimit = mcpAnswerMode ? 12 : options.tokenBudget >= 10_000 ? 12 : options.tokenBudget >= 7_000 ? 10 : options.tokenBudget >= 5_000 ? 8 : 6;
-    const selectedDetails = (mcpAnswerMode
+    const bundleIds = author && !isFullyPromptCovered(row.evidence_json, coverage)
+      ? plotBundleDetailIds({ content: row.content, cardShape: row.card_shape, atomAccessVersion: row.atom_access_version, summaryEvidence: [],
+        ...publicKnowledgeScope(parseList(row.known_by_json)), details: allDetails }) : new Set<string>();
+    const factReasons = new Map(rankedDetails.flatMap(entry=>{
+      const reasons = selectFactReasons({directRelevance:entry.directRelevance,
+        atomPath:(pathsByMemory.get(row.id) ?? []).some(path=>path.atomIds.at(-1) === entry.entry.id)});
+      return reasons.length ? [[entry.entry.id,reasons] as const] : [];
+    }));
+    const authorCard = isAuthorCard({cardShape:row.card_shape,content:row.content});
+    const selectedDetails = (authorCard ? rankedDetails.filter(entry=>bundleIds.has(entry.entry.id)
+      || factReasons.get(entry.entry.id)?.length || options.deferAutomaticBudget && entry.entry.seed?.status === "open") : mcpAnswerMode
       ? rankedDetails
-      : rankedDetails.filter((entry) => entry.entry.role === "core" || entry.relevance > 0 || entry.entry.retention === "durable" || entry.entry.kind === "open_thread"))
-      .filter((entry, index) => entry.entry.role === "core" || mcpAnswerMode || options.deferAutomaticBudget || entry.directRelevance > 0 || index < perMemoryDetailLimit).map((entry) => entry.entry)
-      .sort((left, right) => Number(right.role === "core") - Number(left.role === "core"));
+      : rankedDetails.filter((entry) => bundleIds.has(entry.entry.id) || entry.entry.role === "core" || entry.relevance > 0 || entry.entry.retention === "durable" || entry.entry.kind === "open_thread"))
+      .filter((entry, index) => bundleIds.has(entry.entry.id) || !authorCard && entry.entry.role === "core" || mcpAnswerMode || options.deferAutomaticBudget || entry.directRelevance > 0 || index < perMemoryDetailLimit).map((entry) => entry.entry)
+      .sort((left, right) => authorCard ? 0 : Number(right.role === "core") - Number(left.role === "core"));
     const safeDetailText = allDetails.map((entry) => entry.text).join(" ");
-    // The archive view may expose the episode's short navigation label with
-    // its parent access scope. The longer synopsis remains search-only: it can
-    // mix several atoms whose holders differ. Character-facing turn packets
-    // continue to receive only materialized details and dialogue.
-    const publicTitle = atomView ? archiveView ? row.title : "" : parentVisible ? row.title : allDetails[0]?.text ?? "";
-    const publicContent = atomView ? "" : parentVisible ? `${row.content}${sectionText}` : [safeDetailText, dialogueText].filter(Boolean).join(" ");
+    // Author candidates retain the parent envelope and its separate evidence.
+    // Preserve the full plot for the final emission plan; character-facing packets
+    // retain their atom-only projection.
+    const publicTitle = author ? row.title : atomView ? archiveView ? row.title : "" : parentVisible ? row.title : allDetails[0]?.text ?? "";
+    const publicContent = author && !mcpAnswerMode && isFullyPromptCovered(row.evidence_json, coverage) ? "" : author || archiveView ? row.content : atomView ? "" : parentVisible ? `${row.content}${sectionText}` : [safeDetailText, dialogueText].filter(Boolean).join(" ");
     const memoryEvidence = parentVisible && !atomView ? parseEvidence(row.evidence_json) : [];
     const evidenceRelevance = weightedOverlap(signals, memoryEvidence.flatMap((entry) => [entry.messageId, entry.quote ?? ""]).join(" "));
     // The parent synopsis is a search envelope even when atom materialization
@@ -1827,10 +1847,18 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       id: row.id,
       signature: semanticSignature,
       atomAccessVersion: row.atom_access_version,
+      cardShape: row.card_shape,
+      ...(row.card_shape === 1 ? {plotKnowers:plotHolders.get(row.id)!} : {}),
       type: row.type,
       title: publicTitle,
       content: publicContent,
       detail: detail.detail,
+      ...(author || archiveView ? { summaryEvidence: parseEvidence(row.evidence_json), clarity: sceneCharacters.flatMap<{ name: string; level: "hazy" | "faint" }>(name => {
+        if (!includesPerson(scopeOf(publicKnowledgeScope(plotHolders.get(row.id) ?? knownBy)), name)) return [];
+        const trace = sceneTraces.get(`${row.id}\0${normalizeEntityName(name)}`);
+        const level = detailFor(row, chat.completed_turn_count, trace).detail;
+        return level === "fragment" ? [{ name, level: "hazy" as const }] : ["deja_vu", "unrecalled"].includes(level) ? [{ name, level: "faint" as const }] : [];
+      }) } : {}),
       perspective: row.perspective ?? undefined,
       storyTime: row.story_time ?? undefined,
       sourceOrdinal: row.source_ordinal ?? undefined,
@@ -1844,6 +1872,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       evidence: memoryEvidence,
       keyDialogues,
       details: selectedDetails,
+      [memoryFactReasons]:factReasons,
       raw: row,
       directSignal,
       directDetailSignal,
@@ -1890,13 +1919,14 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       stableAnchors(db, options.chatId, perspective, chat.profile, options.tokenBudget, intent, facetSignals, undefined,
         true, options.activePerspectives ?? [], archiveView, emptyPacketManifest(), new Set(), stateHits, relevance, options.stateScores);
       const physical = renderPhysicalIntimacy(db, options.chatId, perspective, options.activePerspectives ?? [], options.tokenBudget,
-        true, archiveView, new Set(), facetSignals, relevance);
+        true, archiveView, new Set(), facetSignals, relevance, author);
       const landmarks = renderRelationshipLandmarks(db, options.chatId, perspective, options.activePerspectives ?? [], chat.profile,
         options.tokenBudget, undefined, true, new Set(), facetSignals, relevance);
       stateHits.push(...(physical.hits ?? []), ...(landmarks.hits ?? []));
       const unique = [...new Map(stateHits.map(hit => [hit.atomKey, hit] as const)).values()];
       return { question, alreadyPresent: false, evidence: unique.map(hit => ({
         atomKey: hit.atomKey, kind: "fact" as const, text: hit.presentation ?? hit.text, knownBy: hit.knownBy,
+        context: hit.section === "relationship_landmarks" ? "Relationship history" : hit.section === "physical_intimacy" ? "Shared intimacy" : undefined,
       })) };
     });
     const diagnostics: RetrievalDiagnostics | undefined = options.collectDiagnostics ? {
@@ -1916,7 +1946,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         expansionReasons:[],lanes:["mcp_candidate"],outcome:"not_reserved",
       })),
     } : undefined;
-    return { packet:"",stableAnchors:"",perspectiveData:"",estimatedTokens:0,selected:[],eligibleCandidates,mcpSearchEnvelopes,
+    return { emissionPlan: buildEmissionPlan([]), packet:"",stableAnchors:"",perspectiveData:"",estimatedTokens:0,selected:[],eligibleCandidates,mcpSearchEnvelopes,
       directAtomKeys:[],structuredManifest:emptyPacketManifest(),coverage:[],alreadyProvidedIds:[],recentMemoryIds:[],
       focusLeaderIds:[],continuityBridgeIds:[],selectedCandidateClasses:{},selectedRoles:{},activationObservations:[],deliveredAtomKeys:[],diagnostics,
       answers:stateAnswers,
@@ -1943,7 +1973,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       item.cognitiveBonus += item.residualActivation * 0.12;
     }
     item.cognitiveBonus = Math.max(item.cognitiveBonus, item.arcSignal * 0.72 + item.associationSignal + item.propagatedEnergy);
-    if (item.detail === "unrecalled" && tierAllowsRecall(item, options.seedMemoryId)) item.detail = "deja_vu";
+    if (!author && item.detail === "unrecalled" && tierAllowsRecall(item, options.seedMemoryId)) item.detail = "deja_vu";
   }
   const tierAccessibleIds = new Set(ranked.map((item) => item.id));
   type AspectMatch = { item: Ranked; score: number; direct: boolean; atomicHit: boolean; temporalTier: number; detailIds: string[]; boundDetailIds: string[]; dialogueKeys: string[] };
@@ -2008,15 +2038,18 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     else if (mcpAnswerMode ? item.retrievalSignal >= 0.12 && (item.arcSignal > 0 || item.associationSignal > 0)
       : Boolean(item.atomPath)) item.candidateClass = "associative";
   }
-  // A path grants access to its actual endpoint atoms, never to their sibling
-  // details, parent synopsis or dialogue. Direct core/continuity retain their
+  // A path selects its endpoint facts. Author cards additionally retain their
+  // already-authorized plot exceptions, never unrelated sibling facts. Direct core/continuity retain their
   // existing materialization, including focus's deliberate full-atom restore.
   const projectPathItem = (item: Ranked): Ranked => {
     if (mcpAnswerMode || item.candidateClass !== "associative") return item;
     const paths = pathsByMemory.get(item.id) ?? [];
     const ids = new Set(paths.map(path => path.atomIds.at(-1)!));
-    const details = (allAtoms.get(item.id)?.details ?? []).filter(detail => ids.has(detail.id));
+    const atoms = allAtoms.get(item.id)?.details ?? [];
+    const minimum = author && isAuthorCard(item) ? plotBundleDetailIds({...item,details:atoms}) : new Set<string>();
+    const details = atoms.filter(detail => ids.has(detail.id) || minimum.has(detail.id));
     return { ...item, ...projectAtomMemory(item, details, []), atomAccessVersion: 1,
+      ...(author ? { title: item.title, content: item.content, participants: item.participants, knownBy: item.knownBy } : {}),
       locations: [...new Set(details.flatMap(detail => detail.locations))], directDetailIds: [],
       viaMemoryId: item.atomPath ? pathNodes.get(item.atomPath.root.atomId)?.memoryId : undefined };
   };
@@ -2098,11 +2131,14 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   ].sort((left, right) => right.baseDirect - left.baseDirect || right.score - left.score);
   const firstFocus = fullFocusLeaders[0];
   if (firstFocus) focusLeaders.push(firstFocus);
-  for (const item of interleaveRankedLanes([lexicalViewLeaders, semanticViewLeaders], 8)) {
+  for (const item of interleaveRankedLanes([
+    lexicalViewLeaderEntries.filter(entry=>entry.kind === "cue").map(entry=>entry.item),
+    semanticViewLeaderEntries.filter(entry=>entry.kind === "cue").map(entry=>entry.item),
+  ], 8)) {
     if (focusLeaders.some((selected) => selected.id === item.id)) continue;
     if (focusLeaders.some((selected) => contentSimilarity(item, selected, similaritySignatures) >= 0.78)) continue;
     focusLeaders.push(item);
-    if (focusLeaders.length >= (options.deferAutomaticBudget ? 8 : 2)) break;
+    if (focusLeaders.length >= 2) break;
   }
   const directSeeds = (mcpAnswerMode ? [...aspectMatches.values()].flatMap(matches => matches.filter(match => match.direct).map(match => match.item)) : [...focusLeaders, ...directHits]
     .filter((item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index)).slice(0, 4);
@@ -2199,16 +2235,20 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   // Historical milestones retain a small separate allowance; current rows are
   // charged once by the shared compiler when automatic budgeting is deferred.
   const historyBudget = options.deferAutomaticBudget ? Math.floor(options.tokenBudget * .05 * structuredScale)
-    : Math.max(0, Math.floor(options.tokenBudget * .15 * structuredScale) - estimateTokens(anchors));
+    : Math.max(0, Math.floor(options.tokenBudget * .15 * structuredScale) - chargedSectionTokens(anchors, pricing));
   const physical: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderPhysicalIntimacy(db, options.chatId, perspective, options.activePerspectives ?? [],
-    Math.min(mcpAnswerMode ? 700 : automaticHistoryLimit(options.tokenBudget, 520), mcpAnswerMode ? Math.floor(options.tokenBudget * .45) : historyBudget), physicalMcpAnswer, archiveView, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
+    Math.min(mcpAnswerMode ? 700 : automaticHistoryLimit(options.tokenBudget, 520), mcpAnswerMode ? Math.floor(options.tokenBudget * .45) : historyBudget), physicalMcpAnswer, archiveView, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined, author, pricing);
   const relationshipLandmarks: StructuredRender = options.memoryOnlyInjection ? { xml: "", atomKeys: [], ids: [] } : renderRelationshipLandmarks(db, options.chatId, perspective, options.activePerspectives ?? [], chat.profile,
-    Math.min(mcpAnswerMode ? 520 : automaticHistoryLimit(options.tokenBudget, 360), mcpAnswerMode ? Math.floor(options.tokenBudget * .3) : Math.max(0, historyBudget - estimateTokens(physical.xml))), coverage, mcpAnswerMode, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined);
+    Math.min(mcpAnswerMode ? 520 : automaticHistoryLimit(options.tokenBudget, 360), mcpAnswerMode ? Math.floor(options.tokenBudget * .3) : Math.max(0, historyBudget - chargedSectionTokens(physical.xml, pricing))), coverage, mcpAnswerMode, mcpAnswerMode ? excludedAtomKeys : undefined, signals, mcpAnswerMode ? ledgerRelevance : undefined, author, pricing);
   const spineParts = [openThreads].filter(Boolean);
   const spine = spineParts.length ? `<continuity_spine>\n${spineParts.join("\n")}\n</continuity_spine>` : "";
   const stable = [anchors, relationshipLandmarks.xml, physical.xml].filter(Boolean).join("\n");
   const selected: MemoryContextItem[] = [];
-  let used = estimateTokens(stable) + estimateTokens(spine) + packetOverhead;
+  const itemCharge = (item: MemoryContextItem) => author && !mcpAnswerMode
+    ? chargedCardTokens(projectMemoryScene(item), {plot:item.content ? "emit" : "omit",clarity:item.clarity}, pricing)
+    : estimateTokens(renderMemoryItem(item, intent));
+  let used = (author && !mcpAnswerMode ? chargedSectionTokens(stable, pricing) + chargedSectionTokens(spine, pricing) + pricing.narrationTokens
+    : estimateTokens(stable) + estimateTokens(spine)) + packetOverhead;
   let dialogueUsed = 0;
   let detailUsed = 0;
   const dialogueBudget = Math.floor(options.tokenBudget * (mcpAnswerMode ? 0.38 : 0.2));
@@ -2216,7 +2256,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const selectionOutcomes = new Map<string, RetrievalCandidateTrace["outcome"]>();
   const selectedRoles = new Map<string, RetrievalSelectionRole>();
   for (const item of orderedCandidates) {
-    let atomFilteredItem = mcpAnswerMode ? filterMemoryAtoms(item, excludedAtomKeys) as Ranked : item;
+    let atomFilteredItem = mcpAnswerMode || author ? filterMemoryAtoms(item, excludedAtomKeys) as Ranked : item;
     if (mcpAnswerMode) {
       const matches = aspects.flatMap(aspect => (aspectMatches.get(aspect) ?? []).filter(match => match.item.id === item.id));
       const details = new Set(matches.flatMap(match => match.detailIds));
@@ -2225,14 +2265,15 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         details: atomFilteredItem.details.filter(detail => details.has(detail.id)),
         keyDialogues: atomFilteredItem.keyDialogues.filter(dialogue => dialogues.has(memoryDialogueAtomKey(item.id, dialogue))) };
     }
-    if (mcpAnswerMode && !hasRenderableMemoryAtom(atomFilteredItem)) {
+    if (author && directAlways?.manifest.memoryIds.includes(item.id) && !memoryCardHasContent(atomFilteredItem)
+      || mcpAnswerMode && !hasRenderableMemoryAtom(atomFilteredItem)) {
       selectionOutcomes.set(item.id, "atom_suppressed");
       continue;
     }
     const reservedFocus = !mcpAnswerMode && focusLeaderIdSet.has(item.id);
     const reservedContinuity = !mcpAnswerMode && recentContinuity?.id === item.id;
     const reserved = reservedFocus || reservedContinuity;
-    if (!mcpAnswerMode && !options.deferAutomaticBudget && item.candidateClass === "associative" && selectedAssociativeTokens + estimateTokens(renderMemoryItem(item, intent)) > associativeTokenBudget) {
+    if (!mcpAnswerMode && !options.deferAutomaticBudget && item.candidateClass === "associative" && selectedAssociativeTokens + itemCharge(item) > associativeTokenBudget) {
       selectionOutcomes.set(item.id, "association_cap");
       continue;
     }
@@ -2254,37 +2295,47 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       selectionOutcomes.set(item.id, "selected");
       continue;
     }
-    let acceptedItem: Ranked = { ...atomFilteredItem, details: atomFilteredItem.details.slice(0, Math.max(0, detailLimit - detailUsed)) };
+    const bundleIds = author && !mcpAnswerMode ? plotBundleDetailIds(atomFilteredItem) : new Set<string>();
+    const limitedDetails = atomFilteredItem.details.slice(0, Math.max(0, detailLimit - detailUsed));
+    let acceptedItem: Ranked = { ...atomFilteredItem, details: atomFilteredItem.details.filter(detail => limitedDetails.includes(detail) || bundleIds.has(detail.id)) };
     const withoutDialogues = renderMemoryItem({ ...atomFilteredItem, keyDialogues: [] }, intent);
     let rendered = renderMemoryItem(acceptedItem, intent);
-    let dialogueCost = Math.max(0, estimateTokens(rendered) - estimateTokens(withoutDialogues));
+    const withoutDialogueCharge = author && !mcpAnswerMode ? itemCharge({...acceptedItem,keyDialogues:[]}) : estimateTokens(withoutDialogues);
+    let dialogueCost = Math.max(0, itemCharge(acceptedItem) - withoutDialogueCharge);
     if (dialogueUsed + dialogueCost > dialogueBudget && item.keyDialogues.length > 0) {
       acceptedItem = { ...acceptedItem, keyDialogues: acceptedItem.keyDialogues.slice(0, mcpAnswerMode ? 3 : 1) };
       rendered = renderMemoryItem(acceptedItem, intent);
-      dialogueCost = Math.max(0, estimateTokens(rendered) - estimateTokens(withoutDialogues));
+      dialogueCost = Math.max(0, itemCharge(acceptedItem) - withoutDialogueCharge);
     }
     if (dialogueUsed + dialogueCost > dialogueBudget) {
       acceptedItem = { ...acceptedItem, keyDialogues: [] };
       rendered = withoutDialogues;
       dialogueCost = 0;
     }
-    let cost = estimateTokens(rendered);
+    let cost = itemCharge(acceptedItem);
     if (reservedFocus && used + cost > options.tokenBudget) {
       const directDetailIds = new Set(item.directDetailIds);
-      const coreContext = acceptedItem.details.find((detail) => detail.role === "core");
-      const directDetails = acceptedItem.details.filter((detail) => directDetailIds.has(detail.id) || detail === coreContext);
+      const coreContext = !isAuthorCard(acceptedItem) ? acceptedItem.details.find((detail) => detail.role === "core") : undefined;
+      const directDetails = acceptedItem.details.filter((detail) => bundleIds.has(detail.id) || directDetailIds.has(detail.id) || detail === coreContext);
       acceptedItem = {
         ...acceptedItem,
         details: directDetails.length > 0 ? directDetails : acceptedItem.details.slice(0, 1),
         keyDialogues: acceptedItem.keyDialogues.slice(0, 1),
       };
       rendered = renderMemoryItem(acceptedItem, intent);
-      dialogueCost = Math.max(0, estimateTokens(rendered) - estimateTokens(renderMemoryItem({ ...acceptedItem, keyDialogues: [] }, intent)));
-      cost = estimateTokens(rendered);
+      dialogueCost = Math.max(0, itemCharge(acceptedItem) - itemCharge({ ...acceptedItem, keyDialogues: [] }));
+      cost = itemCharge(acceptedItem);
     }
     if (used + cost > (reserved ? hardTokenCeiling : options.tokenBudget)) {
-      selectionOutcomes.set(item.id, "token_budget");
-      continue;
+      const fitted = author && isAuthorCard(acceptedItem) ? fitAutomaticCard(acceptedItem,
+        current=>used + itemCharge(current) <= (reserved ? hardTokenCeiling : options.tokenBudget),new Set()) : undefined;
+      if (!fitted) {
+        selectionOutcomes.set(item.id, "token_budget");
+        continue;
+      }
+      acceptedItem = {...acceptedItem,details:fitted.details,keyDialogues:fitted.keyDialogues};
+      cost = itemCharge(acceptedItem);
+      dialogueCost = Math.max(0,cost-itemCharge({...acceptedItem,keyDialogues:[]}));
     }
     if (!mcpAnswerMode && item.candidateClass === "associative" && acceptedItem.details.length === 0) {
       selectionOutcomes.set(item.id, "atom_suppressed");
@@ -2307,35 +2358,45 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const recentMemoryIds = [...continuityMemoryIds].filter((id) => selected.some((item) => item.id === id));
   const packetPerspectives = options.activePerspectives?.length ? options.activePerspectives
     : ["narrator", "__shared__"].includes(perspective) ? [] : [perspective];
-  let packet = selected.length > 0 || perspectiveData
-    ? consolidateMemoryPacket(db, options.chatId, false, perspectiveData ? [{ name: perspective, data: perspectiveData }] : [], selected, intent, packetMode, recentMemoryIds, packetPerspectives)
-    : "";
+  let emissionPlan: EmissionPlan;
+  const rebuildPacket = () => {
+    emissionPlan = buildEmissionPlan(selected, {
+      promptSourceMessageIds: options.promptSourceMessageIds, excludedAtomKeys: mcpAnswerMode || author ? excludedAtomKeys : undefined,
+      lanes: mergePacketManifests([directAlways ? {...emptyPacketManifest(),alwaysInjectMemoryIds:directAlways.manifest.alwaysInjectMemoryIds} : emptyPacketManifest(),
+        ...(perspectiveData ? [anchorManifest,openManifest,{...emptyPacketManifest(),atomKeys:[...physical.atomKeys,...relationshipLandmarks.atomKeys],intimacyMilestoneIds:physical.ids}] : [])]) });
+    if (directAlways) prependAlwaysCards(emissionPlan,directAlways.plan);
+    const body = selected.length || perspectiveData ? consolidateMemoryPacket(db,options.chatId,false,
+      perspectiveData ? [{name:perspective,data:perspectiveData}] : [],selected,intent,packetMode,
+      recentMemoryIds.filter(id=>selected.some(item=>item.id===id)),packetPerspectives,"",undefined,undefined,"",undefined,emissionPlan) : "";
+    return prependAlwaysInject(body,renderAlwaysInjectPlan(emissionPlan));
+  };
+  const packetCharge = (value: string) => author && !mcpAnswerMode ? chargedPacketTokens(value, emissionPlan, pricing) : estimateTokens(value);
+  let packet = rebuildPacket();
   const reservedFinalIds = new Set([...focusLeaderIdSet, ...(recentContinuity ? [recentContinuity.id] : [])]);
-  while (!options.deferAutomaticBudget && selected.length > 0 && estimateTokens(packet) > options.tokenBudget) {
+  while (!options.deferAutomaticBudget && selected.length > 0 && packetCharge(packet) > options.tokenBudget) {
     const removableIndex = lastIndexWhere(selected, (item) => !reservedFinalIds.has(item.id));
     if (removableIndex < 0) break;
     const [removed] = selected.splice(removableIndex, 1);
     if (removed) selectionOutcomes.set(removed.id, "final_packet_trim");
-    packet = consolidateMemoryPacket(db, options.chatId, false, perspectiveData ? [{ name: perspective, data: perspectiveData }] : [], selected, intent, packetMode, recentMemoryIds.filter((id) => selected.some((item) => item.id === id)), packetPerspectives);
+    packet = rebuildPacket();
   }
-  while (!options.deferAutomaticBudget && selected.length > 0 && estimateTokens(packet) > hardTokenCeiling) {
+  while (!options.deferAutomaticBudget && selected.length > 0 && packetCharge(packet) > hardTokenCeiling) {
     const removableIndex = lastIndexWhere(selected, (item) => !focusLeaderIdSet.has(item.id));
     const index = removableIndex >= 0 ? removableIndex : selected.length - 1;
     const [removed] = selected.splice(index, 1);
     if (removed) selectionOutcomes.set(removed.id, "final_packet_trim");
-    packet = consolidateMemoryPacket(db, options.chatId, false, perspectiveData ? [{ name: perspective, data: perspectiveData }] : [], selected, intent, packetMode, recentMemoryIds.filter((id) => selected.some((item) => item.id === id)), packetPerspectives);
+    packet = rebuildPacket();
   }
-  if (!options.deferAutomaticBudget && estimateTokens(packet) > hardTokenCeiling && anchors) {
+  if (!options.deferAutomaticBudget && packetCharge(packet) > hardTokenCeiling && anchors) {
     Object.assign(anchorManifest, emptyPacketManifest());
     perspectiveData = [spine, relationshipLandmarks.xml, physical.xml].filter(Boolean).join("\n");
-    packet = consolidateMemoryPacket(db, options.chatId, false, perspectiveData ? [{ name: perspective, data: perspectiveData }] : [], selected, intent, packetMode, recentMemoryIds.filter((id) => selected.some((item) => item.id === id)), packetPerspectives);
+    packet = rebuildPacket();
   }
-  if (!options.deferAutomaticBudget && estimateTokens(packet) > hardTokenCeiling) {
+  if (!options.deferAutomaticBudget && packetCharge(packet) > hardTokenCeiling) {
     perspectiveData = "";
-    packet = selected.length ? consolidateMemoryPacket(db, options.chatId, false, [], selected, intent, packetMode, recentMemoryIds.filter((id) => selected.some((item) => item.id === id)), packetPerspectives) : "";
+    packet = rebuildPacket();
   }
 
-  packet=prependAlwaysInject(packet,directAlways?.xml ?? '');
   stateHits.push(...(physical.hits ?? []), ...(relationshipLandmarks.hits ?? []));
   const coverageItems: RecallCoverageItem[] = aspects.map((aspect) => {
     if (mcpAnswerMode) {
@@ -2362,6 +2423,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     return { aspect, status: "no_grounded_hit" as const };
   });
 
+  if (selected.length > 0 && !options.deferReinforcement) assertChatUnlocked(db,options.chatId);
   if (selected.length > 0 && options.reinforce === true && !options.deferReinforcement) {
     const reinforce = db.prepare(`
       UPDATE memories SET recall_count=recall_count+1,last_recalled_revision=?,strength=ROUND(MIN(1.0,strength+0.025),3),updated_at=? WHERE id=?
@@ -2388,7 +2450,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     return candidateClass ? [[id, candidateClass]] : [];
   })) as Record<string, RetrievalCandidateClass>;
   const selectedRoleMap = Object.fromEntries([...selectedIdSet].map((id) => [id, selectedRoles.get(id) ?? "filler"])) as Record<string, RetrievalSelectionRole>;
-  const activationObservations = mcpAnswerMode || ["narrator", "__shared__", "shared"].includes(perspective.toLocaleLowerCase())
+  const activationObservations = mcpAnswerMode || !author && ["narrator", "__shared__", "shared"].includes(perspective.toLocaleLowerCase())
     ? [] : [...selectedIdSet].flatMap((id): AutomaticActivationObservation[] => {
     const item = rankedById.get(id);
     const role = selectedRoles.get(id);
@@ -2405,7 +2467,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     });
   const deliveredAtomKeys = [...new Set([
     ...(directAlways?.manifest.atomKeys ?? []),
-    ...selected.flatMap(memoryAtomKeys),
+    ...buildManifest(emissionPlan!).atomKeys,
     ...(packet.includes("<recorded_state") ? anchorManifest.atomKeys : []),
     ...(packet.includes("<physical_intimacy") ? physical.atomKeys : []),
     ...(packet.includes("<relationship_landmarks") ? relationshipLandmarks.atomKeys : []),
@@ -2413,7 +2475,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const automaticAtomPriorities: Record<string, AutomaticAtomPriority> = {};
   const detailSources = new Map(detailRows.map((row) => [String(row.id), parseEvidence(String(row.evidence_json ?? "[]")).map((entry) => entry.messageId)]));
   const portfolioEligible = options.deferAutomaticBudget && !mcpAnswerMode
-    ? ranked.filter(item => !promptCoveredCandidateIds.has(item.id) && (eligible.includes(item) || tierAllowsRecall(item) || allAtoms.get(item.id)?.details.some(detail=>detail.seed?.status==="open"))) : eligible;
+    ? ranked.filter(item => !promptCoveredCandidateIds.has(item.id) && (author || eligible.includes(item) || tierAllowsRecall(item) || allAtoms.get(item.id)?.details.some(detail=>detail.seed?.status==="open"))) : eligible;
   const automaticPriorityItems = new Map([...portfolioEligible, ...selected].map((item) => [item.id,
     projectPathItem({ ...rankedById.get(item.id)!, ...item, ...allAtoms.get(item.id) })]));
   const connectionWeights = new Map<string, Map<string, number>>();
@@ -2485,15 +2547,16 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         const meta = { memoryId: item.id, time: item.storyTime };
         return [
           ...item.details.filter(detail => match.detailIds.includes(detail.id)).map(detail => ({ ...meta,
-            atomKey: memoryDetailAtomKey(detail), kind: "fact" as const, text: detail.text, knownBy: detail.knownBy,knownByLabels:detail.knownByLabels,
+            atomKey: memoryDetailAtomKey(detail), kind: "fact" as const, text: detail.text, knownBy: detail.knownBy,knownByEveryone:detail.knownByEveryone,knownByLabels:detail.knownByLabels,
             location: detail.locations.join(", "), basis: detail.epistemic })),
           ...item.keyDialogues.filter(dialogue => match.dialogueKeys.includes(memoryDialogueAtomKey(item.id, dialogue))).map(dialogue => ({ ...meta,
-            atomKey: memoryDialogueAtomKey(item.id, dialogue), kind: "quote" as const, text: dialogue.text, speaker: dialogue.speaker, knownBy: dialogue.knownBy,knownByLabels:dialogue.knownByLabels })),
+            atomKey: memoryDialogueAtomKey(item.id, dialogue), kind: "quote" as const, text: dialogue.text, speaker: dialogue.speaker, knownBy: dialogue.knownBy,knownByEveryone:dialogue.knownByEveryone,knownByLabels:dialogue.knownByLabels })),
         ];
       }),
       ...stateHits.filter(hit => hit.delivered && deliveredAtomKeys.includes(hit.atomKey)
         && ledgerOverlap(hit.text, [{kind:"focus",text:aspect,weight:1}]) >= 0.72).map(hit => ({
           atomKey: hit.atomKey, kind: "fact" as const, text: hit.presentation ?? hit.text, knownBy: hit.knownBy,
+        context: hit.section === "relationship_landmarks" ? "Relationship history" : hit.section === "physical_intimacy" ? "Shared intimacy" : undefined,
         })),
     ],
   })) : undefined;
@@ -2507,6 +2570,8 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   // The reference peak belongs to the whole search, including direct/already selected hits.
   const bestAdjustedDetailScore = Math.max(0, ...[...associationHits.values()].flat().map(hit => hit.adjustedScore));
   const candidateEvidence = {
+    emissionPlan: emissionPlan!,
+    standaloneScopes: [...(physical.scopes ?? []), ...(relationshipLandmarks.scopes ?? [])],
     answers,
     automaticPortfolioCandidates: options.deferAutomaticBudget && !mcpAnswerMode ? new Map(portfolioEligible.map(item => {
       const hits = (associationHits.get(item.id) ?? []).filter(hit => hit.adjustedScore >= ASSOCIATION_RELATIVE_THRESHOLD * bestAdjustedDetailScore
@@ -2526,9 +2591,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       const via = rankedById.get(item.id)?.viaMemoryId ?? eventClusterResult.connections.get(item.id)?.parentId;
       return via ? [[item.id, via]] : [];
     })),
-    structuredManifest: mergePacketManifests([directAlways?.manifest ?? emptyPacketManifest(),...(perspectiveData ? [anchorManifest, openManifest, {
-      ...emptyPacketManifest(), atomKeys: [...physical.atomKeys, ...relationshipLandmarks.atomKeys], intimacyMilestoneIds: physical.ids,
-    }] : [])]),
+    structuredManifest: buildManifest({...emissionPlan!,cards:emissionPlan!.cards.filter(card=>directAlways?.manifest.memoryIds.includes(card.memoryId))}),
     eligibleCandidates: portfolioEligible.map(item => {
       const projected=projectPathItem({...item,...allAtoms.get(item.id)});
       const visible=publicMemoryContext(projected);
@@ -2543,7 +2606,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   };
   if (!options.collectDiagnostics) return { ...candidateEvidence,
     packet, stableAnchors: stable, perspectiveData, estimatedTokens: packet ? estimateTokens(packet) : 0,
-    selected:[...(directAlways?.items ?? []),...selected], coverage: coverageItems, alreadyProvidedIds,
+    selected:emittedMemoryRecords(emissionPlan!), coverage: coverageItems, alreadyProvidedIds,
     recentMemoryIds: recentMemoryIds.filter((id) => selectedIdSet.has(id)),
     focusLeaderIds: focusLeaders.map((item) => item.id).filter((id) => selectedIdSet.has(id)),
     continuityBridgeIds: recentContinuity && selectedIdSet.has(recentContinuity.id) ? [recentContinuity.id] : [],
@@ -2586,6 +2649,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     ...(pathSnapshot ? { atomPathSearch: pathSnapshot.stats } : {}),
     elapsedMs: Math.round(performance.now() - started),
     perspective,
+    audience: options.audience,
     intent,
     mcpAnswerMode,
     tokenBudget: options.tokenBudget,
@@ -2682,5 +2746,5 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   };
   return { packet,
     ...candidateEvidence,
-    stableAnchors: stable, perspectiveData, estimatedTokens: packet ? estimateTokens(packet) : 0, selected:[...(directAlways?.items ?? []),...selected], coverage: coverageItems, alreadyProvidedIds, recentMemoryIds: diagnostics.recentMemoryIds, focusLeaderIds: diagnostics.focusLeaderIds, continuityBridgeIds: diagnostics.continuityBridgeIds, selectedCandidateClasses, selectedRoles: selectedRoleMap, activationObservations, deliveredAtomKeys, diagnostics:{...diagnostics,alwaysInject:directAlways?.diagnostics} };
+    stableAnchors: stable, perspectiveData, estimatedTokens: packet ? estimateTokens(packet) : 0, selected:emittedMemoryRecords(emissionPlan!), coverage: coverageItems, alreadyProvidedIds, recentMemoryIds: diagnostics.recentMemoryIds, focusLeaderIds: diagnostics.focusLeaderIds, continuityBridgeIds: diagnostics.continuityBridgeIds, selectedCandidateClasses, selectedRoles: selectedRoleMap, activationObservations, deliveredAtomKeys, diagnostics:{...diagnostics,alwaysInject:directAlways?.diagnostics} };
 }

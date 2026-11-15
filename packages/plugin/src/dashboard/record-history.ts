@@ -1,3 +1,4 @@
+import { detailAccessLine } from "./film/ui.js";
 import { formatStoryTime } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
@@ -208,6 +209,7 @@ const sceneRange = (from: SceneRef | null, to: SceneRef | null): string => {
 };
 
 export type RecordDetailOptions = {
+  accessEditing?: string;
   translations: ReadonlyMap<string, string>;
   display: TranslationDisplay;
   back: string;
@@ -271,7 +273,7 @@ export function renderRecordDetail(chain: RecordChain, data: Pick<DashboardData,
   });
   const history = showSteps ? `<section class="psec rec-history"><h2 class="sec">변화 <span class="n">${chain.versions.length}</span></h2><ol class="chg">${steps.join("")}</ol></section>` : "";
   const actions = options.actions.length ? `<div class="reader__acts">${menu({ label: "기록 더보기", items: options.actions })}</div>` : "";
-  return `<article class="reader rec"><div class="reader__bar"><button type="button" class="back hit" data-action="now-back">${icon("back")}<span>${escapeHtml(options.back)}</span></button>${actions}</div><p class="rec-who">${who}</p><h2 class="reader__title">${title}</h2>${card}${truth}${history}</article>`;
+  return `<article class="reader rec"><div class="reader__bar"><button type="button" class="back hit" data-action="now-back">${icon("back")}<span>${escapeHtml(options.back)}</span></button>${actions}</div><p class="rec-who">${who}</p><h2 class="reader__title">${title}</h2>${card}${chain.kind === "promise" && chain.current ? detailAccessLine("", chain.current, options.accessEditing === chain.current.id, "promise") : ""}${truth}${history}</article>`;
 }
 
 const sceneLink = (scene: SceneRef | null): string => scene

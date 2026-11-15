@@ -3,7 +3,7 @@
     {
       "id": "recall_rp_memory",
       "name": "recall_rp_memory",
-      "description": "Retrieve a specific missing fact from stored RP history when it would help the next scene: an event, world fact, relationship, belief, preference, or promise. Use recent conversation and supplied memories directly when they already provide it. This is optional archival lookup, not a routine continuity check, scene planner, or predictor of what someone will do next. Ask one natural-language question about the missing record. For more detail in a supplied memory, use expand_rp_memory. Results are evidence with scene context and dialogue; they do not certify a question’s premise or grant character knowledge.",
+      "description": "Look up stored RP history that the supplied memories do not cover. It pays off when the next reply needs something exact from the past: the words of an old promise or confession, a number, name, gift or date from an earlier event, what a character was told long ago, or how an earlier scene between these two actually went. Ask one natural-language question about it. Skip it when the recent conversation and supplied memories already give what the reply needs. Results are evidence with scene context and dialogue; they do not confirm the question's premise or give a character knowledge. For more detail in a supplied memory, use expand_rp_memory.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -21,7 +21,7 @@
     {
       "id": "expand_rp_memory",
       "name": "expand_rp_memory",
-      "description": "Expand one clearly chosen memory ref with its details, dialogue, and source evidence. Use this after a supplied record is known to be the right one; do not expand several refs as a general continuity check. Optional focus narrows the result to locally matching evidence inside that memory and may return no match; it never searches other memories. If several records might answer, use recall_rp_memory instead. Refs from earlier responses in this chat remain valid; current access rules apply.",
+      "description": "Open one supplied memory ref to get its details, dialogue and source evidence. It pays off when the reply will quote or build on that record: the exact lines spoken, a detail the summary leaves out, or who was there. Optional focus narrows the result to matching evidence inside this memory and may return nothing; it never searches other memories. Refs from earlier responses in this chat stay valid. If you are not sure which record holds it, use recall_rp_memory.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

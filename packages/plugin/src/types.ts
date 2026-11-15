@@ -21,9 +21,15 @@ export interface PluginSettings {
   workerAttention?: { at: number; message: string };
   statusWidgetPosition?: { left: number; top: number };
   statusWidgetVisible?: boolean;
+  majorAlerts?: boolean;
+  incidentCursor?: number;
+  incidentServerUrl?: string;
   quizEnabled?: boolean;
   defaultProfile: RpProfile;
   profiles: Record<string, RpProfile>;
+  /** Canonical name; empty string records an explicit omniscient choice for inheritance. */
+  narrationViewpoint: Record<string, string>;
+  /** Opaque downgrade data: preserve unchanged; never use for author retrieval or narration. */
   perspectives: Record<string, string[]>;
   detectedPerspectives: Record<string, string[]>;
   includeUserMessages: Record<string, boolean>;
@@ -63,6 +69,7 @@ export interface PluginSettings {
 }
 
 export interface CachedChatState {
+  memoryEpoch?: string;
   serverInstanceId?: string;
   stableAnchors: string;
   lastPacket: string;
@@ -93,8 +100,7 @@ export interface CurrentContext {
   chatTitles?: Record<string, string>;
   characterId: string;
   characterName: string;
-  activePerspectives: string[];
-  perspectiveMode: "auto" | "manual";
+  narrationViewpoint?: string;
   identityHints: {
     userPersonaName?: string;
     hostCharacterName?: string;
@@ -155,10 +161,10 @@ export interface RuntimeState {
   statusStale?: boolean;
   lastResolvedSetup?: { chatId: string; projection: ResolvedSetupProjection };
   activeMemoryLanguages?: Record<string, MemoryLanguage>;
-  perspectiveStatus?: { perspectives: string[]; unresolved: boolean; omissionReason?: TurnPrepareResponse["omissionReason"] };
   automaticTurnPacket?: {
     turnKey: string;
     chatId: string;
+    narrationViewpoint?: string;
     memoryOnlyInjection?: boolean;
   upcomingOccasions?: boolean;
   pairProgress?: boolean;
@@ -218,6 +224,7 @@ export interface RuntimeState {
   unloaded?: boolean;
   mainRequest?: { id: string; signal: AbortSignal; preparing: boolean; cancel: () => void };
   pendingPrepare?: { requestId: string; chatId: string; startedAt: number; visible: boolean; choose: (choice: "omit" | "block") => void };
+  upgradeBlocked?: {chatId:string;lock:import('./api-client.js').UpgradeLock};
   activeModelRequest?: { chatId: string; requestId?: string; turnKey?: string; latestMessageId?: string; startedAt?: number; packet?: string; plannedTools?: string[] };
   mainGeneration?: {
     id: string; chatId?: string; expiresAt: number; resume: () => void;
@@ -239,6 +246,8 @@ export interface RuntimeState {
   statusWidgetTimer?: number;
   setupAttention?: Record<string, { completedTurns: number; lastRequestId?: string; counting?: Promise<void> }>;
   activityTimer?: number;
+  requestActivityRefresh?: () => void;
+  dashboardOpen?: boolean;
   updateNextCheckAt?: number;
   updateLocalRecheckAt?: number;
   updateDashboardChecked?: boolean;
@@ -269,10 +278,11 @@ export interface RuntimeState {
   currentJob?: { id: string; chatId: string; attempt: number; sourceMessageCount: number; sourceTurnCount?: number; startedAt: number; kind?: string; sourceRecovery?: boolean; sourceRecoveryMetadata?: import("@rcm/shared").SourceRecoveryMetadata; phase?: Exclude<import("@rcm/shared").WorkerPhase, "idle" | "faulted" | "paused"> };
   serverWorker?: ServerWorkerStatus;
   statusSummary?: {
+    upgrade?: import('./api-client.js').UpgradeStatus;
     queuedJobs: number; failedJobs: number; blockingFailedJobs?: number; advisoryFailedJobs?: number; pendingReviews: number; pendingReconciliations?: number;
     waitingForAssistant?: number; bufferedMessages?: number; bufferedTurns?: number; bufferedSourceTokens?: number;
     extractionGroupTurns?: number; recoverableMessages?: number; historicalBackfillMessages?: number;
-    ingestionState?: "historical_pending" | "managed" | "cleared"; pendingEmbeddings: number; failedEmbeddings: number; embeddingError?: string;
+    ingestionState?: "historical_pending" | "managed" | "cleared"; pendingEmbeddings: number; failedEmbeddings: number; embeddingError?: string; embeddingRetryAt?: number;
     auxiliaryAuthFailed?: boolean;
     modelResponseDiagnostic?: import("@rcm/shared").ModelResponseDiagnostic;
     lastJobSourceRecovery?: import("@rcm/shared").SourceRecoveryMetadata;
@@ -293,6 +303,9 @@ export interface RuntimeState {
   serverConnectionIssue?: ServerConnectionIssue;
   serverConnectionFailureCount?: number;
   serverConnectionLastFailureAt?: number;
+  heartbeatOutage?: { failures: number; firstFailureAt: number };
+  connectionOutageNotified?: boolean;
+  notifyConnectionOutage?: () => void;
   publishActivity?: () => void;
   publishStatusSummary?: () => void;
   refreshStatusWidget?: () => void;

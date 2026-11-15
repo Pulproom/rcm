@@ -42,7 +42,7 @@ export function chatFamilies<T extends FamilyChat>(chats: T[], currentChatId?: s
   return families.sort((left, right) => Number(hasCurrent(right)) - Number(hasCurrent(left)) || latest(right) - latest(left));
 }
 
-/** 「못된라일리 (Branch 3)」 under the root 「못된라일리」 reads 「(Branch 3)」; unrelated titles stay whole. */
+/** 「구름 탐험 (Branch 3)」 under the root 「구름 탐험」 reads 「(Branch 3)」; unrelated titles stay whole. */
 export function familyShortTitle(title: string, rootTitle: string): string {
   const rest = rootTitle && title.startsWith(rootTitle) ? title.slice(rootTitle.length).trim() : "";
   return rest || title;

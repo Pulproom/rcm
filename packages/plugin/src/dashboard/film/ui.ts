@@ -10,9 +10,9 @@ export const escapeHtml = (value: unknown): string => String(value ?? "")
   .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
 /** Promise text and its scene fill the row; only the meta line shares space with the menu. */
-export function promiseEntry(parts: { direction: string; scheduledFor?: string; status?: string; body: string; src: string; actions?: string }): string {
+export function promiseEntry(parts: { direction: string; scheduledFor?: string; status?: string; body: string; src: string; actions?: string; access?: string }): string {
   const meta = [parts.direction, parts.status, parts.scheduledFor ? `예정 · ${formatStoryTime(parts.scheduledFor)}` : ""].filter(Boolean).join(" · ");
-  return `<li class="entry entry--promise"><div class="entry__head"><span class="entry__who">${escapeHtml(meta)}</span>${parts.actions ?? ""}</div><span class="entry__body">${parts.body}</span>${parts.src ? `<div class="entry__src">${parts.src}</div>` : ""}</li>`;
+  return `<li class="entry entry--promise"><div class="entry__head"><span class="entry__who">${escapeHtml(meta)}</span>${parts.actions ?? ""}</div><span class="entry__body">${parts.body}</span>${parts.access ?? ""}${parts.src ? `<div class="entry__src">${parts.src}</div>` : ""}</li>`;
 }
 
 type Data = Record<string, string>;
@@ -24,6 +24,7 @@ const actionAttrs = (action?: string, data?: Data): string =>
   `${action ? ` data-action="${escapeHtml(action)}"` : ""}${dataAttrs(data)}`;
 
 export const ICONS: Record<string, string> = {
+  sprout: '<path d="M12 20.5V12"/><path d="M12 12.5C12 8.6 9.6 6 5.5 6c0 3.9 2.4 6.5 6.5 6.5Z"/><path d="M12 10.5c0-3.3 2.1-5.5 6-5.5 0 3.3-2.1 5.5-6 5.5Z"/>',
   overview: '<path d="M4 5h7v6H4zM13 5h7v10h-7zM4 13h7v6H4zM13 17h7v2h-7z"/>',
   timeline: '<path d="M6 3v18M6 7h8M6 12h12M6 17h9"/>',
   relationships: '<circle cx="7" cy="7" r="3"/><circle cx="17" cy="8" r="3"/><circle cx="12" cy="17" r="3"/><path d="m9.7 8.2 4.5-.5m1.1 3-2 3.6m-3.2.2-1.8-4.8"/>',
@@ -33,11 +34,14 @@ export const ICONS: Record<string, string> = {
   operations: '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="10" cy="18" r="1.5"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.4.25.74.6 1 .99.25.4.4.85.4 1.32V11h.2v4h-.09A1.7 1.7 0 0 0 19.4 15Z"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  album: '<rect x="4" y="6" width="13" height="15" rx="1.5"/><path d="M7 3.5h12.5a1 1 0 0 1 1 1V18M7 17l3-3.5 2.5 2.5 1.5-1.5 2 2.5"/>',
   home: '<path d="m4 11 8-6 8 6v8a1 1 0 0 1-1 1h-4v-5H9v5H5a1 1 0 0 1-1-1z"/>',
   film: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M8 5 6 9m7-4-2 4m7-4-2 4"/>',
   people: '<circle cx="9" cy="9" r="3.2"/><path d="M3.5 19c.8-3 3-4.6 5.5-4.6s4.7 1.6 5.5 4.6"/><circle cx="17" cy="8" r="2.6"/><path d="M16 13.2c2.4.2 4 1.8 4.6 4.3"/>',
   clip: '<rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9zm-.5 8 2 2 4-4m-6 7h7"/>',
   sliders: '<path d="M4 7h10m4 0h2M4 17h4m4 0h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+  lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
   check: '<path d="M5 12.5 9.5 17 19 7.5"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -123,7 +127,7 @@ export function maskSecretInputs(root: ParentNode): void {
 
 export function connectionCheck(target: "risu" | "server" | "mcp" | "voyage" | "translation", trailing = ""): string {
   const label = { risu: "Risu 보조 모델", server: "서버 보조 모델", mcp: "검색 보조 모델", voyage: "Voyage", translation: "참고 번역" }[target];
-  const description = "짧은 확인 요청을 보냅니다. 호출 비용이 발생하며 설정은 저장하지 않아요.";
+  const description = "짧은 확인 요청을 보내요. 호출 비용이 발생하며 설정은 저장하지 않아요.";
   return `<div class="connection-check settings-action" data-connection-check="${target}"><button type="button" class="btn btn--quiet" data-action="test-connection" data-target="${target}" title="${description}" aria-describedby="connection-help-${target}">연결 확인</button><span class="sr-only" id="connection-help-${target}">${description}</span><span class="connection-result" role="status" aria-live="polite" aria-label="${label} 연결 확인 결과" data-connection-result></span>${trailing}</div>`;
 }
 
@@ -177,12 +181,12 @@ export function menu(opts: { label: string; title?: string; items: Array<MenuIte
 }
 
 /** `actions` (a `menu()`) sits at the summary's right edge, outside the summary so it never toggles the fold. */
-export function fold(summary: string, body: string, opts: { count?: number; open?: boolean; preserveKey?: string; actions?: string; role?: "more" | "section" | "hidden-lines"; marks?: string } = {}): string {
+export function fold(summary: string, body: string, opts: { summaryHtml?: string; count?: number; open?: boolean; preserveKey?: string; actions?: string; role?: "more" | "section" | "hidden-lines"; marks?: string; className?: string } = {}): string {
   const more = opts.role === "more" && lex().skin === "phone";
   const label = more ? `${opts.count ?? 0}개 더 보기` : summary;
   const count = more || opts.count === undefined ? "" : `<span class="n">${opts.count}</span>`;
   const preserve = opts.preserveKey ? ` data-preserve-open="${escapeHtml(opts.preserveKey)}"` : "";
-  const details = `<details class="fold${opts.role ? ` fold--${opts.role}` : ""}"${opts.open ? " open" : ""}${preserve}><summary><span>${escapeHtml(label)}</span>${opts.marks ?? ""}${count}<span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${body}</div></details>`;
+  const details = `<details class="fold${opts.role ? ` fold--${opts.role}` : ""}${opts.className ? ` ${escapeHtml(opts.className)}` : ""}"${opts.open ? " open" : ""}${preserve}><summary><span>${!more && opts.summaryHtml !== undefined ? opts.summaryHtml : escapeHtml(label)}</span>${opts.marks ?? ""}${count}<span class="chev" aria-hidden="true">${icon("chevron")}</span></summary><div class="fold__body">${body}</div></details>`;
   return opts.actions ? `<div class="foldbox">${details}<div class="foldbox__acts">${opts.actions}</div></div>` : details;
 }
 
@@ -224,7 +228,7 @@ export function frame(opts: {
 
 export function errorDetails(report: string | undefined): string {
   if (!report) return "";
-  return fold("오류 자세히", `<pre tabindex="0" class="error-report" style="white-space:pre-wrap;overflow-wrap:anywhere;user-select:text">${escapeHtml(report)}</pre>${btn("복사", { action: "copy-error-details" })}`, { preserveKey: "error-details" });
+  return fold("오류 자세히", `<pre tabindex="0" class="error-report" aria-label="오류 로그">${escapeHtml(report)}</pre>${btn("복사", { kind: "quiet", icon: "copy", action: "copy-error-details", hit: true })}`, { preserveKey: "error-details", className: "fold--error-details" });
 }
 
 export function notice(text: string, opts: { tone?: "cut" | "plain"; body?: string; action?: string; errorReport?: string } = {}): string {
@@ -250,4 +254,37 @@ export function field(opts: { id: string; label: string; control: string; hint?:
   const hint = opts.hint ? `<p class="hint">${escapeHtml(opts.hint)}</p>` : "";
   const error = opts.error ? `<p class="err" role="alert">${escapeHtml(opts.error)}</p>` : "";
   return `<div class="field"><label for="${escapeHtml(opts.id)}">${escapeHtml(opts.label)}</label>${opts.control}${hint}${error}</div>`;
+}
+
+export type AccessEditorKind = "memory" | "detail" | "dialogue" | "promise" | "physical_milestone";
+// Only second-hand knowing is named; seeing or living it is the default reading of a name.
+const ACCESS_BASIS_LABELS: Record<string, string> = { told: "전해 들음", heard: "간접 전언·소문", inferred: "추측" };
+
+/** 모두 아는: visible to whoever recalls it, characters who appear later included. Shared by 기본 관계 and memory details. */
+export const everyoneCheck = (name: string, checked: boolean, label: string): string => `<label class="check"><input type="checkbox" name="${name}"${checked ? " checked" : ""}><span>${label}<small>누가 떠올려도 보여요. 나중에 등장하는 인물도 포함돼요.</small></span></label>`;
+
+const ACCESS_BASIS_OPTIONS: Record<import("@rcm/shared").ItemAccessBasis, string> = {
+  experienced: "직접 참여", witnessed: "직접 목격·청취", told: "직접 전달받음", heard: "간접 전언·소문", inferred: "추론", internal: "자신의 생각·감정",
+};
+export function accessHolderRow(name = "", basis = "witnessed", index = 0): string {
+  const id = `access-holder-${index}`;
+  return `<div class="access-holder-row">${field({ id, label: "인물", control: `<input id="${id}" class="input notranslate" translate="no" name="holder" value="${escapeHtml(name)}" placeholder="인물 이름">` })}${field({ id: `${id}-basis`, label: "알게 된 경로", control: `<select id="${id}-basis" class="select" name="basis">${Object.entries(ACCESS_BASIS_OPTIONS).map(([value, label]) => `<option value="${value}"${value === basis ? " selected" : ""}>${label}</option>`).join("")}</select>` })}${btn("제외", { kind: "quiet", action: "remove-access-holder" })}</div>`;
+}
+
+/** Uses the same active grants as retrieval, for both details and dialogue. */
+export function accessLine(labelHtml: string, action = "", heading = "아는 인물"): string {
+  return `<div class="detail-know"><span class="detail-know__k" role="img" aria-label="${heading}">${icon("eye")}</span><span class="detail-know__v notranslate" translate="no">${labelHtml}</span>${action}</div>`;
+}
+
+export function detailAccessLine(memoryId: string, detail: any, editing: boolean, kind: AccessEditorKind = "detail", participants: string[] = []): string {
+  const holders: Array<{ name: string; basis?: string }> = Array.isArray(detail?.access?.holders) ? detail.access.holders : [];
+  if (editing) {
+    const speakers = [...new Set([...participants, String(detail.speaker ?? "")].map(name => name.trim()).filter(Boolean))];
+    const speaker = kind === "dialogue" ? field({ id: "dialogue-speaker", label: "말한 사람", control: `<select id="dialogue-speaker" class="select notranslate" translate="no" name="speaker" required>${speakers.map(name => `<option value="${escapeHtml(name)}"${name === String(detail.speaker ?? "").trim() ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select>` }) : "";
+    return `<form id="detail-access-form" class="form detail-know-form" data-memory-id="${escapeHtml(memoryId)}" data-detail-id="${escapeHtml(String(detail.id))}" data-item-kind="${kind}">${speaker}<div class="access-holder-list">${holders.map((item, index) => accessHolderRow(item.name, item.basis, index)).join("")}</div>${btn("인물 추가", { kind: "quiet", action: "add-access-holder", icon: "plus" })}<p class="sub">인물이 없으면 작가만 아는 기록이에요. 직접 들은 대사는 ‘직접 목격·청취’, 대사로 전달받은 별개의 사건은 ‘직접 전달받음’을 골라 주세요.</p>${everyoneCheck("detailAccessEveryone", detail?.access?.everyone === true, "모두 아는 기억")}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-detail-access" })}${btn("저장", { kind: "primary", action: "submit-form", data: { formId: "detail-access-form" } })}</div></form>`;
+  }
+  const names = holders.map((item) => `${escapeHtml(item.name)}${ACCESS_BASIS_LABELS[item.basis ?? ""] ? `<span class="detail-know__how">(${ACCESS_BASIS_LABELS[item.basis ?? ""]})</span>` : ""}`).join(" · ");
+  const label = detail?.access?.everyone === true ? "모두" : names || (detail?.access?.narratorOnly ? "작가만" : "확인 필요");
+  const heading = kind === "memory" && detail.cardShape === 1 ? "장면에 있던 인물" : "아는 인물";
+  return accessLine(label, iconBtn("edit", "아는 인물 수정", { action: "edit-detail-access", data: { itemKind: kind, memoryId, detailId: String(detail.id) }, expanded: false }), heading);
 }

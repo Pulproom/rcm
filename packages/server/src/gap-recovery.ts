@@ -1,6 +1,7 @@
+import { assertChatUnlocked } from './upgrade-lock.js';
 import type { RcmDatabase } from './db.js';
-import { editProtectedMessageIds } from './turn-clock.js';
-import { sourceHasProcessingHistory } from './source-processing.js';
+import { sourceTurnMembership, editProtectedMessageIds } from './turn-clock.js';
+import { appliedSourceEnd, sourceHasProcessingHistory } from './source-processing.js';
 
 interface SourceRow { message_id: string; ordinal: number; role: string; lifecycle: string; host_visibility: string; extraction_state: string; memory_excluded: number; content: string | null; completed_turn_seq: number | null }
 
@@ -26,9 +27,8 @@ function detectLegacyMemoryGaps(db: RcmDatabase, chatId: string): Array<{message
   const boundary = replies.at(-Math.min(5,Math.max(1,chat.edit_protection_turns)))?.ordinal ?? -Infinity;
   const precedingReply = replies.filter(row=>row.ordinal<boundary).at(-1)?.ordinal ?? -Infinity;
   const newProtection = new Set(settled.filter(row => row.ordinal>precedingReply && row.ordinal<= (replies.at(-1)?.ordinal ?? -Infinity)).map(row=>row.message_id));
-  const appliedEnd = (db.prepare(`SELECT MAX(m.ordinal) ordinal FROM extraction_batches b,json_each(b.source_message_ids_json) s
-    JOIN messages m ON m.chat_id=b.chat_id AND m.message_id=s.value WHERE b.chat_id=? AND b.generation_id='active' AND b.status='applied'`).get(chatId) as {ordinal:number|null}).ordinal;
-  if (appliedEnd === null) return [];
+  const appliedEnd = appliedSourceEnd(db,chatId);
+  if (appliedEnd < 0) return [];
   const memberships = db.prepare(`SELECT s.value messageId,b.status,j.status jobStatus FROM extraction_batches b
     LEFT JOIN jobs j ON j.id=b.job_id,json_each(b.source_message_ids_json) s WHERE b.chat_id=?`).all(chatId) as Array<{messageId:string;status:string;jobStatus:string|null}>;
   return settled.filter(row => row.extraction_state === 'pending' && !row.memory_excluded && row.content !== null && row.ordinal<appliedEnd
@@ -42,13 +42,16 @@ function detectLegacyMemoryGaps(db: RcmDatabase, chatId: string): Array<{message
 
 export function gapRecoveryHoles(db: RcmDatabase, chatId: string): Array<{sourceMessageIds:string[];startOrdinal:number;endOrdinal:number}> {
   const targets = new Set(gapRecoveryCandidates(db,chatId).map(row=>row.messageId));
-  const rows = db.prepare('SELECT message_id,ordinal FROM messages WHERE chat_id=? ORDER BY ordinal,message_id').all(chatId) as Array<{message_id:string;ordinal:number}>;
+  if (!targets.size) return [];
+  const turns=sourceTurnMembership(db,chatId);
+  const includeUsers=(db.prepare('SELECT include_user_messages value FROM chats WHERE id=?').get(chatId) as {value:number}).value!==0;
   const holes: Array<{sourceMessageIds:string[];startOrdinal:number;endOrdinal:number}> = [];
   let current: typeof holes[number] | undefined;
-  for (const row of rows) {
-    if (!targets.has(row.message_id)) { current=undefined; continue; }
-    if (!current || row.ordinal!==current.endOrdinal+1) { current={sourceMessageIds:[],startOrdinal:row.ordinal,endOrdinal:row.ordinal}; holes.push(current); }
-    current.sourceMessageIds.push(row.message_id); current.endOrdinal=row.ordinal;
+  for (const turn of turns) {
+    if (['done','encapsulated','skipped_policy'].includes(turn.at(-1)!.extraction_state) || !turn.some(row=>targets.has(row.message_id))) { current=undefined; continue; }
+    const eligible=turn.filter(row=>row.role==='assistant' || includeUsers && !['skipped_policy','excluded_episode'].includes(row.extraction_state));
+    if (!current) { current={sourceMessageIds:[],startOrdinal:eligible[0]!.ordinal,endOrdinal:eligible.at(-1)!.ordinal}; holes.push(current); }
+    current.sourceMessageIds.push(...eligible.map(row=>row.message_id)); current.endOrdinal=eligible.at(-1)!.ordinal;
   }
   return holes;
 }
@@ -57,6 +60,7 @@ export function gapRecoveryHoles(db: RcmDatabase, chatId: string): Array<{source
  * Existing sequence anchors can have gaps; newly counted responses shift later
  * anchors, rather than recycling those old clock values. */
 export function backfillAssistantTurns(db: RcmDatabase, chatId: string): void {
+  assertChatUnlocked(db,chatId);
   const rows=db.prepare('SELECT * FROM messages WHERE chat_id=? ORDER BY ordinal,message_id').all(chatId) as SourceRow[];
   const clock=(db.prepare('SELECT completed_turn_count FROM chats WHERE id=?').get(chatId) as {completed_turn_count:number}).completed_turn_count;
   const anchors=new Map<number,number>();
@@ -64,9 +68,16 @@ export function backfillAssistantTurns(db: RcmDatabase, chatId: string): void {
   let inserted=0,previous=0;
   let users: SourceRow[]=[];
   for (const row of rows) {
-    if (row.role==='user') { if (row.completed_turn_seq===null && ['committed','client_pruned'].includes(row.lifecycle) && ['active','all_before'].includes(row.host_visibility)) users.push(row); continue; }
+    if (!['committed','client_pruned'].includes(row.lifecycle) || !['active','all_before'].includes(row.host_visibility)) {
+      // Retain elapsed clock anchors without consuming users from the new branch.
+      if (row.role==='assistant' && row.completed_turn_seq!==null) {
+        anchors.set(row.completed_turn_seq,row.completed_turn_seq+inserted);
+        previous=Math.max(previous,row.completed_turn_seq+inserted);
+      }
+      continue;
+    }
+    if (row.role==='user') { if (row.completed_turn_seq===null) users.push(row); continue; }
     if (row.role!=='assistant') continue;
-    if (row.completed_turn_seq===null && (!['committed','client_pruned'].includes(row.lifecycle) || !['active','all_before'].includes(row.host_visibility))) continue;
     const seq=row.completed_turn_seq===null ? previous+1 : Math.max(previous+1,row.completed_turn_seq+inserted);
     if (row.completed_turn_seq===null) inserted++;
     else anchors.set(row.completed_turn_seq,seq);

@@ -2,7 +2,7 @@ import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPoli
 import type { CurrentContext, DashboardContext, RuntimeState } from "./types.js";
 import { serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
-import { cachedSourceReceipt, type ServerClient } from './api-client.js';
+import { cachedSourceReceipt, ServerRequestError, type ServerClient } from './api-client.js';
 
 const encoder = new TextEncoder();
 export const MEMORY_MARKER = "[[RCM]]";
@@ -75,7 +75,7 @@ export async function readHostSourceLedgers(onlyChatIds?: ReadonlySet<string>): 
       const chatId = String(descriptor.id || `${characterId}:${chatIndex}`);
       if (onlyChatIds && !onlyChatIds.has(chatId)) continue;
       const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
-      if (!chat) throw new Error(`Risu 원문을 불러오지 못했습니다: ${String(descriptor.name ?? descriptor.title ?? chatId)}`);
+      if (!chat) throw new Error(`Risu 원문을 불러오지 못했어요: ${String(descriptor.name ?? descriptor.title ?? chatId)}`);
       assertCompleteHostChat(chat);
       if (String(chat.id || `${characterId}:${chatIndex}`) !== chatId) throw new Error('HOST_SOURCE_CHANGED');
       const source = chat.message;
@@ -346,11 +346,10 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
     visibility: hostVisibility(messages, ordinal, allBefore), role: messageRole(message),
   }));
   const scopeKey = serverScopeKey(state.settings, chatId);
-  const perspectives = (state.settings.perspectives[chatId] ?? []).map(name => name.trim()).filter(Boolean);
   const context: DashboardContext = {
     ...identity, chatId, characterName, hostIdentity: !chat.id ? { kind: 'position', listFingerprint: '' } : undefined,
-    identityHints: { userPersonaName: resolveUserPersonaName(database, chat), hostCharacterName: characterName, recentSpeakerNames: [], cachedPerspectives: scopeKey ? state.settings.detectedPerspectives[scopeKey] ?? [] : [] },
-    activePerspectives: [...new Set(perspectives)].slice(0, 4), perspectiveMode: perspectives.length ? "manual" : "auto",
+    identityHints: { userPersonaName: resolveUserPersonaName(database, chat), hostCharacterName: characterName, recentSpeakerNames: [], cachedPerspectives: [] },
+    narrationViewpoint: state.settings.narrationViewpoint[chatId] || undefined,
     profile: state.settings.profiles[chatId] ?? state.settings.defaultProfile,
     includeUserMessages: state.settings.includeUserMessages[chatId] ?? true,
     memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
@@ -530,9 +529,6 @@ export async function readCurrentContext(
     return [explicit, resolved].filter(Boolean);
   }))].slice(0, 12);
   const scopeKey = serverScopeKey(state.settings, chatId);
-  const configuredPerspectives = (state.settings.perspectives[chatId] ?? []).map((name) => name.trim()).filter(Boolean);
-  const activePerspectives = configuredPerspectives.length > 0 ? [...new Set(configuredPerspectives)].slice(0, 4) : [];
-  const cachedPerspectives = scopeKey ? state.settings.detectedPerspectives[scopeKey] ?? [] : [];
   const description = String(character?.desc ?? character?.description ?? character?.personality ?? "");
   const staticProjection = {
     hash: await sha256(JSON.stringify({ characterName, description, lore: loreProjection })),
@@ -555,9 +551,8 @@ export async function readCurrentContext(
     chatTitles,
     characterId,
     characterName,
-    activePerspectives,
-    perspectiveMode: configuredPerspectives.length > 0 ? "manual" : "auto",
-    identityHints: { userPersonaName, hostCharacterName: characterName, recentSpeakerNames, cachedPerspectives },
+    narrationViewpoint: state.settings.narrationViewpoint[chatId] || undefined,
+    identityHints: { userPersonaName, hostCharacterName: characterName, recentSpeakerNames, cachedPerspectives: [] },
     chat,
     profile: state.settings.profiles[chatId] ?? state.settings.defaultProfile,
     includeUserMessages: state.settings.includeUserMessages[chatId] ?? true,
@@ -633,8 +628,8 @@ export function makePrepareRequest(
     querySignals: context.querySignals,
     serverInstanceId: context.serverInstanceId,
     backfillApproved: context.backfillApproved,
-    perspectives: context.activePerspectives,
-    perspectiveMode: context.perspectiveMode,
+    perspectives: [],
+    narrationViewpoint: context.narrationViewpoint || undefined,
     identityHints: context.identityHints,
     tokenBudget,
     memoryBudgetPreset: options.memoryBudgetPreset,
@@ -786,10 +781,14 @@ export function injectMemory(messages: OpenAIChat[], rawPacket: string, requeste
 }
 
 const sourceRechecks = new WeakMap<RuntimeState, Promise<void>>();
+export function hasHeldSourceRecheck(state: RuntimeState, chatId: string): boolean {
+  const reason = cachedSourceReceipt(state.settings, chatId)?.sourceChangeHeld;
+  return reason === 'stale' || reason === 'incomplete' || reason === 'proof_required';
+}
+
 export function recheckHeldSources(state: RuntimeState, client: ServerClient): void {
   const chatId = state.current?.chatId;
-  const receipt = chatId ? cachedSourceReceipt(state.settings, chatId) : undefined;
-  if (!chatId || !receipt || !['stale', 'incomplete', 'proof_required'].includes(receipt.sourceChangeHeld ?? '') || sourceRechecks.has(state)) return;
+  if (!chatId || !hasHeldSourceRecheck(state, chatId) || sourceRechecks.has(state)) return;
   const serverUrl = state.settings.serverUrl;
   const pending = (async () => {
     const context = await readCurrentContext(state, { snapshotMode: 'full' });
@@ -797,4 +796,36 @@ export function recheckHeldSources(state: RuntimeState, client: ServerClient): v
     await client.request(`/v1/chats/${encodeURIComponent(chatId)}/source-sync`, { method: 'POST', body: JSON.stringify(makePrepareRequest(context, 0, { deferExtraction: true })) });
   })().catch(() => undefined).finally(() => sourceRechecks.delete(state));
   sourceRechecks.set(state, pending);
+}
+
+export async function syncCompleteSourceLedger(
+  client: Pick<ServerClient, "request">,
+  context: Awaited<ReturnType<typeof readCurrentContext>>,
+  reread?: () => Promise<typeof context>,
+): Promise<{ expectedSourceMessages: number; serverInstanceId: string }> {
+  if (context.snapshotScope !== "full" || context.snapshot.length !== context.sourceMessageCount) {
+    throw new Error(`전체 원문을 불러오지 못했어요 (${context.snapshot.length}/${context.sourceMessageCount}). 다시 시도해 주세요.`);
+  }
+  const result = await client.request<{sourceChangeHeld?:string;serverInstanceId?:string}>(`/v1/chats/${encodeURIComponent(context.chatId)}/source-sync`, {
+    method: "POST",
+    body: JSON.stringify(makePrepareRequest(context, 0, { deferExtraction: true })),
+  }, 120_000);
+  if (result.sourceChangeHeld === 'stale' && reread) return syncCompleteSourceLedger(client,await reread());
+  if (result.sourceChangeHeld) throw new ServerRequestError('원문 확인 필요',409,'SOURCE_SNAPSHOT_HELD');
+  return { expectedSourceMessages: context.sourceMessageCount, serverInstanceId: result.serverInstanceId ?? "" };
+}
+
+/** Each attempt reads the full host again, using the receipt saved by ServerClient. */
+export async function syncCurrentSourceLedger(client: Pick<ServerClient,'request'>, state: RuntimeState, chatId: string,
+  contextReader: typeof readCurrentContext = readCurrentContext): Promise<Awaited<ReturnType<typeof readCurrentContext>>> {
+  const serverUrl=state.settings.serverUrl;
+  const read = async () => {
+    const context=await contextReader(state,{snapshotMode:'full'});
+    if (context.chatId!==chatId || state.current?.chatId!==chatId || state.settings.serverUrl!==serverUrl) throw new Error('현재 채팅이 바뀌었어요. 다시 시도해 주세요.');
+    return context;
+  };
+  let context=await read();
+  await syncCompleteSourceLedger(client,context,async()=>context=await read());
+  if (state.current?.chatId!==chatId || state.settings.serverUrl!==serverUrl) throw new Error('현재 채팅이 바뀌었어요. 다시 시도해 주세요.');
+  return context;
 }

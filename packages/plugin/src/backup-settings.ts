@@ -8,7 +8,7 @@ export function exportChatSettings(settings:PluginSettings,id:string,characterId
     characterEnabled:settings.characterEnabled[characterId]??true,
     enabled:settings.chatEnabled[id]??settings.defaultChatEnabled,catchUpPending:settings.chatCatchUpPending[id],
     profile:settings.profiles[id]??settings.defaultProfile,
-    perspectives:settings.perspectives[id],detectedPerspectives:scope?settings.detectedPerspectives[scope]:undefined,
+    narrationViewpoint:settings.narrationViewpoint[id]||undefined,
     includeUserMessages:settings.includeUserMessages[id],extractionGroupTurns:settings.extractionGroupTurns[id],
     upcomingOccasions:settings.upcomingOccasions[id]??true,
     pairProgress:settings.pairProgress[id]??false,
@@ -24,10 +24,9 @@ export function restoreChatSettings(settings:PluginSettings,id:string,input:unkn
   settings.characterEnabled[characterId]=value.characterEnabled??true;
   put(settings.chatEnabled,value.enabled);put(settings.chatCatchUpPending,value.catchUpPending);
   put(settings.profiles,value.profile);
-  put(settings.perspectives,value.perspectives);
+  put(settings.narrationViewpoint,value.narrationViewpoint??"");
   const scope=serverScopeKey(settings,id);
   if(scope){
-    if(value.detectedPerspectives===undefined)delete settings.detectedPerspectives[scope];else settings.detectedPerspectives[scope]=[...value.detectedPerspectives];
     if(value.backfillApproved===undefined)delete settings.backfillApproved[scope];else settings.backfillApproved[scope]=value.backfillApproved;
   }
   put(settings.includeUserMessages,value.includeUserMessages);put(settings.extractionGroupTurns,value.extractionGroupTurns);

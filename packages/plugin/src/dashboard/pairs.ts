@@ -79,6 +79,10 @@ export const milestoneLabel = (item: any): string => {
   return MILESTONE_LABELS[key] ?? (String(item?.act ?? "").trim() || key || "스킨십");
 };
 
+/** Only model/user-defined act names enter reference translation; built-in labels are UI copy. */
+export const intimacyLabelTranslationKey = (item: any): string | undefined =>
+  item?.act === "other" && String(item?.customLabel ?? "").trim() ? `intimacy:${item.id}:customLabel` : undefined;
+
 const sourceOrdinal = (item: any): number | null => {
   const value = item?.sourceOrdinal;
   if (value === null || value === undefined || value === "") return null;

@@ -1,3 +1,6 @@
+import { repairSourceCoverage } from './source-coverage.js';
+import { repairAbbreviationEvidence } from './abbreviation-evidence-repair.js';
+import { backfillLegacyParticipantAccess } from "./access-migration.js";
 import { installSetupStorageGuards, migrateSetupStorage } from "./setup-storage.js";
 import { migrateTranslationKeys } from "./translation-cache.js";
 import Database from "better-sqlite3";
@@ -6,11 +9,55 @@ import { repairInheritedRevisions } from './lineage-revisions.js';
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID } from "node:crypto";
 import { isInitialCalibrationMemory } from "@rcm/shared";
+import { refreshAlbumSummaries } from "./album-summary.js";
+import { snapshotBeforeMigration } from "./db-snapshot.js";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 59 as const;
+export const DATABASE_SCHEMA_VERSION = 67 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
+
+const albumSchema = `
+-- Albums are independent snapshots: source_chat_id deliberately has no chat FK.
+CREATE TABLE IF NOT EXISTS albums (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  source_chat_id TEXT,
+  source_available INTEGER NOT NULL CHECK(source_available IN (0,1)),
+  document_json TEXT NOT NULL,
+  summary_json TEXT,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  cover_photo_id TEXT,
+  period_label TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_albums_updated ON albums(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_albums_source ON albums(source_chat_id);
+CREATE TABLE IF NOT EXISTS album_photos (
+  id TEXT PRIMARY KEY,
+  album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  mime TEXT NOT NULL,
+  ext TEXT NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  bytes INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('upload','inlay')),
+  inlay_id TEXT,
+  public_url TEXT,
+  caption TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(album_id, inlay_id)
+);
+CREATE TABLE IF NOT EXISTS album_versions (
+  album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(album_id, revision)
+);
+
+`;
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -31,6 +78,7 @@ CREATE TABLE IF NOT EXISTS chat_work_state (
 
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
+  rebuilt_contract TEXT,
   chat_title TEXT,
   character_id TEXT NOT NULL,
   profile TEXT NOT NULL CHECK(profile IN ('companion','simulation')),
@@ -204,6 +252,7 @@ CREATE TABLE IF NOT EXISTS evidence_spans (
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
   FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_evidence_spans_chat_message_memory ON evidence_spans(chat_id,message_id,memory_id);
 
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
@@ -231,6 +280,8 @@ CREATE TABLE IF NOT EXISTS memories (
   capsule_parent_id TEXT,
   retention_class TEXT NOT NULL DEFAULT 'arc' CHECK(retention_class IN ('scene','arc','durable')),
   atom_access_version INTEGER NOT NULL DEFAULT 0,
+  card_shape INTEGER NOT NULL DEFAULT 0,
+  replacement_memory_key TEXT,
   source_batch_id TEXT,
   user_managed INTEGER NOT NULL DEFAULT 0,
   created_revision INTEGER NOT NULL,
@@ -240,6 +291,10 @@ CREATE TABLE IF NOT EXISTS memories (
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_memories_chat_active ON memories(chat_id, active, created_revision);
+-- Album watermarks are nonnegative. Keep this index specific to badge range
+-- reads so it does not change the scan order of unrelated episode readers.
+CREATE INDEX IF NOT EXISTS idx_memories_album_since ON memories(chat_id,created_at,participants_json)
+  WHERE active=1 AND type='episode' AND capsule_parent_id IS NULL AND created_at>=0;
 CREATE TABLE IF NOT EXISTS memory_dialogues (
   id TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL,
@@ -250,6 +305,8 @@ CREATE TABLE IF NOT EXISTS memory_dialogues (
   evidence_json TEXT NOT NULL,
   kind TEXT NOT NULL,
   ordinal INTEGER NOT NULL DEFAULT 0,
+  user_edited INTEGER NOT NULL DEFAULT 0 CHECK(user_edited IN (0,1)),
+  user_hidden INTEGER NOT NULL DEFAULT 0 CHECK(user_hidden IN (0,1)),
   created_at INTEGER NOT NULL,
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
   FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
@@ -270,6 +327,7 @@ CREATE TABLE IF NOT EXISTS memory_details (
   original_text TEXT,
   participants_json TEXT NOT NULL DEFAULT '[]',
   known_by_json TEXT NOT NULL DEFAULT '[]',
+  hidden_from_json TEXT NOT NULL DEFAULT '[]',
   locations_json TEXT NOT NULL DEFAULT '[]',
   epistemic TEXT NOT NULL,
   salience REAL NOT NULL DEFAULT 0.5,
@@ -398,6 +456,7 @@ CREATE TABLE IF NOT EXISTS beliefs (
   polarity TEXT NOT NULL,
   confidence REAL NOT NULL,
   source TEXT,
+  deleted_through_ordinal INTEGER,
   source_batch_id TEXT,
   evidence_json TEXT NOT NULL DEFAULT '[]',
   active INTEGER NOT NULL DEFAULT 1,
@@ -616,6 +675,8 @@ CREATE TABLE IF NOT EXISTS extraction_batches (
   draft_json TEXT,
   final_json TEXT,
   audit_patch_json TEXT,
+  producer_event_contract TEXT,
+  producer_state_contract TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
@@ -657,13 +718,18 @@ END;
 CREATE TABLE IF NOT EXISTS regeneration_runs (
   id TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL,
-  mode TEXT NOT NULL CHECK(mode IN ('episode','canonical_suffix')),
-  batch_id TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK(mode IN ('episode','canonical_suffix','upgrade')),
+  batch_id TEXT,
   shadow_chat_id TEXT,
   job_id TEXT,
   source_fingerprint_json TEXT NOT NULL,
   post_extraction_review INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL CHECK(status IN ('queued','processing','ready','applied','discarded','failed','stale')),
+  status TEXT NOT NULL CHECK(status IN ('queued','processing','ready','finishing','applied','discarded','failed','stale')),
+  phase INTEGER,
+  range_json TEXT,
+  contract TEXT,
+  backup_path TEXT,
+  last_progress_at INTEGER,
   preview_json TEXT,
   error TEXT,
   created_at INTEGER NOT NULL,
@@ -774,6 +840,7 @@ CREATE TABLE IF NOT EXISTS relationship_projections (
   overrides_json TEXT NOT NULL DEFAULT '{}',
   event_cursor_json TEXT NOT NULL DEFAULT '{"revision":-1,"eventIds":[]}',
   projection_origin TEXT NOT NULL DEFAULT 'llm',
+  level_definition_version INTEGER NOT NULL DEFAULT 1,
   stale INTEGER NOT NULL DEFAULT 0,
   updated_revision INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -810,6 +877,7 @@ CREATE TABLE IF NOT EXISTS physical_intimacy_milestones (
   auto_inject INTEGER NOT NULL DEFAULT 1,
   manual_override INTEGER NOT NULL DEFAULT 0,
   deleted_by_user INTEGER NOT NULL DEFAULT 0,
+  deleted_through_ordinal INTEGER,
   active INTEGER NOT NULL DEFAULT 1,
   created_revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
@@ -1002,18 +1070,34 @@ export function openDatabase(path: string): DatabaseHandle {
   db.pragma("busy_timeout = 5000");
   const hasSchemaLedger = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get());
   let version = 0;
+  let vectorLoadedForSnapshot = false;
   if (hasSchemaLedger) {
     version = Number((db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number | null }).version ?? 0);
+    if (version === 59 && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('albums','album_photos','album_versions') LIMIT 1").get()) {
+      db.close();
+      throw Object.assign(new Error("Unreleased album schema 59 cannot be upgraded in place: it conflicts with released 1.0.25 schema 59. Preserve this development database and start with a fresh schema 62, or use a released schema 58/59 database."), { code: "ALBUM_SCHEMA_59_RESET_REQUIRED" });
+    }
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, DATABASE_SCHEMA_VERSION].includes(version)) {
+      db.close();
+      throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
+    }
+    if (version < DATABASE_SCHEMA_VERSION && db.name !== ":memory:") {
+      try {
+        // VACUUM must recognize the released database's existing vec0 tables.
+        sqliteVec.load(db);
+        vectorLoadedForSnapshot = true;
+        snapshotBeforeMigration(db, DATABASE_SCHEMA_VERSION);
+      } catch (error) {
+        db.close();
+        throw error;
+      }
+    }
     if (version === 46) {
       db.transaction(() => {
         db.exec("ALTER TABLE translation_cache ADD COLUMN model TEXT NOT NULL DEFAULT ''");
         migrateTranslationKeys(db);
         db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES(47,?)").run(Date.now());
       })();
-    }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, DATABASE_SCHEMA_VERSION].includes(version)) {
-      db.close();
-      throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
   }
   db.transaction(() => {
@@ -1044,11 +1128,103 @@ export function openDatabase(path: string): DatabaseHandle {
       db.exec("DROP TRIGGER IF EXISTS source_fts_insert; DROP TRIGGER IF EXISTS source_fts_update; DROP TRIGGER IF EXISTS source_fts_delete");
     }
     db.exec(schema);
+    if (!(db.pragma('table_info(relationship_projections)') as Array<{name:string}>).some(column => column.name === 'level_definition_version')) {
+      db.exec('ALTER TABLE relationship_projections ADD COLUMN level_definition_version INTEGER NOT NULL DEFAULT 1');
+    }
+    // Additive to unreleased DB64, including early DB64 databases.
+    for (const table of ['physical_intimacy_milestones', 'beliefs']) {
+      if (!(db.pragma(`table_info(${table})`) as Array<{name:string}>).some(column => column.name === 'deleted_through_ordinal')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN deleted_through_ordinal INTEGER`);
+      }
+    }
+    db.exec(`CREATE TABLE IF NOT EXISTS incidents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id TEXT,
+      kind TEXT NOT NULL,
+      detail_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`);
+    // DB64 is unreleased. Rebuild even an early DB64 snapshot: ALTER COLUMN
+    // cannot widen SQLite CHECK constraints. No table references this control
+    // table, so its outbound FKs can stay enabled throughout the transaction.
+    if (!(db.pragma('table_info(regeneration_runs)') as Array<{name:string}>).some(column => column.name === 'phase')) {
+      const ddl = schema.match(/CREATE TABLE IF NOT EXISTS regeneration_runs \([\s\S]*?\n\);/)![0];
+      const columns = (db.pragma('table_info(regeneration_runs)') as Array<{name:string}>).map(column => column.name).join(',');
+      db.exec(ddl.replace('IF NOT EXISTS regeneration_runs', 'regeneration_runs_v64'));
+      db.exec(`INSERT INTO regeneration_runs_v64(${columns}) SELECT ${columns} FROM regeneration_runs;
+        DROP TABLE regeneration_runs;
+        ALTER TABLE regeneration_runs_v64 RENAME TO regeneration_runs;
+        CREATE INDEX idx_regeneration_runs_chat ON regeneration_runs(chat_id,status,updated_at)`);
+    }
+    if (!(db.pragma('table_info(regeneration_runs)') as Array<{name:string}>).some(column => column.name === 'last_progress_at')) {
+      db.exec('ALTER TABLE regeneration_runs ADD COLUMN last_progress_at INTEGER');
+      // Recover early DB64 progress once. Lease selection never scans job history.
+      db.exec(`UPDATE regeneration_runs AS u SET last_progress_at=MAX(u.created_at,COALESCE((
+        SELECT MAX(MAX(COALESCE(json_extract(p.payload_json,'$.upgradeLastLeasedAt'),
+          CASE WHEN p.status='leased' THEN p.updated_at ELSE 0 END),CASE WHEN p.status='done' THEN p.updated_at ELSE 0 END))
+        FROM jobs p WHERE p.chat_id IN (u.chat_id,u.shadow_chat_id)
+          AND COALESCE(json_extract(p.payload_json,'$.upgradeRunId'),json_extract(p.payload_json,'$.upgradePhase2RunId'))=u.id
+      ),0)) WHERE u.mode='upgrade' AND u.status NOT IN ('applied','discarded','stale')`);
+    }
+    // Every completion service writes job status. This one owner records actual
+    // lease/completion progress atomically, across both phases; renewals do not.
+    db.exec(`CREATE TRIGGER IF NOT EXISTS upgrade_job_progress AFTER UPDATE OF status ON jobs
+      WHEN NEW.status IN ('leased','done') AND
+        COALESCE(json_extract(NEW.payload_json,'$.upgradeRunId'),json_extract(NEW.payload_json,'$.upgradePhase2RunId')) IS NOT NULL
+      BEGIN
+        UPDATE regeneration_runs SET last_progress_at=MAX(COALESCE(last_progress_at,created_at),NEW.updated_at)
+        WHERE id=COALESCE(json_extract(NEW.payload_json,'$.upgradeRunId'),json_extract(NEW.payload_json,'$.upgradePhase2RunId'))
+          AND mode='upgrade' AND status NOT IN ('applied','discarded','stale');
+      END`);
+    const batchColumns = new Set((db.pragma('table_info(extraction_batches)') as Array<{name:string}>).map(column => column.name));
+    for (const column of ['producer_event_contract', 'producer_state_contract']) {
+      if (!batchColumns.has(column)) db.exec(`ALTER TABLE extraction_batches ADD COLUMN ${column} TEXT`);
+    }
+    if (!(db.pragma('table_info(chats)') as Array<{name:string}>).some(column => column.name === 'rebuilt_contract'))
+      db.exec('ALTER TABLE chats ADD COLUMN rebuilt_contract TEXT');
+    if (hasSchemaLedger && version < 64) {
+      // Only a surviving producer's pinned payload is evidence; never infer defaults.
+      for (const [column, key] of [['producer_event_contract', 'promptContract'], ['producer_state_contract', 'stateContract']]) {
+        db.exec(`UPDATE extraction_batches SET ${column}=(SELECT CASE WHEN json_valid(payload_json)
+          THEN CASE WHEN json_type(payload_json,'$.${key}')='text' THEN json_extract(payload_json,'$.${key}') END END
+          FROM jobs WHERE jobs.id=extraction_batches.job_id) WHERE ${column} IS NULL`);
+      }
+    }
+    for (const table of ['assertions', 'beliefs', 'promise_events']) {
+      if (!(db.pragma(`table_info(${table})`) as Array<{name:string}>).some(column => column.name === 'linked_detail_ids_json'))
+        db.exec(`ALTER TABLE ${table} ADD COLUMN linked_detail_ids_json TEXT`);
+    }
+    // DB63 is unreleased; older snapshots have no typed contribution boundary.
+    if (!(db.pragma('table_info(promise_events)') as Array<{name:string}>).some(column => column.name === 'event_kind'))
+      db.exec('ALTER TABLE promise_events ADD COLUMN event_kind TEXT');
+    if (!(db.pragma('table_info(promise_events)') as Array<{name:string}>).some(column => column.name === 'amendment_text'))
+      db.exec('ALTER TABLE promise_events ADD COLUMN amendment_text TEXT');
+    if (!(db.pragma('table_info(promise_events)') as Array<{name:string}>).some(column => column.name === 'scheduled_for_delta'))
+      db.exec('ALTER TABLE promise_events ADD COLUMN scheduled_for_delta TEXT');
+    // DB62 is unreleased: also upgrade databases created before this column was added.
+    if (hasSchemaLedger && !(db.pragma('table_info(memories)') as Array<{name:string}>).some(row => row.name === 'card_shape')) {
+      db.exec('ALTER TABLE memories ADD COLUMN card_shape INTEGER NOT NULL DEFAULT 0');
+    }
+    if (hasSchemaLedger && !(db.pragma('table_info(memories)') as Array<{name:string}>).some(row => row.name === 'replacement_memory_key')) {
+      db.exec('ALTER TABLE memories ADD COLUMN replacement_memory_key TEXT');
+    }
+    if (hasSchemaLedger && version < 61) {
+      const columns = (table: string) => new Set((db.pragma(`table_info(${table})`) as Array<{name: string}>).map(row => row.name));
+      for (const table of ['memory_details', 'memory_dialogues']) {
+        const existing = columns(table);
+        for (const name of ['user_edited', 'user_hidden']) if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} INTEGER NOT NULL DEFAULT 0 CHECK(${name} IN (0,1))`);
+      }
+    }
+    if (hasSchemaLedger && !(db.pragma('table_info(memory_details)') as Array<{name:string}>).some(row => row.name === 'hidden_from_json')) {
+      db.exec("ALTER TABLE memory_details ADD COLUMN hidden_from_json TEXT NOT NULL DEFAULT '[]'");
+    }
     if (hasSchemaLedger && version < 59) {
       if (!(db.pragma('table_info(memories)') as Array<{name:string}>).some(row=>row.name==='always_inject'))
         db.exec('ALTER TABLE memories ADD COLUMN always_inject INTEGER NOT NULL DEFAULT 0 CHECK(always_inject IN (0,1))');
       migrateMemoryGaps(db);
+      db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(59,?)").run(Date.now());
     }
+    db.exec(albumSchema);
     const chatColumns = new Set((db.pragma("table_info(chats)") as { name: string }[]).map(row => row.name));
     if (!chatColumns.has("engaged_at")) db.exec("ALTER TABLE chats ADD COLUMN engaged_at INTEGER");
     if (!chatColumns.has("last_seen_at")) db.exec("ALTER TABLE chats ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0");
@@ -1090,6 +1266,9 @@ export function openDatabase(path: string): DatabaseHandle {
     }
     if (hasSchemaLedger && version < 48) db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(48,?)").run(Date.now());
     if (hasSchemaLedger && version < 49) db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(49,?)").run(Date.now());
+    if (hasSchemaLedger && version < 62) { backfillLegacyParticipantAccess(db); }
+    if (hasSchemaLedger && version < 67 && !(db.pragma("table_info(albums)") as Array<{ name: string }>).some(c => c.name === "summary_json")) db.exec("ALTER TABLE albums ADD COLUMN summary_json TEXT");
+    refreshAlbumSummaries(db);
     db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)").run(DATABASE_SCHEMA_VERSION, Date.now());
   })();
   if (!hasSchemaLedger) {
@@ -1097,9 +1276,11 @@ export function openDatabase(path: string): DatabaseHandle {
   }
   migrateTranslationKeys(db);
   repairInheritedRevisions(db);
+  repairSourceCoverage(db);
+  repairAbbreviationEvidence(db);
   let currentVectorEnabled = false;
   try {
-    sqliteVec.load(db);
+    if (!vectorLoadedForSnapshot) sqliteVec.load(db);
     db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS embedding_vectors_v4_chat USING vec0(embedding float[1024], chat_id TEXT PARTITION KEY)");
     currentVectorEnabled = true;
   } catch (error) {

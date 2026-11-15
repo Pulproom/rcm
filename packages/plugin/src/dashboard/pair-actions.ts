@@ -101,11 +101,11 @@ export function createPairController(view: PairViewState, root: HTMLElement,
       const index = Number(target.dataset.landmarkIndex);
       const memory = getData().memories.find((item) => item.id === memoryId);
       const landmark = Number.isInteger(index) && Array.isArray(memory?.landmarkKinds) ? memory.landmarkKinds[index] : undefined;
-      if (!memory || !landmark) throw new Error("변경할 기념일을 찾지 못했습니다.");
+      if (!memory || !landmark) throw new Error("변경할 기념일을 찾지 못했어요.");
       const deleting = action === "delete-anniversary";
       let appliedIndex = index;
       if (deleting) {
-        if (landmark.kind !== "anniversary_basis" && !landmark.userDefined) throw new Error("사용자가 지정한 기념일만 삭제할 수 있습니다.");
+        if (landmark.kind !== "anniversary_basis" && !landmark.userDefined) throw new Error("사용자가 지정한 기념일만 삭제할 수 있어요.");
         if (!await confirmDelete(`기념일 '${String(landmark.label ?? "")}'을 삭제할까요?`)) return;
       }
       await queue.enqueue(memoryId,
@@ -114,14 +114,14 @@ export function createPairController(view: PairViewState, root: HTMLElement,
           const next = [...latest];
           appliedIndex = landmarkEntryIndex(next, landmark, index);
           const current = appliedIndex >= 0 ? next[appliedIndex] : undefined;
-          if (!current) throw new Error("변경할 기념일을 찾지 못했습니다.");
+          if (!current) throw new Error("변경할 기념일을 찾지 못했어요.");
           if (deleting) next.splice(appliedIndex, 1);
           else next[appliedIndex] = { ...current, alwaysInject: target.dataset.value === "true" };
           return next;
         },
         async (landmarkKinds) => {
           const result = await client.patchMemory(getChatId(), memoryId, { landmarkKinds });
-          if (!result.ok) throw new Error("기념일 변경을 저장하지 못했습니다.");
+          if (!result.ok) throw new Error("기념일 변경을 저장하지 못했어요.");
         });
       if (deleting) {
         const hiddenAnniversaries = remapHiddenAnniversariesAfterDelete(

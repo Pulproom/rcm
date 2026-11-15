@@ -1,3 +1,7 @@
+import { assertUpgradeJobWritable } from './upgrade-lock.js';
+import { assertUpgradeJobSource } from './upgrade-run.js';
+import { deletedMemoryKeys } from './user-deletions.js';
+import { availableMemoryKey, remapExtractionMemoryKeys } from './extraction-memory-keys.js';
 import { ModelContentValidationError } from "@rcm/shared";
 import { recordSmallReviews } from "./small-review.js";
 import { recordAuditAdditionDrops } from "./extraction-audit.js";
@@ -62,11 +66,13 @@ export function completeEpisodeJob(
   reconciliation?: ReconciliationSubmission,
   audit?: ExtractionAuditSubmission,
 ): { chatId: string; warnings: string[]; pendingReconciliations: number } {
+  assertUpgradeJobWritable(db,jobId);
   const job = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(jobId, workerId) as
     | { chat_id: string; payload_json: string }
     | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
-  const payload = JSON.parse(job.payload_json) as { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; episodeId?: string; postExtractionReview?: boolean; batchId?: string; backfillRunId?: string; trigger?: JobTrigger };
+  const payload = JSON.parse(job.payload_json) as { upgradeRunId?:string; sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[]; episodeId?: string; postExtractionReview?: boolean; batchId?: string; backfillRunId?: string; trigger?: JobTrigger };
+  assertUpgradeJobSource(db,job.chat_id,payload);
   recordAuditAdditionDrops(db, jobId, payload, audit);
   const sourceMessageIds = payload.sourceMessageIds ?? [];
   const episodeId = payload.episodeId ?? "";
@@ -78,13 +84,13 @@ export function completeEpisodeJob(
       db.prepare("UPDATE episodes SET status='failed',last_error='Source changed; reprocess required',updated_at=? WHERE id=?").run(now(), episodeId);
       for (const id of sourceMessageIds) db.prepare("UPDATE messages SET extraction_state=CASE WHEN host_visibility IN ('active','all_before') THEN 'pending' ELSE 'blocked' END,updated_at=? WHERE chat_id=? AND message_id=?").run(now(), job.chat_id, id);
     })();
-    return { chatId: job.chat_id, warnings: ["원문이 변경되어 오래된 에피소드 추출·검수 결과를 적용하지 않았습니다."], pendingReconciliations: 0 };
+    return { chatId: job.chat_id, warnings: ["원문이 변경되어 오래된 에피소드 추출·검수 결과를 적용하지 않았어요."], pendingReconciliations: 0 };
   }
   if (sourceMessageIds.length > 0) {
     const placeholders = sourceMessageIds.map(() => "?").join(",");
     const available = db.prepare(`SELECT count(*) AS count FROM messages WHERE chat_id=? AND message_id IN (${placeholders}) AND host_visibility IN ('active','all_before') AND content IS NOT NULL`)
       .get(job.chat_id, ...sourceMessageIds) as { count: number };
-    if (available.count !== sourceMessageIds.length) throw Object.assign(new Error("보류 구간의 원문 가시성이 변경되었습니다."), { code: "EPISODE_SOURCE_CHANGED" });
+    if (available.count !== sourceMessageIds.length) throw Object.assign(new Error("보류 구간의 원문 가시성이 변경됐어요."), { code: "EPISODE_SOURCE_CHANGED" });
   }
   const canonicalResult = { ...result,
     capsule:{...result.capsule,keyDialogues:canonicalEpisodeDialogues(db,job.chat_id,sourceMessageIds,result.capsule.keyDialogues)},
@@ -159,11 +165,13 @@ export function completeEpisodeJob(
     const reconciled = applyReconciliation(db, job.chat_id, jobId, sourceMessageIds, auditedDraft, reconciliation);
     pendingReconciliations += reconciled.pending;
     extraction = validateDialogueEvidence(db, job.chat_id, sourceMessageIds, reconciled.result);
+    const capsuleKey=availableMemoryKey(`episode:${episodeId}`,deletedMemoryKeys(db,job.chat_id));
+    extraction=remapExtractionMemoryKeys(extraction,new Map([[`episode:${episodeId}`,capsuleKey]]));
     const previousChildren = containedMemoryIds(db, job.chat_id, sourceSet);
     ingestExtraction(db, job.chat_id, extraction, jobId, payload.batchId);
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status='applied',draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(JSON.stringify(prepared), JSON.stringify(extraction), audit?.patch ? JSON.stringify(audit.patch) : null, now(), payload.batchId);
     lockInitialCalibration(db, job.chat_id);
-    const parent = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=?").get(job.chat_id, `episode:${episodeId}`) as { id: string };
+    const parent = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=?").get(job.chat_id, capsuleKey) as { id: string };
     pendingReconciliations = Math.max(0, pendingReconciliations - recordSmallReviews(db, job.chat_id, jobId, sourceMessageIds, reviewDraft,
       payload.batchId ?? jobId, audit?.patch?.keepPendingItemRefs, new Map([[`episode:${episodeId}`, parent.id]])));
     const children = previousChildren.filter((id) => id !== parent.id);
@@ -190,6 +198,7 @@ export function completeEpisodeJob(
     `).run(extraction.memories[0]?.title ?? result.capsule.title, extraction.memories[0]?.content ?? result.capsule.content, parent.id, job.chat_id, now(), episodeId, job.chat_id);
     if (!markJobComplete(db, jobId, workerId)) throw new Error("Lease not found while completing episode");
   })();
+  if (payload.upgradeRunId) return {chatId:job.chat_id,warnings:[],pendingReconciliations};
   const finalLedger = payload.backfillRunId ? enqueueFinalLedgerConsistency(db, job.chat_id, payload.backfillRunId) : undefined;
   if (!finalLedger || finalLedger.state === "not_needed") {
     queueLaggingRelationshipProjections(db, job.chat_id);

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { RcmDatabase } from "./db.js";
-
 export type RetrievalTraceMode = "off" | "metadata" | "full";
 
 export interface RetrievalTraceConfig {
@@ -15,7 +14,7 @@ export interface RetrievalTraceConfig {
 export const RETRIEVAL_TRACE_CHAT_PREFIX = "retrieval_trace_chat:";
 
 export interface RetrievalTraceEvent {
-  schema?: "rcm.retrieval-trace.v19";
+  schema?: "rcm.retrieval-trace.v20";
   currentState?: import("./state-outcomes.js").StateOutcomeReport;
   id: string;
   at?: number;
@@ -112,7 +111,7 @@ export class RetrievalTraceWriter {
     }));
     const sanitized: Record<string, unknown> = {
       ...event,
-      schema: "rcm.retrieval-trace.v19",
+      schema: "rcm.retrieval-trace.v20",
       at: event.at ?? Date.now(),
       source: this.sourcePosition(event.chatId, event.traceContext?.latestMessageId),
       query: full ? boundedText(event.query, 32_000) : redactText(event.query),

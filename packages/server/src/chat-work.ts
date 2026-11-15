@@ -5,6 +5,10 @@ import { CHAT_WORK_HELD_MESSAGE as CHAT_WORK_HELD } from "@rcm/shared";
 export { CHAT_WORK_HELD_MESSAGE as CHAT_WORK_HELD } from "@rcm/shared";
 const active = new WeakMap<RcmDatabase, Map<string, Set<AbortController>>>();
 
+export function abortChatWork(db:RcmDatabase,chatId:string,reason:Error): void {
+  for (const controller of active.get(db)?.get(chatId) ?? []) controller.abort(reason);
+}
+
 export function hasActiveChatWork(db: RcmDatabase, chatId: string): boolean {
   return Boolean(active.get(db)?.get(chatId)?.size);
 }
@@ -38,4 +42,12 @@ export function setChatWorkEnabled(db: RcmDatabase, chatId: string, enabled: boo
     }
   })();
   if (!enabled) for (const controller of active.get(db)?.get(chatId) ?? []) controller.abort(new Error(CHAT_WORK_HELD));
+}
+
+/** Reserved regeneration ids and internal rows never belong to user operations. */
+export const userChatSql = (alias='chats'): string => `${alias}.is_internal=0 AND ${alias}.id NOT GLOB '__rcm_regen__*'`;
+export function assertUserChat(db:RcmDatabase,chatId:string): void {
+  if (chatId.startsWith('__rcm_regen__') || db.prepare('SELECT 1 FROM chats WHERE id=? AND is_internal<>0').get(chatId)) {
+    throw Object.assign(new Error('Internal chats are not available to user operations'),{code:'INTERNAL_CHAT'});
+  }
 }

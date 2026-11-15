@@ -1,5 +1,6 @@
+import type { RetrievalAudience } from "./retrieval.js";
 import type { RcmDatabase } from "./db.js";
-import { NARRATOR_ARCHIVE_HOLDER, readItemAccessBatches, resolveItemAccess, visibleTo, type ItemAccessRow } from "./item-access.js";
+import { PENDING_ACCESS_HOLDER, NARRATOR_ARCHIVE_HOLDER, readItemAccessBatches, resolveItemAccess, visibleTo, type ItemAccessRow } from "./item-access.js";
 import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { memoryAtomKey } from "./memory-atoms.js";
 import { memoryContextSignature } from "./memory-search-document.js";
@@ -36,6 +37,7 @@ interface RelationSnapshotRow {
 export interface StoredAtomPathSearchOptions {
   chatId: string;
   perspective: string;
+  audience?: RetrievalAudience;
   roots: readonly AtomPathRoot[];
   excludedMemoryIds?: readonly string[];
   excludedAtomIds?: readonly string[];
@@ -145,7 +147,7 @@ export function searchStoredAtomPaths(db: RcmDatabase, options: StoredAtomPathSe
         ? [] : evidenceMessageIds(row.evidence_json)))];
       const sources = loadSourceRows(sourceIds);
       for (const row of rows) {
-        if (row.holder !== NARRATOR_ARCHIVE_HOLDER && !exactCurrentEvidence(row.evidence_json, sources)) continue;
+        if (row.holder !== PENDING_ACCESS_HOLDER && row.holder !== NARRATOR_ARCHIVE_HOLDER && !exactCurrentEvidence(row.evidence_json, sources)) continue;
         const key = accessKey(row.item_kind, row.item_id);
         accessRows.set(key, [...(accessRows.get(key) ?? []), row.holder]);
       }
@@ -156,8 +158,8 @@ export function searchStoredAtomPaths(db: RcmDatabase, options: StoredAtomPathSe
 
   const visible = (access: Map<string, string[]>, kind: AccessRow["item_kind"], id: string): boolean => {
     const scope = resolveItemAccess(access, kind, id);
-    if (!scope.explicit) return false;
-    return options.perspective === "narrator" || visibleTo(scope, options.perspective);
+    if (!scope.explicit || scope.pending) return false;
+    return options.audience?.kind === "author" || options.perspective === "narrator" || visibleTo(scope, options.perspective);
   };
 
   const loadEvidenceSources = (values: string[]): Map<string, string> => {
@@ -270,7 +272,14 @@ export function searchStoredAtomPaths(db: RcmDatabase, options: StoredAtomPathSe
     for (const row of uniqueRows) {
       let allowed = relationAllowed.get(row.id);
       if (allowed === undefined) {
-        allowed = !fullyPromptCovered(row.evidence_json, promptSources)
+        const relation = resolveItemAccess(access, "atom_relation", row.id);
+        const source = resolveItemAccess(access, "detail", row.source_detail_id);
+        const target = resolveItemAccess(access, "detail", row.target_detail_id);
+        // Author visibility cannot turn an invalid knowledge claim into scope.
+        const intactKnowledge = !options.audience || options.audience.kind !== "author"
+          || (relation.everyone ? source.everyone && target.everyone
+            : relation.holders.every(holder => visibleTo(source, holder) && visibleTo(target, holder)));
+        allowed = Boolean(intactKnowledge) && !fullyPromptCovered(row.evidence_json, promptSources)
           && exactCurrentEvidence(row.evidence_json, sources) && visible(access, "atom_relation", row.id)
           && allowedDetail(row.source_detail_id, access, sources) && allowedDetail(row.target_detail_id, access, sources);
         relationAllowed.set(row.id, allowed);

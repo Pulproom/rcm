@@ -39,14 +39,19 @@ export function installMenuController(root: HTMLElement): () => void {
     const rect = button.getBoundingClientRect();
     Object.assign(pop.style, { position: "fixed", left: "auto", bottom: "auto", right: `${Math.max(8, view.width - rect.right)}px`, top: `${rect.bottom + 6}px` });
     const height = pop.offsetHeight;
-    const below = rect.bottom + 6 + height <= view.height - 8;
-    const top = below ? rect.bottom + 6 : Math.max(8, rect.top - 6 - height);
+    const right = Math.max(8, Math.min(view.width - rect.right, view.width - pop.offsetWidth - 8));
+    pop.style.right = `${right}px`;
+    // A bottom tab bar (narrow screens) is the floor, so a last-row menu flips up instead of covering it.
+    const nav = root.querySelector<HTMLElement>(".nav")?.getBoundingClientRect();
+    const floor = nav && nav.height > 0 && nav.top > view.height / 2 ? nav.top : view.height;
+    const below = rect.bottom + 6 + height <= floor - 8;
+    const top = Math.max(8, Math.min(floor - height - 8, below ? rect.bottom + 6 : rect.top - 6 - height));
     pop.style.top = `${top}px`;
     // A transformed ancestor would make "fixed" relative to itself; correct by the measured drift.
     const placed = pop.getBoundingClientRect();
-    const drift = { x: placed.right - (view.width - Math.max(8, view.width - rect.right)), y: placed.top - top };
+    const drift = { x: placed.right - (view.width - right), y: placed.top - top };
     if (Math.abs(drift.y) > 1) pop.style.top = `${top - drift.y}px`;
-    if (Math.abs(drift.x) > 1) pop.style.right = `${Math.max(8, view.width - rect.right) + drift.x}px`;
+    if (Math.abs(drift.x) > 1) pop.style.right = `${right + drift.x}px`;
   };
   const release = (menu: HTMLDetailsElement): void => {
     const pop = popOf(menu);

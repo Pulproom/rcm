@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { McpEvidence, McpQuestionAnswer, McpSourceRange } from "@rcm/shared";
+import { segmentSentences, type McpEvidence, McpQuestionAnswer, McpSourceRange } from "@rcm/shared";
 import { aggregateRerankUsage, type AggregatedRerankUsage, type EvidenceReranker } from "./reranker.js";
 import { evidenceRanker } from "./mcp-evidence.js";
 import { presentationOnlySourcePassage } from "./source-evidence.js";
@@ -60,19 +60,12 @@ function metadataForSpan(evidence: McpEvidence, sourceRange: McpSourceRange | un
 }
 
 function sentenceRanges(text: string): Array<{ start: number; end: number }> {
-  try {
-    const segmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
-    return [...segmenter.segment(text)].flatMap(segment => {
-      const leading = segment.segment.search(/\S/u);
-      if (leading < 0) return [];
-      const value = segment.segment.trimEnd();
-      return [{ start: segment.index + leading, end: segment.index + value.length }];
-    });
-  } catch {
-    return [...text.matchAll(/\S[\s\S]*?(?:[.!?。！？]+(?=\s|$)|$)/gu)].map(match => ({
-      start: match.index!, end: match.index! + match[0].length,
-    }));
-  }
+  return segmentSentences(text).flatMap(segment => {
+    const leading = segment.segment.search(/\S/u);
+    if (leading < 0) return [];
+    const value = segment.segment.trimEnd();
+    return [{ start: segment.index + leading, end: segment.index + value.length }];
+  });
 }
 
 function sourceSpans(evidence: McpEvidence, excluded: McpSourceRange[], anchors: McpEvidence[]): SourceSpan[] {

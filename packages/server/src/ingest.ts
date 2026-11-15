@@ -1,15 +1,19 @@
-import { ModelContentValidationError, clipLandmarkDisplayText } from "@rcm/shared";
+import { assertChatUnlocked } from './upgrade-lock.js';
+import { readMemoryPreferenceFields } from './memory-bookmarks.js';
+import { appendJobStateDrops } from "./jobs.js";
+import { StateItemValidationError, isolateInvalidStateItems, stateItemIdentity, type StateItemDrop } from "@rcm/shared";
+import { ModelContentValidationError, clipLandmarkDisplayText, isInitialCalibrationMemory } from "@rcm/shared";
 import { applyProgressDone, ensurePairProgress } from "./pair-progress.js";
 import { refreshDetailFts } from './memory-detail-edits.js';
 import { recordPromiseRecency, snapshotPromiseRecency } from "./promise-recency.js";
-import { applySeedResolutions, recordSeedResolutionDrops } from "./story-seeds.js";
-import { activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
+import { applySeedResolutions, recordSeedResolutionDrops, readStorySeed } from "./story-seeds.js";
+import { resolveStateDetailLinks, activeSocialRelations, isReverseMutualSocialRelation, socialRelationCovers, resolveSocialRelation, sameSocialRelationLabel, sameSocialRelationScope, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
 import { recordReconciliationReview } from "./reconciliation.js";
 import { storeSourcePassages } from "./source-evidence.js";
 import { randomUUID } from "node:crypto";
 import { invalidateStorySupports, markStorySupportsInvalid } from "./story-spine.js";
-import { augmentSearchText, modelImageRanges, normalizeStoryTime, type ExtractionResult } from "@rcm/shared";
-import { canonicalizeExtraction, normalizeEntityName } from "./entities.js";
+import { augmentSearchText, rescueDialogueEvidence, modelImageRanges, normalizeStoryTime, ExtractionResultSchema, type ExtractionResult } from "@rcm/shared";
+import { buildEntityIdentityResolver, canonicalizeExtraction, normalizeEntityName, listEntities } from "./entities.js";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
 import { normalizeUnitScore } from "./scores.js";
@@ -19,12 +23,18 @@ import { addressTermAliasGuard, ingestSocialKnowledge } from "./social-knowledge
 import { queueRelationshipProjection } from "./relationship-projections.js";
 import { intimacyMilestoneKeys } from "./intimacy-milestones.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
-import { transitionEvidenceJson, transitionSourceEvidence, canAutomaticallyChange } from "./user-corrections.js";
+import { transitionEvidenceJson, transitionSourceEvidence, compatibleIndependentAssertion, canAutomaticallyChange } from "./user-corrections.js";
 import { storeAtomRelations, type AtomRelationContext } from "./atom-relations.js";
-import { aliasRemovalGuard, deletionGuard, userDeletionsKey } from "./user-deletions.js";
-import { readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
+import { aliasRemovalGuard, deletionGuard, userDeletionsKey, deletionSuppressesEvidence } from "./user-deletions.js";
+import { loadPlotKnowers, promiseLinkedSupport, promiseContributionChain, projectPromiseRow, rebuildPromiseContent, PENDING_ACCESS_HOLDER, readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
 
 const storyHeader = /\[🌐\|([^|\]\r\n]+)\|/g;
+
+/** Reinforcement retains saved source metadata and deduplicates by the ledger's citation identity. */
+function mergeStateEvidence(saved: string, incoming: ExtractionResult["assertions"][number]["evidence"]) {
+  return [...JSON.parse(saved), ...incoming].filter((item, index, all) => all.findIndex(candidate =>
+    candidate.messageId === item.messageId && (candidate.quote ?? "") === (item.quote ?? "")) === index);
+}
 
 export function replaceItemAccess(
   db: RcmDatabase,
@@ -155,7 +165,14 @@ export function rebuildCharacterRecallTraces(db: RcmDatabase, chatId: string): v
   db.prepare(`INSERT OR IGNORE INTO memory_traces(memory_id,character_name,strength,salience,detail_level)
     SELECT m.id,n.value,m.strength,m.salience,CASE WHEN m.strength>0.75 THEN 'clear' ELSE 'gist' END
     FROM memories m,json_each(CASE WHEN json_array_length(m.known_by_json)>0 THEN m.known_by_json ELSE m.participants_json END) n
-    WHERE m.chat_id=? AND m.active=1`).run(chatId);
+    WHERE m.chat_id=? AND m.active=1 AND m.card_shape=0`).run(chatId);
+  const authors = db.prepare("SELECT id,card_shape,known_by_json,strength,salience FROM memories WHERE chat_id=? AND active=1 AND card_shape=1")
+    .all(chatId) as Array<{id:string;card_shape:1;known_by_json:string;strength:number;salience:number}>;
+  const plotHolders = loadPlotKnowers(db, chatId, authors);
+  const initial = db.prepare("INSERT OR IGNORE INTO memory_traces(memory_id,character_name,strength,salience,detail_level) VALUES(?,?,?,?,?)");
+  for (const memory of authors) for (const holder of plotHolders.get(memory.id)!) {
+    initial.run(memory.id, holder, memory.strength, memory.salience, memory.strength > 0.75 ? "clear" : "gist");
+  }
   const events = db.prepare(`SELECT * FROM memory_recall_events WHERE chat_id=? ORDER BY completed_turn_seq,created_at,id`)
     .all(chatId) as Array<{ memory_id: string; holder: string; action: string; created_revision: number; completed_turn_seq: number }>;
   const insert = db.prepare(`INSERT INTO memory_traces(memory_id,character_name,strength,salience,recall_count,last_recalled_revision,last_recalled_turn_seq,detail_level)
@@ -214,12 +231,12 @@ export function validateDialogueEvidence(
   sourceMessageIds: string[],
   source: ExtractionResult,
 ): ExtractionResult {
-  const result = structuredClone(source);
   const rows = sourceMessageIds.length ? db.prepare(`SELECT message_id,canonical_content,canonical_hash FROM messages
     WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${sourceMessageIds.map(() => "?").join(",")})`).all(chatId, ...sourceMessageIds)
     : [];
   const messages = new Map((rows as Array<{ message_id: string; canonical_content: string | null; canonical_hash: string }>)
     .map((row) => [row.message_id, row]));
+  const result = rescueDialogueEvidence(source, [...messages.values()].map(row => ({ id: row.message_id, content: row.canonical_content ?? "", canonicalHash: row.canonical_hash })));
   for (const memory of result.memories) {
     for (const dialogue of memory.keyDialogues ?? []) {
       const message = messages.get(dialogue.messageId);
@@ -361,7 +378,7 @@ export function validateExtractionSources(
       const existing = db.prepare("SELECT status,scheduled_for AS scheduledFor FROM promises WHERE chat_id=? AND promise_key=?").get(chatId, promise.key) as { status: string; scheduledFor: string | null } | undefined;
       if (!existing || existing.status !== "open") errors.push(`promise ${promise.key} cannot become offscreen without an existing open promise`);
       if (!existing?.scheduledFor) errors.push(`promise ${promise.key} cannot become offscreen without an existing scheduled point`);
-      if (existing?.scheduledFor && promise.scheduledFor !== existing.scheduledFor) errors.push(`promise ${promise.key} must preserve its scheduled point when marked offscreen`);
+      if (existing?.scheduledFor && promise.scheduledFor !== undefined && promise.scheduledFor !== existing.scheduledFor) errors.push(`promise ${promise.key} must preserve its scheduled point when marked offscreen`);
       if (!promise.statusReason?.trim()) errors.push(`promise ${promise.key} requires a status reason when marked offscreen`);
       if ((promise.evidence ?? []).length === 0) errors.push(`promise ${promise.key} requires current transcript evidence when marked offscreen`);
     }
@@ -379,8 +396,79 @@ export function validateExtractionSources(
   return errors;
 }
 
-export function ingestExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceJobId: string = randomUUID(), sourceBatchId?: string, relationContext?: AtomRelationContext, userInitiated: boolean | 'additions' | 'regeneration' = false): string[] {
+/** Probe the existing source/lifecycle validator per record. Reference skeletons
+ * preserve the supplied memory-key set; they are never stored or model output. */
+export function isolateExtractionSources(db:RcmDatabase,chatId:string,sourceIds:string[],result:ExtractionResult): {result:ExtractionResult;drops:StateItemDrop[]} {
+  const lists=["memories","assertions","beliefs","promises","relationshipEvents","socialKnowledge","relationshipBaselines","physicalIntimacy"] as const;
+  const base={...ExtractionResultSchema.parse({language:result.language}),memories:result.memories.map(memory=>({...memory,evidence:[],associations:[],details:memory.details?.map(detail=>({...detail,evidence:[],access:[]})),keyDialogues:[],landmarkKinds:[]}))};
+  const issues:StateItemValidationError["issues"]=[];
+  for(const list of lists) (result[list] ?? []).forEach((candidate,index)=>{
+    const probe={...base,[list]:list==="memories" ? base.memories.map((memory,i)=>i===index ? candidate : memory) : [candidate]} as ExtractionResult;
+    const errors=validateExtractionSources(db,chatId,sourceIds,probe);
+    if(errors.length)issues.push({path:[list,index],point:"C8:source_lifecycle",message:errors.join("; ")});
+  });
+  if(!issues.length)return {result,drops:[]};
+  const isolated=isolateInvalidStateItems(result,new StateItemValidationError(issues))!;
+  const survivors=isolated.value as ExtractionResult;
+  // No rejected reference may become valid merely because its parent was removed.
+  const remaining=validateExtractionSources(db,chatId,sourceIds,survivors);
+  if(remaining.length)throw new ModelContentValidationError("Unattributed source/lifecycle validation failure");
+  return {result:survivors,drops:isolated.drops};
+}
+
+export function isolateMemoryIdentityCollisions(db:RcmDatabase,chatId:string,result:ExtractionResult,sourceBatchId?:string,additionsOnly=false): {result:ExtractionResult;drops:StateItemDrop[]} {
+  const issues:StateItemValidationError["issues"]=[];
+  result.memories.forEach((memory,index)=>{
+    const stored=db.prepare("SELECT user_managed,source_batch_id FROM memories WHERE chat_id=? AND memory_key=?").get(chatId,memory.key) as {user_managed:number;source_batch_id:string|null}|undefined;
+    if(stored&&(additionsOnly||stored.user_managed||stored.source_batch_id!==(sourceBatchId??null))) issues.push({path:["memories",index],point:"C10:memory_identity",message:"Memory identity belongs to protected or another batch content"});
+  });
+  if(!issues.length)return {result,drops:[]};
+  const isolated=isolateInvalidStateItems(result,new StateItemValidationError(issues))!;
+  return {result:isolated.value as ExtractionResult,drops:isolated.drops};
+}
+
+/** Generation provenance comes from the leased server prompt, never model JSON. */
+export function normalizeGeneratedCardShapes(result: ExtractionResult, promptContract?: "e1d" | "e1e" | "e1f"): void {
+  for (const memory of result.memories) {
+    const author = (promptContract === 'e1d' || promptContract === 'e1e' || promptContract === 'e1f') && !memory.key.startsWith('state_')
+      && !memory.key.startsWith('manual:') && !isInitialCalibrationMemory({ memoryKey: memory.key });
+    if (author) memory.cardShape = 1;
+    else delete memory.cardShape;
+  }
+}
+
+function ownerOnlyStateKey(kind: 'assertion' | 'belief', item: { subject: string; predicate: string; value: string; holder?: string; stateKind?: string; polarity?: string }): string {
+  return JSON.stringify([kind, item.holder ?? item.subject, item.subject, normalizeLedgerPredicate(item.predicate), normalizeLedgerText(item.value), item.stateKind ?? item.polarity]);
+}
+
+/** Stored scope survives keep, lineage and backup even when the original job does not. */
+export function snapshotOwnerOnlyState(db: RcmDatabase, chatId: string): ReadonlySet<string> {
+  const keys = new Set<string>();
+  const assertions = db.prepare(`SELECT a.subject,a.predicate,a.value,a.state_kind AS stateKind FROM assertions a
+    WHERE a.chat_id=? AND a.linked_detail_ids_json IS NULL AND a.state_kind IN ('secret','goal')
+      AND (SELECT COUNT(*) FROM item_access x WHERE x.chat_id=a.chat_id AND x.item_kind='assertion' AND x.item_id=a.id AND x.active=1)=1
+      AND EXISTS (SELECT 1 FROM item_access x WHERE x.chat_id=a.chat_id AND x.item_kind='assertion' AND x.item_id=a.id AND x.active=1 AND x.holder=a.subject AND x.basis='internal')`)
+    .all(chatId) as Array<{ subject: string; predicate: string; value: string; stateKind: string }>;
+  for (const item of assertions) keys.add(ownerOnlyStateKey('assertion', item));
+  const beliefs = db.prepare('SELECT holder,subject,predicate,value,polarity FROM beliefs WHERE chat_id=? AND linked_detail_ids_json IS NULL')
+    .all(chatId) as Array<{ holder: string; subject: string; predicate: string; value: string; polarity: string }>;
+  for (const item of beliefs) keys.add(ownerOnlyStateKey('belief', item));
+  return keys;
+}
+
+export function ingestExtraction(db: RcmDatabase, chatId: string, result: ExtractionResult, sourceJobId: string = randomUUID(), sourceBatchId?: string, relationContext?: AtomRelationContext, userInitiated: boolean | 'additions' | 'regeneration' | 'replay' = false, options: { promptContract?: "e1d" | "e1e" | "e1f"; preserveStoredCardShapes?: true; storedOwnerOnlyState?: ReadonlySet<string> } = {}): string[] {
+  assertChatUnlocked(db,chatId);
+  // Only server-owned final/keep payloads or server-normalized candidates may
+  // preserve stored provenance. Execution mode alone grants no such trust.
+  if (!options.preserveStoredCardShapes) {
+    normalizeGeneratedCardShapes(result, userInitiated === true ? undefined : options.promptContract);
+    for (const promise of result.promises) delete promise.storedAmendment;
+  }
   const additionsOnly = userInitiated === 'additions';
+  const replayAccepted = userInitiated === 'replay';
+  const stateContract = (db.prepare("SELECT json_extract(payload_json,'$.stateContract') contract FROM jobs WHERE id=? AND chat_id=?")
+    .get(sourceJobId,chatId) as {contract?:string}|undefined)?.contract;
+  const ownerOnlyState = stateContract === 'r10' || stateContract === 'r11';
   // Episode regeneration schedules after its batch final_json is replaced;
   // registering here would freeze an obsolete batch fingerprint and trigger.
   const invalidateStory = userInitiated === 'regeneration' ? markStorySupportsInvalid : invalidateStorySupports;
@@ -393,6 +481,9 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       UNION ALL SELECT source_message_ids_json ids FROM extraction_batches WHERE id=? AND chat_id=? LIMIT 1`)
       .get(sourceJobId, chatId, sourceBatchId ?? null, chatId) as { ids: string | null } | undefined : undefined;
   result = canonicalizeExtraction(db, chatId, result, source?.ids ? JSON.parse(source.ids) : [], sourceBatchId);
+  const identityIsolation=isolateMemoryIdentityCollisions(db,chatId,result,sourceBatchId,additionsOnly);
+  result=identityIsolation.result;
+  appendJobStateDrops(db,sourceJobId,identityIsolation.drops);
   // API 10 models classify transient ledger items explicitly. Missing fields
   // are legacy output and remain fully compatible; only explicit scene rows
   // are folded into the episode instead of polluting long-lived ledgers.
@@ -402,14 +493,13 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     beliefs: result.beliefs.filter((item) => item.retention !== "scene"),
     promises: result.promises.filter((item) => item.scope !== "scene"),
   };
-  result.relationshipEvents = (result.relationshipEvents ?? []).filter((event) =>
-    !event.changes.every((change) => change.effect === "increase" && change.impact === "minor") || Boolean(event.memoryKey || event.detailKey));
   for (const assertion of result.assertions) assertion.predicate = normalizeLedgerPredicate(assertion.predicate);
   for (const belief of result.beliefs) belief.predicate = normalizeLedgerPredicate(belief.predicate);
   db.transaction(() => {
     ensurePairProgress(db, chatId);
     const revokedStorySupports=new Set<string>();
     const detailAccessEdits = readDetailAccessEdits(db, chatId);
+    const memoryPreferences = readMemoryPreferenceFields(db,chatId);
     const dialogueIdentities = readDialogueAccessIdentities(db, chatId);
     const timestamp = now();
     const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
@@ -418,8 +508,13 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     if (!additionsOnly) storeSourcePassages(db, chatId, result.sourcePassages, sourceBatchId);
     const replaceAccess = (itemKind: string, itemId: string, grants: Array<{ holder: string; basis: string; evidence: Array<{ messageId: string; quote?: string }>; confidence: number }>): void =>
       replaceItemAccess(db, chatId, itemKind, itemId, grants, revision, timestamp);
+    const saveOwnerKnowledge = (kind:'assertion'|'belief', id:string, owner:string, evidence:Array<{messageId:string;quote?:string}>, confidence:number) => {
+      const table=kind==='assertion' ? 'assertions' : 'beliefs';
+      const updated=db.prepare(`UPDATE ${table} SET linked_detail_ids_json=NULL WHERE id=? AND chat_id=? AND user_edit_ordinal IS NULL`).run(id,chatId);
+      if (updated.changes && kind==='assertion') replaceAccess(kind,id,[{holder:owner,basis:'internal',evidence,confidence}]);
+    };
 
-    const editedAccess = (kind: "detail" | "dialogue", id: string, evidence: Array<{ messageId: string; quote?: string }>) => {
+    const editedAccess = (kind: "memory" | "detail" | "dialogue" | "promise" | "physical_milestone", id: string, evidence: Array<{ messageId: string; quote?: string }>) => {
       const holders = detailAccessEdits.get(id);
       if (holders === undefined) return undefined;
       const provenance = db.prepare("SELECT basis,confidence FROM item_access WHERE chat_id=? AND item_kind=? AND item_id=? AND holder=?");
@@ -447,13 +542,17 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       for (const alias of [entity.name, ...entity.aliases]) if (!removedAlias(id, alias) && !addressTerm(entity.name, alias)) aliasInsert.run(id, alias, normalizeEntityName(alias));
     }
 
+    // Resolve only after this batch's entities and aliases are persisted, using
+    // the same owned identity ledger as access holders. No prose classification.
+    const resolveIdentity = buildEntityIdentityResolver(db, chatId);
+    const canonicalNames = new Set(listEntities(db, chatId).map(entity => entity.name));
     const memoryByKey = new Map<string, string>();
     const detailByKey = new Map<string, string>();
     for (const memory of result.memories) {
       const sourceBatchId = batchFor([...memory.evidence, ...(memory.details ?? []).flatMap(detail => detail.evidence), ...(memory.keyDialogues ?? []).flatMap(dialogue => dialogue.evidence)]);
       const keyDialogues = memory.keyDialogues ?? [];
-      const existing = db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=?").get(chatId, memory.key) as
-        | { id: string }
+      const existing = db.prepare("SELECT * FROM memories WHERE chat_id=? AND memory_key=?").get(chatId, memory.key) as
+        | { id: string; [column:string]:any }
         | undefined;
       const id = existing?.id ?? randomUUID();
       if (additionsOnly && existing) throw new Error('Additive memory identity already exists');
@@ -461,8 +560,8 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       db.prepare(`
         INSERT INTO memories(
           id,chat_id,memory_key,type,title,content,participants_json,known_by_json,perspective,story_time,story_time_normalized,locations_json,landmark,landmark_kinds_json,evidence_json,retention_class,
-          salience,strength,atom_access_version,source_batch_id,created_revision,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          salience,strength,atom_access_version,card_shape,source_batch_id,created_revision,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(chat_id,memory_key) DO UPDATE SET
           type=excluded.type,title=excluded.title,content=excluded.content,
           participants_json=excluded.participants_json,known_by_json=excluded.known_by_json,
@@ -470,7 +569,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           locations_json=excluded.locations_json,landmark=excluded.landmark,landmark_kinds_json=excluded.landmark_kinds_json,evidence_json=excluded.evidence_json,
           retention_class=excluded.retention_class,
           salience=MAX(memories.salience,excluded.salience),strength=MAX(memories.strength,excluded.strength),
-          atom_access_version=excluded.atom_access_version,source_batch_id=COALESCE(excluded.source_batch_id,memories.source_batch_id),
+          atom_access_version=excluded.atom_access_version,card_shape=excluded.card_shape,source_batch_id=COALESCE(excluded.source_batch_id,memories.source_batch_id),
           active=CASE WHEN memories.user_managed=1 AND memories.active=0 THEN 0 ELSE 1 END,updated_at=excluded.updated_at
       `).run(
         id,
@@ -480,7 +579,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         memory.title,
         memory.content,
         JSON.stringify(memory.participants),
-        JSON.stringify(memory.knownBy),
+        JSON.stringify(detailAccessEdits.get(id) ?? memory.knownBy),
         memory.perspective ?? null,
         memory.storyTime ?? null,
         normalizeStoryTime(memory.storyTime) ?? null,
@@ -492,11 +591,17 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         memory.salience,
         strength,
         (memory.details?.length ?? 0) > 0 || keyDialogues.length > 0 ? 1 : 0,
+        memory.cardShape ?? 0,
         sourceBatchId ?? null,
         revision,
         timestamp,
         timestamp,
       );
+      const preferenceFields=memoryPreferences.get(id);
+      if (existing && preferenceFields?.length) db.prepare(`UPDATE memories SET ${preferenceFields.map(column=>`${column}=?`).join(',')} WHERE id=?`)
+        .run(...preferenceFields.map(column=>existing[column]),id);
+      const headerAccess = editedAccess("memory", id, memory.evidence);
+      if (headerAccess !== undefined) replaceAccess("memory", id, headerAccess);
       memoryByKey.set(memory.key, id);
       db.prepare("DELETE FROM evidence_spans WHERE memory_id=?").run(id);
       for (const evidence of memory.evidence) {
@@ -522,7 +627,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           INSERT INTO memory_dialogues(id,chat_id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal,created_at)
           VALUES(?,?,?,?,?,?,?,?,?,?)
         `).run(dialogueId, chatId, id, dialogue.speaker, dialogue.text, dialogue.messageId, JSON.stringify(dialogue.evidence), dialogue.kind, ordinal, timestamp);
-        replaceAccess("dialogue", dialogueId, editedAccess("dialogue", dialogueId, dialogue.evidence) ?? dialogue.access ?? memory.knownBy.map(holder => ({ holder, basis: "witnessed", evidence: [{ messageId: dialogue.messageId }], confidence: 1 })));
+        replaceAccess("dialogue", dialogueId, editedAccess("dialogue", dialogueId, dialogue.evidence) ?? dialogue.access ?? (memory.cardShape === 1 ? [] : memory.knownBy.map(holder => ({ holder, basis: "witnessed", evidence: [{ messageId: dialogue.messageId }], confidence: 1 }))));
       }
       for (const [savedId, item] of dialogueIdentities) if (item.memoryId === id) dialogueIdentities.delete(savedId);
       const incomingDetailKeys = new Set((memory.details ?? []).map((detail) => detail.key));
@@ -552,27 +657,42 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
             AND NOT EXISTS(SELECT value ->> '$.messageId' FROM json_each(?) EXCEPT SELECT value ->> '$.messageId' FROM json_each(evidence_json)))) LIMIT 1`)
           .get(chatId,id,detail.key,detail.text,detail.text,detail.text,detail.text,JSON.stringify(detail.evidence),JSON.stringify(detail.evidence)) as {id:string}|undefined;
         if (corrected) { refreshDetailFts(db,corrected.id); detailByKey.set(JSON.stringify([memory.key,detail.key]),corrected.id); continue; }
-        const existingDetail = db.prepare("SELECT id FROM memory_details WHERE chat_id=? AND memory_id=? AND detail_key=?").get(chatId, id, detail.key) as { id: string } | undefined;
+        const existingDetail = db.prepare("SELECT id,hidden_from_json,seed_json FROM memory_details WHERE chat_id=? AND memory_id=? AND detail_key=?").get(chatId, id, detail.key) as { id: string; hidden_from_json: string; seed_json: string|null } | undefined;
         const detailId = existingDetail?.id ?? randomUUID();
+        const hiddenFrom = detail.hiddenFrom?.flatMap(name => {
+          const identity = resolveIdentity(name);
+          if (identity.ambiguous || !canonicalNames.has(identity.canonical)) {
+            relationWarnings.push(`memory ${memory.key} detail ${detail.key} hiddenFrom dropped an unknown or ambiguous person: ${name}`);
+            return [];
+          }
+          return [identity.canonical];
+        });
         const ordinals = detail.evidence.map((entry) => evidenceOrdinal(db, chatId, [entry])).filter((value): value is number => value !== null);
-        db.prepare(`INSERT INTO memory_details(id,chat_id,memory_id,detail_key,kind,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal,source_end_ordinal,active,created_revision,created_at,updated_at,role,original_kind,seed_json)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_id,memory_id,detail_key) DO UPDATE SET
+        db.prepare(`INSERT INTO memory_details(id,chat_id,memory_id,detail_key,kind,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal,source_end_ordinal,active,created_revision,created_at,updated_at,role,original_kind,seed_json,hidden_from_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_id,memory_id,detail_key) DO UPDATE SET
             role=excluded.role,original_kind=excluded.original_kind,seed_json=excluded.seed_json,kind=excluded.kind,text=excluded.text,participants_json=excluded.participants_json,known_by_json=excluded.known_by_json,
+            hidden_from_json=excluded.hidden_from_json,
             locations_json=excluded.locations_json,epistemic=excluded.epistemic,salience=excluded.salience,retention_class=excluded.retention_class,
             evidence_json=excluded.evidence_json,source_start_ordinal=excluded.source_start_ordinal,source_end_ordinal=excluded.source_end_ordinal,
             active=1,updated_at=excluded.updated_at`).run(
           detailId, chatId, id, detail.key, detail.kind, detail.text, JSON.stringify(detail.participants), JSON.stringify(detail.knownBy),
           JSON.stringify(detail.locations), detail.epistemic, detail.salience, detail.retention, JSON.stringify(detail.evidence),
-          ordinals.length ? Math.min(...ordinals) : null, ordinals.length ? Math.max(...ordinals) : null, 1, revision, timestamp, timestamp, detail.role ?? "supporting", detail.originalKind ?? null, detail.seed ? JSON.stringify(detail.seed) : null,
+          ordinals.length ? Math.min(...ordinals) : null, ordinals.length ? Math.max(...ordinals) : null, 1, revision, timestamp, timestamp, detail.role ?? "supporting", detail.originalKind ?? null,
+          // Preserve explicit closures; NULL also means the detail never had a seed.
+          existingDetail && ['closed','abandoned'].includes(readStorySeed(existingDetail.seed_json)?.status ?? '')
+            ? existingDetail.seed_json : detail.seed ? JSON.stringify(detail.seed) : null,
+          hiddenFrom === undefined ? (replayAccepted ? existingDetail?.hidden_from_json : undefined) ?? "[]" : JSON.stringify([...new Set(hiddenFrom)]),
         );
         detailByKey.set(JSON.stringify([memory.key, detail.key]), detailId);
-        replaceAccess("detail", detailId, editedAccess("detail", detailId, detail.evidence) ?? detail.access ?? detail.knownBy.map(holder => ({ holder, basis: "witnessed", evidence: detail.evidence, confidence: 1 })));
+        replaceAccess("detail", detailId, editedAccess("detail", detailId, detail.evidence) ?? detail.access ?? (memory.cardShape === 1 ? [] : detail.knownBy.map(holder => ({ holder, basis: "witnessed", evidence: detail.evidence, confidence: 1 }))));
         syncDetailKnownBy(db, chatId, detailId);
         db.prepare("DELETE FROM memory_detail_fts WHERE detail_id=?").run(detailId);
         db.prepare("INSERT INTO memory_detail_fts(detail_id,chat_id,memory_id,text,participants,locations) VALUES(?,?,?,?,?,?)")
           .run(detailId, chatId, id, augmentSearchText(detail.text, result.language), augmentSearchText(detail.participants.join(" "), result.language), augmentSearchText(detail.locations.join(" "), result.language));
       }
-      const traceHolders = memory.knownBy.length > 0
+      const traceHolders = memory.cardShape === 1
+        ? loadPlotKnowers(db, chatId, [{id,card_shape:1,known_by_json:JSON.stringify(detailAccessEdits.get(id) ?? memory.knownBy)}]).get(id)!
+        : memory.knownBy.length > 0
         ? memory.knownBy
         : [...new Set([...memory.participants, ...(memory.witnesses ?? []).map((witness) => witness.name)])];
       for (const holder of traceHolders) {
@@ -602,7 +722,14 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
     }
 
+    const stateLinks = (item: {support?:Array<{memoryKey:string;detailKey:string}>;memoryKey?:string;detailKeys?:string[]}, list:'assertions'|'beliefs'|'promises', index:number) => {
+      const ids=resolveStateDetailLinks(db,chatId,item,memoryByKey);
+      if (ids && !ids.length) appendJobStateDrops(db,sourceJobId,[{path:[list,index],list,point:'R10:stored_detail_links',reason:'Supporting detail is unavailable; state item withheld',candidate:item}]);
+      return ids;
+    };
     for (const assertion of result.assertions) {
+      const linkedDetailIds=stateLinks(assertion,"assertions",result.assertions.indexOf(assertion));
+      if (linkedDetailIds && !linkedDetailIds.length) continue;
       const sourceBatchId = batchFor(assertion.evidence);
       const activeRelations = assertion.socialRelation ? activeSocialRelations(db, chatId) : [];
       const manualScope = assertion.socialRelation
@@ -638,6 +765,10 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
       const socialRelation = resolvedRelation ? JSON.stringify(resolvedRelation) : null;
       const stateKind = assertion.socialRelation ? "condition" : assertion.stateKind ?? "condition";
+      const saveOwnerAccess = (id:string) => {
+        if ((ownerOnlyState || options.storedOwnerOnlyState?.has(ownerOnlyStateKey('assertion', assertion))) && linkedDetailIds === undefined && (stateKind === 'secret' || stateKind === 'goal'))
+          saveOwnerKnowledge('assertion',id,assertion.subject,assertion.evidence,assertion.confidence);
+      };
       const firstEvidenceId = assertion.evidence[0]?.messageId;
       const evidenceMessage = firstEvidenceId
         ? db.prepare("SELECT ordinal FROM messages WHERE chat_id=? AND message_id=?").get(chatId, firstEvidenceId) as { ordinal: number } | undefined
@@ -656,23 +787,32 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         .map((id) => activeAssertions.find((row) => row.id === id && sameSocialRelationScope(row.social_relation_json, assertion.socialRelation)))
         .filter((row): row is typeof activeAssertions[number] => Boolean(row));
       const protectedTargets = (requestedTargets.length ? requestedTargets : matchingCurrent).filter(row => !canAutomaticallyChange(db,chatId,row,assertion.evidence));
-      const compatible = assertion.changeType === "initial" && protectedTargets.every(row=>normalizeLedgerPredicate(row.predicate)!==assertion.predicate && assertion.compatibleWithIds?.includes(row.id));
+      const compatible = compatibleIndependentAssertion({create:assertion.changeType==="initial",targetIds:assertion.targetAssertionIds ?? [],compatibleWithIds:assertion.compatibleWithIds,protectedIds:protectedTargets.map(row=>String(row.id)),candidateIds:activeAssertions.filter(row=>sameSocialRelationScope(row.social_relation_json,assertion.socialRelation)).map(row=>String(row.id))});
       if (!userInitiated && protectedTargets.length && !compatible) {
         db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
           .run(randomUUID(),chatId,"assertion_auto_protected",JSON.stringify(protectedTargets),JSON.stringify(assertion),revision,timestamp);
         continue;
       }
-      // Explicit, non-compatible targets authorize the same transition as update.
-      // Resolve scope and enforce protections above before interpreting this intent.
+      // Reconciliation maps reinforce (including review merge) to initial + targets.
+      // Like beliefs, refresh the saved proposition rather than replacing its history
+      // with a paraphrase. Supersede maps to update and still creates a successor.
       const transitionTargets = requestedTargets.filter(row => assertion.changeType !== "initial" || !assertion.compatibleWithIds?.includes(row.id));
-      const changeType = assertion.changeType === "initial" && transitionTargets.length ? "update" : assertion.changeType;
-      if (current && changeType === "initial" && current.state_kind === stateKind && normalizeLedgerText(current.value) === normalizeLedgerText(assertion.value)) {
-        const evidence = [...JSON.parse(current.evidence_json), ...assertion.evidence].filter((item, index, all) => all.findIndex((candidate) => candidate.messageId === item.messageId && (candidate.quote ?? "") === (item.quote ?? "")) === index);
-        db.prepare("UPDATE assertions SET predicate=?,confidence=MAX(confidence,?),evidence_json=?,social_relation_json=COALESCE(?,social_relation_json) WHERE id=?").run(assertion.predicate, assertion.confidence, JSON.stringify(evidence), socialRelation, current.id);
+      const targetedReinforcement = assertion.changeType === "initial" && transitionTargets.length > 0;
+      const reinforcementTargets = targetedReinforcement ? transitionTargets
+        : current && assertion.changeType === "initial" && current.state_kind === stateKind && normalizeLedgerText(current.value) === normalizeLedgerText(assertion.value) ? [current] : [];
+      if (reinforcementTargets.length) {
+        for (const reinforced of reinforcementTargets) {
+          if (compatible && !canAutomaticallyChange(db,chatId,reinforced,assertion.evidence)) continue;
+          const evidence = mergeStateEvidence(reinforced.evidence_json, assertion.evidence);
+          db.prepare("UPDATE assertions SET predicate=?,confidence=MAX(confidence,?),evidence_json=?,social_relation_json=COALESCE(?,social_relation_json),linked_detail_ids_json=COALESCE(?,linked_detail_ids_json) WHERE id=?")
+            .run(targetedReinforcement ? reinforced.predicate : assertion.predicate, assertion.confidence, JSON.stringify(evidence), socialRelation, JSON.stringify(linkedDetailIds) ?? null, reinforced.id);
+          if (!targetedReinforcement) saveOwnerAccess(reinforced.id);
+        }
         continue;
       }
+      const changeType = assertion.changeType;
       const allowsConcurrentValues = stateKind === "goal" || stateKind === "secret";
-      if (current && changeType === "initial" && !allowsConcurrentValues) {
+      if (current && changeType === "initial" && !allowsConcurrentValues && !compatible) {
         db.prepare(`
           INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at)
           VALUES(?,?,?,?,?,?,?)
@@ -702,23 +842,31 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       );
       const sourceMemoryId = assertion.validFromMemoryKey ? memoryByKey.get(assertion.validFromMemoryKey) ?? null : null;
       db.prepare(`
-        INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,source_batch_id,created_at,social_relation_json)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,source_batch_id,created_at,social_relation_json,linked_detail_ids_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         insertedAssertionId, chatId, assertion.subject, assertion.predicate, assertion.value, stateKind, assertion.confidence,
-        revision, validFromOrdinal, sourceMemoryId, JSON.stringify(transitionSourceEvidence(db,chatId,assertion.evidence)), assertion.retention ?? "arc", sourceBatchId ?? null, timestamp, socialRelation,
+        revision, validFromOrdinal, sourceMemoryId, JSON.stringify(transitionSourceEvidence(db,chatId,assertion.evidence)), assertion.retention ?? "arc", sourceBatchId ?? null, timestamp, socialRelation, JSON.stringify(linkedDetailIds) ?? null,
       );
+      saveOwnerAccess(insertedAssertionId);
     }
 
     for (const belief of result.beliefs) {
+      const linkedDetailIds=stateLinks(belief,"beliefs",result.beliefs.indexOf(belief));
+      if (linkedDetailIds && !linkedDetailIds.length) continue;
+      const saveOwnerAccess = (id:string) => {
+        if ((ownerOnlyState || options.storedOwnerOnlyState?.has(ownerOnlyStateKey('belief', belief))) && linkedDetailIds === undefined) saveOwnerKnowledge('belief',id,belief.holder,belief.evidence,belief.confidence);
+      };
       const sourceBatchId = batchFor(belief.evidence);
-      const userDeleted = (db.prepare(`SELECT predicate,value,polarity FROM beliefs
+      const beliefOrdinal = evidenceOrdinal(db, chatId, belief.evidence);
+      const deletionRows = (db.prepare(`SELECT * FROM beliefs
         WHERE chat_id=? AND holder=? COLLATE NOCASE AND subject=? COLLATE NOCASE
-          AND active=0 AND source LIKE 'user_deleted:%'`).all(chatId, belief.holder, belief.subject) as Array<{ predicate: string; value: string; polarity: string }>).some((row) =>
+          AND (deleted_through_ordinal IS NOT NULL OR active=0 AND source LIKE 'user_deleted:%')`).all(chatId, belief.holder, belief.subject) as Array<Record<string, any>>).filter((row) =>
         normalizeLedgerPredicate(row.predicate) === belief.predicate
         && normalizeLedgerText(row.value) === normalizeLedgerText(belief.value)
         && row.polarity === belief.polarity);
-      if (userDeleted) continue;
+      if (deletionRows.some(row => deletionSuppressesEvidence(row.deleted_through_ordinal, row.active === 0 && row.source?.startsWith('user_deleted:'), beliefOrdinal))) continue;
+      const userDeleted = deletionRows.find(row => row.active === 0 && row.source?.startsWith('user_deleted:'));
       const candidates = db.prepare("SELECT * FROM beliefs WHERE chat_id=? AND holder=? COLLATE NOCASE AND subject=? COLLATE NOCASE AND active=1 AND status='active' ORDER BY created_at DESC")
         .all(chatId, belief.holder, belief.subject) as Array<Record<string, any>>;
       const existing = candidates.find((row) => normalizeLedgerPredicate(row.predicate) === belief.predicate);
@@ -735,12 +883,12 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           .run(randomUUID(),chatId,"belief_auto_protected",JSON.stringify(protectedTargets),JSON.stringify(belief),revision,timestamp);
         continue;
       }
-      if (existing && normalizeLedgerText(existing.value) === normalizeLedgerText(belief.value) && existing.polarity === belief.polarity) {
-        const evidence = [...JSON.parse(existing.evidence_json), ...belief.evidence].filter((item, index, all) => all.findIndex((candidate) => candidate.messageId === item.messageId && (candidate.quote ?? "") === (item.quote ?? "")) === index);
-        db.prepare("UPDATE beliefs SET predicate=?,confidence=MAX(confidence,?),evidence_json=? WHERE id=?").run(belief.predicate, belief.confidence, JSON.stringify(evidence), existing.id);
+      if (belief.action !== "reinforce" && existing && normalizeLedgerText(existing.value) === normalizeLedgerText(belief.value) && existing.polarity === belief.polarity) {
+        const evidence = mergeStateEvidence(existing.evidence_json, belief.evidence);
+        db.prepare("UPDATE beliefs SET predicate=?,confidence=MAX(confidence,?),evidence_json=?,linked_detail_ids_json=COALESCE(?,linked_detail_ids_json) WHERE id=?").run(belief.predicate, belief.confidence, JSON.stringify(evidence), JSON.stringify(linkedDetailIds) ?? null, existing.id);
+        saveOwnerAccess(existing.id);
         continue;
       }
-      const beliefOrdinal = evidenceOrdinal(db, chatId, belief.evidence);
       if ((belief.action === "reinforce" || belief.action === "supersede" || belief.action === "dispute") && !target) {
         db.prepare(`INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)`)
           .run(randomUUID(), chatId, "belief_action_target", JSON.stringify(candidates), JSON.stringify(belief), revision, timestamp);
@@ -748,12 +896,14 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
       if (belief.action === "reinforce" && target) {
         for (const reinforced of requestedTargets.length ? requestedTargets : [target]) {
-          const evidence = [...JSON.parse(reinforced.evidence_json), ...belief.evidence].filter((item, index, all) => all.findIndex((candidate) => candidate.messageId === item.messageId && (candidate.quote ?? "") === (item.quote ?? "")) === index);
-          db.prepare("UPDATE beliefs SET confidence=MAX(confidence,?),evidence_json=? WHERE id=?").run(belief.confidence, JSON.stringify(evidence), reinforced.id);
+          const evidence = mergeStateEvidence(reinforced.evidence_json, belief.evidence);
+          db.prepare("UPDATE beliefs SET confidence=MAX(confidence,?),evidence_json=?,linked_detail_ids_json=COALESCE(?,linked_detail_ids_json) WHERE id=?").run(belief.confidence, JSON.stringify(evidence), JSON.stringify(linkedDetailIds) ?? null, reinforced.id);
+          // Omitted support preserves the saved links and direct/owner grants.
+          // New support replaces the links; its knower set is not unioned.
         }
         continue;
       }
-      const insertedId = randomUUID();
+      const insertedId = userDeleted?.id ?? randomUUID();
       if (belief.action === "supersede" && target) {
         const supersededTargets = requestedTargets.length ? requestedTargets : [target];
         for (const superseded of supersededTargets) db.prepare("UPDATE beliefs SET active=0,status='superseded',superseded_by=?,valid_to_ordinal=?,automatic_closure_evidence_json=? WHERE id=?").run(
@@ -764,23 +914,38 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           .run(userInitiated ? null : transitionEvidenceJson(db,chatId,belief.evidence,{successorId:insertedId,action:'dispute',previousStatus:target.status}),target.id);
       }
       const status = belief.action === "dispute" ? "disputed" : "active";
-      db.prepare(`
-        INSERT INTO beliefs(id,chat_id,holder,subject,predicate,value,polarity,confidence,source,evidence_json,active,status,retention_class,source_batch_id,created_revision,valid_from_ordinal,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?)
+      if (userDeleted) {
+        db.prepare(`UPDATE beliefs SET predicate=?,confidence=?,source=?,evidence_json=?,active=1,status=?,retention_class=?,source_batch_id=?,
+          created_revision=?,valid_from_ordinal=?,valid_to_ordinal=NULL,created_at=?,linked_detail_ids_json=?,user_edit_ordinal=NULL,auto_locked=0,superseded_by=NULL,automatic_closure_evidence_json=NULL WHERE id=?`).run(
+          belief.predicate, belief.confidence, belief.source ?? null, JSON.stringify(belief.evidence), status, belief.retention ?? 'arc', sourceBatchId ?? null,
+          revision, beliefOrdinal, timestamp, JSON.stringify(linkedDetailIds) ?? null, insertedId,
+        );
+      } else db.prepare(`
+        INSERT INTO beliefs(id,chat_id,holder,subject,predicate,value,polarity,confidence,source,evidence_json,active,status,retention_class,source_batch_id,created_revision,valid_from_ordinal,created_at,linked_detail_ids_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)
       `).run(
         insertedId, chatId, belief.holder, belief.subject, belief.predicate, belief.value, belief.polarity,
-        belief.confidence, belief.source ?? null, JSON.stringify(belief.evidence), status, belief.retention ?? "arc", sourceBatchId ?? null, revision, beliefOrdinal, timestamp,
+        belief.confidence, belief.source ?? null, JSON.stringify(belief.evidence), status, belief.retention ?? "arc", sourceBatchId ?? null, revision, beliefOrdinal, timestamp, JSON.stringify(linkedDetailIds) ?? null,
       );
+      saveOwnerAccess(insertedId);
     }
 
     const affectedRelationshipPairs: Array<{ from: string; to: string }> = [];
     const setupFingerprint = (db.prepare("SELECT relationship_setup_fingerprint FROM chats WHERE id=?").get(chatId) as { relationship_setup_fingerprint: string | null } | undefined)?.relationship_setup_fingerprint ?? null;
     for (const baseline of result.relationshipBaselines ?? []) {
+      const knownAxes = RELATIONSHIP_AXES.filter((axis) => baseline[axis] !== "unknown");
+      if (knownAxes.length === 0) {
+        appendJobStateDrops(db, sourceJobId, [{
+          point: "relationship_baseline_all_unknown", disposition: "omitted", list: "relationshipBaselines",
+          path: ["relationshipBaselines", result.relationshipBaselines!.indexOf(baseline)],
+          identity: stateItemIdentity("relationshipBaselines", baseline), candidate: baseline,
+          reason: "No source-supported baseline axis",
+        }]);
+        continue;
+      }
       const existingBaseline = db.prepare("SELECT id,source,active FROM relationship_baselines WHERE chat_id=? AND from_entity=? AND to_entity=?").get(chatId, baseline.from, baseline.to) as { id: string; source: string; active: number } | undefined;
       if (additionsOnly && existingBaseline) continue;
       if (existingBaseline?.active === 1 && existingBaseline.source !== "transcript_unknown") continue;
-      const knownAxes = RELATIONSHIP_AXES.filter((axis) => baseline[axis] !== "unknown");
-      if (knownAxes.length === 0) continue;
       const qualitative = Object.fromEntries(RELATIONSHIP_AXES.map((axis) => [axis, baseline[axis]]));
       if (existingBaseline) db.prepare(`UPDATE relationship_baselines SET qualitative_json=?,known_axes_json=?,reason=?,source=?,source_quote=?,evidence_json=?,setup_fingerprint=?,active=1,created_revision=?,created_at=? WHERE id=?`).run(
         JSON.stringify(qualitative), JSON.stringify(knownAxes), baseline.reason, baseline.source, baseline.sourceQuote ?? null, JSON.stringify(baseline.evidence), baseline.source === "setup" ? setupFingerprint : null, revision, timestamp, existingBaseline.id,
@@ -822,12 +987,15 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       const sourceMemoryId = resolvePhysicalSourceMemoryId(db, chatId, memoryByKey, event.memoryKey, event.evidence);
       let insertedMilestone = false;
       for (const milestoneKey of intimacyMilestoneKeys(event.act)) {
-        const existing = db.prepare(`SELECT id,source_memory_id,source_start_ordinal,active,manual_override,deleted_by_user FROM physical_intimacy_milestones
+        const existing = db.prepare(`SELECT id,source_memory_id,source_start_ordinal,active,manual_override,deleted_by_user,deleted_through_ordinal FROM physical_intimacy_milestones
           WHERE chat_id=? AND participant_a=? AND participant_b=? AND milestone_key=?`).get(chatId, participantA, participantB, milestoneKey) as {
-            id: string; source_memory_id: string | null; source_start_ordinal: number | null; active: number; manual_override: number; deleted_by_user: number;
+            id: string; source_memory_id: string | null; source_start_ordinal: number | null; active: number; manual_override: number; deleted_by_user: number; deleted_through_ordinal: number | null;
           } | undefined;
-        if (existing?.manual_override === 1 || existing?.deleted_by_user === 1) continue;
-        if (additionsOnly && existing) continue;
+        // Keep the boundary after revival too: historical backfill must not
+        // replace the new occurrence with the user's deleted past.
+        if (existing && deletionSuppressesEvidence(existing.deleted_through_ordinal, existing.deleted_by_user === 1, startOrdinal)) continue;
+        if (existing?.deleted_by_user !== 1 && existing?.manual_override === 1) continue;
+        if (additionsOnly && existing && existing.deleted_by_user !== 1) continue;
         const replaceExisting = Boolean(existing) && (existing!.active === 0
           || startOrdinal !== null && (existing!.source_start_ordinal === null || startOrdinal < existing!.source_start_ordinal)
           || startOrdinal === existing!.source_start_ordinal && !existing!.source_memory_id && Boolean(sourceMemoryId));
@@ -835,7 +1003,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         const storedMilestone = existing?.id ?? randomUUID();
         if (existing) {
           db.prepare(`UPDATE physical_intimacy_milestones SET act=?,custom_label=?,initiator=?,interaction_context=?,circumstance=?,evidence_json=?,source_quote=?,
-            source_memory_id=?,source_batch_id=?,source_start_ordinal=?,active=1,deleted_by_user=0,created_revision=?,created_at=? WHERE id=?`).run(
+            source_memory_id=?,source_batch_id=?,source_start_ordinal=?,active=1,manual_override=0,deleted_by_user=0,created_revision=?,created_at=? WHERE id=?`).run(
             event.act, event.customLabel ?? null, event.initiator ?? null, event.interactionContext ?? "ambiguous", event.circumstance ?? null,
             JSON.stringify(event.evidence), event.sourceQuote ?? null, sourceMemoryId, sourceBatchId ?? null, startOrdinal, revision, timestamp, storedMilestone,
           );
@@ -848,7 +1016,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         }
         insertedMilestone = true;
         replaceAccess("physical_milestone", storedMilestone,
-          event.access !== undefined ? event.access : event.participants.map((holder) => ({ holder, basis: "experienced", evidence: event.evidence, confidence: 1 })));
+          editedAccess("physical_milestone", storedMilestone, event.evidence) ?? (event.access !== undefined ? event.access : event.participants.map((holder) => ({ holder, basis: "experienced", evidence: event.evidence, confidence: 1 }))));
       }
       if (insertedMilestone && sourceMemoryId && (!additionsOnly || [...memoryByKey.values()].includes(sourceMemoryId))) {
         const row = db.prepare("SELECT landmark_kinds_json FROM memories WHERE id=?").get(sourceMemoryId) as { landmark_kinds_json: string } | undefined;
@@ -859,42 +1027,86 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     }
 
     for (const promise of result.promises) {
+      const linkedDetailIds=stateLinks(promise,"promises",result.promises.indexOf(promise));
+      if (linkedDetailIds && !linkedDetailIds.length) continue;
       const sourceBatchId = batchFor(promise.evidence ?? []);
-      const existingPromise = db.prepare("SELECT * FROM promises WHERE chat_id=? AND promise_key=?").get(chatId, promise.key) as Record<string,any> | undefined;
+      const existingPromiseRow = db.prepare("SELECT * FROM promises WHERE chat_id=? AND promise_key=?").get(chatId, promise.key) as Record<string,any> | undefined;
+      const existingPromise = existingPromiseRow ? projectPromiseRow(db,chatId,existingPromiseRow) : undefined;
       if (additionsOnly && existingPromise) continue;
       const protectedPromises = (existingPromise ? [existingPromise] : db.prepare("SELECT * FROM promises WHERE chat_id=? AND promisor=? COLLATE NOCASE AND promisee=? COLLATE NOCASE").all(chatId,promise.promisor,promise.promisee) as Array<Record<string,any>>).filter(row=>normalizeLedgerPredicate(row.promise_key) === normalizeLedgerPredicate(promise.key) && !canAutomaticallyChange(db,chatId,row,promise.evidence ?? []));
-      const compatible = !existingPromise && protectedPromises.every(row=>promise.compatibleWithIds?.includes(row.id));
-      if (!userInitiated && protectedPromises.length && !compatible) {
+      if (!userInitiated && protectedPromises.length) {
         db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
           .run(randomUUID(),chatId,"promise_auto_protected",JSON.stringify(protectedPromises),JSON.stringify(promise),revision,timestamp);
         continue;
       }
       const promiseId = existingPromise?.id ?? randomUUID();
+      // Freeze an unlinked event's own scope before a later event replaces the
+      // parent's grants. Linked events continue to read their details dynamically.
+      const previousSupport = existingPromise ? promiseLinkedSupport(db,chatId,promiseId) : undefined;
+      const previousAccess = db.prepare("SELECT holder,basis,evidence_json,confidence FROM item_access WHERE chat_id=? AND item_kind='promise' AND item_id=? AND active=1")
+        .all(chatId,promiseId) as Array<{holder:string;basis:string;evidence_json:string;confidence:number}>;
+      const savedAccess = previousAccess.length ? previousAccess.map(grant=>({...grant,evidence:JSON.parse(grant.evidence_json)}))
+        : [{holder:PENDING_ACCESS_HOLDER,basis:'internal',evidence:promise.evidence ?? [],confidence:1}];
+      for (const legacy of db.prepare(`SELECT id FROM promise_events e WHERE chat_id=? AND promise_id=? AND linked_detail_ids_json IS NULL
+        AND NOT EXISTS(SELECT 1 FROM item_access a WHERE a.chat_id=e.chat_id AND a.item_kind='promise_event' AND a.item_id=e.id)`).all(chatId,promiseId) as {id:string}[])
+        replaceAccess('promise_event',legacy.id,savedAccess);
+      const eventAccess = promise.access ?? (previousSupport
+        ? (previousSupport.holders.length ? previousSupport.holders : [PENDING_ACCESS_HOLDER]).map(holder=>({holder,basis:'internal',evidence:promise.evidence ?? [],confidence:1}))
+        : existingPromise ? savedAccess
+        : [promise.promisor,promise.promisee].map(holder=>({holder,basis:'experienced',evidence:promise.evidence ?? [],confidence:1})));
       const sourceMemoryId = promise.memoryKey ? memoryByKey.get(promise.memoryKey) ?? null : null;
+      // Revoked automatic content is not a baseline for a fresh establishment.
+      // User corrections and locks remain protected by the gate above.
+      const reestablishes = existingPromise?.status === "invalidated" && existingPromise.user_edit_ordinal == null && !existingPromise.auto_locked;
+      const eventEvidence=transitionEvidenceJson(db,chatId,promise.evidence ?? []);
+      const duplicateAmendment=!reestablishes && promise.amendment && promiseContributionChain(db,chatId,promiseId)
+        .some(event=>event.active===1 && event.amendment_text===promise.amendment && event.evidence_json===eventEvidence);
+      const amendmentText = replayAccepted ? options.preserveStoredCardShapes ? promise.storedAmendment ?? null : null
+        : (promise.event==='established'||promise.event==='reinforced') && !duplicateAmendment ? promise.amendment ?? '' : '';
+      // Replay already carries accepted content; never append its amendment again.
+      let content = promise.content;
+      if (existingPromise && !userInitiated && !replayAccepted && !reestablishes) {
+        content = existingPromise.content;
+        if (amendmentText) {
+          content += `\n${amendmentText}`;
+        }
+      }
       db.prepare(`
         INSERT INTO promises(id,chat_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,retention_scope,source_batch_id,updated_revision,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(chat_id,promise_key) DO UPDATE SET
           promisor=excluded.promisor,promisee=excluded.promisee,content=excluded.content,status=excluded.status,
-          scheduled_for=COALESCE(excluded.scheduled_for,promises.scheduled_for),status_reason=excluded.status_reason,
-          source_memory_id=COALESCE(excluded.source_memory_id,promises.source_memory_id),
+          scheduled_for=excluded.scheduled_for,status_reason=excluded.status_reason,
+          source_memory_id=excluded.source_memory_id,
           retention_scope=excluded.retention_scope,
-          source_batch_id=COALESCE(excluded.source_batch_id,promises.source_batch_id),
+          source_batch_id=excluded.source_batch_id,
           updated_revision=excluded.updated_revision
       `).run(
-        promiseId, chatId, promise.key, promise.promisor, promise.promisee, promise.content, promise.status,
-        promise.scheduledFor ?? null, promise.statusReason ?? null, sourceMemoryId, promise.scope ?? "arc", sourceBatchId ?? null, revision, timestamp,
+        promiseId, chatId, promise.key, promise.promisor, promise.promisee, content, promise.status,
+        promise.scheduledFor ?? (!reestablishes ? existingPromise?.scheduled_for : null) ?? null, promise.statusReason ?? null,
+        sourceMemoryId ?? (!reestablishes ? existingPromise?.source_memory_id : null) ?? null, promise.scope ?? "arc",
+        sourceBatchId ?? (!reestablishes ? existingPromise?.source_batch_id : null) ?? null, revision, timestamp,
       );
-      if (!existingPromise || promise.access !== undefined) replaceAccess("promise", promiseId,
-        promise.access !== undefined ? promise.access : [promise.promisor, promise.promisee].map((holder) => ({ holder, basis: "experienced", evidence: promise.evidence ?? [], confidence: 1 })));
+      if (!existingPromise || promise.access !== undefined || detailAccessEdits.has(promiseId)) replaceAccess("promise", promiseId,
+        editedAccess("promise", promiseId, promise.evidence ?? []) ?? (promise.detailKeys !== undefined || promise.support !== undefined ? [] : promise.access !== undefined ? promise.access : [promise.promisor, promise.promisee].map((holder) => ({ holder, basis: "experienced", evidence: promise.evidence ?? [], confidence: 1 }))));
       const sourceOrdinal = evidenceOrdinal(db,chatId,promise.evidence ?? []);
       recordPromiseRecency(db, chatId, promiseId, existingPromise?.status, promise.status, "automatic");
       const eventId = randomUUID();
       const effective=db.prepare("SELECT * FROM promises WHERE id=?").get(promiseId) as Record<string,any>;
-      db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_batch_id,source_ordinal,created_revision,created_at,evidence_json,user_authored) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        eventId, chatId, promiseId, effective.promise_key, effective.promisor, effective.promisee, effective.content, effective.status, effective.scheduled_for, effective.status_reason, effective.source_memory_id, effective.source_batch_id, sourceOrdinal, revision, timestamp, transitionEvidenceJson(db,chatId,promise.evidence ?? []), Number(userInitiated),
+      // Existing open commitments keep their cumulative content, even when an
+      // older response calls an amendment established. Only a fresh baseline
+      // (or its accepted replay) starts a contribution chain.
+      const eventKind = promise.event === 'established' && existingPromise && !reestablishes && !replayAccepted ? 'reinforced'
+        : promise.event ?? (!existingPromise || reestablishes ? 'established' : promise.status === 'open' ? 'reinforced' : promise.status === 'offscreen' ? 'scheduled_passed' : promise.status);
+      db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_batch_id,source_ordinal,created_revision,created_at,evidence_json,user_authored,linked_detail_ids_json,event_kind,amendment_text,scheduled_for_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        eventId, chatId, promiseId, effective.promise_key, effective.promisor, effective.promisee, effective.content, effective.status,
+        effective.scheduled_for, effective.status_reason,
+        amendmentText==null ? effective.source_memory_id : sourceMemoryId, amendmentText==null ? effective.source_batch_id : sourceBatchId ?? null,
+        sourceOrdinal, revision, timestamp, eventEvidence, Number(userInitiated), JSON.stringify(linkedDetailIds) ?? null,eventKind,amendmentText,promise.scheduledFor ?? null,
       );
+      if (linkedDetailIds === undefined) replaceAccess('promise_event',eventId,eventAccess);
       snapshotPromiseRecency(db, eventId, promiseId);
+      rebuildPromiseContent(db,chatId,promiseId);
     }
 
     if (additionsOnly) for (const item of result.socialKnowledge ?? []) {

@@ -64,7 +64,7 @@ export function renderLockHome(input: LockHomeInput): string {
         foot: input.latest.lineHtml ? input.latest.titleHtml : undefined,
         action: "open-timeline-memory", data: { memoryId: input.latest.memoryId },
       })
-      : notification({ tone: "gray", iconName: "film", head: escapeHtml(input.emptyTitle), meta: "", body: "대화가 몇 턴 쌓이면 첫 장면이 도착합니다." }),
+      : notification({ tone: "gray", iconName: "film", head: escapeHtml(input.emptyTitle), meta: "", body: "대화가 몇 턴 쌓이면 첫 장면이 도착해요." }),
     input.overduePromise
       ? notification({
         tone: "orange", iconName: "check", head: "약속", meta: escapeHtml(`${input.overduePromise.when} · 지남`),

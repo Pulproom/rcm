@@ -1,3 +1,4 @@
+import { assertChatUnlocked, assertUpgradeJobWritable, chatUpgradeLock } from './upgrade-lock.js';
 import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { acceptQuizItems, orderStoryMemories, estimateTokens, measureAuxiliaryPrompt, isScene, sceneNumbers, QUIZ_BATCH_SIZE, quizDateLabel, QUIZ_MIX, QUIZ_REFILL_BELOW,
@@ -279,6 +280,7 @@ export function inheritQuizzes(db: RcmDatabase, parent: string, child: string, m
 }
 
 export function disableAllQuizzes(db: RcmDatabase): void {
+  for (const row of db.prepare('SELECT id FROM chats').all() as {id:string}[]) assertChatUnlocked(db,row.id);
   db.transaction(() => {
     db.prepare("UPDATE quiz_state SET enabled=0,updated_at=?").run(now());
     db.prepare("UPDATE jobs SET status='superseded',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE type='quiz' AND status='queued'").run(now());
@@ -312,6 +314,7 @@ export function regenerateQuizzes(db: RcmDatabase, chatId: string): QuizRegenera
 }
 
 export function maybeEnqueueQuiz(db: RcmDatabase, chatId: string): boolean {
+  if (chatUpgradeLock(db,chatId) || db.prepare("SELECT 1 FROM regeneration_runs WHERE shadow_chat_id=? AND mode='upgrade' AND phase=1").get(chatId)) return false;
   return db.transaction(() => {
     if (!auxiliaryModelReady(db) || !quizGenerationEligible(db, chatId)) return false;
     ensureState(db, chatId);
@@ -376,6 +379,11 @@ export function shuffleQuizOptions(item: QuizDraftItem, random: () => number = M
 }
 
 export function nextQuiz(db: RcmDatabase, chatId: string, random: () => number = Math.random): QuizNextResponse {
+  if (chatUpgradeLock(db,chatId)) {
+    const state = quizState(db,chatId);
+    return {enabled:state?.enabled!==0,available:false,remaining:quizStatus(db,chatId).unanswered,generating:false,question:null,
+      stats:{streak:state?.streak??0,bestStreak:state?.best_streak??0,answered:state?.answered??0,correct:state?.correct??0}};
+  }
   if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId)) return {
     enabled: true, available: false, remaining: 0, generating: false, question: null,
     stats: { streak: 0, bestStreak: 0, answered: 0, correct: 0 }, waitingReason: "conversation_too_short",
@@ -596,6 +604,7 @@ export function buildQuizJob(db: RcmDatabase, row: { id: string; chatId: string;
 }
 
 export function completeQuizJob(db: RcmDatabase, jobId: string, workerId: string, result: unknown, random: () => number = Math.random): { chatId: string; accepted: number; warnings: string[] } {
+  assertUpgradeJobWritable(db,jobId);
   return db.transaction(() => {
     const row = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased' AND type='quiz'")
       .get(jobId, workerId) as { chat_id: string; payload_json: string } | undefined;

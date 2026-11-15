@@ -1,4 +1,7 @@
 import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD } from "./chat-work.js";
+import { chatUpgradeLock, assertChatUnlocked, upgradeLockSql } from './upgrade-lock.js';
+import { assertSourceSnapshotAccepted, isSourceSnapshotHeld } from './source-snapshot.js';
+import { jobQueueClassSql, UPGRADE_AGING_MS } from './jobs.js';
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
 import { StateSearchIndex } from "./state-search-index.js";
 import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
@@ -56,6 +59,16 @@ interface TranscriptChunk {
   text: string;
   messageIds: string[];
   ranges: Array<{ messageId: string; canonicalHash: string; start: number; end: number }>;
+}
+
+interface TranscriptSourceLookup {
+  excluded: boolean;
+  evidence: Array<{ rowid: number; memoryId: string }>;
+}
+
+interface TranscriptLookup {
+  messages: Map<string, TranscriptSourceLookup>;
+  chunks: Map<number, { messageIds: string[]; excluded: boolean; memoryIds: string[] }>;
 }
 
 export interface EmbeddingOptions {
@@ -154,7 +167,11 @@ export class EmbeddingService {
   #warming: Promise<void> | null = null;
   #indexSignal?: AbortSignal;
   #indexQueue: Promise<number> = Promise.resolve(0);
+  #pendingIndex: Array<{ chatId: string; queuedAt: number; run: () => Promise<number>; resolve: (value:number) => void; reject: (error:unknown) => void }> = [];
+  #indexDrainQueued = false;
+  #lastUpgradeDequeue = new Map<string,number>();
   #indexRetryAfter = 0;
+  #indexResumeTimer?: ReturnType<typeof setTimeout>;
   #queryRetryAfter = 0;
   #indexError = "";
   #queryError = "";
@@ -190,14 +207,22 @@ export class EmbeddingService {
     if (this.#indexSignal) throw new Error("검색 임베딩 처리 중이에요. 끝나면 다시 시도해 주세요.");
     // Serialize the reset with indexing so it never resets an in-flight attempt.
     const reset = this.#indexQueue.then(() => {
+      assertSourceSnapshotAccepted(this.db,chatId);
       if (isChatWorkHeld(this.db, chatId)) throw new Error(CHAT_WORK_HELD);
       if (!this.ready) throw new Error("검색 임베딩 연결을 먼저 확인해 주세요.");
       const count = this.db.transaction(() => {
+        assertChatUnlocked(this.db,chatId);
         const items = this.db.prepare("DELETE FROM embedding_failures WHERE chat_id=? AND attempts>=?").run(chatId, MAX_ITEM_ATTEMPTS).changes;
         const blocks = this.db.prepare("UPDATE embedding_blocks SET status='queued',attempts=0,last_error=NULL,updated_at=? WHERE chat_id=? AND status='failed'").run(now(), chatId).changes;
         return items + blocks;
       })();
-      if (count) { this.#indexRetryAfter = 0; this.#indexError = ""; }
+      if (count) {
+        this.#indexRetryAfter = 0; this.#indexError = "";
+        clearTimeout(this.#indexResumeTimer); this.#indexResumeTimer = undefined;
+        // The caller resumes this chat; do not strand other chats when it
+        // clears the shared provider backoff ahead of the scheduled wake.
+        if (this.db.prepare("SELECT 1 FROM embedding_blocks WHERE status='queued' AND chat_id<>? LIMIT 1").get(chatId)) this.#scheduleIndexResume();
+      }
       return count;
     });
     this.#indexQueue = reset.then(() => 0, () => 0);
@@ -211,6 +236,7 @@ export class EmbeddingService {
     dimension: number;
     pendingBlocks: number;
     failedBlocks: number;
+    retryAt?: number;
     stateSearch: StateSearchIndex["status"];
     lastError?: string;
   } {
@@ -221,6 +247,7 @@ export class EmbeddingService {
       dimension: this.dimension,
       pendingBlocks: (this.db.prepare("SELECT count(*) AS count FROM embedding_blocks WHERE status='queued'").get() as { count: number }).count,
       failedBlocks: (this.db.prepare("SELECT count(*) AS count FROM embedding_blocks WHERE status='failed'").get() as { count: number }).count,
+      retryAt: this.#indexRetryAfter > Date.now() ? this.#indexRetryAfter : undefined,
       lastError: [this.#indexError, this.#queryError].filter(Boolean).join("; ") || undefined,
       stateSearch: { ...this.stateIndex.status },
     };
@@ -331,11 +358,24 @@ export class EmbeddingService {
     if (lane === "index") {
       this.#indexError = message;
       this.#indexRetryAfter = Date.now() + 5 * 60_000;
+      this.#scheduleIndexResume();
     } else {
       this.#queryError = message;
       this.#queryRetryAfter = Date.now() + 30_000;
     }
     console.warn(`[RCM] Voyage ${lane} backoff; lexical retrieval remains active`, message);
+  }
+
+  /** Backoff belongs to the provider, not to unattempted blocks. Resume all
+   * eligible chats, including work queued after the request that failed. */
+  #scheduleIndexResume(): void {
+    clearTimeout(this.#indexResumeTimer);
+    if (!this.ready) return;
+    this.#indexResumeTimer = setTimeout(() => {
+      this.#indexResumeTimer = undefined;
+      void this.indexPending();
+    }, Math.max(0, this.#indexRetryAfter - Date.now()));
+    this.#indexResumeTimer.unref?.();
   }
 
   #deleteRows(rowids: number[]): void {
@@ -615,7 +655,10 @@ export class EmbeddingService {
         continue;
       }
       const chunks = chunkTranscript(messages);
-      if (chunks.length === 0) continue;
+      if (chunks.length === 0) {
+        this.db.prepare("UPDATE embedding_blocks SET status='stale',updated_at=? WHERE id=?").run(now(), block.id);
+        continue;
+      }
       this.db.prepare("UPDATE embedding_blocks SET attempts=attempts+1,updated_at=? WHERE id=?").run(now(), block.id);
       try {
         const vectors = (await this.#request([chunks.map((chunk) => chunk.text)], "document"))[0]!;
@@ -635,10 +678,8 @@ export class EmbeddingService {
           this.db.prepare("UPDATE embedding_blocks SET attempts=MAX(0,attempts-1) WHERE id=?").run(block.id);
           throw error;
         }
-        const attempts = block.attempts + 1;
-        const status = attempts >= MAX_BLOCK_ATTEMPTS ? "failed" : "queued";
         const message = error instanceof Error ? error.message : String(error);
-        this.db.prepare("UPDATE embedding_blocks SET status=?,last_error=?,updated_at=? WHERE id=?").run(status, message.slice(0, 1000), now(), block.id);
+        this.db.prepare("UPDATE embedding_blocks SET status='failed',last_error=?,updated_at=? WHERE id=?").run(message.slice(0, 1000), now(), block.id);
         this.#recordFailure(error, "index");
         break;
       }
@@ -646,51 +687,143 @@ export class EmbeddingService {
     return { selected: blocks.length, indexed };
   }
 
-  indexPending(chatId?: string): Promise<number> {
-    if (!this.ready || Date.now() < this.#indexRetryAfter) return Promise.resolve(0);
+  /** Choose only between chat heads; requests within a chat keep their order.
+   * A running provider request is never preempted. Resets still serialize on
+   * #indexQueue, just as they did before cross-chat priority was introduced.
+   */
+  #queueIndexChat(chatId: string, run: () => Promise<number>): Promise<number> {
+    const result = new Promise<number>((resolve,reject) => {
+      this.#pendingIndex.push({chatId,queuedAt:now(),run,resolve,reject});
+    });
+    if (!this.#indexDrainQueued) {
+      this.#indexDrainQueued = true;
+      const drain = async () => {
+        try {
+          while (this.#pendingIndex.length) {
+            let selected = 0;
+            if (this.db.prepare(`SELECT 1 FROM chats WHERE ${upgradeLockSql('chats.id')} LIMIT 1`).get()) {
+              const seen = new Set<string>();
+              let best = Infinity;
+              for (const [index,task] of this.#pendingIndex.entries()) {
+                if (seen.has(task.chatId)) continue;
+                seen.add(task.chatId);
+                const upgrade = chatUpgradeLock(this.db,task.chatId);
+                const job = this.db.prepare(`SELECT ${jobQueueClassSql('j')} kind FROM jobs j WHERE j.chat_id=?
+                  AND (j.status IN ('queued','leased') OR EXISTS (
+                    SELECT 1 FROM extraction_batches b JOIN embedding_blocks block
+                      ON block.chat_id=b.chat_id AND block.message_ids_json=b.source_message_ids_json AND block.status='queued'
+                    WHERE b.job_id=j.id))
+                  ORDER BY j.created_at,j.rowid LIMIT 1`).get(task.chatId) as {kind:string}|undefined;
+                const lastProgress = upgrade ? this.#lastUpgradeDequeue.get(upgrade.runId)
+                  ?? (this.db.prepare('SELECT created_at FROM regeneration_runs WHERE id=?').get(upgrade.runId) as {created_at:number}).created_at : 0;
+                const priority = upgrade ? (now()-lastProgress > UPGRADE_AGING_MS ? 0 : 2)
+                  : job?.kind === 'background' ? 2 : 1;
+                if (priority < best || priority === best && task.queuedAt < this.#pendingIndex[selected]!.queuedAt) {
+                  selected=index; best=priority;
+                }
+              }
+            } else this.#lastUpgradeDequeue.clear();
+            const task = this.#pendingIndex.splice(selected,1)[0]!;
+            try { task.resolve(await task.run()); }
+            catch (error) { task.reject(error); }
+          }
+        } finally { this.#indexDrainQueued = false; }
+        return 0;
+      };
+      this.#indexQueue = this.#indexQueue.then(drain,drain);
+    }
+    return result;
+  }
+
+  indexPending(chatId?: string, requireCompletion = false): Promise<number> {
+    if (!this.ready) return Promise.resolve(0);
+    if (Date.now() < this.#indexRetryAfter) {
+      this.#scheduleIndexResume();
+      return Promise.resolve(0);
+    }
     const runChat = async (chatId: string) => {
-      if (Date.now() < this.#indexRetryAfter) return 0;
+      if (Date.now() < this.#indexRetryAfter || isSourceSnapshotHeld(this.db,chatId)) return 0;
       this.#requeueRowIdCollisionBlocks(chatId);
       this.#discardStaleBlocks(chatId);
+      // Recover old interrupted attempts that the selection ceiling excludes.
+      this.db.prepare("UPDATE embedding_blocks SET status='failed',updated_at=? WHERE chat_id=? AND status='queued' AND attempts>=?")
+        .run(now(), chatId, MAX_BLOCK_ATTEMPTS);
       this.#removeInactiveMemoryItems(chatId);
       const memories = await this.#indexMemories(chatId);
-      if (Date.now() < this.#indexRetryAfter) return memories;
+      if (Date.now() < this.#indexRetryAfter || isSourceSnapshotHeld(this.db,chatId)) return memories;
       const details = await this.#indexContextualDetails(chatId);
-      if (Date.now() < this.#indexRetryAfter) return memories + details;
+      if (Date.now() < this.#indexRetryAfter || isSourceSnapshotHeld(this.db,chatId)) return memories + details;
       const spine = await this.#indexStorySpine(chatId);
       let blocks = 0;
       for (let page = 0; page < MAX_BLOCK_PAGES; page += 1) {
-        if (Date.now() < this.#indexRetryAfter) break;
+        if (Date.now() < this.#indexRetryAfter || isSourceSnapshotHeld(this.db,chatId)) break;
         const result = await this.#indexBlocks(chatId);
         blocks += result.indexed;
         if (result.selected < BLOCK_PAGE_SIZE || result.indexed === 0) break;
       }
-      if (Date.now() < this.#indexRetryAfter) return memories + details + spine + blocks;
+      if (Date.now() < this.#indexRetryAfter || isSourceSnapshotHeld(this.db,chatId)) return memories + details + spine + blocks;
       const states = await this.stateIndex.index(chatId, async texts => (await this.#request(texts.map(text => [text]), "document")).map(group => group[0]!), this.#indexSignal);
       this.#indexError = "";
       return memories + details + spine + blocks + states;
     };
-    const run = async () => {
-      let indexed = 0;
-      const chats = chatId ? [{ id: chatId }] : this.db.prepare("SELECT id FROM chats WHERE NOT EXISTS (SELECT 1 FROM chat_work_state held WHERE held.chat_id=chats.id AND held.enabled=0)").all() as Array<{ id: string }>;
-      for (const chat of chats) {
+    const chats = chatId ? [{ id: chatId }] : this.db.prepare("SELECT id FROM chats WHERE NOT EXISTS (SELECT 1 FROM chat_work_state held WHERE held.chat_id=chats.id AND held.enabled=0)").all() as Array<{ id: string }>;
+    const tasks = chats.map(chat => this.#queueIndexChat(chat.id,async () => {
         // Fresh indexes can complete entirely in microtasks. Let health and
         // other sockets run before the next chat without changing work order.
         await yieldToEventLoop();
-        if (isChatWorkHeld(this.db, chat.id)) continue;
+        const upgrade = chatUpgradeLock(this.db,chat.id);
+        // The phase-2 driver owns its bounded attempts. Ordinary warm/resume
+        // calls must not keep spending on a locked or exhausted upgrade.
+        if (isSourceSnapshotHeld(this.db,chat.id) || isChatWorkHeld(this.db, chat.id) || upgrade && (upgrade.phase === 1 || !requireCompletion)) return 0;
+        if (this.db.prepare("SELECT 1 FROM regeneration_runs WHERE shadow_chat_id=? AND mode='upgrade' AND phase=1 AND status NOT IN ('discarded','applied')").get(chat.id)) return 0;
+        // Only an admitted upgrade dequeue consumes its priority interval;
+        // warm requests that skip locked chats must not postpone real work.
+        if (upgrade) this.#lastUpgradeDequeue.set(upgrade.runId,now());
         const scope = beginChatWork(this.db, chat.id);
         this.#indexSignal = scope.controller.signal;
-        try { indexed += await runChat(chat.id); }
-        catch (error) { if (!this.#indexSignal.aborted) throw error; }
-        finally { scope.finish(); this.#indexSignal = undefined; }
-      }
-      return indexed;
-    };
-    this.#indexQueue = this.#indexQueue.then(run, run).catch((error) => {
-      this.#recordFailure(error, "index");
+        try { return await runChat(chat.id); }
+        catch (error) {
+          if (requireCompletion) throw error;
+          if (!this.#indexSignal.aborted) this.#recordFailure(error, "index");
+        }
+        finally {
+          scope.finish(); this.#indexSignal = undefined;
+        }
       return 0;
+    }).catch((error) => {
+      this.#recordFailure(error, "index");
+      if (requireCompletion) throw error;
+      return 0;
+    }));
+    return Promise.all(tasks).then(counts => counts.reduce((sum,count) => sum+count,0));
+  }
+
+  /** Existing serialized queue, including the state-search sidecar. Drain capped
+   * pages to quiescence; a provider backoff/failure is never reported as success.
+   * Participation is frozen on the upgrade run at start, before this is called.
+   */
+  async finishUpgradeIndex(chatId:string): Promise<void> {
+    if (!this.ready) throw new Error('EMBEDDINGS_UNAVAILABLE');
+    // One explicit phase-2 attempt may retry this chat's failed pages. Keep the
+    // reset serialized with provider writes; the run owns the bounded retry count.
+    const reset = this.#indexQueue.catch(()=>0).then(()=>{
+      assertSourceSnapshotAccepted(this.db,chatId);
+      this.db.prepare('DELETE FROM embedding_failures WHERE chat_id=?').run(chatId);
+      this.db.prepare("UPDATE embedding_blocks SET status='queued',attempts=0,last_error=NULL WHERE chat_id=? AND status='failed'").run(chatId);
+      this.#indexError=''; this.#indexRetryAfter=0;
     });
-    return this.#indexQueue;
+    this.#indexQueue=reset.then(()=>0,()=>0);
+    await reset;
+    while (true) {
+      assertSourceSnapshotAccepted(this.db,chatId);
+      const indexed = await this.indexPending(chatId,true);
+      assertSourceSnapshotAccepted(this.db,chatId);
+      if (this.#indexError || Date.now() < this.#indexRetryAfter || this.failedWork(chatId).count) {
+        throw new Error(this.#indexError || this.failedWork(chatId).lastError || 'EMBEDDINGS_INCOMPLETE');
+      }
+      if (isChatWorkHeld(this.db,chatId)) throw new Error(CHAT_WORK_HELD);
+      if (!indexed) { this.stateIndex.assertComplete(chatId); return; }
+    }
   }
 
   removeDetail(id: string): void {
@@ -742,7 +875,7 @@ export class EmbeddingService {
     }
   }
 
-  #searchVector(vector: number[], chatId: string, total: number, limit: number): SemanticSearchResult {
+  #searchVector(vector: number[], chatId: string, total: number, limit: number, lookup: TranscriptLookup): SemanticSearchResult {
     try {
       const stateScores = this.stateIndex.search(chatId, vector);
       const searchUnavailable = !this.stateIndex.status.available || this.stateIndex.status.indexed < this.stateIndex.status.canonical;
@@ -761,6 +894,34 @@ export class EmbeddingService {
       `).all(chatId, ...rows.map((row) => row.rowid)) as Array<{
         rowid: number; item_id: string; kind: "memory" | "memory_detail" | "transcript_chunk" | "story_segment" | "story_arc" | "story_overview"; source_id: string; source_json: string;
       }>;
+      const sourceLookup = lookup.messages;
+      const chunkSources = new Map(mapped.filter(item => item.kind === "transcript_chunk" && !lookup.chunks.has(item.rowid))
+        .map(item => [item.rowid, (JSON.parse(item.source_json) as { messageIds: string[] }).messageIds]));
+      const missingSources = [...new Set([...chunkSources.values()].flat())].filter(id => !sourceLookup.has(id));
+      if (missingSources.length) {
+        // One request-local lookup per message, including empty/excluded results.
+        // Both joins use chat/message keys; the evidence index also covers rowid.
+        const sources = this.db.prepare(`SELECT requested.value AS message_id,COALESCE(m.memory_excluded,0) AS excluded,
+            e.rowid AS evidence_rowid,e.memory_id
+          FROM json_each(?) requested
+          LEFT JOIN messages m ON m.chat_id=? AND m.message_id=requested.value
+          LEFT JOIN evidence_spans e ON e.chat_id=? AND e.message_id=requested.value
+            AND e.memory_id IS NOT NULL AND COALESCE(m.memory_excluded,0)=0`)
+          .all(JSON.stringify(missingSources), chatId, chatId) as Array<{ message_id: string; excluded: number; evidence_rowid: number | null; memory_id: string | null }>;
+        for (const source of sources) {
+          let entry = sourceLookup.get(source.message_id);
+          if (!entry) { entry = { excluded: Boolean(source.excluded), evidence: [] }; sourceLookup.set(source.message_id, entry); }
+          if (source.memory_id !== null) entry.evidence.push({ rowid: source.evidence_rowid!, memoryId: source.memory_id });
+        }
+      }
+      for (const [rowid, messageIds] of chunkSources) {
+        // Preserve the old table scan's first-evidence order, including score
+        // ties, instead of letting a covering index reorder DISTINCT memories.
+        const excluded = messageIds.length === 0 || messageIds.some(id => sourceLookup.get(id)!.excluded);
+        const memoryIds = excluded ? [] : [...new Set(messageIds.flatMap(id => sourceLookup.get(id)!.evidence)
+          .sort((a, b) => a.rowid - b.rowid).map(row => row.memoryId))];
+        lookup.chunks.set(rowid, { messageIds, excluded, memoryIds });
+      }
       const scores = new Map<string, number>();
       const hits = new Map<string, SemanticMemoryHit>();
       const atomHits = new Map<string, SemanticMemoryHit[]>();
@@ -789,15 +950,10 @@ export class EmbeddingService {
           if (memoryId) record(memoryId, score * 1.05, item.kind, item.source_id);
           continue;
         }
-        const { messageIds } = JSON.parse(item.source_json) as { messageIds: string[] };
-        if (messageIds.length === 0 || this.db.prepare(`SELECT 1 FROM messages WHERE chat_id=? AND memory_excluded=1
-          AND message_id IN (SELECT value FROM json_each(?)) LIMIT 1`).get(chatId,JSON.stringify(messageIds))) continue;
+        const { messageIds, excluded, memoryIds } = lookup.chunks.get(item.rowid)!;
+        if (excluded) continue;
         sourceHits.push({ chunkId: item.item_id, messageIds, score });
-        const evidence = this.db.prepare(`
-          SELECT DISTINCT memory_id FROM evidence_spans
-          WHERE chat_id=? AND memory_id IS NOT NULL AND message_id IN (${messageIds.map(() => "?").join(",")})
-        `).all(chatId, ...messageIds) as Array<{ memory_id: string }>;
-        for (const row of evidence) record(row.memory_id, score * 0.9, "transcript_chunk", item.source_id);
+        for (const memoryId of memoryIds) record(memoryId, score * 0.9, "transcript_chunk", item.source_id);
       }
       const limited = new Map([...scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit));
       const limitedStory = new Map([...storyScores.entries()].sort((a, b) => b[1] - a[1]).slice(0, Math.min(24, limit)));
@@ -823,9 +979,10 @@ export class EmbeddingService {
     if (searchable.length === 0) return { scores: new Map(), hits: new Map(), viewScores: signals.map(() => new Map()), storyScores: new Map(), storyHits: new Map() };
     const searchedVectors = await this.#queryVectors(searchable.map(({ signal }) => signal.text), chatId);
     const vectors = new Map(searchable.map((entry, index) => [entry.index, searchedVectors[index]]));
+    const sourceLookup: TranscriptLookup = { messages: new Map(), chunks: new Map() };
     const results = new Map(searchable.flatMap(({ index }) => {
       const vector = vectors.get(index);
-      return vector ? [[index, this.#searchVector(vector, chatId, total, limit)] as const] : [];
+      return vector ? [[index, this.#searchVector(vector, chatId, total, limit, sourceLookup)] as const] : [];
     }));
     const separation = (result: SemanticSearchResult): number => {
       const window = [...result.scores.values()].slice(0, 24);
@@ -928,6 +1085,7 @@ export class EmbeddingService {
     this.#discardStaleBlocks(chatId);
     const total = (this.db.prepare("SELECT count(*) AS count FROM embedding_items WHERE chat_id=?").get(chatId) as { count: number }).count;
     const vectors = await this.#queryVectors(queries, chatId);
-    return queries.map((_query, index) => vectors[index] ? this.#searchVector(vectors[index]!, chatId, total, limit) : { searchUnavailable: true, scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() });
+    const sourceLookup: TranscriptLookup = { messages: new Map(), chunks: new Map() };
+    return queries.map((_query, index) => vectors[index] ? this.#searchVector(vectors[index]!, chatId, total, limit, sourceLookup) : { searchUnavailable: true, scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() });
   }
 }

@@ -40,7 +40,7 @@ export function settingsFailureCode(error: unknown): string | undefined {
   if (value?.status === 429 || /HTTP 429/.test(text)) return "RATE_LIMITED";
   if (value?.kind === "timeout" || value?.name === "TimeoutError" || /AUXILIARY_MODEL_TIMEOUT|timed?\s*out|TIMEOUT/.test(text)) return "TIMEOUT";
   if (value?.kind === "transport" || /MODEL_CONNECTION_FAILED/.test(text)) return "NETWORK_ERROR";
-  if (value?.kind === "json" || /INVALID_REPAIR_SYNTAX|UNCHANGED_INVALID_REPAIR|AUXILIARY_STREAM_UNREADABLE|REPAIR_BUDGET_EXHAUSTED/.test(text)) return "INVALID_RESPONSE";
+  if (value?.kind === "json" || /INVALID_REPAIR_SYNTAX|INVALID_REPAIR_CONTENT|UNCHANGED_INVALID_REPAIR|AUXILIARY_STREAM_UNREADABLE|REPAIR_BUDGET_EXHAUSTED/.test(text)) return "INVALID_RESPONSE";
   if (value?.status === 400 || value?.status === 422) return "AUXILIARY_PROVIDER_REJECTED";
   return undefined;
 }
@@ -153,6 +153,16 @@ export function isPermanentProviderError(error: unknown): boolean {
 }
 
 export interface ProviderFailureMetadata { status?: number; code?: string; finishReason?: string; refusal?: boolean; retryAfterMs?: number }
+
+/** Allowlisted provider accounting fields only; never retain response bodies. */
+export function auxiliaryUsageMetadata(raw: any): Record<string, number> {
+  return Object.fromEntries(Object.entries({
+    promptTokens: raw?.prompt_tokens ?? raw?.input_tokens ?? raw?.promptTokenCount,
+    completionTokens: raw?.completion_tokens ?? raw?.output_tokens ?? raw?.candidatesTokenCount,
+    reasoningTokens: raw?.reasoning_tokens ?? raw?.completion_tokens_details?.reasoning_tokens ?? raw?.thoughtsTokenCount,
+    cachedInputTokens: raw?.cachedContentTokenCount ?? raw?.prompt_tokens_details?.cached_tokens ?? raw?.cached_tokens,
+  }).filter(([, value]) => typeof value === "number" && Number.isFinite(value) && value >= 0)) as Record<string, number>;
+}
 export function providerFailureMetadata(error: unknown): ProviderFailureMetadata {
   const value = error as ProviderFailureMetadata | null;
   return {

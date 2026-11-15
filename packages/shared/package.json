@@ -1,6 +1,6 @@
 {
   "name": "@rcm/shared",
-  "version": "1.0.28",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -16,6 +16,7 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "jsonrepair": "3.15.0",
     "zod": "^4.3.6"
   }
 }

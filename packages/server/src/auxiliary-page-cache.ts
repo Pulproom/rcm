@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, inspectSourceReferences } from "@rcm/shared";
+import { parseReconciliationResult, stateWritingContext, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, StateRecoveryReportSchema, inspectSourceReferences, type StateRecoveryReport } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { isModelContentRejection } from "@rcm/shared";
 import { fingerprintMatches } from "./source-fingerprint.js";
@@ -14,7 +14,16 @@ export function resetRejectedJobCache(db: RcmDatabase, jobId: string, workerId: 
   if (payload.sourceFingerprint?.length && !fingerprintMatches(db, row.chat_id, payload.sourceFingerprint)) return;
   const fields = ["validatedAuxiliaryParts", "risuStageCheckpoints", "validatedExtractionCheckpoint", "validatedPreReconciliationCheckpoint"];
   if (!fields.some(field => payload[field] !== undefined)) return;
-  for (const field of fields) delete payload[field];
+  // A rejected downstream page does not invalidate independently validated
+  // extraction/audit input. Completion rejection can implicate the whole draft.
+  if (payload.pipelineStage === "state_reconciliation") {
+    if (payload.validatedAuxiliaryParts) for (const [key, page] of Object.entries(payload.validatedAuxiliaryParts)) {
+      if ((page as { purpose?: string }).purpose === "reconciliation") delete payload.validatedAuxiliaryParts[key];
+    }
+  } else if (payload.pipelineStage === "post_extraction_audit") {
+    delete payload.validatedPreReconciliationCheckpoint;
+    if (payload.risuStageCheckpoints) delete payload.risuStageCheckpoints.audit;
+  } else for (const field of fields) delete payload[field];
   payload.cacheResetDiagnostic = { reason: "model_content_rejected", count: (payload.cacheResetDiagnostic?.count ?? 0) + 1 };
   db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner=?")
     .run(JSON.stringify(payload), Date.now(), jobId, workerId);
@@ -35,7 +44,7 @@ function validatePage(purpose: CachedAuxiliaryPurpose, userPrompt: string, input
     return parsed;
   }
   if (purpose === "reconciliation") {
-    const parsed = ReconciliationResultSchema.parse(input);
+    const parsed = parseReconciliationResult(input,undefined,stateWritingContext(userPrompt));
     const stateInput = supplied as typeof supplied & {eventDraft?:unknown;priorLedger?:Array<{id:string;immutable:boolean}>};
     if (stateInput.eventDraft) {
       if (!parsed.state) throw new Error("State extraction page requires state");
@@ -43,7 +52,9 @@ function validatePage(purpose: CachedAuxiliaryPurpose, userPrompt: string, input
       const refs = parsed.decisions.map(item=>item.itemRef);
       if(refs.length!==expected.size || new Set(refs).size!==expected.size || refs.some(ref=>!expected.has(ref)))throw new Error("State decisions must cover every observation exactly once");
       const allowed = new Map((stateInput.priorLedger??[]).map(item=>[item.id,item]));
-      if(parsed.decisions.some(d=>d.targetIds.some(id=>!allowed.has(id)||allowed.get(id)!.immutable)))throw new Error("State target is outside the supplied mutable ledger");
+      // Immutable targets are retained as proposals for item-level review at
+      // completion. Caching never authorizes their mutation.
+      if(parsed.decisions.some(d=>d.targetIds.some(id=>!allowed.has(id))))throw new Error("State target is outside the supplied ledger");
       return parsed;
     }
     const expected = new Set(supplied.items?.map((item) => item.itemRef) ?? []);
@@ -78,8 +89,13 @@ export function cachedAuxiliaryPage(payload: Record<string, any>, purpose: Cache
   try { return validatePage(purpose, userPrompt, candidate); } catch { return undefined; }
 }
 
+export function cachedAuxiliaryStateRecovery(payload: Record<string, any>, systemPrompt: string, userPrompt: string): StateRecoveryReport | undefined {
+  const report=payload.validatedAuxiliaryParts?.[auxiliaryPageKey("reconciliation",systemPrompt,userPrompt)]?.stateRecovery;
+  return report===undefined ? undefined : StateRecoveryReportSchema.parse(report);
+}
+
 export function storeValidatedAuxiliaryPage(db: RcmDatabase, jobId: string, workerId: string | undefined, input: {
-  purpose: CachedAuxiliaryPurpose; systemPrompt: string; userPrompt: string; result: unknown;
+  purpose: CachedAuxiliaryPurpose; systemPrompt: string; userPrompt: string; result: unknown; stateRecovery?: unknown;
 }): string {
   const row = (workerId
     ? db.prepare("SELECT payload_json FROM jobs WHERE id=? AND status='leased' AND lease_owner=?").get(jobId, workerId)
@@ -89,6 +105,7 @@ export function storeValidatedAuxiliaryPage(db: RcmDatabase, jobId: string, work
   const planned = (payload.auxiliaryPromptParts ?? []) as Array<{ purpose: string; systemPrompt: string; userPrompt: string }>;
   if (!planned.some((part) => part.purpose === input.purpose && part.systemPrompt === input.systemPrompt && part.userPrompt === input.userPrompt)) throw new Error("Auxiliary page does not match the server-planned prompt");
   const result = validatePage(input.purpose, input.userPrompt, input.result);
+  const stateRecovery=input.stateRecovery===undefined ? undefined : StateRecoveryReportSchema.parse(input.stateRecovery);
   if (input.purpose === "reconciliation" && (result as any).state) {
     const messages=db.prepare(`SELECT message_id AS id,canonical_content AS content,canonical_hash AS canonicalHash FROM messages
       WHERE chat_id=(SELECT chat_id FROM jobs WHERE id=?) AND message_id IN (SELECT value FROM json_each(?))
@@ -97,7 +114,7 @@ export function storeValidatedAuxiliaryPage(db: RcmDatabase, jobId: string, work
     if(inspectSourceReferences((result as any).state,messages).some(issue=>issue.blocking))throw new Error("State page contains unverified current source evidence");
   }
   const key = auxiliaryPageKey(input.purpose, input.systemPrompt, input.userPrompt);
-  payload.validatedAuxiliaryParts = { ...(payload.validatedAuxiliaryParts ?? {}), [key]: { purpose: input.purpose, result, validatedAt: Date.now() } };
+  payload.validatedAuxiliaryParts = { ...(payload.validatedAuxiliaryParts ?? {}), [key]: { purpose: input.purpose, result, ...(stateRecovery ? {stateRecovery} : {}), validatedAt: Date.now() } };
   if (workerId) db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner=?")
     .run(JSON.stringify(payload), Date.now(), jobId, workerId);
   else db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner IS NOT NULL")

@@ -6,6 +6,7 @@ import type { RuntimeState, TranslationDisplay, TranslationProvider } from "./ty
 import type { MemoryLanguage } from "@rcm/shared";
 import { ServerClient } from "./api-client.js";
 import { addLog, isChatMemoryEnabled } from "./settings.js";
+import { retryAfterMs } from "./server-errors.js";
 
 const chatTranslationGeneration = new Map<string, number>();
 export function invalidateChatTranslations(chatId: string): void {
@@ -29,8 +30,7 @@ async function translationCurrent(state: RuntimeState, chatIds: string[], curren
 
 const GOOGLE_URL_BYTE_LIMIT = 6_000;
 const GOOGLE_431_RETRY_BYTE_LIMIT = 3_000;
-const GOOGLE_COOLDOWN_MS = 60_000;
-const GOOGLE_RATE_LIMIT_ERROR = "Google 번역 HTTP 429";
+const TRANSLATION_COOLDOWN_MS = 60_000;
 
 const escapeDisplayText = (value: string): string => value
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -54,14 +54,31 @@ export interface TranslationResult extends TranslationSource { translated: strin
 interface Prepared { source: TranslationSource; sourceHash: string; key: string }
 
 let googleSlots = 0;
-let googleCooldownUntil = 0;
+let cooldownUntil = 0;
+const failureBursts = new WeakMap<RuntimeState, number>();
 const googleWaiters: Array<() => void> = [];
 let risuBusy = false;
 const risuWaiters: Array<() => void> = [];
 let aggregatePending = 0;
 
-export function googleTranslationCooldownMs(): number {
-  return Math.max(0, googleCooldownUntil - Date.now());
+export function translationCooldownMs(): number {
+  return Math.max(0, cooldownUntil - Date.now());
+}
+function checkCooldown(): void {
+  if (translationCooldownMs()) throw new TranslationError("RATE_LIMITED", "");
+  cooldownUntil = 0;
+}
+function translationFailure(state: RuntimeState, error: unknown, label = "Reference translation failed"): string {
+  if (settingsFailureCode(error) === "RATE_LIMITED") {
+    // A locally blocked request must not extend the provider's cooldown.
+    if (!translationCooldownMs()) cooldownUntil = Date.now() + ((error as { retryAfterMs?: number })?.retryAfterMs ?? TRANSLATION_COOLDOWN_MS);
+  }
+  const message = settingsFailureMessage(error, "translation");
+  if ((failureBursts.get(state) ?? 0) <= Date.now()) {
+    addLog(state.logs, "warn", `${label}: ${sanitizeDiagnosticText(message, [state.settings.serverToken])}`);
+  }
+  failureBursts.set(state, Math.max(cooldownUntil, Date.now() + TRANSLATION_COOLDOWN_MS));
+  return message;
 }
 
 const clientFor = (state: RuntimeState): ServerClient => new ServerClient(() => state.settings);
@@ -80,7 +97,7 @@ async function prepare(records: TranslationSource[]): Promise<Prepared[]> {
 }
 
 async function withGoogleSlot<T>(task: () => Promise<T>): Promise<T> {
-  if (googleTranslationCooldownMs()) throw new Error(GOOGLE_RATE_LIMIT_ERROR);
+  checkCooldown();
   if (googleSlots >= 2) await new Promise<void>((resolve) => googleWaiters.push(resolve));
   googleSlots += 1;
   try { return await task(); } finally { googleSlots -= 1; googleWaiters.shift()?.(); }
@@ -91,7 +108,7 @@ async function withRisuSlot<T>(task: () => Promise<T>): Promise<T> {
   try { return await task(); } finally { risuBusy = false; risuWaiters.shift()?.(); }
 }
 function googleText(payload: unknown): string {
-  if (!Array.isArray(payload) || !Array.isArray(payload[0])) throw new Error("Google 번역 응답 형식을 읽지 못했습니다.");
+  if (!Array.isArray(payload) || !Array.isArray(payload[0])) throw new Error("Google 번역 응답 형식을 읽지 못했어요.");
   return payload[0].map((segment) => Array.isArray(segment) && typeof segment[0] === "string" ? segment[0] : "").join("");
 }
 function googleTranslationUrl(text: string, sourceLanguage: MemoryLanguage): string {
@@ -116,7 +133,7 @@ export function splitGoogleTranslationText(text: string, sourceLanguage: MemoryL
       if (encodedBytes(googleTranslationUrl(candidate, sourceLanguage)) <= maxUrlBytes) { fit = middle; low = middle + 1; }
       else high = middle - 1;
     }
-    if (!fit) throw new Error("Google 번역 요청 한도를 맞출 수 없습니다.");
+    if (!fit) throw new Error("Google 번역 요청 한도를 맞출 수 없어요.");
     let end = offset + fit;
     if (end < points.length) {
       const minimumNaturalBreak = offset + Math.floor(fit * 0.7);
@@ -132,17 +149,14 @@ export function splitGoogleTranslationText(text: string, sourceLanguage: MemoryL
 
 async function requestGoogleTranslation(chunk: string, sourceLanguage: MemoryLanguage, retry431 = true): Promise<string> {
   // Check after acquiring a slot, including queued requests and smaller 431 parts.
-  if (googleTranslationCooldownMs()) throw new Error(GOOGLE_RATE_LIMIT_ERROR);
+  checkCooldown();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
     const response = await risuai.nativeFetch(googleTranslationUrl(chunk, sourceLanguage), { method: "GET", signal: controller.signal });
     if (response.status === 429) {
-      const retryAfterSeconds = Number(response.headers.get("Retry-After"));
-      const cooldownMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 && retryAfterSeconds <= 3_600
-        ? retryAfterSeconds * 1_000 : GOOGLE_COOLDOWN_MS;
-      googleCooldownUntil = Math.max(googleCooldownUntil, Date.now() + cooldownMs);
-      throw new Error(GOOGLE_RATE_LIMIT_ERROR);
+      cooldownUntil = Math.max(cooldownUntil, Date.now() + (retryAfterMs(response.headers.get("Retry-After")) ?? TRANSLATION_COOLDOWN_MS));
+      throw new TranslationError("RATE_LIMITED", "");
     }
     if (response.status === 431 && retry431) {
       const smaller = splitGoogleTranslationText(chunk, sourceLanguage, GOOGLE_431_RETRY_BYTE_LIMIT);
@@ -172,6 +186,7 @@ async function translateGoogle(text: string, sourceLanguage: MemoryLanguage, isC
 export const translationOutputBudget = (state: RuntimeState) => state.settings.translationProvider === "server" ? state.settings.translationServerMaxOutput : state.settings.translationMaxOutput;
 export const backgroundTranslationEnabled = (state: RuntimeState) => state.settings.translationProvider === "google" || state.settings.translationBackground;
 export async function callTranslationBatch(state: RuntimeState, items: import("@rcm/shared").TranslationPart[], provider = state.settings.translationProvider, background = false, chatId = state.current?.chatId) {
+  checkCooldown();
   const stats = state.translationStats ??= { calls: 0, items: 0 };
   stats.calls += 1;
   state.translationBackgroundRunning = background;
@@ -184,11 +199,11 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
       }, TRANSLATION_TIMEOUT_MS + 5000);
       const { config } = await clientFor(state).request<{ config: { relaxAuxiliaryCensorship?: boolean } }>("/v1/admin/server-llm");
       const response = await runRisuModel(state, { messages: withAuxiliaryStoryFraming([{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items }) }], config.relaxAuxiliaryCensorship === true), ...risuModelSlot(state.settings.translationSlot, state.settings.translationModel) });
-      if (response?.type !== "success" || typeof response.result !== "string") throw new TranslationError("MODEL_CONNECTION_FAILED", String(response?.result || "Risu 번역 모델 호출 실패"));
+      if (response?.type !== "success" || typeof response.result !== "string") throw new TranslationError(settingsFailureCode(response) ?? settingsFailureCode(response?.result) ?? "MODEL_CONNECTION_FAILED", "");
       return { items: validateTranslation(response.result, items, response.finish_reason ?? response.finishReason), usage: response.usage ?? response.usageMetadata, model: state.settings.translationSlot === "static" ? state.settings.translationModel : state.settings.translationSlot };
     };
     // Risu's shared call deadline also owns stream cancellation and call-ID cleanup.
-    const result = provider === "server" ? await Promise.race([call(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TranslationError("TIMEOUT", "참고 번역 호출이 120초를 넘었습니다.")), TRANSLATION_TIMEOUT_MS); })]) : await call();
+    const result = provider === "server" ? await Promise.race([call(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TranslationError("TIMEOUT", "참고 번역 호출이 120초를 넘었어요.")), TRANSLATION_TIMEOUT_MS); })]) : await call();
     stats.lastError = undefined;
     const usage = result.usage;
     const input = usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.promptTokenCount;
@@ -197,10 +212,9 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
     if (typeof total === "number" && Number.isFinite(total)) stats.tokens = (stats.tokens ?? 0) + total;
     return result;
   } catch (error) {
-    const code = (error as { code?: string })?.code ?? "MODEL_CONNECTION_FAILED";
-    const detail = settingsFailureMessage(error, "translation");
+    const code = settingsFailureCode(error) ?? (error as { code?: string })?.code ?? "MODEL_CONNECTION_FAILED";
+    const detail = translationFailure(state, error);
     stats.lastError = `${code}: ${detail}`;
-    addLog(state.logs, "warn", `Reference translation failed: ${stats.lastError}`);
     throw new TranslationError(code, detail);
   } finally {
     if (timer) clearTimeout(timer);
@@ -211,6 +225,7 @@ export async function callTranslationBatch(state: RuntimeState, items: import("@
 async function translateRisuBatch(state: RuntimeState, records: Pick<TranslationSource, "text">[], provider: TranslationProvider, isCurrent: () => boolean, background: boolean, completed: (index: number, text: string, model: string) => Promise<void>, chatId = state.current?.chatId): Promise<{ translated: Map<string, string>; model: string }> {
   return withRisuSlot(async () => {
     if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
+    checkCooldown();
     if(provider === "server") {
       const {config}=await clientFor(state).request<{config:import("@rcm/shared").TranslationConnectionPublicConfig}>("/v1/admin/translation/initialize", {
         method:"POST",body:JSON.stringify({model:state.settings.translationServerModel,temperature:state.settings.translationTemperature,thinking:state.settings.translationThinking,maxOutput:state.settings.translationServerMaxOutput}),
@@ -269,8 +284,7 @@ export async function translatePacket(state: RuntimeState, packet: string, sourc
     return translated;
   } catch (error) {
     const code = (error as { code?: string })?.code ?? (provider === "google" ? "GOOGLE_TRANSLATION_FAILED" : "MODEL_CONNECTION_FAILED");
-    const detail = settingsFailureMessage(error, "translation");
-    addLog(state.logs, "warn", `Packet translation failed: ${code}: ${detail}`);
+    const detail = translationFailure(state, error, `Packet translation failed: ${code}`);
     throw new TranslationError(code, detail);
   }
 }
@@ -306,7 +320,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
     let batchError: string | undefined;
     let model = "";
     const fail = (item: Prepared, error: unknown) => {
-      const message = settingsFailureMessage(error, "translation");
+      const message = translationFailure(state, error);
       batchError ??= message;
       results.set(item.key, { ...item.source, translated: item.source.text, cached: false, error: message });
     };
@@ -328,7 +342,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
         const translated = response.translated; model = response.model;
         for (const [index, item] of missing.entries()) {
           const value = translated.get(String(index));
-          if (!value) throw new Error(`번역 결과에서 ${item.source.itemId} 항목이 빠졌습니다.`);
+          if (!value) throw new Error(`번역 결과에서 ${item.source.itemId} 항목이 빠졌어요.`);
           fresh.set(item.key, value);
         }
       } catch (error) {
@@ -348,12 +362,10 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
     }
     if (provider !== "google" && state.translationStats) state.translationStats.items += cacheItems.length;
     changeActivity(state, -pendingStarted, batchError); pendingStarted = 0;
-    if (batchError) addLog(state.logs, "warn", `Reference translation failed: ${sanitizeDiagnosticText(batchError ?? "cache request failed", [state.settings.serverToken])}`);
     return prepared.map((item) => results.get(item.key) ?? { ...item.source, translated: item.source.text, cached: false });
   } catch (error) {
-    const message = settingsFailureMessage(error, "translation");
+    const message = translationFailure(state, error);
     changeActivity(state, pendingStarted ? -pendingStarted : 0, message);
-    addLog(state.logs, "warn", `Reference translation failed: ${sanitizeDiagnosticText(message, [state.settings.serverToken])}`);
     return records.map((source) => ({ ...source, translated: source.text, cached: false, error: message }));
   }
 }
@@ -366,20 +378,57 @@ function releaseTranslation(): void {
   else translationBusy = false;
 }
 
-/** Screen requests take the next slot before background batches. */
-export async function translateRecords(state: RuntimeState, records: TranslationSource[], provider?: TranslationProvider): Promise<TranslationResult[]> {
-  const current = await translationCurrent(state, [...new Set(records.map(record => record.chatId))], () => true);
+type ScreenRequest = {
+  records: TranslationSource[];
+  current: Promise<() => boolean>;
+  resolve: (results: TranslationResult[]) => void;
+  reject: (error: unknown) => void;
+};
+const screenBatches = new WeakMap<RuntimeState, Map<string, ScreenRequest[]>>();
+const sourceIdentity = (source: TranslationSource) => JSON.stringify([source.serverInstanceId, source.chatId, source.kind, source.itemId, source.text, source.sourceLanguage]);
+
+async function runScreenBatch(state: RuntimeState, requests: ScreenRequest[], provider?: TranslationProvider): Promise<void> {
+  const current = await Promise.all(requests.map(request => request.current));
   if (translationBusy) await new Promise<void>(resolve => screenTranslationWaiters.push(resolve));
   else translationBusy = true;
-  // An explicit provider is a one-off override; normal screen work resolves it after waiting.
-  try { return await translateRecordsUnlocked(state, records, provider ?? state.settings.translationProvider, current); }
+  try {
+    const active = current.filter(check => check());
+    const records = [...new Map(requests.filter((_, index) => current[index]!()).flatMap(request => request.records).map(record => [sourceIdentity(record), record])).values()];
+    const results = await translateRecordsUnlocked(state, records, provider ?? state.settings.translationProvider, () => active.every(check => check()));
+    const bySource = new Map(results.map(result => [sourceIdentity(result), result]));
+    requests.forEach((request, index) => request.resolve(current[index]!() ? request.records.flatMap(record => bySource.has(sourceIdentity(record)) ? [bySource.get(sourceIdentity(record))!] : []) : []));
+  } catch (error) { requests.forEach(request => request.reject(error)); }
   finally { releaseTranslation(); }
+}
+
+/** Coalesce one view's same-tick rows, deduplicate sources, and take priority over prefetch. */
+export async function translateRecords(state: RuntimeState, records: TranslationSource[], provider?: TranslationProvider): Promise<TranslationResult[]> {
+  if (!records.length) return [];
+  changeActivity(state, records.length);
+  let failure: string | undefined;
+  try {
+    const current = translationCurrent(state, [...new Set(records.map(record => record.chatId))], () => true);
+    let batches = screenBatches.get(state);
+    if (!batches) screenBatches.set(state, batches = new Map());
+    // Never merge independent chat scopes or explicit provider overrides.
+    const key = JSON.stringify([provider, [...new Set(records.map(record => record.chatId))].sort()]);
+    let batch = batches.get(key);
+    if (!batch) {
+      batches.set(key, batch = []);
+      const pending = batch;
+      queueMicrotask(() => { batches.delete(key); void runScreenBatch(state, pending, provider); });
+    }
+    const results = await new Promise<TranslationResult[]>((resolve, reject) => batch.push({ records, current, resolve, reject }));
+    failure = results.find(result => result.error)?.error;
+    return results;
+  } finally { changeActivity(state, -records.length, failure); }
 }
 
 /** Google keeps its bounded prefetch; LLM modes pack all pending sources by output budget. */
 export async function prefetchTranslationRecords(state: RuntimeState, records: TranslationSource[], isCurrent: () => boolean): Promise<TranslationSource[]> {
   const provider = state.settings.translationProvider;
   if (!backgroundTranslationEnabled(state)) return [];
+  if (translationCooldownMs()) return records;
   if (provider !== "google") {
     if (translationBusy) return records;
     translationBusy = true;
@@ -393,14 +442,14 @@ export async function prefetchTranslationRecords(state: RuntimeState, records: T
   let translated = 0;
   for (let offset = 0; offset < records.length && translated < 24; offset += 128) {
     if (!current()) return [];
-    if (translationBusy || provider === "google" && googleTranslationCooldownMs()) return records.slice(offset);
+    if (translationBusy || translationCooldownMs()) return records.slice(offset);
     const candidates = records.slice(offset, offset + 128).filter(record => record.sourceLanguage !== "ko");
     const cached = await readCachedTranslations(state, candidates, provider);
     const cachedKeys = new Set(cached.map(record => JSON.stringify([record.kind, record.itemId, record.text])));
     const missing = candidates.filter(record => !cachedKeys.has(JSON.stringify([record.kind, record.itemId, record.text])));
     for (let index = 0; index < missing.length && translated < 24; index += 2) {
       if (!current()) return [];
-      if (translationBusy || provider === "google" && googleTranslationCooldownMs()) return [...missing.slice(index), ...records.slice(offset + 128)];
+      if (translationBusy || translationCooldownMs()) return [...missing.slice(index), ...records.slice(offset + 128)];
       translationBusy = true;
       try {
         const batch = missing.slice(index, index + Math.min(2, 24 - translated));

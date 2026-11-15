@@ -1,3 +1,7 @@
+import { escapeMemoryText, escapeMemoryAttribute as xml } from "@rcm/shared";
+import { sourceTurnMembership } from './turn-clock.js';
+import { NARRATOR_ARCHIVE_HOLDER, PENDING_ACCESS_HOLDER } from "./item-access.js";
+import type { RetrievalAudience } from "./retrieval.js";
 import { createHash } from "node:crypto";
 import { estimateTokens, memoryEvidenceKind, normalizeSearchTokens, validSourcePassageAccess, type SourcePassage } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
@@ -8,7 +12,6 @@ import { deletionGuard } from "./user-deletions.js";
 import { buildEntityIdentityResolver, normalizeEntityName } from "./entities.js";
 
 const normalized = (value: string) => value.normalize("NFKC").trim().toLocaleLowerCase();
-const xml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 const SOURCE_RECOVERY_SEMANTIC_THRESHOLD = 0.72;
 
 export function presentationOnlySourcePassage(value: string): boolean {
@@ -71,7 +74,11 @@ export function storeSourcePassages(db: RcmDatabase, chatId: string, passages: S
     // Ambiguous quotes must be re-submitted with sufficient source context.
     if (start < 0 || row.canonical_content.slice(start, start + passage.quote.length) !== passage.quote
       || (passage.startOffset === undefined && row.canonical_content.indexOf(passage.quote, start + 1) >= 0)) continue;
-    const grants = validSourcePassageAccess(passage, sources, passage.access).filter(grant => {
+    // Reuse the internal narrator marker so an explicit empty scope stays
+    // distinct from invalid/revoked grants, including after backup and lineage.
+    const declaredAccess = passage.access.length ? passage.access : [{ holder: NARRATOR_ARCHIVE_HOLDER,
+      basis: "internal" as const, confidence: 1, evidence: [{ messageId: passage.messageId, quote: passage.quote }] }];
+    const grants = validSourcePassageAccess(passage, sources, declaredAccess).filter(grant => {
       const holder = resolve(grant.holder);
       return holder.ambiguous || !deleted("entity", holder.variants.map(normalizeEntityName), grant.evidence.length ? grant.evidence : [{ messageId: passage.messageId }]);
     });
@@ -91,7 +98,7 @@ export interface SourceEvidenceItem {
 }
 export function renderSourceEvidence(items: SourceEvidenceItem[]): string {
   if (!items.length) return "";
-  return `<source_evidence>${items.map((item) => `<source_excerpt${item.holders.length ? ` known_by="${xml(item.holders.join(", "))}"` : ' narrator_only="true"'}${item.speaker ? ` speaker="${xml(item.speaker)}"` : ""} basis="${memoryEvidenceKind(item.epistemic)}">${xml(item.quote)}</source_excerpt>`).join("\n")}</source_evidence>`;
+  return `<source_evidence>${items.map((item) => `<source_excerpt${item.holders.length ? ` known_by="${xml(item.holders.join(", "))}"` : ' narrator_only="true"'}${item.speaker ? ` speaker="${xml(item.speaker)}"` : ""} basis="${memoryEvidenceKind(item.epistemic)}">${escapeMemoryText(item.quote)}</source_excerpt>`).join("\n")}</source_evidence>`;
 }
 export const sourceEvidenceAtomKey = (item: { id: string; quote: string }) => memoryAtomKey("source", item.id, item.quote);
 
@@ -121,6 +128,8 @@ function recoveryCovered(candidate: SourceRecoveryCandidate, content: string, ha
 
 /** One bounded recovery attempt per unchanged processed source, using the existing audit queue. */
 export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates: Array<string | SourceRecoveryCandidate>, query = "", deliveredEvidence: DeliveredSourceEvidence[] = []): number {
+  if (!candidates.length) return 0;
+  let turns:ReturnType<typeof sourceTurnMembership>|undefined;
   for (const candidate of candidates) {
     const messageId = typeof candidate === "string" ? candidate : candidate.messageId;
     const row = db.prepare(`SELECT m.ordinal,m.canonical_hash,m.canonical_content,m.role,c.include_user_messages,c.memory_language FROM messages m JOIN chats c ON c.id=m.chat_id
@@ -129,15 +138,22 @@ export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates:
     if (!row || (row.role === "user" && row.include_user_messages === 0)) continue;
     if (recoveryCovered(typeof candidate === "string" ? { messageId, matchKinds: [], matchedPhrases: [] } : candidate,
       row.canonical_content, row.canonical_hash, deliveredEvidence)) continue;
-    const id = `source-recovery:${createHash("sha256").update(`${chatId}\0${messageId}\0${row.canonical_hash}`).digest("hex")}`;
+    turns ??= sourceTurnMembership(db,chatId);
+    const turn=turns.find(turn=>turn.some(source=>source.message_id===messageId));
+    const response=turn?.at(-1);
+    if (!response || !['done','encapsulated'].includes(response.extraction_state)) continue;
+    const ids=turn!.filter(source=>source.role==='assistant' || row.include_user_messages!==0 && !['skipped_policy','excluded_episode'].includes(source.extraction_state)).map(source=>source.message_id);
+    const fingerprint=sourceFingerprint(db,chatId,ids);
+    const responseHash=fingerprint.find(source=>source.messageId===response.message_id)!.contentHash;
+    const id = `source-recovery:${createHash("sha256").update(`${chatId}\0${response.message_id}\0${responseHash}`).digest("hex")}`;
     const sourceRecoveryContext = typeof candidate === "string" ? undefined : {
       ...(query.trim() ? { query: query.trim().slice(0, 2000) } : {}),
       matchKinds: candidate.matchKinds,
       matchedPhrases: candidate.matchedPhrases.slice(0, 8),
     };
-    const payload = { sourceMessageIds: [messageId], sourceFingerprint: sourceFingerprint(db, chatId, [messageId]), sourceRecoveryContext,
+    const payload = { sourceMessageIds: ids, sourceFingerprint: fingerprint, sourceRecoveryContext,
       sourceRecoveryMetadata: { targets: [{ messageId, ordinal: row.ordinal }], matchKinds: typeof candidate === "string" ? [] : candidate.matchKinds },
-      sourceRecovery: true, trigger: 'source_recovery', postExtractionReview: true, auditDraft: { language: row.memory_language, entities: [], memories: [], stateObservations: [] } };
+      sourceRecovery: true, selectDefaultContracts: true, trigger: 'source_recovery', postExtractionReview: true, auditDraft: { language: row.memory_language, entities: [], memories: [], stateObservations: [] } };
     const added = db.prepare(`INSERT OR IGNORE INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at)
       VALUES(?,?,'audit_retry','queued',?,0,?,?)`).run(id, chatId, JSON.stringify(payload), Date.now(), Date.now()).changes;
     if (added) return 1;
@@ -146,7 +162,7 @@ export function queueSourceRecovery(db: RcmDatabase, chatId: string, candidates:
 }
 
 export function retrieveSourceEvidence(db: RcmDatabase, chatId: string, query: string, perspectives: string[], tokenBudget: number,
-  promptIds: string[] = [], semantic: SemanticSourceHit[] = [], coveredQuotes: string[] = [], excludedAtoms: string[] = [], accept: (quote: string) => boolean = () => true, ranking?: {rank:(quote:string)=>number; maxItems:number; budgetRatio:number}): { items: SourceEvidenceItem[]; xml: string; tokens: number; unresolvedMessageIds: string[]; recoveryCandidates: SourceRecoveryCandidate[] } {
+  promptIds: string[] = [], semantic: SemanticSourceHit[] = [], coveredQuotes: string[] = [], excludedAtoms: string[] = [], accept: (quote: string) => boolean = () => true, ranking?: {rank:(quote:string)=>number; maxItems:number; budgetRatio:number}, audience?: RetrievalAudience): { items: SourceEvidenceItem[]; xml: string; tokens: number; unresolvedMessageIds: string[]; recoveryCandidates: SourceRecoveryCandidate[] } {
   const tokens = normalizeSearchTokens(query).slice(0, 48);
   const recoveryPhrases = exactRecoveryPhrases(query);
   const queryFts = tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" OR ");
@@ -192,11 +208,14 @@ export function retrieveSourceEvidence(db: RcmDatabase, chatId: string, query: s
           AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).get(chatId, id) as { canonical_content: string } | undefined;
         if (support?.canonical_content) sources.set(id, support.canonical_content);
       }
-      const grants = validSourcePassageAccess({ messageId }, sources, storedGrants);
+      const grants = storedGrants.some(grant => grant.holder === PENDING_ACCESS_HOLDER)
+        ? [] : validSourcePassageAccess({ messageId }, sources, storedGrants);
       if (grants.length) hasValidAccess = true;
       else if (strongSemantic || matchedPhrases.some((phrase) => normalized(row.quote).replace(/[^\p{L}\p{N}]+/gu, " ").includes(phrase))) invalidRelevantAccess = true;
-      const holders = grants.map((grant) => grant.holder).filter((holder) => active.has(normalized(holder)));
-      if (!holders.length || row.canonical_content.slice(row.start_offset, row.end_offset) !== row.quote || coveredQuotes.some((quote) => quote.includes(row.quote))) continue;
+      const author = audience?.kind === "author";
+      const holders = grants.map((grant) => grant.holder).filter(holder => holder !== NARRATOR_ARCHIVE_HOLDER)
+        .filter(holder => author || active.has(normalized(holder)));
+      if (!(author ? grants.length : holders.length) || row.canonical_content.slice(row.start_offset, row.end_offset) !== row.quote || coveredQuotes.some((quote) => quote.includes(row.quote))) continue;
       const overlap = tokens.filter((token) => normalizeSearchTokens(row.quote).includes(token)).length;
       const contextual = semantic.some((hit) => hit.messageIds.includes(messageId) && Boolean((db.prepare("SELECT content FROM embedding_items WHERE item_id=? AND chat_id=?")
         .get(hit.chunkId, chatId) as { content: string } | undefined)?.content.includes(row.quote)));

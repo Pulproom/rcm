@@ -1,5 +1,7 @@
-import type { ChatLineageStatus } from "@rcm/shared";
+import { CHAT_WORK_HELD_MESSAGE, type ChatLineageStatus } from "@rcm/shared";
+import { CACHE_KEY, saveStoredJson, isChatMemoryEnabled } from '../settings.js';
 import type { ServerClient } from "../api-client.js";
+import { upgradeErrorReason } from "../server-errors.js";
 import type { DashboardData, Tab, confirmDashboard } from "../dashboard.js";
 import type { InitialCalibrationActivity, RuntimeState } from "../types.js";
 import { currentLineageOperation } from "../lineage-settings.js";
@@ -8,6 +10,7 @@ import { setupEntryLoading, REREAD_NOTICE_HTML, setupSourcesPage } from "./setup
 import type { PeopleController } from "./people-actions.js";
 
 export interface DashboardSetupPicker extends SetupPicker {
+  upgrade?: {backup:boolean};
   rebuild?: { expectedSourceMessages?: number; extractionReviewOverride: boolean };
 }
 
@@ -20,7 +23,7 @@ export interface SetupViewState {
 
 export const createSetupView = (): SetupViewState => ({ loading: false, openChecked: new Set() });
 /** The empty placeholder starts as "unseeded"; trust setup only after the server answered. */
-export const setupPendingIn = (data: DashboardData): boolean => Boolean(data.loadedDatasets?.includes("initialCalibration")) && setupPickerNeeded(data.initialCalibration?.status, data.lineage);
+export const setupPendingIn = (data: DashboardData, probe?: RuntimeState["lineageProbe"]): boolean => Boolean(data.loadedDatasets?.includes("initialCalibration")) && setupPickerNeeded(data.initialCalibration?.status, data.lineage, probe);
 
 type InitialSetupAction = "initial-confirm" | "initial-skip" | "save-initial-entity" | "add-initial-entity" | "delete-initial-entity" | "save-initial-relationship";
 export function isInitialSetupAction(action: string | undefined): action is InitialSetupAction {
@@ -28,6 +31,7 @@ export function isInitialSetupAction(action: string | undefined): action is Init
 }
 
 export interface SetupActionHost {
+  syncSources(chatId: string): Promise<void>;
   getData(): DashboardData;
   getActiveTab(): Tab;
   setActiveTab(tab: "initial" | "overview"): void;
@@ -39,6 +43,7 @@ export interface SetupActionHost {
 }
 
 export interface SetupController {
+  openUpgrade(backup:boolean): Promise<void>;
   open(action: "open-setup-sources" | "initial-retry", target: HTMLElement): Promise<void>;
   loadPicker(chatId: string): Promise<void>;
   handlePickerAction(action: string, target: HTMLElement): Promise<void>;
@@ -54,12 +59,25 @@ export interface SetupController {
 export function createSetupController(setupView: SetupViewState, root: HTMLElement, state: RuntimeState,
   client: Pick<ServerClient, "request">, host: SetupActionHost): SetupController {
   const { render } = host;
+  const assertUpgradeEnabled = () => {
+    if (!state.current || !isChatMemoryEnabled(state.settings,state.current.chatId,state.current.characterId) || host.getData().upgrade?.workEnabled === false)
+      throw Object.assign(new Error(CHAT_WORK_HELD_MESSAGE),{code:'CHAT_WORK_OFF'});
+  };
   return {
+    async openUpgrade(backup) {
+      const chatId = state.current?.chatId;
+      if (!chatId || currentLineageOperation(state)) return;
+      assertUpgradeEnabled();
+      const picker = await loadSetupPicker(state,chatId);
+      if (state.current?.chatId !== chatId) return;
+      setupView.picker = {...picker,upgrade:{backup}};
+      host.setActiveTab('initial'); host.clearEditor(); render(false);
+    },
     async open(action, target) {
       if (currentLineageOperation(state)) return;
       if (!state.current || setupView.loading || setupView.confirming) return;
       if (["choice_required", "ambiguous"].includes(host.getData().lineage?.status ?? "")) return;
-      if (action === "open-setup-sources" && !setupPendingIn(host.getData())) return;
+      if (action === "open-setup-sources" && !setupPendingIn(host.getData(), state.lineageProbe)) return;
       if (action === "initial-retry" && ["ready", "inherited", "skipped"].includes(host.getData().initialCalibration?.status ?? "")
         && !await host.confirm("", false, { title: "초기 설정 다시 읽기", bodyHtml: REREAD_NOTICE_HTML, confirm: "재료 고르기", cancel: "취소", className: "reread-dialog" })) return;
       setupView.loading = true;
@@ -98,6 +116,21 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
         if (action === "setup-skip" && ["ready", "inherited", "skipped"].includes(host.getData().initialCalibration?.status)) { setupView.picker = undefined; render(); return; }
         view.busy = true; view.error = undefined; render();
         try {
+          if (view.upgrade) {
+            if (action !== 'setup-submit') throw new Error('새 버전으로 다시 만들려면 초기 설정 자료를 선택해 주세요.');
+            if ((await readSetupHost()).chatId !== view.chatId) throw new Error('Risu에서 이 채팅을 다시 열고 재료를 선택해 주세요.');
+            const resolvedSetup = await selectedSetupProjection(view);
+            if (!resolvedSetup) throw new Error('읽을 재료를 하나 이상 골라 주세요.');
+            assertUpgradeEnabled();
+            await host.syncSources(view.chatId);
+            state.automaticTurnPacket=undefined; state.lastInjection=undefined;
+            delete state.cache[view.chatId];
+            void saveStoredJson(CACHE_KEY,state.cache).catch(()=>undefined);
+            await client.request(`/v1/chats/${encodeURIComponent(view.chatId)}/upgrade`,{method:'POST',body:JSON.stringify({backup:view.upgrade.backup,resolvedSetup,identityHints:state.current.identityHints})},120_000);
+            setupView.picker = undefined;
+            host.setActiveTab('overview'); host.drainWorker(); await host.refresh();
+            return;
+          }
           const lineage = await client.request<ChatLineageStatus>(`/v1/chats/${encodeURIComponent(view.chatId)}/lineage`);
           if (["choice_required", "ambiguous"].includes(lineage.status) || (lineage.status === "inherited" && !view.reread)) {
             setupView.picker = undefined;
@@ -108,6 +141,7 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
           const projection = action === "setup-submit" ? await selectedSetupProjection(view) : undefined;
           if (action === "setup-submit" && !projection) throw new Error("읽을 재료를 하나 이상 골라 주세요.");
           const rebuilding = action === "setup-submit" && view.rebuild;
+          await host.syncSources(view.chatId);
           const result = await client.request<{ calibration: InitialCalibrationActivity }>(`/v1/chats/${encodeURIComponent(view.chatId)}/${rebuilding ? "reprocess" : `initial-calibration/${action === "setup-submit" ? "retry" : "skip"}`}`, {
             method: "POST", ...(projection ? { body: JSON.stringify({
               ...(rebuilding ? { ...rebuilding, activatePendingMemoryLanguage: true } : {}),
@@ -122,7 +156,9 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
           host.drainWorker();
           await host.refresh();
         } catch (error) {
-          view.error = error instanceof Error ? error.message : "설정을 읽지 못했어요. 다시 시도해 주세요.";
+          view.error = view.upgrade && (error as { code?: string }).code
+            ? upgradeErrorReason((error as { code?: string }).code)
+            : error instanceof Error ? error.message : "설정을 읽지 못했어요. 다시 시도해 주세요.";
         }
         finally { view.busy = false; }
       }
@@ -151,11 +187,12 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
         if (currentLineageOperation(state) || setupView.confirming) return;
         setupView.confirming = action;
         render(false);
-        const chatId = state.current?.chatId;
+        const chatId = decodeURIComponent(chat);
         try {
           if (action === "initial-skip" && !await host.confirm(host.getData().initialCalibration?.status === "failed"
-            ? "초기 분석 없이 원문 기억 생성을 계속할까요? 이름과 별칭은 나중에 인물 설정에서 직접 추가할 수 있습니다."
+            ? "초기 분석 없이 원문 기억 생성을 계속할까요? 이름과 별칭은 나중에 인물 설정에서 직접 추가할 수 있어요."
             : "분석된 초기 이름·관계축을 사용하지 않고 원문 기억 생성을 시작할까요?")) return;
+          await host.syncSources(chatId);
           const result = await client.request<{ calibration: InitialCalibrationActivity }>(`/v1/chats/${chat}/initial-calibration/${action === "initial-confirm" ? "confirm" : "skip"}`, { method: "POST" }, 120_000);
           if (state.current?.chatId !== chatId) return;
           state.statusSummary = {
@@ -189,7 +226,7 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
       const result = await client.request<{ ok: boolean }>(`/v1/chats/${chat}/initial-calibration/relationships/${encodeURIComponent(initialBaselineId)}`, {
         method: "PATCH", body: JSON.stringify({ axes, summary }),
       });
-      if (!result.ok) throw new Error("초기 관계를 저장하지 못했습니다.");
+      if (!result.ok) throw new Error("초기 관계를 저장하지 못했어요.");
     },
     handleSearch(input) {
       if (!input.hasAttribute("data-setup-search") || !setupView.picker) return false;

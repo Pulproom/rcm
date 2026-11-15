@@ -1,6 +1,7 @@
+import type { IncidentFeed } from './toasts.js';
 import type { QuizAnswerRequest, SourceReferenceIssue } from "@rcm/shared";
 import { PickerSetupProjectionSchema, RCM_API_REVISION, RCM_PLUGIN_VERSION, TurnPrepareResponseSchema, structuredValidationDiagnostic, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type QuizAnswerResponse, type QuizNextResponse, type QuizStats, type QuizStatus, type QuizRegenerateResponse, type ReconciliationSubmission, type ServerWorkerStatus, type TurnPrepareRequest, type TurnPrepareResponse } from "@rcm/shared";
-import { ServerConnectionError, ServerRequestError, isHostFetchSyntaxError, safeErrorText, type ServerErrorContext } from "./server-errors.js";
+import { ServerConnectionError, ServerRequestError, isHostFetchSyntaxError, safeErrorText, retryAfterMs, type ServerErrorContext } from "./server-errors.js";
 export { ServerConnectionError, ServerRequestError } from "./server-errors.js";
 import type { PluginSettings } from "./types.js";
 
@@ -44,6 +45,19 @@ export type ChatViewPreferences = {
 
 export type ChatViewPreferencesPatch = Partial<ChatViewPreferences>;
 
+export type UpgradeLock = { runId: string; phase: 1 | 2; done: number; total: number };
+export type UpgradeStatus = {
+  workEnabled?: boolean;
+  summary: { totalMemories: number; legacyMemories: number; visibleTotalMemories: number; visibleLegacyMemories: number; legacyBatchIds: string[]; rebuiltContract: string | null; currentContract: string };
+  preview?: { turns: number; memories: number; legacyMemories: number; estimatedCalls: number; blockedReason?: 'SOURCE_MISSING' | 'SETUP_UNAVAILABLE' | 'BUSY' | 'ALREADY_CURRENT' };
+  lock?: UpgradeLock | null;
+  lastRun?: { runId: string; phase: 1 | 2; status: string; error?: string; memories?: number };
+  dismissed: boolean;
+};
+export class UpgradeBlockedError extends Error {
+  constructor(readonly lock: UpgradeLock) { super('CHAT_UPGRADING'); }
+}
+
 export type SocialKnowledgeApiItem = {
   derived?: "mutual_interaction";
   derivedFrom?: string;
@@ -65,9 +79,9 @@ export type SocialKnowledgeApiItem = {
 declare const __RCM_DISTRIBUTION__: boolean;
 
 export type SocialRelationApiItem = import("@rcm/shared").SocialRelation & { knownBy: string[]; knownByEveryone: boolean };
-export type MemoryDetailAccessPatch = { holders: string[]; everyone: boolean; bases: Record<string, import("@rcm/shared").ItemAccessBasis> };
+export type MemoryDetailAccessPatch = { holders: string[]; everyone: boolean; bases: Record<string, import("@rcm/shared").ItemAccessBasis>; speaker?: string };
 
-export type MemoryDetailAccessResponse = { ok: boolean; access: import("@rcm/shared").MemoryDetailAccess; knownBy: string[] };
+export type MemoryDetailAccessResponse = { ok: boolean; access: import("@rcm/shared").MemoryDetailAccess; knownBy: string[]; speaker?: string };
 export type MemoryDetailApiItem = import("@rcm/shared").MemoryContextItem["details"][number] & {
   userEdited?: boolean;
   hidden?: boolean;
@@ -110,7 +124,20 @@ export function cachedSourceReceipt(settings: PluginSettings, chatId: string): S
 }
 
 export class ServerClient {
+  onIncidentFeed?: (feed: Partial<IncidentFeed>, serverUrl: string, requestedCursor?: number) => Promise<void>;
   constructor(private readonly settings: () => PluginSettings) {}
+
+  getUpgrade(chatId: string): Promise<UpgradeStatus> { return this.request(`/v1/chats/${encodeURIComponent(chatId)}/upgrade`); }
+  startUpgrade(chatId: string, body: {backup: boolean; resolvedSetup: import('@rcm/shared').ResolvedSetupProjection; identityHints: Record<string,unknown>}): Promise<{runId:string;shadowChatId:string;queuedJobs:number}> {
+    return this.request(`/v1/chats/${encodeURIComponent(chatId)}/upgrade`,{method:'POST',body:JSON.stringify(body)},120_000);
+  }
+  cancelUpgrade(chatId: string, runId: string): Promise<{ok:true}> { return this.request(`/v1/chats/${encodeURIComponent(chatId)}/upgrade/${encodeURIComponent(runId)}/cancel`,{method:'POST'}); }
+  resumeUpgrade(chatId: string, runId: string): Promise<{ok:true}> { return this.request(`/v1/chats/${encodeURIComponent(chatId)}/upgrade/${encodeURIComponent(runId)}/resume`,{method:'POST'}); }
+  retryUpgradeFinish(chatId: string, runId: string): Promise<{accepted:true}> { return this.request(`/v1/chats/${encodeURIComponent(chatId)}/upgrade/${encodeURIComponent(runId)}/finish-retry`,{method:'POST'}); }
+  dismissUpgrade(chatId: string): Promise<{ok:true}> { return this.request(`/v1/chats/${encodeURIComponent(chatId)}/upgrade/dismiss`,{method:'POST'}); }
+
+  /** Append API/read paths without discarding a configured reverse-proxy base path. */
+  url(path: string): string { return `${this.settings().serverUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`; }
 
   async request<T>(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<T> {
     const startedAt = performance.now();
@@ -238,7 +265,7 @@ export class ServerClient {
 
   async raw(path: string, init: RequestInit = {}, timeoutMs: number | null = DEFAULT_SERVER_REQUEST_TIMEOUT_MS, timings?: PrepareClientTimings): Promise<Response> {
     // Every setup sender shares this network boundary; raw captures never reach fetch.
-    if (typeof init.body === "string" && init.body.includes('"resolvedSetup":') && (path === "/v1/turn/prepare" || /\/initial-calibration\/retry$|\/reprocess$/u.test(path))) {
+    if (typeof init.body === "string" && init.body.includes('"resolvedSetup":') && (path === "/v1/turn/prepare" || /\/initial-calibration\/retry$|\/reprocess$|\/upgrade$/u.test(path))) {
       const body = JSON.parse(init.body) as { resolvedSetup?: unknown };
       if (body.resolvedSetup !== undefined && !PickerSetupProjectionSchema.safeParse(body.resolvedSetup).success)
         throw new Error("설정 재료를 선택 화면에서 골라 주세요. 요청 캡처는 전송할 수 없어요.");
@@ -263,14 +290,13 @@ export class ServerClient {
     }, timeoutMs);
     try {
       const method = (init.method ?? "GET").toUpperCase();
-      const serverUrl = settings.serverUrl.replace(/\/$/, "");
       const override = context.methodOverride !== undefined;
       const body = init.body ?? (override || ["POST", "PUT"].includes(method) ? "{}" : undefined);
       // Frozen recovery protocol: released API90 servers reject either plugin
       // header on revision mismatch. Keep these authenticated requests unversioned.
       const recoveryRequest = method === "GET" && ["/v1/health", "/v1/update/status"].includes(path.split("?")[0]!)
         || method === "POST" && ["/v1/update/stage", "/v1/update/apply"].includes(path);
-      const response = await Promise.race([risuai.nativeFetch(`${serverUrl}${path}`, {
+      const response = await Promise.race([risuai.nativeFetch(this.url(path), {
         ...init,
         method: context.method,
         ...(body === undefined ? {} : { body }),
@@ -295,10 +321,12 @@ export class ServerClient {
         let serverSummary: string | undefined;
         let code: string | undefined;
         let expectedApiRevision: number | undefined;
+        let revision: number | undefined;
         let rejectedItems: ServerRequestError['rejectedItems'];
         try {
-          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string; expectedApiRevision?: number; rejectedItems?: unknown };
+          const parsed = JSON.parse(detail) as { summary?: string; code?: string; error?: unknown; existingId?: string; expectedApiRevision?: number; rejectedItems?: unknown; revision?: number };
           code = typeof parsed.code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(parsed.code) ? parsed.code : undefined;
+          if (code === "ALBUM_REVISION_CONFLICT" && Number.isSafeInteger(parsed.revision) && Number(parsed.revision) > 0) revision = parsed.revision;
           if (Array.isArray(parsed.rejectedItems)) rejectedItems = parsed.rejectedItems.filter(item => item && typeof item.id === 'string' && typeof item.reason === 'string');
           if (Number.isInteger(parsed.expectedApiRevision) && Number(parsed.expectedApiRevision) > 0) expectedApiRevision = parsed.expectedApiRevision;
           const summary = typeof parsed.summary === "string" ? parsed.summary.trim().slice(0, 240) : "";
@@ -307,7 +335,7 @@ export class ServerClient {
           readable = [summary, reason && !summary.includes(reason) ? reason : "", parsed.code ? `(${parsed.code})` : "", parsed.existingId ? `existingId=${parsed.existingId}` : ""].filter(Boolean).join(" ");
         } catch { /* Unstructured response bodies are not reportable diagnostics. */ }
         readable = safeErrorText(readable, [settings.serverToken, typeof init.body === "string" ? init.body : ""]);
-        throw new ServerRequestError(`Server request failed: ${method} ${context.path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code, expectedApiRevision, rejectedItems, finishContext(), serverSummary);
+        throw new ServerRequestError(`Server request failed: ${method} ${context.path} returned ${response.status}${readable ? `: ${readable}` : ""}`, response.status, code, expectedApiRevision, rejectedItems, finishContext(), serverSummary, retryAfterMs(response.headers.get("Retry-After")), revision);
       }
       return response;
     } catch (error) {
@@ -334,6 +362,9 @@ export class ServerClient {
     const serialized = JSON.stringify(body);
     if (timings) timings.serializeMs = performance.now() - startedAt;
     const response = await this.request<unknown>("/v1/turn/prepare", { method: "POST", body: serialized, signal }, timeoutMs, timings);
+    if (response && typeof response === 'object' && 'blocked' in response && response.blocked === true && 'reason' in response && response.reason === 'CHAT_UPGRADING' && 'lock' in response) {
+      throw new UpgradeBlockedError(response.lock as UpgradeLock);
+    }
     const schemaStartedAt = performance.now();
     const parsed = TurnPrepareResponseSchema.safeParse(response);
     if (timings) timings.schemaMs = performance.now() - schemaStartedAt;
@@ -343,7 +374,7 @@ export class ServerClient {
     }
     if (parsed.data.apiRevision !== RCM_API_REVISION) {
       if (timings) timings.schemaStage = "failed";
-      throw new Error(`RCM API 버전이 맞지 않습니다: 플러그인 ${RCM_API_REVISION}, 서버 ${parsed.data.apiRevision}. 서버와 플러그인을 함께 업데이트해 주세요.`);
+      throw new Error(`RCM API 버전이 맞지 않아요: 플러그인 ${RCM_API_REVISION}, 서버 ${parsed.data.apiRevision}. 서버와 플러그인을 함께 업데이트해 주세요.`);
     }
     if (timings) timings.schemaStage = "parsed";
     return parsed.data;
@@ -354,6 +385,8 @@ export class ServerClient {
       && ["fresh", "reused"].includes(String(event.prepareOutcome))) {
       await this.request("/v1/turn/delivery", { method: "POST", body: JSON.stringify({
         chatId: event.chatId, memoryIds: (event.manifest as { memoryIds?: unknown } | undefined)?.memoryIds,
+        atomKeys: (event.manifest as { atomKeys?: unknown } | undefined)?.atomKeys, receiptId: event.id,
+        longtermMemoryIds: (event.manifest as { longtermMemoryIds?: unknown } | undefined)?.longtermMemoryIds,
       }) }, 2_000);
     }
     if (event.receiptOnly === true) return;
@@ -363,7 +396,7 @@ export class ServerClient {
 
   async lease(workerId: string, modelSettingsFingerprint?:string): Promise<LeasedJob | null> {
     const result = await this.request<{ job: LeasedJob | null }>("/v1/jobs/lease", {
-      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
+      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled, capabilities:{stateExtractionV2:true,stateWritingFormat:true,eventWritingFormat:true,eventWritingFormatE1e:true,eventWritingFormatE1f:true,stateWritingFormatR10:true,stateWritingFormatR11:true} }),
     });
     return result.job;
   }
@@ -372,8 +405,8 @@ export class ServerClient {
     return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/validated-stage`,{method:'POST',body:JSON.stringify({workerId,stage,inputHash,result})});
   }
 
-  validatedAuxiliaryPart(jobId: string, workerId: string, purpose: "initial_calibration" | "ledger_consistency" | "reconciliation", part: { systemPrompt: string; userPrompt: string }, result: unknown): Promise<{ ok: boolean }> {
-    return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/validated-auxiliary-part`, { method: "POST", body: JSON.stringify({ workerId, purpose, systemPrompt: part.systemPrompt, userPrompt: part.userPrompt, result }) });
+  validatedAuxiliaryPart(jobId: string, workerId: string, purpose: "initial_calibration" | "ledger_consistency" | "reconciliation", part: { systemPrompt: string; userPrompt: string; stateRecovery?: import("@rcm/shared").StateRecoveryReport }, result: unknown): Promise<{ ok: boolean }> {
+    return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/validated-auxiliary-part`, { method: "POST", body: JSON.stringify({ workerId, purpose, systemPrompt: part.systemPrompt, userPrompt: part.userPrompt, result, stateRecovery:part.stateRecovery }) });
   }
 
   stageDraft(jobId: string, workerId: string, output: string, storyValidationReason?: string): Promise<{ ok: boolean }> {
@@ -384,15 +417,18 @@ export class ServerClient {
     return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/renew`, { method: "POST", body: JSON.stringify({ workerId }) });
   }
 
-  prepareReconciliation(jobId: string, workerId: string, result: unknown, audit?: ExtractionAuditSubmission): Promise<{ required: boolean; candidateSetHash?: string; systemPrompt?: string; userPrompt?: string; parts?: Array<{ systemPrompt: string; userPrompt: string; stateExtraction?: boolean; sourceUnits?: import("@rcm/shared").SourceUnit[]; cachedResult?: unknown }>; groundingDraft?: any; evidenceIssues?: SourceReferenceIssue[] }> {
-    return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/reconciliation/prepare`, {
+  async prepareReconciliation(jobId: string, workerId: string, result: unknown, audit?: ExtractionAuditSubmission): Promise<{ required: boolean; stateFieldRecovery?: boolean; candidateSetHash?: string; reviewExemptItemRefs?: string[]; systemPrompt?: string; userPrompt?: string; parts?: Array<{ reviewExemptItemRefs?: string[]; systemPrompt: string; userPrompt: string; stateExtraction?: boolean; sourceUnits?: import("@rcm/shared").SourceUnit[]; cachedResult?: unknown; cachedStateRecovery?: import("@rcm/shared").StateRecoveryReport }>; groundingDraft?: any; evidenceIssues?: SourceReferenceIssue[] }> {
+    const prepared=await this.request<Awaited<ReturnType<ServerClient["prepareReconciliation"]>>>(`/v1/jobs/${encodeURIComponent(jobId)}/reconciliation/prepare`, {
       method: "POST", body: JSON.stringify({ workerId, result, audit }),
     });
+    // An absent health advertisement is the legacy contract. Do not infer
+    // accounting support from a matching API revision or response shape.
+    return {...prepared,stateFieldRecovery:serverSummaries.get(this.settings().serverUrl.replace(/\/$/,""))?.capabilities?.stateFieldRecovery===true};
   }
 
-  progress(jobId: string, workerId: string, stage: "first_extraction" | "post_extraction_audit" | "state_reconciliation" | "ledger_consistency" | "relationship_projection" | "story_consolidation" | "storing", repairDelta = 0, llmCallStats?: OperationLlmCallStats, llmCallDiagnostic?: Record<string, unknown>): Promise<{ ok: boolean }> {
+  progress(jobId: string, workerId: string, stage: "first_extraction" | "post_extraction_audit" | "state_reconciliation" | "ledger_consistency" | "relationship_projection" | "story_consolidation" | "storing", repairDelta = 0, llmCallStats?: OperationLlmCallStats, llmCallDiagnostic?: Record<string, unknown>, shapeNormalizations?:import("@rcm/shared").AuxiliaryShapeDiagnostic[]): Promise<{ ok: boolean }> {
     return this.request(`/v1/jobs/${encodeURIComponent(jobId)}/progress`, {
-      method: "POST", body: JSON.stringify({ workerId, stage, repairDelta, llmCallStats, llmCallDiagnostic }),
+      method: "POST", body: JSON.stringify({ workerId, stage, repairDelta, llmCallStats, llmCallDiagnostic, shapeNormalizations }),
     });
   }
 
@@ -409,9 +445,12 @@ export class ServerClient {
   }
 
   async heartbeat(workerId: string, chatId?: string): Promise<ServerWorkerStatus> {
-    const result = await this.request<{ worker: ServerWorkerStatus }>("/v1/worker/heartbeat", {
-      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
+    const serverUrl=this.settings().serverUrl;
+    const requestedCursor=this.settings().incidentServerUrl === serverUrl ? this.settings().incidentCursor : undefined;
+    const result = await this.request<{ worker: ServerWorkerStatus } & Partial<IncidentFeed>>("/v1/worker/heartbeat", {
+      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), incidentCursor: requestedCursor, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
     });
+    await this.onIncidentFeed?.(result,serverUrl,requestedCursor);
     return result.worker;
   }
 
@@ -420,9 +459,9 @@ export class ServerClient {
     return result.worker;
   }
 
-  async resumeServerWorker(workerId: string): Promise<ServerWorkerStatus> {
+  async resumeServerWorker(workerId: string, chatId?: string): Promise<ServerWorkerStatus> {
     const result = await this.request<{ worker: ServerWorkerStatus }>("/v1/worker/resume", {
-      method: "POST", body: JSON.stringify({ workerId, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
+      method: "POST", body: JSON.stringify({ workerId, chatId, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
     });
     return result.worker;
   }

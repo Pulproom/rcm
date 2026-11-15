@@ -9,6 +9,17 @@ export interface LineageSource {
   display_comparison_hash: string | null;
 }
 export type SourcePair = { parent: LineageSource; child: NonNullable<TurnPrepareRequest['messageVisibility']>[number] };
+
+/** A recovered Yumi model source may retain the exact display captured earlier.
+ * Record identity alone never proves that the message was not edited. */
+export function matchesCapturedYumiDisplay(
+  row: { role: string; source_kind: string; source_record_id: string | null; content_hash: string },
+  item: NonNullable<TurnPrepareRequest['messageVisibility']>[number] | undefined,
+): boolean {
+  return Boolean(item && row.source_kind === 'risu_display' && item.role === row.role
+    && row.source_record_id && item.sourceRecordId === row.source_record_id
+    && item.displayContentHash === row.content_hash);
+}
 export function lineageSources(db: RcmDatabase, chatId: string): LineageSource[] {
   return db.prepare(`SELECT message_id,ordinal,role,content_hash,content,lifecycle,host_visibility,
       source_record_id,display_content_hash,display_comparison_hash FROM messages

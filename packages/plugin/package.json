@@ -1,7 +1,7 @@
 {
   "name": "@rcm/plugin",
   "private": true,
-  "version": "1.0.28",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@rcm/shared": "workspace:*",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "fflate": "^0.8.2"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

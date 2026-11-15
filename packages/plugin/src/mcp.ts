@@ -1,5 +1,5 @@
 declare const __RCM_DISTRIBUTION__: boolean;
-import { INVALID_MEMORY_REF_MESSAGE, MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, memoryGuidanceBlock } from "@rcm/shared";
+import { INVALID_MEMORY_REF_MESSAGE, MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, initialMemoryGuidanceBlock, memoryGuidanceBlock } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
 import { readCurrentChatScope, readCurrentContext, sha256 } from "./context.js";
 import { isChatMemoryEnabled } from "./settings.js";
@@ -119,7 +119,6 @@ export async function executeMemoryTool(
   const query = String(expanding ? args?.focus ?? "" : args?.query ?? "").trim();
   const aspects = undefined;
   const intent = "recall" as const;
-  const perspective = "omniscient narrator";
   let chatId = state.current?.chatId ?? state.memoryToolOpportunity?.chatId ?? "unknown";
   const call: TurnSearch = { kind: expanding ? "expand" : "recall", query, ...(expanding ? { ref } : {}), at: toolStartedAt,
     memoryIds: [], alreadyProvidedIds: [], response: "", responseTokens: 0, responseTruncated: false };
@@ -176,7 +175,7 @@ export async function executeMemoryTool(
     if (context.chatId !== chatId || (state.memoryReferenceSnapshot && state.memoryReferenceSnapshot !== snapshot)) {
       return reject("chat_changed", "The chat changed after this request was prepared. Retry from the current chat; previously supplied refs still identify the same memories.");
     }
-    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "The request belongs to an earlier generation and was discarded.");
+    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "This request is from an earlier reply and was set aside. Try again from the current chat.");
     timing = startTiming(state, {
       chatId: context.chatId,
       kind: "mcp",
@@ -188,20 +187,22 @@ export async function executeMemoryTool(
     const path = `/v1/chats/${encodeURIComponent(context.chatId)}/${expanding ? "expand" : "recall"}`;
     // Whole-memory exclusions would hide the remainder after a partial result.
     const delivered = state.lastInjection?.manifest;
-    const common = state.lastInjection?.guidanceInjected === true || state.lastInjection?.packet?.includes(memoryGuidanceBlock) || state.mcpGuidanceDelivered
+    const automaticGuidance = state.lastInjection?.packet ?? "";
+    const fullGuidanceDelivered = automaticGuidance.includes(memoryGuidanceBlock)
+      || (state.lastInjection?.guidanceInjected === true && !automaticGuidance.includes(initialMemoryGuidanceBlock));
+    const common = fullGuidanceDelivered || state.mcpGuidanceDelivered
       ? "" : memoryGuidanceBlock;
-    const responseReserve = estimateTokens(common) + 24;
+    const responseReserve = 24;
     if (responseReserve >= callBudget) {
       return reject("budget_rejected", "Ask a shorter question so the result fits its budget.");
     }
-    const shared = { perspective, intent, tokenBudget: callBudget - responseReserve, excludeMemoryIds: [], excludeMemorySignatures: [],
+    const shared = { intent, tokenBudget: callBudget - responseReserve, excludeMemoryIds: [], excludeMemorySignatures: [],
       memoryOnlyInjection: state.settings.memoryOnlyInjection[context.chatId] ?? false,
       alreadyPresentMemoryIds: delivered?.memoryIds ?? [],
       alreadyPresentAtomKeys: [...new Set([...(delivered?.atomKeys ?? []), ...(state.mcpReturnedAtomKeys ?? [])])].slice(-512),
       excludeAtomKeys: [...new Set(state.mcpReturnedAtomKeys ?? [])].slice(-512),
       excludeSourceRanges: (state.mcpReturnedSourceRanges ?? []).slice(-256),
       promptSourceMessageIds: state.lastPromptSourceMessageIds ?? [],
-      activePerspectives: context.activePerspectives,
       opportunityMemoryIds: state.memoryToolOpportunity?.value.recallCandidateMemoryIds ?? [],
       opportunityAtomKeys: state.memoryToolOpportunity?.value.recallCandidateAtomKeys ?? [],
       traceContext };
@@ -214,28 +215,28 @@ export async function executeMemoryTool(
     ).catch((error) => { if (signal?.aborted) throw error; return null; });
     requestMs = performance.now() - requestStarted;
     serverTimings = result?.timings;
-    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "The response belongs to an earlier generation and was discarded.");
+    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "This result is from an earlier reply and was set aside. Try again from the current chat.");
     const latestContext = await readCurrentContext(state);
     const latestSnapshot = await sha256(JSON.stringify(latestContext.snapshot.map(message => [message.id, message.content, message.generationId])));
-    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "The response belongs to an earlier generation and was discarded.");
+    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "This result is from an earlier reply and was set aside. Try again from the current chat.");
     if (latestContext.chatId !== chatId || snapshot !== latestSnapshot) {
       return reject("chat_changed", "The chat changed during this request. Retry from the current chat.");
     }
     if (result?.code === "INVALID_MEMORY_REF") return reject("invalid_ref", INVALID_MEMORY_REF_MESSAGE);
     if (result?.code === "MEMORY_SNAPSHOT_CHANGED") return reject("snapshot_changed", "The memory changed during this request. Retry against the current chat.");
     if (!result) {
-      const response = "<rp_memory_result>The memory search request could not complete. This is a communication failure, not a search miss; continue with available context.</rp_memory_result>";
+      const response = "<rp_memory_result>The memory server could not be reached. Continue from the chat and the memories you already have; this failure does not tell you whether the event happened.</rp_memory_result>";
       traceDelivery(response, false, [], traceContext.requestId, "transport_error", 0);
       return response;
     }
     if (result.opportunityError === "stale_turn" && !result.newAtomCount) {
-      const response = '<rp_memory_result>The prepared memory opportunity belongs to an earlier RP turn. Continue from the current prompt.</rp_memory_result>';
+      const response = '<rp_memory_result>These memories were prepared for an earlier reply. Continue from the current chat.</rp_memory_result>';
       traceDelivery(response, false, [], traceContext.requestId, result.deliverySource, 0, result.opportunityError, "earlier_generation");
       return response;
     }
     const serverPacket = result.packet?.trim();
     if (!serverPacket?.startsWith("<rp_memory_result>") || !serverPacket.endsWith("</rp_memory_result>")) {
-      const response = "<rp_memory_result>The memory server returned an invalid result packet. This is a communication failure, not a search miss; continue with available context.</rp_memory_result>";
+      const response = "<rp_memory_result>The memory server sent an unreadable answer. Continue from the chat and the memories you already have; this failure does not tell you whether the event happened.</rp_memory_result>";
       traceDelivery(response, false, [], traceContext.requestId, "invalid_packet", 0);
       return response;
     }
@@ -244,11 +245,14 @@ export async function executeMemoryTool(
     // The server owns selection, rendering, refs and response-budget assembly.
     // Re-rendering `answers` here can turn a compact synthesized answer back into
     // its much larger evidence corpus and make client/server budget checks disagree.
+    // The server prices its complete guidance. Keep one copy in this turn,
+    // whether it first arrived with automatic memory or a tool response.
+    const packetBody = serverPacket.replace(memoryGuidanceBlock, "");
     const response = common && hasContent
-      ? serverPacket.replace("<rp_memory_result>", `<rp_memory_result>${common}`)
-      : serverPacket;
+      ? packetBody.replace("<rp_memory_result>", `<rp_memory_result>${common}`)
+      : packetBody;
     if (estimateTokens(response) > callBudget) {
-      const rejected = '<rp_memory_result>The result exceeded its delivery budget. Ask a narrower question.</rp_memory_result>';
+      const rejected = '<rp_memory_result>The answer was too long to send. Ask a narrower question.</rp_memory_result>';
       traceDelivery(rejected, false, [], traceContext.requestId, "budget_rejected", 0);
       return rejected;
     }
@@ -276,7 +280,7 @@ export async function executeMemoryTool(
       traceDelivery(MEMORY_TOOL_CANCELLED_MESSAGE, false, [], undefined, undefined, 0, undefined, "request_cancelled");
       throw error;
     }
-    return reject("transport_error", "The memory search request could not complete. This is a communication failure, not a search miss; continue with available context.");
+    return reject("transport_error", "The memory server could not be reached. Continue from the chat and the memories you already have; this failure does not tell you whether the event happened.");
   } finally {
     if (timing) finishTiming(state, timing, timingOutcome);
   }

@@ -7,7 +7,8 @@ export interface AuxiliaryPromptBudget {
  * The reserved slot cannot be spent by optional source-access corrections. */
 export function consumeAuxiliaryRepair(purpose: string, budget: { repairBudgetUsed: boolean; stateRepairBudgetUsed: boolean }) {
   const next = { ...budget };
-  if (!purpose.endsWith("_repair")) return next;
+  // The shared state recovery function owns the one-per-state-call field cap.
+  if (!purpose.endsWith("_repair") || purpose === "state_field_repair") return next;
   const slot = purpose === "state_response_repair" ? "stateRepairBudgetUsed" : "repairBudgetUsed";
   if (next[slot]) throw new Error(`REPAIR_BUDGET_EXHAUSTED: requested=${purpose}; general=${Number(next.repairBudgetUsed)}/1; state_response=${Number(next.stateRepairBudgetUsed)}/1; maximum=2 repairs per explicit attempt`);
   next[slot] = true;

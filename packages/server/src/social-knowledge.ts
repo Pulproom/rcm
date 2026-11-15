@@ -1,8 +1,11 @@
-import { ModelContentValidationError } from "@rcm/shared";
+import { escapeMemoryText, estimateTokens } from "@rcm/shared";
+import { deletedMemoryKeys } from './user-deletions.js';
+import { availableMemoryKey } from './extraction-memory-keys.js';
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { EVERYONE_HOLDER } from "./item-access.js";
 import { randomUUID } from "node:crypto";
-import { estimateTokens, type ExtractionResult, type SocialKnowledge } from "@rcm/shared";
+import type { ExtractionResult, SocialKnowledge } from "@rcm/shared";
+import { chatPacketPricing, type PacketPricing, chargedSectionTokens } from "./charged-cost.js";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
 import { buildEntityIdentityResolver, listEntities, normalizeEntityName } from "./entities.js";
@@ -11,8 +14,13 @@ import { invalidateStorySupports, storyMemorySupportIds } from "./story-spine.js
 
 export type SocialKnowledgeLevel = "aware_of" | "interacted";
 export const socialKnowledgeLevelLabel: Record<SocialKnowledgeLevel, string> = {
-  aware_of: "by name only; no meeting recorded", interacted: "interacted; not necessarily in person",
+  aware_of: "Knows of them.", interacted: "Has interacted.",
 };
+/** Joins rendered phrases as sentences; only checks the final character for terminal punctuation, never meaning. */
+export function joinSentences(parts: Array<string | undefined>): string {
+  return parts.map(part => part?.trim()).filter((part): part is string => !!part)
+    .map(part => /[.!?。！？…]["'”’)\]]*$/u.test(part) ? part : `${part}.`).join(" ");
+}
 type SocialEvidence = { messageId: string; quote?: string } | { sourceKind: "setup"; setupFingerprint: string; sourceIndex: number; quote: string };
 type IngestedSocialKnowledge = Omit<SocialKnowledge, "addressTerms"> & { addressTerms?: string[] };
 
@@ -70,12 +78,14 @@ function cognitionReferences(row: Pick<EventRow,'cognition_detail_ids_json'|'man
   return ids.length || row.manual ? ids : previous;
 }
 
-function socialKnowledgeView(db: RcmDatabase, chatId: string): Array<SocialKnowledgeItem & { detailIds: string[] }> {
+function socialKnowledgeView(db: RcmDatabase, chatId: string, pair?: readonly [string, string]): Array<SocialKnowledgeItem & { detailIds: string[] }> {
   const current = new Map<string, Omit<SocialKnowledgeItem,'knownAs'|'addressTerms'|'evidence'> & {
     detailIds: string[]; knownAs: Set<string>; addressTerms: Set<string>; evidence: Map<string,SocialEvidence>;
   }>();
   const rows=db.prepare(`SELECT * ${currentEventsSql}`).all(chatId) as EventRow[];
   for (const row of rows) {
+    // A scoped reader must filter exact stored names before the general view merges aliases.
+    if (pair && !(row.holder === pair[0] && row.subject === pair[1] || row.holder === pair[1] && row.subject === pair[0])) continue;
     const key = `${normalizeEntityName(row.holder)}\0${normalizeEntityName(row.subject)}`;
     if (row.action === "retract") { current.delete(key); continue; }
     if (!row.level) continue;
@@ -84,7 +94,13 @@ function socialKnowledgeView(db: RcmDatabase, chatId: string): Array<SocialKnowl
     const addressTerms = previous?.addressTerms ?? new Set<string>();
     const evidence = previous?.evidence ?? new Map<string,SocialEvidence>();
     for (const value of parseArray<string>(row.known_as_json)) knownAs.add(value);
-    for (const value of parseArray<string>(row.address_terms_json)) addressTerms.add(value);
+    // Event order is story/source order, then revision/time. Re-evidence moves
+    // a typed term to the end; no meaning or clock is inferred from its prose.
+    const userOrdered = row.user_edit_ordinal != null || previous?.userEdited;
+    for (const value of parseArray<string>(row.address_terms_json)) {
+      if (!userOrdered) addressTerms.delete(value);
+      addressTerms.add(value);
+    }
     for (const item of parseArray<SocialEvidence>(row.evidence_json)) {
       const identity=JSON.stringify(item);
       if (!evidence.has(identity)) evidence.set(identity,item);
@@ -134,8 +150,8 @@ export function addressTermAliasGuard(db: RcmDatabase, chatId: string, incoming:
   };
 }
 
-export function listRecordedSocialKnowledge(db: RcmDatabase, chatId: string): SocialKnowledgeItem[] {
-  return socialKnowledgeView(db, chatId).map(({detailIds,...item}) => ({...item, cognition: detailIds.flatMap(id => {
+export function listRecordedSocialKnowledge(db: RcmDatabase, chatId: string, pair?: readonly [string, string]): SocialKnowledgeItem[] {
+  return socialKnowledgeView(db, chatId, pair).map(({detailIds,...item}) => ({...item, cognition: detailIds.flatMap(id => {
     const detail = db.prepare(`SELECT d.id,d.text,d.user_edited FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1 AND EXISTS
       (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id AND a.item_kind='detail'
@@ -218,6 +234,37 @@ function evidenceOrdinals(db: RcmDatabase, chatId: string, evidence: SocialKnowl
   return row ?? { start: null, end: null };
 }
 
+function currentPair(db: RcmDatabase, chatId: string, holder: string, subject: string) {
+  return socialKnowledgeView(db, chatId).find(row =>
+    normalizeEntityName(row.holder) === normalizeEntityName(holder)
+    && normalizeEntityName(row.subject) === normalizeEntityName(subject));
+}
+
+function nameAdditions(current: Pick<SocialKnowledgeItem, "knownAs" | "addressTerms"> | undefined,
+  knownAs: string[], addressTerms: string[] = []) {
+  const missing = (values: string[], existing: string[], normalize: (value: string) => string) => {
+    const seen = new Set(existing.map(normalize));
+    return values.map(value => value.trim()).filter(value => {
+      if (!value || seen.has(normalize(value))) return false;
+      seen.add(normalize(value));
+      return true;
+    });
+  };
+  return { knownAs: missing(knownAs, current?.knownAs ?? [], normalizeEntityName),
+    addressTerms: missing(addressTerms, current?.addressTerms ?? [], value => value) };
+}
+
+/** Names can survive withheld cognition, but never identity ambiguity or user protection. */
+export function recognitionNameAdditions(db: RcmDatabase, chatId: string,
+  recognition: Pick<SocialKnowledge, "holder" | "subject" | "knownAs" | "addressTerms" | "evidence">) {
+  const resolveIdentity = buildEntityIdentityResolver(db, chatId);
+  const holder = resolveIdentity(recognition.holder);
+  if (normalizeEntityName(holder.canonical) === normalizeEntityName(resolveIdentity(recognition.subject).canonical)
+    || holder.ambiguous
+    || !canAutomaticallyChangeSocialKnowledge(db, chatId, recognition.holder, recognition.subject, recognition.evidence)) return;
+  return nameAdditions(currentPair(db, chatId, recognition.holder, recognition.subject), recognition.knownAs, recognition.addressTerms);
+}
+
 export function ingestSocialKnowledge(
   db: RcmDatabase,
   chatId: string,
@@ -229,15 +276,23 @@ export function ingestSocialKnowledge(
 ): number {
   const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
   if (!chat) return 0;
+  const resolveIdentity=buildEntityIdentityResolver(db,chatId);
   let inserted = 0;
   for (const item of items) {
     if (normalizeEntityName(item.holder) === normalizeEntityName(item.subject)) continue;
-    const current = socialKnowledgeView(db, chatId).find((row) =>
-      normalizeEntityName(row.holder) === normalizeEntityName(item.holder)
-      && normalizeEntityName(row.subject) === normalizeEntityName(item.subject));
-    if (!canAutomaticallyChangeSocialKnowledge(db,chatId,item.holder,item.subject,item.evidence)) continue;
+    const current = currentPair(db, chatId, item.holder, item.subject);
     const knownAs = [...new Set(item.knownAs.map((value) => value.trim()).filter(Boolean))];
     const addressTerms = [...new Set((item.addressTerms ?? []).map((value) => value.trim()).filter(Boolean))];
+    const additions = nameAdditions(current, knownAs, addressTerms);
+    const holder = resolveIdentity(item.holder);
+    if (current && !holder.ambiguous && !item.cognitionDetailKeys?.length
+      && levelRank(current.level) >= levelRank(item.level)
+      && !additions.knownAs.length && !additions.addressTerms.length) continue;
+    if (!canAutomaticallyChangeSocialKnowledge(db,chatId,item.holder,item.subject,item.evidence)) {
+      db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
+        .run(randomUUID(),chatId,"recognition_auto_protected",JSON.stringify({point:"recognition_auto_protected",reason:"User-controlled recognition cannot change automatically",current}),JSON.stringify(item),chat.revision,now());
+      continue;
+    }
     const cognitionIds = (item.cognitionDetailKeys ?? []).map(key => {
       const memoryId = item.memoryKey && memoryByKey.get(item.memoryKey);
       const detailId = detailByKey.get(JSON.stringify([item.memoryKey,key]));
@@ -245,12 +300,13 @@ export function ingestSocialKnowledge(
         AND (d.id=? OR (? IS NULL AND d.memory_id=? AND d.detail_key=?)) AND d.active=1 AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id
         AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`)
         .get(chatId, detailId ?? null, detailId ?? null, memoryId ?? null, key, item.holder) as { id: string } | undefined;
-      if (!detail) throw new ModelContentValidationError("Cognition detail requires live evidence and access for its holder");
-      return detail.id;
+      return detail?.id;
     });
-    if (current && !cognitionIds.length && levelRank(current.level) >= levelRank(item.level)
-      && knownAs.every((value) => current.knownAs.some((known) => normalizeEntityName(known) === normalizeEntityName(value)))
-      && addressTerms.every((value) => current.addressTerms.includes(value))) continue;
+    if(holder.ambiguous || cognitionIds.some(id=>id===undefined)) {
+      db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
+        .run(randomUUID(),chatId,"C9:persisted_recognition_access",JSON.stringify({reason:"Cognition detail requires live evidence and access for its holder"}),JSON.stringify(item),chat.revision,now());
+      continue;
+    }
     const range = evidenceOrdinals(db, chatId, item.evidence);
     db.prepare(`
       INSERT INTO social_knowledge_events(
@@ -301,7 +357,7 @@ export function setManualSocialKnowledge(
     } else if (texts.length) {
       const memoryId = randomUUID();
       db.prepare(`INSERT INTO memories(id,chat_id,memory_key,type,title,content,participants_json,known_by_json,retention_class,atom_access_version,user_managed,created_revision,created_at,updated_at)
-        VALUES(?,?,?,'belief',?,?,?,?,'durable',1,1,?,?,?)`).run(memoryId, chatId, `manual:${memoryId}`, `${input.holder} → ${input.subject}`, texts.join('\n'),
+        VALUES(?,?,?,'belief',?,?,?,?,'durable',1,1,?,?,?)`).run(memoryId, chatId, availableMemoryKey(`manual:${memoryId}`,deletedMemoryKeys(db,chatId)), `${input.holder} → ${input.subject}`, texts.join('\n'),
           JSON.stringify([input.holder,input.subject]), JSON.stringify([input.holder]), chat.revision, timestamp, timestamp);
       for (const [index,text] of texts.entries()) {
         const detailId = randomUUID();
@@ -396,8 +452,39 @@ export interface SceneNames {
   sceneRecognitionIds: string[];
 }
 
-/** One stable, holder-scoped renderer shared by automatic packets and MCP. */
-export function renderSceneNames(db: RcmDatabase, chatId: string, holders: string[], present: string[], mentioned: string[], tokenBudget = 200): SceneNames {
+/** Canonical identity is visible to the author; this field limits the holder's naming knowledge. */
+export function hasRecognitionContent(display: {body?:string;knownAs?:readonly string[];addressTerms?:readonly string[]}): boolean {
+  return Boolean(display.body?.trim() || display.knownAs?.length || display.addressTerms?.length);
+}
+
+export function recognitionNaming(subject: string, knownAs: readonly string[], omitCanonical = false): string {
+  if (!knownAs.length) return "knows no name for them";
+  const names = omitCanonical ? knownAs.filter(name=>name!==subject) : knownAs;
+  return names.length ? (knownAs.includes(subject) ? "knows as " : "knows only as ")
+    + names.map(name => JSON.stringify(name)).join(", ") : "";
+}
+
+const sceneNamesHeading = "Names (who knows whom, by what name)";
+const sceneNamesText = (lines: string[]): string => lines.length ? sceneNamesHeading + "\n" + lines.join("\n") : "";
+
+/** Model lists use newest stored evidence; manual directional snapshots keep order.
+ * There is no per-term timestamp. The event projection supplies last-evidenced
+ * order; entries in the same event use their supplied order as the tie-break. */
+export function recentAddressTerms(terms: readonly string[], userEdited = false): string[] {
+  const unique = [...new Set(terms)];
+  // One usable term is more useful than an empty field. The enclosing packet's
+  // budget still applies; this exception is only to the per-row 40-token cap.
+  if (unique.length === 1) return unique;
+  const selected: string[] = [];
+  for (const term of userEdited ? unique : unique.reverse()) {
+    const candidate = [...selected, term];
+    if (estimateTokens(escapeMemoryText(candidate.map(value => JSON.stringify(value)).join(", "))) <= 40) selected.push(term);
+  }
+  return selected;
+}
+
+/** Direction describes whose naming knowledge this is, not who can know the row. */
+export function renderSceneNames(db: RcmDatabase, chatId: string, holders: string[], present: string[], mentioned: string[], tokenBudget = 200, pricing: PacketPricing = chatPacketPricing(db, chatId)): SceneNames {
   const resolve = buildEntityIdentityResolver(db, chatId);
   const characters = new Set(listEntities(db, chatId).filter(entity => ["person", "character"].includes(entity.type)).map(entity => normalizeEntityName(entity.name)));
   const canonical = (value: string): string => {
@@ -410,27 +497,35 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
   const visible = new Map(listSocialKnowledge(db, chatId).map(item => [item.id, item]));
   const sceneRecognitions = socialKnowledgeView(db, chatId).filter(item => subjectSet.has(canonical(item.subject))
     && characters.has(canonical(item.subject)));
-  const pairs = sceneRecognitions.filter(item => holderSet.has(canonical(item.holder))
-    && canonical(item.holder) !== canonical(item.subject) && (item.knownAs.length || item.addressTerms.length)
+  const pairs = sceneRecognitions.filter(item => hasRecognitionContent({...item,body:visible.get(item.id)?.cognition.map(detail=>detail.text).join(" ")} ) && holderSet.has(canonical(item.holder))
+    && canonical(item.holder) !== canonical(item.subject)
     // A referenced recognition atom must still be accessible to its holder.
     && (!item.detailIds.length || visible.get(item.id)!.cognition.length > 0))
     .sort((a, b) => Number(presentSet.has(canonical(b.subject))) - Number(presentSet.has(canonical(a.subject)))
+      || b.updatedAt - a.updatedAt
       || a.holder.localeCompare(b.holder) || a.subject.localeCompare(b.subject));
   const quote = (value: string) => JSON.stringify(value);
   const lines: string[] = [];
   const recognitionIds: string[] = [];
-  const render = () => lines.length ? ("Names in this scene:\n" + lines.join("\n")).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;") : "";
-  for (const item of pairs.slice(0, 8)) {
-    // Never use an alias or canonical identity the holder has not learned.
-    const label = item.knownAs.find(name => normalizeEntityName(name) === normalizeEntityName(item.subject)) ?? item.knownAs[0] ?? "unnamed person";
-    const fields = [item.knownAs.length ? "knows as " + item.knownAs.map(quote).join(", ") : "",
-      item.addressTerms.length ? "calls " + item.addressTerms.map(quote).join(", ") : ""].filter(Boolean);
-    lines.push("- " + item.holder + " → " + label + ": " + fields.join("; ")
-      + (item.level === "aware_of" ? ` (${socialKnowledgeLevelLabel[item.level]})` : ""));
-    if (estimateTokens(render()) > Math.min(200, tokenBudget)) { lines.pop(); break; }
+  const render = () => escapeMemoryText(sceneNamesText(lines));
+  for (const item of pairs) {
+    if (lines.length >= 8) break;
+    // The author sees canonical identity; "knows only as" limits the holder's naming knowledge.
+    const label = item.subject;
+    const addressTerms = recentAddressTerms(item.addressTerms, item.userEdited);
+    const line = () => "- " + item.holder + " → " + label + ": " + [recognitionNaming(item.subject,item.knownAs),
+      addressTerms.length ? "calls " + addressTerms.map(quote).join(", ") : ""].filter(Boolean).join("; ")
+      + (item.level === "aware_of" ? ` (${socialKnowledgeLevelLabel[item.level]})` : "");
+    lines.push(line());
+    // Extra address terms must not evict an otherwise fitting full knownAs row.
+    while (addressTerms.length && chargedSectionTokens(render(), pricing) > Math.min(200, tokenBudget)) {
+      addressTerms.pop(); lines[lines.length - 1] = line();
+    }
+    if (chargedSectionTokens(render(), pricing) > Math.min(200, tokenBudget)) { lines.pop(); continue; }
     recognitionIds.push(`recognition:${item.holder}:${item.subject}`);
   }
-  return { text: render(), pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds,
+  return { text: render(),
+    pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds,
     sceneRecognitionIds: sceneRecognitions.map(item => `recognition:${item.holder}:${item.subject}`) };
 }
 

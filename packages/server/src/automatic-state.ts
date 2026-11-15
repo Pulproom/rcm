@@ -1,81 +1,102 @@
+import { escapeMemoryText } from "@rcm/shared";
+import { automaticPacketBudget } from "./packet-budget.js";
+import { standaloneViewpoint } from "./standalone-lanes.js";
+import { type PacketPricing, chargedSectionTokens } from "./charged-cost.js";
 import { promiseMadeLabel } from "./promise-recency.js";
-import { estimateTokens, structuredStoryTimeEnd, type MemoryContextItem } from "@rcm/shared";
+import { estimateTokens, standaloneScopeText, structuredStoryTimeEnd } from "@rcm/shared";
 import { emptyPacketManifest } from "./packet-manifest.js";
-import { canAccessStateEvidence, rankStateEvidence, stateKindLabel, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
+import { rankStateEvidence, lastRecordedStateText, stateMcpEvidence, stateEvidenceScope, type StateEvidence } from "./state-evidence.js";
 import type { StateOutcomeCapture } from "./state-outcomes.js";
-import { EVERYONE_HOLDER } from "./item-access.js";
-import { socialKnowledgeLevelLabel } from "./social-knowledge.js";
+import { hasRecognitionContent, joinSentences, recognitionNaming, recentAddressTerms, socialKnowledgeLevelLabel } from "./social-knowledge.js";
 
-/** The 400-token floor tapers below 1,334 tokens; it never takes over a small packet. */
-export const sharedStateBudget = (tokens: number): number => Math.floor(Math.min(tokens * .30, Math.max(400, tokens * .15)));
+/** The small-packet taper prevents the state floor from taking over the packet. */
+export const sharedStateBudget = (tokens: number): number => automaticPacketBudget(tokens).state;
 
 export interface AutomaticStateRow {
   item: StateEvidence;
+  sceneRecognitionPriority?: number;
   line: string;
   baseLine?: string;
   changeNote?: string;
   perspectives: string[];
   active: boolean;
   pinned: boolean;
+  /** Both canonical endpoints belong to prepare's resolved sceneCharacters. */
+  sceneRelationshipPriority?: number;
+  relationshipReservation?: "reserved" | "overflow";
   promiseSlot?: "pinned" | "recent";
+  /** Admitted without relationship reservation; that reservation cannot evict it. */
+  protectedPromise?: boolean;
   continuitySlot?: "state" | "promise";
   relevance: number;
   rank: number;
-  legend: string;
 }
 
-/** Access and relevance are still evaluated independently for every perspective.
- * Only renderer-identical, already-authorized rows share a budget charge. */
+/** One author selection; scene identities affect rank and pins, never access. */
 export function automaticStateCandidates(corpus: StateEvidence[], options: {
   perspectives: string[]; activeNames: string[]; query: string; covered: ReadonlySet<string>;
   semantic?: Map<string, number>; latestStoryTime?: number; trace?: StateOutcomeCapture; memoryOnly?: boolean;
   namesRecognitionIds?: ReadonlySet<string>;
   sceneRecognitionIds?: ReadonlySet<string>;
+  sceneCharacters?: readonly string[];
+  preferredRelationshipNames?: readonly string[];
 }): AutomaticStateRow[] {
   const rows = new Map<string, AutomaticStateRow>();
   const normalize = (name: string) => name.normalize("NFKC").trim().toLocaleLowerCase();
   const active = new Set(options.activeNames.map(normalize));
+  const scene = new Set(options.sceneCharacters?.map(normalize));
+  const preferred = new Set(options.preferredRelationshipNames?.map(normalize));
   const sceneRecognitionIds = options.sceneRecognitionIds ?? new Set<string>();
-  for (const perspective of options.perspectives) {
-    const candidates = rankStateEvidence(corpus, options.query, { perspective, activeNames: options.activeNames,
-      continuity: true, automaticPromises: true, semantic: options.semantic, trace: options.trace, sceneRecognitionIds });
-    for (const [index, { item, score }] of candidates.entries()) {
-      const pinned = item.kind === "basic_relation" && item.subjects.length >= 2 && item.subjects.every(name => active.has(normalize(name)));
-      if (options.memoryOnly || !pinned && !item.promisePinned && !item.promiseRecent && item.sourceIds.length && item.sourceIds.every(id => options.covered.has(id))) {
-        options.trace?.record(perspective, item, options.memoryOnly ? "memory_only" : "prompt_covered", { rank: index + 1 });
-        continue;
-      }
-      if (item.kind === "recognition") {
-        const rendered = options.namesRecognitionIds?.has(item.id) ? "folded_into_names"
-          : !item.automatic?.body.trim() ? "omitted_empty" : undefined;
-        if (rendered) {
-          options.trace?.record(perspective, item, rendered === "folded_into_names" ? "deduped" : "not_rendered", { rank: index + 1, rendered });
-          continue;
-        }
-      }
-      const line = renderAutomaticStateLine(item, options.perspectives, options.latestStoryTime);
-      const change = item.previous;
-      const changeNote = change && canAccessStateEvidence(change.item, perspective)
-        ? escapeState(` (was ${change.item.automatic!.body}${change.changedAt ? ` until ${change.changedAt}` : ""})`) : undefined;
-      // Keep the existing canonical deduplication policy: shortening labels or
-      // eliding scope tags must not merge previously distinct records.
-      // A user pin is a separate delivery slot even when its prose matches an ordinary row.
-      const key = `${renderStateLine(item)}\0${changeNote ?? ""}\0${item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : ""}`;
-      const previous = rows.get(key);
-      if (previous) {
-        previous.perspectives.push(perspective);
-        previous.relevance = Math.max(previous.relevance, score);
-      } else rows.set(key, { item, line, baseLine: line, changeNote, perspectives: [perspective], rank: index + 1, legend: stateLegend(options.perspectives),
-        relevance: score,
-        pinned,
-        continuitySlot: item.current && item.subjects.some(name => active.has(normalize(name)))
-          ? item.kind === "promise" && item.promiseStatus === "open" ? "promise"
-            : ["world_fact", "basic_relation", "relationship", "belief"].includes(item.kind) ? "state" : undefined
-          : undefined,
-        promiseSlot: item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : undefined,
-        active: item.kind === "recognition" ? sceneRecognitionIds.has(item.id)
-          : [...item.holders, ...item.subjects].some(name => active.has(normalize(name))) });
+  const perspective = "narrator";
+  const candidates = rankStateEvidence(corpus, options.query, { perspective, archive: true, activeNames: options.activeNames,
+    continuity: true, automaticPromises: true, semantic: options.semantic, trace: options.trace, sceneRecognitionIds });
+  for (const [index, { item, score }] of candidates.entries()) {
+    const pinned = item.kind === "basic_relation" && item.subjects.length >= 2 && item.subjects.every(name => active.has(normalize(name)));
+    const sceneRelationship = item.kind === "relationship" && item.current && item.relationship && item.automatic?.summaryReady !== false
+      && [item.relationship.from, item.relationship.to].every(name => scene.has(normalize(name)));
+    if (options.memoryOnly || !pinned && !sceneRelationship && !item.promisePinned && !item.promiseRecent && item.sourceIds.length && item.sourceIds.every(id => options.covered.has(id))) {
+      options.trace?.record(perspective, item, options.memoryOnly ? "memory_only" : "prompt_covered", { rank: index + 1 });
+      continue;
     }
+    if (item.kind === "recognition" && item.automatic && !hasRecognitionContent(item.automatic)) {
+      options.trace?.record(perspective, item, "not_rendered", {rank: index + 1, rendered: "omitted_empty"});
+      continue;
+    }
+    if (item.kind === "relationship" && (item.automatic?.summaryReady === false || !item.automatic?.body.trim())) {
+      options.trace?.record(perspective, item, "not_rendered", { rank: index + 1, rendered: "omitted_empty" });
+      continue;
+    }
+    const namingInNames = item.kind === "recognition" && options.namesRecognitionIds?.has(item.id);
+    if (namingInNames && !item.automatic?.body.trim()) {
+      options.trace?.record(perspective, item, "not_rendered", {rank:index + 1,rendered:"omitted_empty"});
+      continue;
+    }
+    const line = renderAutomaticStateLine(item, options.latestStoryTime, namingInNames);
+    const change = item.previous;
+    const changeNote = change
+      ? `\n- ${stateScopePrefix(change.item)}${escapeState(`Previously: ${change.item.dedupeBody && change.item.dedupeBody !== change.item.automatic!.body ? `${change.item.automatic!.subject}: ` : ""}${change.item.automatic!.body}${change.changedAt ? ` until ${change.changedAt}` : ""}`)}` : undefined;
+    const dedupeChangeNote = change?.item.dedupeBody
+      ? `\n- ${stateScopePrefix(change.item)}${escapeState(`Previously: ${change.item.dedupeBody}${change.changedAt ? ` until ${change.changedAt}` : ""}`)}` : changeNote;
+    // Canonical scope remains part of the deduplication key.
+    // A user pin is a separate delivery slot even when its prose matches an ordinary row.
+    const key = `${renderStateLine(item.dedupeText ? { ...item, displayText: item.dedupeText } : item)}\0${dedupeChangeNote ?? ""}\0${item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : ""}`;
+    const previous = rows.get(key);
+    if (previous) {
+      previous.perspectives.push(perspective);
+      previous.relevance = Math.max(previous.relevance, score);
+    } else rows.set(key, { item, line, baseLine: line, changeNote, perspectives: [perspective], rank: index + 1,
+      relevance: score,
+      pinned,
+      ...(item.kind === "recognition" && item.subjects.length === 2 && item.subjects.every(name => scene.has(normalize(name)))
+        ? { sceneRecognitionPriority: item.subjects.filter(name => preferred.has(normalize(name))).length } : {}),
+      ...(sceneRelationship ? { sceneRelationshipPriority: item.subjects.filter(name => preferred.has(normalize(name))).length } : {}),
+      continuitySlot: item.current && item.subjects.some(name => active.has(normalize(name)))
+        ? item.kind === "promise" && item.promiseStatus === "open" ? "promise"
+          : ["world_fact", "basic_relation", "relationship", "belief"].includes(item.kind) ? "state" : undefined
+        : undefined,
+      promiseSlot: item.promisePinned ? "pinned" : item.promiseRecent ? "recent" : undefined,
+      active: item.kind === "recognition" ? sceneRecognitionIds.has(item.id)
+        : [...item.holders, ...item.subjects].some(name => active.has(normalize(name))) });
   }
   const promisePriority = ({ item, active }: AutomaticStateRow): number => {
     if (item.kind !== "promise" || item.promiseStatus !== "open") return 0;
@@ -92,35 +113,76 @@ export function automaticStateCandidates(corpus: StateEvidence[], options: {
     .map((row, index) => ({ ...row, perspectives: [...new Set(row.perspectives)], rank: index + 1 }));
 }
 
-export function renderStateLine(item: StateEvidence): string {
-  const escapeXml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-  const scope = item.holders.length ? `Known by ${(item.knownByLabels ?? item.holders).join(", ")}` : "Authorial record; character access not specified";
-  return `- ${stateKindLabel(item.kind, item.stateKind)}: ${escapeXml(item.text.replace(/\r?\n/g, " "))} [${escapeXml(scope)}]`;
+/** Only relevance-selected current rows can nominate event provenance.
+ * Fixed relation/promise slots do not turn into additional scene reservations. */
+export function automaticStateSources(rows: readonly AutomaticStateRow[], sources: (item: StateEvidence) => string[]): string[][] {
+  return rows.filter(row => row.item.current && row.relevance > 0 && !row.pinned && !row.promiseSlot
+    && (row.item.kind === "belief" || row.item.kind === "promise"
+      || row.item.kind === "world_fact" && ["secret","goal","condition"].includes(row.item.stateKind ?? "")))
+    .sort((a,b)=>a.rank-b.rank)
+    .map(row => [...new Set(sources(row.item))]).filter(group=>group.length);
 }
 
-export function selectAutomaticState(rows: AutomaticStateRow[], budget: number): AutomaticStateRow[] {
+export function renderStateLine(item: StateEvidence): string {
+  return `- ${stateScopePrefix(item)}${escapeMemoryText(stateMcpEvidence(item).text.replace(/\r?\n/g, " "))}`;
+}
+
+export function selectAutomaticState(rows: AutomaticStateRow[], budget: number, pricing?: PacketPricing, sceneRelationshipAllowance = Math.min(480, Math.floor(budget * .6))): AutomaticStateRow[] {
+  for (const row of rows) row.relationshipReservation = undefined;
   const selected = rows.filter(row => row.pinned);
+  const fill = (candidates: readonly AutomaticStateRow[]) => {
+    for (const row of candidates) if (!selected.includes(row) && !row.promiseSlot
+      && row.relationshipReservation !== "overflow"
+      && renderAutomaticState([...selected, row], undefined, pricing).chargedTokens <= budget) selected.push(row);
+  };
   // At most one compact current state and one open promise, inside the existing
   // lane. Pins already count; unused capacity goes straight back to normal ranking.
   const slotBudget = Math.min(80, Math.floor(budget * .20));
   for (const slot of ["state", "promise"] as const) {
     if (selected.some(row => row.continuitySlot === slot)) continue;
+    // Compactness measures prose; the complete section still funds fixed POV slots.
     const row = rows.find(row => row.continuitySlot === slot && !row.promiseSlot
-      && estimateTokens(row.line) <= slotBudget && renderAutomaticState([...selected, row]).tokens <= budget);
+      && estimateTokens(row.line) <= slotBudget && renderAutomaticState([...selected, row], undefined, pricing).chargedTokens <= budget);
     if (row) selected.push(row);
   }
-  for (const row of rows) if (!selected.includes(row) && !row.promiseSlot && renderAutomaticState([...selected, row]).tokens <= budget) selected.push(row);
+  fill(rows);
   // Separate, bounded slots leave the ordinary/open-promise allowance intact.
   for (const slot of ["pinned", "recent"] as const) {
     const extra: AutomaticStateRow[] = [];
     const slotBudget = Math.min(180, Math.floor(budget * .4));
-    for (const row of rows) if (row.promiseSlot === slot && renderAutomaticState([...extra, row]).tokens <= slotBudget) extra.push(row);
+    for (const row of rows) if (row.promiseSlot === slot && renderAutomaticState([...extra, row], undefined, pricing).chargedTokens <= slotBudget) extra.push(row);
     selected.push(...extra);
   }
+  // First secure the exact promises admitted by the existing policy, including
+  // supplemental pins/recent endings and ordinary ranked open promises.
+  const beforeReservation = [...selected];
+  for (const row of rows) if (row.item.kind === "promise") row.protectedPromise = selected.includes(row);
+  selected.splice(0, selected.length, ...selected.filter(row => row.pinned || row.protectedPromise));
+  const reserved: AutomaticStateRow[] = [];
+  const relationships = rows.filter(row => row.sceneRelationshipPriority !== undefined).sort((a, b) =>
+    b.sceneRelationshipPriority! - a.sceneRelationshipPriority!
+    || (b.item.updatedOrdinal ?? -1) - (a.item.updatedOrdinal ?? -1)
+    || (b.item.updatedRevision ?? -1) - (a.item.updatedRevision ?? -1)
+    || a.rank - b.rank);
+  const pair = (row: AutomaticStateRow) => JSON.stringify([...row.item.subjects].sort());
+  const topPair = relationships[0] ? pair(relationships[0]) : undefined;
+  for (const row of relationships) {
+    // Until stored summaries shorten naturally, the leading pair may use the
+    // former 480 allowance. Other scene pairs share the new bounded allowance.
+    const relationshipBudget = Math.min(budget * .6, pair(row) === topPair ? Math.max(480, sceneRelationshipAllowance) : sceneRelationshipAllowance);
+    row.relationshipReservation = "overflow";
+    if (renderAutomaticState([...reserved, row], undefined, pricing).chargedTokens > relationshipBudget
+      || renderAutomaticState([...selected, row], undefined, pricing).chargedTokens > budget) continue;
+    reserved.push(row); selected.push(row); row.relationshipReservation = "reserved";
+  }
+  const recognitions = rows.filter(row => row.sceneRecognitionPriority !== undefined).sort((a,b) =>
+    b.sceneRecognitionPriority! - a.sceneRecognitionPriority! || a.rank - b.rank);
+  fill(recognitions);
+  fill([...beforeReservation, ...rows]);
   // Fill current rows first; history uses only what is left in this lane.
   for (const row of selected) if (row.changeNote && estimateTokens(row.changeNote) <= 80) {
     row.line = row.baseLine! + row.changeNote;
-    if (renderAutomaticState(selected).tokens > budget) row.line = row.baseLine!;
+    if (renderAutomaticState(selected, undefined, pricing).chargedTokens > budget) row.line = row.baseLine!;
   }
   return selected;
 }
@@ -132,74 +194,38 @@ export function trimAutomaticStateNote(rows: AutomaticStateRow[]): boolean {
   return true;
 }
 
-/** Admit whole scene-linked rows after the floor. Speculative swaps are rolled
- * back when even all eligible peripheral memories cannot fund a row. */
-export function fundAutomaticState(options: {
-  candidates: AutomaticStateRow[]; selected: AutomaticStateRow[]; memories: MemoryContextItem[];
-  tokenBudget: number; longtermMemoryIds: string[];
-  canYield: (item: MemoryContextItem) => boolean; renderTokens: () => number; hardTokenCeiling: number;
-}): string[] {
-  // IDs arrive in portfolio order, open seeds first. Already protected longterm
-  // cards count toward the floor; reserve only the missing places, unchanged.
-  const longterm = options.longtermMemoryIds.flatMap(id => options.memories.filter(item => item.id === id));
-  const floor = options.tokenBudget >= 4000 ? 2 : options.tokenBudget >= 2000 ? 1 : 0;
-  const protectedCount = longterm.filter(item => !options.canYield(item)).length;
-  const reserved = new Set(longterm.filter(options.canYield).slice(0, Math.max(0, floor - protectedCount)));
-  const removed: string[] = [];
-  for (const row of options.candidates) {
-    if (row.promiseSlot || !row.active || options.selected.includes(row)) continue;
-    const previous = [...options.memories];
-    const previousLines = options.selected.map(item => item.line);
-    options.selected.push(row);
-    let tokens = options.renderTokens();
-    while (tokens > options.hardTokenCeiling && trimAutomaticStateNote(options.selected)) tokens = options.renderTokens();
-    for (let index = options.memories.length - 1; tokens > options.hardTokenCeiling && index >= 0; index--) {
-      if (reserved.has(options.memories[index]!) || !options.canYield(options.memories[index]!)) continue;
-      options.memories.splice(index, 1); tokens = options.renderTokens();
-    }
-    if (tokens <= options.hardTokenCeiling) removed.push(...previous.filter(item => !options.memories.includes(item)).map(item => item.id));
-    else {
-      options.selected.pop();
-      options.selected.forEach((item, index) => { item.line = previousLines[index]!; });
-      options.memories.splice(0, options.memories.length, ...previous);
-    }
-  }
-  return removed;
+const escapeState = (value: string): string => escapeMemoryText(value.replace(/\r?\n/g, " "));
+const stateScopePrefix = (item: StateEvidence): string => {
+  const tag = standaloneScopeText(stateEvidenceScope(item)).replace(/^Known by/, "known by").replace(/^No character knows/, "no character knows");
+  return tag ? `[${escapeState(tag)}] ` : "";
+};
+
+const rowScopes = (row: AutomaticStateRow) =>
+  row.item.kind === "relationship" ? [] : [row.item, ...(row.line !== row.baseLine && row.item.previous ? [row.item.previous.item] : [])]
+    .map(stateEvidenceScope);
+
+function renderAutomaticStateLine(item: StateEvidence, latestStoryTime?: number, namingInNames = false): string {
+  // A basic relation is mutual; an arrow would read as one-sided.
+  const subject = item.automatic?.subject ?? item.subjects.join(" → ");
+  if (item.kind === "relationship") return `- ${escapeState(subject)}: ${escapeState(item.automatic!.body)}`;
+  const scope = stateScopePrefix(item);
+  return `- ${escapeState(item.kind === "basic_relation" ? subject.replaceAll(" → ", " & ") : subject)}${scope ? ` ${scope.trimEnd()}` : ""}: ${escapeState(automaticStateBody(item, latestStoryTime, namingInNames))}`;
 }
 
-const escapeState = (value: string): string => value.replace(/\r?\n/g, " ").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-const normalizeHolder = (value: string): string => value.normalize("NFKC").trim().toLocaleLowerCase();
-const characterPerspectives = (perspectives: string[]): string[] => [...new Set(perspectives.filter(name => !["narrator", "__shared__"].includes(name)))];
-
-function stateLegend(perspectives: string[]): string {
-  const characters = characterPerspectives(perspectives);
-  return escapeState(`Untagged = ${characters.length ? `known to all of: ${characters.join(", ")}` : "known to everyone"}. [narration] = story fact with no recorded holder. [Name] = knowledge limited to listed holders.`);
-}
-
-function renderAutomaticStateLine(item: StateEvidence, perspectives: string[], latestStoryTime?: number): string {
-  const characters = characterPerspectives(perspectives);
-  const holders = new Set(item.holders.map(normalizeHolder));
-  const shared = holders.has(EVERYONE_HOLDER) || characters.length > 0 && characters.every(name => holders.has(normalizeHolder(name)));
-  const tag = shared ? "" : ` [${item.holders.length ? item.holders.join(", ") : "narration"}]`;
+function automaticStateBody(item: StateEvidence, latestStoryTime?: number, namingInNames = false): string {
   const display = item.automatic;
   let body = display?.body ?? item.text;
-  if (display?.recognitionLevel) body += ` (${socialKnowledgeLevelLabel[display.recognitionLevel]})`;
+  const addressTerms = recentAddressTerms(display?.addressTerms ?? [], display?.addressTermsUserEdited);
+  if (item.kind==="recognition" && display && !namingInNames) body=joinSentences([recognitionNaming(item.subjects[1] ?? "them",display.knownAs ?? []),
+    display.body,addressTerms.length?`Calls ${addressTerms.map(term=>JSON.stringify(term)).join(", ")}.`:""]);
+  if (display?.recognitionLevel) body = joinSentences([body, socialKnowledgeLevelLabel[display.recognitionLevel]]);
   if (item.kind === "promise") {
     if (item.promisePinned || item.promiseRecent) body = body.length > 220 ? `${body.slice(0, 219)}…` : body;
     const status = overduePromise(item, latestStoryTime) ? "overdue" : item.promiseStatus ?? "open";
     const recentStatus: Record<string, string> = { kept: "recently kept", broken: "recently broken", released: "recently released", offscreen: "recently handled offscreen" };
     body += ` (${item.promiseRecent && !item.promisePinned ? recentStatus[status] ?? status : status}${item.due ? ` · due ${item.due}` : ""}${item.firstMade ? ` · ${promiseMadeLabel(item.firstMade)}` : ""})`;
   }
-  if (item.kind === "relationship") {
-    if (item.relationship?.stale) body += " [Last recorded relationship; update pending.]";
-    // Strip only terminal separator punctuation from typed list entries; never
-    // interpret the text as a relationship change or a resolved tension.
-    const tensions = display?.tensions?.map(text => text.trim().replace(/[.;]+$/u, "")).filter(Boolean);
-    if (tensions?.length) body += `${/[.!?。！？]$/u.test(body) ? "" : "."} Tension: ${tensions.join("; ")}`;
-  }
-  // A basic relation is mutual; an arrow would read as one-sided.
-  const subject = display ? display.subject : item.subjects.join(" → ");
-  return `- ${escapeState(item.kind === "basic_relation" ? subject.replaceAll(" → ", " & ") : subject)}${escapeState(tag)}: ${escapeState(body)}`;
+  return lastRecordedStateText(item,body);
 }
 
 function overduePromise(item: StateEvidence, latestStoryTime?: number): boolean {
@@ -213,10 +239,14 @@ function stateGroup(item: StateEvidence): number {
   if (item.kind === "world_fact" && item.stateKind === "condition") return 1;
   if (item.kind === "belief" || item.stateKind === "goal") return 2;
   if (item.kind === "promise") return item.promisePinned ? 4 : item.promiseRecent ? 5 : 3;
-  return 6;
+  return item.kind === "recognition" ? 6 : 7;
 }
 
-export function renderAutomaticState(rows: AutomaticStateRow[]) {
+export function renderAutomaticState(rows: AutomaticStateRow[], viewpoint?: string, pricing?: PacketPricing): {
+  xml: string; manifest: ReturnType<typeof emptyPacketManifest>; tokens: number; chargedTokens: number; lineCount: number;
+  linkedDetailIds: string[];
+  snapshots: Array<{id: string; text: string}>;
+} {
   const manifest = emptyPacketManifest();
   for (const { item } of rows) {
     manifest.stateEvidenceIds.push(item.id); manifest.atomKeys.push(stateMcpEvidence(item).atomKey);
@@ -226,16 +256,22 @@ export function renderAutomaticState(rows: AutomaticStateRow[]) {
     if (item.kind === "promise") manifest.promiseIds.push(id);
     if (item.relationship) manifest.relationshipPairs.push(item.relationship);
   }
-  const headings = ["Relationships", "Now", "Goals and beliefs", "Promises (story record; characters may keep, delay or break them as the story goes)", "Pinned promises", "Recently ended promises", "Other"];
+  const headings = ["Relationships", "Facts of the world", "Goals and beliefs", "Promises (characters may keep, delay or break them)", "Pinned promises", "Recently ended promises", "Who knows whom", "World and secrets"];
   const openPromise = (row: AutomaticStateRow) => Number(row.item.promiseStatus === "open");
   const ordered = [...rows].sort((a, b) => stateGroup(a.item) - stateGroup(b.item)
     || (a.item.kind === "promise" && b.item.kind === "promise" ? openPromise(b) - openPromise(a) : 0) || a.rank - b.rank);
   const groups = headings.flatMap((heading, index) => {
     const group = ordered.filter(row => stateGroup(row.item) === index);
+    if (index === 1 && group.every(row => rowScopes(row).every(scope => !scope))) heading += " (who knows them is not recorded)";
     return group.length ? [escapeState(heading), ...group.map(row => row.line)] : [];
   });
   // The final packet consolidator also shares identical lines. Measure that
   // exact form when distinct canonical rows have the same compact presentation.
-  const lines = rows.length ? [...new Set([rows[0]!.legend, ...groups])].join("\n") : "";
-  return { xml: lines ? `<recorded_state as_of="last_processed_history">\n${lines}\n</recorded_state>` : "", manifest, tokens: lines ? estimateTokens(lines) : 0, lineCount: lines ? lines.split("\n").length : 0 };
+  const lines = rows.length ? [...new Set(groups)].join("\n") : "";
+  const rendered = standaloneViewpoint(lines, rows.flatMap(rowScopes), viewpoint);
+  return { xml: rendered ? `<recorded_state>\n${rendered}\n</recorded_state>` : "", manifest,
+    tokens: rendered ? estimateTokens(rendered) : 0, chargedTokens: chargedSectionTokens(lines ? `<recorded_state>\n${lines}\n</recorded_state>` : "", pricing),
+    lineCount: lines ? lines.split("\n").length : 0,
+    linkedDetailIds: rows.flatMap(row => [row.item,...(row.line !== row.baseLine && row.item.previous ? [row.item.previous.item] : [])].flatMap(item=>item.linkedDetailIds ?? [])),
+    snapshots: ordered.map(row => ({ id: row.item.id, text: standaloneViewpoint(row.line, rowScopes(row), viewpoint) })) };
 }

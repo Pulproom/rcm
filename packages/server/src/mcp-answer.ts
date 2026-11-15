@@ -1,10 +1,13 @@
+import { buildEmissionPlan, omitStateLinkedDetails, buildManifest, emittedMemoryItems, factReasonsFor, memoryFactReasons, planMemoryCard, type EmissionPlan, type FactSelectedMemory } from "./emission-plan.js";
+import { chatPacketPricing, chargedSectionTokens, chargedPacketTokens } from "./charged-cost.js";
+import { plotBundleDetailIds } from "./automatic-packet.js";
+import { storedNarrationViewpoint } from "./perspectives.js";
 import { appendMcpSourceContext } from "./mcp-source-context.js";
-import { evidenceRanker, rankMcpRecords } from "./mcp-evidence.js";
-import { estimateTokens, renderMcpAnswer, type McpEvidence, type McpQuestionAnswer, type McpSourceRange } from "@rcm/shared";
+import { evidenceRanker, memoryDetailEvidence, memoryPlotEvidence, rankMcpRecords } from "./mcp-evidence.js";
+import { segmentSentences, emitsMemoryPlot, estimateTokens, isAuthorCard, renderMcpAnswer, type McpEvidence, type McpQuestionAnswer, type McpSourceRange, type MemoryContextItem } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import type { retrieve } from "./retrieval.js";
+import { selectFactReasons, type retrieve, type RetrievalAudience } from "./retrieval.js";
 import type { SemanticSearchResult } from "./embedding.js";
-import { emptyPacketManifest } from "./packet-manifest.js";
 import { memoryAtomKeys, memoryDetailAtomKey, memoryDialogueAtomKey, memorySummaryAtomKey } from "./memory-atoms.js";
 import { retrieveSourceEvidence, sourceEvidenceAtomKey } from "./source-evidence.js";
 import { targetDetailSourceEvidence } from "./target-source-evidence.js";
@@ -15,20 +18,38 @@ import { collectStateEvidence, selectStateEvidence, stateMcpEvidence } from "./s
 import { McpSelector, type SelectorDiagnostic } from "./mcp-selector.js";
 import { mcpEvidenceVersion, selectorBundles } from "./mcp-selector-bundles.js";
 
+/** Rendering and accounting consume the same final plan, including budget omissions. */
+export function renderAuthorMcpAnswer(answers: McpQuestionAnswer[], plan: EmissionPlan, candidates: MemoryContextItem[],
+  reference: (id: string) => string | undefined = () => undefined, viewpoint?: string, supplied: ReadonlySet<string> = new Set()): string {
+  const items = emittedMemoryItems(plan);
+  return renderMcpAnswer(answers,reference,{viewpoint,cards:plan.cards.map((card,index)=>({...card,item:{...items[index]!,content:card.item.content},
+    moreDetails:candidates.find(item=>item.id===card.memoryId)?.details.some(detail=>!card.detailIds.includes(detail.id) && !supplied.has(memoryDetailAtomKey(detail)))}))});
+}
+
 export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result: ReturnType<typeof retrieve>, options: {
   memoryOnlyInjection?: boolean;
-  archiveView?: boolean; query: string; aspects?: string[]; tokenBudget: number; perspectives: string[]; promptIds?: string[]; excludedAtoms: string[];
+  audience?: RetrievalAudience; archiveView?: boolean; query: string; aspects?: string[]; tokenBudget: number; perspectives: string[]; promptIds?: string[]; excludedAtoms: string[];
   semantic: SemanticSearchResult[]; seedMemoryId?: string; referenceMemoryId?: string; reranker?: EvidenceReranker;
   excludedSourceRanges?: McpSourceRange[];
   currentMessageId?: string;
   selector?: Pick<McpSelector,"publicConfig"|"select">; signal?:AbortSignal; isCurrent?:()=>boolean;
 }): Promise<{ answers: McpQuestionAnswer[]; rerank: McpRerankDiagnostic; sourceSpans: McpSourceSpanDiagnostic; selector?:SelectorDiagnostic }> {
+  if (options.audience) options = { ...options, archiveView: options.audience.kind === "author" };
+  const pricing = chatPacketPricing(db,chatId);
   const sourceStarted = performance.now();
   const useSelector=Boolean(options.selector?.publicConfig.enabled&&options.archiveView&&!options.seedMemoryId);
   const version=useSelector?mcpEvidenceVersion(db,chatId):undefined;
   const supplied = new Set(options.excludedAtoms);
-  const records = rankMcpRecords(result.eligibleCandidates, options.query, options.aspects ?? [], options.semantic, supplied, options.seedMemoryId, { searchEnvelopes: result.mcpSearchEnvelopes, referenceMemoryId: options.referenceMemoryId, archiveView: options.archiveView });
+  // Authorization materializes the candidate set. Hit-only emission follows
+  // MCP ranking and fitting, so a missing automatic hit cannot hide a fact here.
+  const candidates = result.eligibleCandidates;
+  const records = rankMcpRecords(candidates, options.query, options.aspects ?? [], options.semantic, supplied, options.seedMemoryId, { searchEnvelopes: result.mcpSearchEnvelopes, referenceMemoryId: options.referenceMemoryId, archiveView: options.archiveView });
   const answers: McpQuestionAnswer[] = records.answers;
+  // Delivery state does not change candidate eligibility. Keep supplied plots
+  // as status, while leaving their prose out of fitting, rendering and receipts.
+  const suppliedPlots = new Set(candidates.filter(item=>emitsMemoryPlot(item) && supplied.has(memorySummaryAtomKey(item) ?? "")).map(item=>memorySummaryAtomKey(item)!));
+  const providedPlots = answers.map(answer=>answer.evidence.filter(evidence=>suppliedPlots.has(evidence.atomKey)));
+  for (const answer of answers) answer.evidence=answer.evidence.filter(evidence=>!suppliedPlots.has(evidence.atomKey));
   const stateEvidence = !options.memoryOnlyInjection && options.archiveView && !options.seedMemoryId
     ? collectStateEvidence(db,chatId) : [];
   const stateAnswers = options.memoryOnlyInjection ? [] : options.archiveView && !options.seedMemoryId
@@ -71,7 +92,7 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
       kind:"quote" as const,text:item.quote,speaker:item.speaker ?? undefined,knownBy:item.holders,basis:item.epistemic})));
   }
   const sourceContext = options.archiveView
-    ? appendMcpSourceContext(db, chatId, answers, result.eligibleCandidates.filter(item => records.memoryIds.includes(item.id) || records.sourceMemoryIds.includes(item.id)), options.seedMemoryId ? [] : options.semantic, options.tokenBudget, options.query,
+    ? appendMcpSourceContext(db, chatId, answers, candidates.filter(item => records.memoryIds.includes(item.id) || records.sourceMemoryIds.includes(item.id)), options.seedMemoryId ? [] : options.semantic, options.tokenBudget, options.query,
       options.currentMessageId ? [options.currentMessageId] : [], Boolean(options.seedMemoryId), options.promptIds, useSelector, records.sourceMemoryIds, stateEvidence)
     : undefined;
   if (!answers.length) answers.push({question:options.query,evidence:[],alreadyPresent:false,relatedRecords:true,searchUnavailable:options.semantic[0]?.searchUnavailable});
@@ -102,27 +123,105 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
       for(const answer of answers.slice(1))answer.evidence=[];
     }
   }
-  for (const answer of answers) {
+  for (const [index,answer] of answers.entries()) {
     answer.alreadyProvidedEvidence = [];
-    answer.alreadyPresent = answer.evidence.some(evidence => supplied.has(evidence.atomKey));
+    answer.alreadyPresent = Boolean(providedPlots[index]?.length) || answer.evidence.some(evidence => supplied.has(evidence.atomKey));
   }
   const retained = answers.map(answer => ({ ...answer, evidence: [] as typeof answer.evidence,
     alreadyProvidedEvidence: [] as McpEvidence[] }));
+  const planFor = (entries: McpQuestionAnswer[]): EmissionPlan => {
+    const evidence=entries.flatMap(answer=>answer.evidence);
+    const keys=new Set(evidence.map(entry=>entry.atomKey));
+    const selected = result.eligibleCandidates.filter(item=>evidence.some(entry=>entry.memoryId===item.id)).map((item):FactSelectedMemory=>{
+      const reasons = new Map(factReasonsFor(item));
+      // Fitting selects explicit atom keys, including unfocused ref expansion.
+      // Merely loading a sibling into the candidate pool grants no reason.
+      for (const detail of item.details) if (keys.has(memoryDetailAtomKey(detail))) {
+        reasons.set(detail.id,[...new Set([...(reasons.get(detail.id) ?? []),...selectFactReasons({mcpAtomRef:true})])]);
+      }
+      return {...item,[memoryFactReasons]:reasons};
+    });
+    const plan=buildEmissionPlan(selected,
+      {promptSourceMessageIds:options.promptIds,excludedAtomKeys:supplied,excludeLineAtoms:false});
+    for(const card of plan.cards){
+      if(!keys.has(memorySummaryAtomKey(card.item)??""))card.plot="omit";
+      card.detailIds=evidence.flatMap(entry=>card.item.details.filter(detail=>memoryDetailAtomKey(detail)===entry.atomKey).map(detail=>detail.id));
+      card.detailIds=[...new Set(card.detailIds)];
+      card.dialogueIds=card.item.keyDialogues.filter(dialogue=>keys.has(memoryDialogueAtomKey(card.memoryId,dialogue)))
+        .map(dialogue=>dialogue.id??memoryDialogueAtomKey(card.memoryId,dialogue));
+    }
+    const stateKeys=new Set(evidence.map(entry=>entry.atomKey));
+    omitStateLinkedDetails(plan,new Set(stateEvidence.filter(item=>stateKeys.has(stateMcpEvidence(item).atomKey)).flatMap(item=>item.linkedDetailIds ?? [])));
+    return plan;
+  };
+  const viewpoint=options.archiveView ? storedNarrationViewpoint(db,chatId) : undefined;
+  // Compare the stable single-row presentation (including access/qualifiers),
+  // preserving deduplication identity across belief wording changes.
+  const historyReplacements = new Map(stateEvidence.flatMap(item=>{
+    if (!item.currentItemId) return [];
+    const current = stateEvidence.find(entry=>entry.id===item.currentItemId);
+    if (!current) return [];
+    const render = (evidence: McpEvidence) => renderMcpAnswer([{question:"",evidence:[evidence],alreadyPresent:false}]);
+    return render(stateMcpEvidence({...current,displayText:current.dedupeText ?? current.displayText})) === render(stateMcpEvidence({...item,kind:current.kind,
+      current:current.current,historyLabel:undefined,displayText:item.dedupeText ?? item.displayText}))
+      ? [[stateMcpEvidence(item).atomKey,stateMcpEvidence(current).atomKey] as const] : [];
+  }));
+  const withoutRepeatedHistory = (entries: McpQuestionAnswer[]): McpQuestionAnswer[] => {
+    const keys = new Set(entries.flatMap(answer=>answer.evidence.map(entry=>entry.atomKey)));
+    return entries.map(answer=>({...answer,evidence:answer.evidence.filter(entry=>{
+      const replacement = historyReplacements.get(entry.atomKey);
+      return !replacement || !keys.has(replacement);
+    })}));
+  };
+  const fittedTokens = () => {
+    const visible = withoutRepeatedHistory(retained);
+    if(!options.archiveView)return estimateTokens(renderMcpAnswer(visible,()=>"m0000000000000000"));
+    const plan=planFor(visible);
+    const packet=renderAuthorMcpAnswer(visible,plan,result.eligibleCandidates,()=>"m0000000000000000",undefined,supplied);
+    return plan.cards.length ? chargedPacketTokens(packet,plan,pricing) : chargedSectionTokens(packet,pricing);
+  };
   const targetBudget=options.tokenBudget;
   const hardBudget=options.tokenBudget;
   // Reserve the complete answer before adding whole evidence bundles. Only if
   // the answer alone exceeds the cap, remove trailing complete sentences;
   // never slice a sentence or an exact source passage to fill a token slot.
   for (const answer of retained) {
-    while (answer.synthesizedText && estimateTokens(renderMcpAnswer(retained,()=>"m0000000000000000")) > hardBudget) {
-      const sentences=[...new Intl.Segmenter(undefined,{granularity:"sentence"}).segment(answer.synthesizedText)].map(part=>part.segment);
+    while (answer.synthesizedText && fittedTokens() > hardBudget) {
+      const sentences=segmentSentences(answer.synthesizedText).map(part=>part.segment);
       sentences.pop();answer.synthesizedText=sentences.join("").trimEnd();
     }
   }
-  const coreKeys = new Set(result.eligibleCandidates.flatMap(item => item.details
-    .filter(detail => detail.role === "core").map(memoryDetailAtomKey)));
+  const coreKeys = new Set(result.eligibleCandidates.flatMap(item => {
+    const card = planMemoryCard(item);
+    return [...(card.shape === 1 && card.plot === "emit" ? [memorySummaryAtomKey(item)!] : []),...item.details
+      .filter(detail => card.shape === 1 ? card.minimumUnitIds.includes(detail.id) : detail.role === "core").map(memoryDetailAtomKey)];
+  }));
+  const budgetOmittedPlots = new Set<string>();
+  const plotFor = (evidence: McpEvidence) => candidates.find(item => item.id === evidence.memoryId && emitsMemoryPlot(item) && !suppliedPlots.has(memorySummaryAtomKey(item)!));
+  const admitPlot = (question:number,evidence:McpEvidence,budget:number) => {
+    if (!options.archiveView || supplied.has(evidence.atomKey)) return;
+    const target=retained[question]!.evidence;
+    const plot=plotFor(evidence);
+    if (plot && !budgetOmittedPlots.has(plot.id) && !target.some(entry=>entry.atomKey===memorySummaryAtomKey(plot))) {
+      const bundleIds=plotBundleDetailIds(plot);
+      // Focus ranks optional atoms; the minimum unit comes from the authorized card, not the shortlist.
+      const bundle=[memoryPlotEvidence(plot),...plot.details.filter(detail=>bundleIds.has(detail.id)).map(detail=>memoryDetailEvidence(plot,detail))]
+        .filter(entry=>!supplied.has(entry.atomKey) && !target.some(old=>old.atomKey===entry.atomKey));
+      target.push(...bundle);
+      if (fittedTokens()>budget) {
+        target.splice(target.length-bundle.length);
+        budgetOmittedPlots.add(plot.id);
+      }
+    }
+  };
   const tryAdd=(question:number,evidence:McpEvidence,budget:number,provided=false)=>{
     const target=provided?retained[question]!.alreadyProvidedEvidence!:retained[question]!.evidence;
+    // Delivery history affects final author emission, never record ranking.
+    if (options.archiveView && supplied.has(evidence.atomKey)) return true;
+    admitPlot(question,evidence,budget);
+    const plot=plotFor(evidence);
+    if (options.archiveView && plot && isAuthorCard(plot) && budgetOmittedPlots.has(plot.id)) return false;
+    if (options.archiveView && plot && evidence.atomKey===memorySummaryAtomKey(plot) && budgetOmittedPlots.has(plot.id)) return true;
     if (evidence.kind === "quote") {
       const quotes = retained.flatMap(answer => answer.evidence).filter(item => item.kind === "quote");
       if (!options.archiveView && quotes.reduce((sum,item) => sum + estimateTokens(item.text),0) + estimateTokens(evidence.text) > (options.seedMemoryId || !answers.some(answer => answer.evidence.some(item => item.kind !== "quote")) ? budget : Math.floor(budget * .25))) return false;
@@ -134,7 +233,7 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
       if (evidence.sourceRange && quotes.some(item => item.sourceRange?.messageId === evidence.sourceRange!.messageId
         && item.sourceRange.start <= evidence.sourceRange!.start && item.sourceRange.end >= evidence.sourceRange!.end)) return true;
     }
-    const core = evidence.memoryId && !coreKeys.has(evidence.atomKey)
+    const core = (!options.archiveView || candidates.some(item=>item.id===evidence.memoryId && !isAuthorCard(item))) && evidence.memoryId && !coreKeys.has(evidence.atomKey)
       && !target.some(entry => entry.memoryId === evidence.memoryId && coreKeys.has(entry.atomKey))
       ? answers[question]!.evidence.filter(entry => entry.memoryId === evidence.memoryId && coreKeys.has(entry.atomKey))
         .sort((a,b) => rank(b.text)-rank(a.text))[0] : undefined;
@@ -142,13 +241,15 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
       ? answers[question]!.evidence.find(entry => entry.kind === "fact" && entry.memoryId === evidence.memoryId && !target.some(old => old.atomKey === entry.atomKey)) : undefined);
     if (evidence.kind === "dialogue" && !evidence.context && !context && !target.some(entry => entry.kind === "fact" && entry.memoryId === evidence.memoryId)) return false;
     if (target.some(entry => entry.atomKey === evidence.atomKey)) return true;
-    if (evidence.atomKey.startsWith("state:") && evidence.kind === "fact") {
-      const stateTokens = retained.flatMap(answer => answer.evidence).filter(item => item.atomKey.startsWith("state:")).reduce((sum,item) => sum + estimateTokens(item.text), 0);
-      if (stateTokens + estimateTokens(evidence.text) > Math.floor(budget * .3)) return false;
-    }
-    target.push(...(context ? [context] : []), evidence);
-    if(estimateTokens(renderMcpAnswer(retained,()=>"m0000000000000000"))<=budget)return true;
-    target.pop(); if (context) target.pop(); return false;
+    const plotEvidence = !options.archiveView && plot ? memoryPlotEvidence(plot) : undefined;
+    const additions = [...new Map([plotEvidence,context,evidence].filter((entry):entry is McpEvidence=>Boolean(entry))
+      .filter(entry=>!options.archiveView || !supplied.has(entry.atomKey))
+      .filter(entry=>!target.some(old=>old.atomKey===entry.atomKey)).map(entry=>[entry.atomKey,entry])).values()];
+    target.push(...additions);
+    const stateTokens = withoutRepeatedHistory(retained).flatMap(answer=>answer.evidence)
+      .filter(item=>item.atomKey.startsWith("state:")).reduce((sum,item)=>sum+estimateTokens(item.text),0);
+    if ((!evidence.atomKey.startsWith("state:") || stateTokens <= Math.floor(budget * .3)) && fittedTokens()<=budget) return true;
+    target.splice(target.length-additions.length); return false;
   };
   // Candidate discovery and final delivery are separate budgets. In archive
   // recall, rotate records, state bundles and independent source ranges so a
@@ -169,6 +270,8 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
       },[[],[],[],[]]);
       for(let index=0;index<Math.max(...lanes.map(lane=>lane.length));index++)for(const lane of lanes){
         const group=lane[index];if(!group)continue;
+        // Optional evidence/source bundles may fail without discarding a fitted plot bundle.
+        for (const evidence of group) admitPlot(question,evidence,targetBudget);
         const before=[...retained[question]!.evidence];
         if(!group.every(evidence=>tryAdd(question,evidence,targetBudget)))retained[question]!.evidence=before;
       }
@@ -185,36 +288,38 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
     const evidence=answers[question]!.evidence[index];if(evidence)tryAdd(question,evidence,targetBudget);
   }
   }
-  for (const answer of retained) {
+  for (const [index,answer] of retained.entries()) {
     answer.alreadyProvidedEvidence = answer.evidence.filter(evidence => supplied.has(evidence.atomKey));
-    answer.alreadyPresent = Boolean(answer.alreadyProvidedEvidence.length);
+    answer.alreadyPresent = Boolean(answer.alreadyProvidedEvidence.length || providedPlots[index]?.length
+      || options.archiveView && answers[index]?.alreadyPresent);
   }
+  const visible = withoutRepeatedHistory(retained);
+  for (const [index,answer] of retained.entries()) answer.evidence = visible[index]!.evidence;
   const keys = new Set(retained.flatMap(answer => answer.evidence.map(evidence => evidence.atomKey)));
-  const alreadyProvidedAtomKeys = [...new Set(retained.flatMap(answer => (answer.alreadyProvidedEvidence ?? []).map(evidence => evidence.atomKey)))];
+  const alreadyProvidedAtomKeys = [...new Set([...providedPlots.flat().map(evidence=>evidence.atomKey),...retained.flatMap(answer => (answer.alreadyProvidedEvidence ?? []).map(evidence => evidence.atomKey))])];
   result.mcpFollowableMemoryIds = [...records.eligibleAtomKeysByMemory].flatMap(([memoryId, atomKeys]) =>
     answers.some((answer, index) => retained[index]?.evidence.length === 0 && !retained[index]?.alreadyProvidedEvidence?.length && answer.evidence.some(evidence =>
       evidence.memoryId === memoryId && atomKeys.has(evidence.atomKey) && !keys.has(evidence.atomKey) && !supplied.has(evidence.atomKey)))
       ? [memoryId] : []);
-  result.selected = result.eligibleCandidates.flatMap(item => {
-    const summaryDelivered = item.atomAccessVersion === 0 && keys.has(memorySummaryAtomKey(item)!);
-    const filtered = { ...item, title: summaryDelivered ? item.title : "", content: summaryDelivered ? item.content : "", atomAccessVersion: summaryDelivered ? 0 : 1,
-      details: item.details.filter(detail => keys.has(memoryDetailAtomKey(detail))),
-      keyDialogues: item.keyDialogues.filter(dialogue => keys.has(memoryDialogueAtomKey(item.id, dialogue))) };
-    return memoryAtomKeys(filtered).length ? [filtered] : [];
-  });
+  result.emissionPlan = planFor(retained);
+  result.selected = emittedMemoryItems(result.emissionPlan);
   result.deliveredAtomKeys = [...keys];
   result.deliveredSourceRanges = [...new Map(retained.flatMap(answer=>answer.evidence.flatMap(evidence=>evidence.dialogueSourceRanges ?? (evidence.sourceRange?[evidence.sourceRange]:[])))
     .map(range=>[`${range.messageId}:${range.start}:${range.end}`,range])).values()];
-  result.structuredManifest = { ...emptyPacketManifest(), atomKeys: [...keys],
-    memoryIds: [...new Set(retained.flatMap(answer => answer.evidence.flatMap(evidence => evidence.memoryId ? [evidence.memoryId] : [])))],
-    detailIds: result.selected.flatMap(item => item.details.map(detail => detail.id)),
-  };
+  const memoryKeys = new Set(result.eligibleCandidates.flatMap(memoryAtomKeys));
+  result.emissionPlan.laneRows.push(...[...keys].filter(key=>!memoryKeys.has(key)).map(id=>({lane:"atomKeys",id})));
+  result.structuredManifest = buildManifest(result.emissionPlan);
   result.coverage = retained.map(answer => ({ aspect: answer.question,
     status: answer.evidence.length ? "related" : answer.alreadyPresent ? "already_present" : "no_grounded_hit",
     memoryIds: [...new Set(answer.evidence.flatMap(evidence => evidence.memoryId ? [evidence.memoryId] : []))],
   }));
-  result.answers = retained;
-  result.packet = renderMcpAnswer(retained);
+  const emittedKeys = new Set(result.structuredManifest.atomKeys);
+  const emittedAnswers = retained.map(answer=>({...answer,evidence:answer.evidence.filter(evidence=>emittedKeys.has(evidence.atomKey)),
+    alreadyProvidedEvidence:answer.alreadyProvidedEvidence?.filter(evidence=>emittedKeys.has(evidence.atomKey))}));
+  result.answers = emittedAnswers;
+  result.deliveredAtomKeys = [...emittedKeys];
+  result.packet = options.archiveView ? renderAuthorMcpAnswer(emittedAnswers,result.emissionPlan,result.eligibleCandidates,undefined,viewpoint,supplied)
+    : renderMcpAnswer(emittedAnswers);
   result.estimatedTokens = estimateTokens(result.packet);
   // Candidate delivery intentionally writes neither recall logs nor strength.
   if (result.diagnostics) {
@@ -228,5 +333,5 @@ export async function finalizeMcpAnswer(db: RcmDatabase, chatId: string, result:
     Object.assign(result.diagnostics, { mcpFinalizationMs: performance.now() - sourceStarted });
     Object.assign(result.diagnostics, { alreadyProvidedAtomKeys });
   }
-  return { answers: retained, rerank, sourceSpans, selector:selectorDiagnostic };
+  return { answers: emittedAnswers, rerank, sourceSpans, selector:selectorDiagnostic };
 }

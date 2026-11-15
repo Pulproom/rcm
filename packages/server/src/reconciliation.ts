@@ -1,7 +1,12 @@
+import { assertChatUnlocked, chatUpgradeLock } from './upgrade-lock.js';
+import { finishReviewedBatches } from './source-coverage.js';
+import { stateDetailSupport } from "@rcm/shared";
+import { type StateItemDrop } from "@rcm/shared";
+import { appendJobStateDrops } from "./jobs.js";
 import { ModelContentValidationError } from "@rcm/shared";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { parseSocialRelation, sameSocialRelationScope, resolveSocialRelation, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
-import { transitionEvidenceJson, canAutomaticallyChange, committedEditOrdinal, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
+import { transitionEvidenceJson, compatibleIndependentAssertion, canAutomaticallyChange, committedEditOrdinal, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   estimateTokens, measureAuxiliaryPrompt,
@@ -9,6 +14,7 @@ import {
   ExtractionResultSchema,
   StateObservationSchema,
   ReconciliationResultSchema,
+  ReconciliationDecisionSchema,
   type ExtractionDraftResult,
   type ExtractionResult,
   type ReconciliationResult,
@@ -48,8 +54,9 @@ function requiresProtectedStateReview(entry: CandidateEntry, decision: Reconcili
   const protectedProperty = entry.candidates.filter(candidate => candidate.immutable && normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key)) === predicate);
   const compatible = decision.action === 'coexist' && entry.observation.kind === 'character_belief'
     && protectedProperty.every(candidate => decision.compatibleWithIds?.includes(candidate.id));
+  const independentAssertion=entry.observation.kind==='world_fact' && compatibleIndependentAssertion({create:decision.action==='create',targetIds:decision.targetIds,compatibleWithIds:decision.compatibleWithIds,protectedIds:protectedProperty.map(candidate=>candidate.id),candidateIds:entry.candidates.map(candidate=>candidate.id)});
   return decision.targetIds.some(id => entry.candidates.some(candidate => candidate.id === id && candidate.immutable))
-    || decision.action !== 'ignore' && protectedProperty.length > 0 && !compatible;
+    || decision.action !== 'ignore' && protectedProperty.length > 0 && !compatible && !independentAssertion;
 }
 
 const placeholders = (values: string[]): string => values.map(() => "?").join(",");
@@ -87,10 +94,11 @@ export interface PreparedReconciliation {
   candidateSetHash?: string;
   systemPrompt?: string;
   userPrompt?: string;
+  reviewExemptItemRefs?: string[];
   items: CandidateEntry[];
   local: StateObservation[];
   deferred: CandidateEntry[];
-  parts?: Array<{ systemPrompt: string; userPrompt: string; itemRefs: string[]; estimatedInputTokens: number }>;
+  parts?: Array<{ systemPrompt: string; userPrompt: string; itemRefs: string[]; reviewExemptItemRefs: string[]; estimatedInputTokens: number }>;
 }
 
 export function prepareReconciliation(db: RcmDatabase, chatId: string, draft: ExtractionDraftResult, maxInputTokens = 80_000): PreparedReconciliation {
@@ -104,9 +112,9 @@ export function prepareReconciliation(db: RcmDatabase, chatId: string, draft: Ex
   for (const entry of all) {
     if (entry.observation.kind !== 'world_fact' || !entry.observation.socialRelation) continue;
     const relation=entry.observation.socialRelation;
-    const parent = draft.memories.find(memory => memory.key === relation.memoryKey);
-    const supported = parent ? relation.detailKeys.every(key => parent.details?.some(detail => detail.key === key))
-      : !!resolveSocialRelation(db, chatId, relation, new Map());
+    const refs=stateDetailSupport(relation) ?? [];
+    const supported = refs.length && refs.every(ref=>draft.memories.some(memory=>memory.key===ref.memoryKey && memory.details?.some(detail=>detail.key===ref.detailKey)))
+      || !!resolveSocialRelation(db, chatId, relation, new Map());
     if (!supported) {
       entry.reviewReason = UNSUPPORTED_SOCIAL_RELATION;
     }
@@ -143,12 +151,14 @@ You reconcile source-grounded roleplay state observations with a bounded canonic
   if (!items.length) return { required: false, items: [], local, deferred };
   const publicItems = items.map(({ itemRef, observation, candidates }) => ({ itemRef, observation, candidates }));
   const parts = pageEntries.map((entries) => { const userPrompt = render(entries); return { systemPrompt, userPrompt,
+    reviewExemptItemRefs: entries.filter(entry => entry.reviewReason).map(entry => entry.itemRef),
     itemRefs: entries.map((entry) => entry.itemRef), estimatedInputTokens: measureAuxiliaryPrompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], estimateTokens, { maxInputTokens, maxOutputTokens: 0 }).estimatedInputTokens }; });
   return {
     required: true,
     candidateSetHash: stableHash(publicItems.map(({ itemRef, candidates }) => ({ itemRef, candidates }))),
     systemPrompt: parts[0]!.systemPrompt,
     userPrompt: parts[0]!.userPrompt,
+    reviewExemptItemRefs: parts[0]!.reviewExemptItemRefs,
     parts,
     items,
     local,
@@ -176,19 +186,63 @@ function emptyFinal(draft: ExtractionDraftResult): ExtractionResult {
 const promiseStatus = (event: Extract<StateObservation, { kind: "promise_event" }>["event"]): "open" | "kept" | "broken" | "released" | "offscreen" =>
   event === "kept" || event === "broken" || event === "released" ? event : event === "scheduled_passed" ? "offscreen" : "open";
 
+/** Only an end that explicitly names an already-ended row is a no-op.
+ * No identity is inferred for create/coexist, and unresolved rows stay reviewable. */
+export function repeatsLedgerEnd(
+  db: RcmDatabase, chatId: string, observation: StateObservation, decision: ReconciliationResult["decisions"][number],
+): boolean {
+  if (decision.action !== "end" || !decision.targetIds.length || decision.compatibleWithIds?.length
+    || observation.kind === "promise_event") return false;
+  const resolve = buildEntityIdentityResolver(db, chatId);
+  const subject = resolve(observation.subject);
+  const holder = observation.kind === "character_belief" ? resolve(observation.holder) : undefined;
+  if (subject.ambiguous || holder?.ambiguous) return false;
+  const statement = observation.kind === "world_fact"
+    ? db.prepare("SELECT subject,predicate,social_relation_json FROM assertions WHERE chat_id=? AND id=? AND valid_to_revision IS NOT NULL")
+    : db.prepare("SELECT holder,subject,predicate FROM beliefs WHERE chat_id=? AND id=? AND active=0 AND valid_to_ordinal IS NOT NULL AND status IN ('active','superseded') AND COALESCE(source,'') NOT LIKE 'user_deleted:%'");
+  return decision.targetIds.every(id => {
+    const row = statement.get(chatId, id) as { subject: string; holder?: string; predicate: string; social_relation_json?: string } | undefined;
+    if (!row || normalizePredicate(row.predicate) !== normalizePredicate(observation.predicateHint)) return false;
+    const sameIdentity = (stored: string, canonical: string) => {
+      const identity = resolve(stored);
+      return !identity.ambiguous && identity.canonical === canonical;
+    };
+    return sameIdentity(row.subject, subject.canonical) && (observation.kind === "world_fact"
+      ? sameSocialRelationScope(row.social_relation_json, observation.socialRelation, resolve)
+      : !!row.holder && sameIdentity(row.holder, holder!.canonical));
+  });
+}
+
+/** An explicit repeat of a recorded outcome is a no-op, even across a user edit. */
+function repeatsPromiseOutcome(observation: StateObservation, target: Candidate | undefined): boolean {
+  if (observation.kind !== "promise_event" || target?.kind !== "promise_event") return false;
+  if (observation.event !== "kept" && observation.event !== "broken" && observation.event !== "released") return false;
+  const saved = target.value;
+  return observation.promiseKeyHint === saved.promise_key
+    && observation.promisor === saved.promisor && observation.promisee === saved.promisee
+    && observation.content === saved.content && observation.event === saved.status
+    && observation.scope === saved.retention_scope && !observation.amendment
+    && (observation.scheduledFor === undefined || observation.scheduledFor === saved.scheduled_for)
+    && (observation.statusReason === undefined || observation.statusReason === saved.status_reason)
+    && observation.access === undefined && observation.support === undefined && observation.detailKeys === undefined;
+}
+
 function addObservation(result: ExtractionResult, observation: StateObservation, action: string, targetIds: string[], canonical?: string, compatibleWithIds?: string[]): void {
   if (observation.kind === "world_fact") {
     result.assertions.push({
       subject: observation.subject, predicate: canonical || observation.predicateHint, value: observation.value,
       ...(compatibleWithIds?.length ? { compatibleWithIds } : {}),
-      socialRelation: observation.socialRelation, validFromMemoryKey: observation.socialRelation?.memoryKey,
+      socialRelation: observation.socialRelation, validFromMemoryKey: observation.memoryKey ?? observation.support?.[0]?.memoryKey ?? observation.socialRelation?.memoryKey,
+      memoryKey: observation.memoryKey ?? observation.support?.[0]?.memoryKey, detailKeys: observation.detailKeys, support: observation.support,
       stateKind: observation.socialRelation ? "condition" : observation.stateKind,
+      // Targeted initial is reinforce; untargeted initial is create/coexist.
       changeType: action === "supersede" ? "update" : action === "dispute" ? "claim" : "initial",
       confidence: observation.confidence, evidence: observation.evidence, retention: observation.retention,
       ...(targetIds.length ? { targetAssertionIds: targetIds } : {}),
     });
   } else if (observation.kind === "character_belief") {
     result.beliefs.push({
+      memoryKey: observation.memoryKey ?? observation.support?.[0]?.memoryKey, detailKeys: observation.detailKeys, support: observation.support,
       holder: observation.holder, subject: observation.subject, predicate: canonical || observation.predicateHint, value: observation.value,
       polarity: observation.stance, confidence: observation.confidence, source: observation.source, evidence: observation.evidence,
       retention: observation.retention, action: action === "create" ? "new" : action === "end" ? "supersede" : action as "reinforce" | "supersede" | "coexist" | "dispute",
@@ -198,8 +252,9 @@ function addObservation(result: ExtractionResult, observation: StateObservation,
   } else {
     result.promises.push({
       key: canonical || observation.promiseKeyHint, promisor: observation.promisor, promisee: observation.promisee,
-      content: observation.content, status: promiseStatus(observation.event), scheduledFor: observation.scheduledFor,
-      statusReason: observation.statusReason, memoryKey: observation.memoryKey, scope: observation.scope,
+      content: observation.content, event: observation.event, amendment: observation.amendment,
+      status: promiseStatus(observation.event), scheduledFor: observation.scheduledFor,
+      statusReason: observation.statusReason, memoryKey: observation.memoryKey ?? observation.support?.[0]?.memoryKey, detailKeys: observation.detailKeys, support: observation.support, scope: observation.scope,
       evidence: observation.evidence, access: observation.access,
       ...(compatibleWithIds?.length ? { compatibleWithIds } : {}),
     });
@@ -214,14 +269,19 @@ export function recordReconciliationReview(db: RcmDatabase, chatId: string, jobI
 }
 
 /** Convert new state without writing reconciliation decisions or closing rows. */
-export function additiveReconciliationResult(draft: ExtractionDraftResult, submission?: ReconciliationSubmission): ExtractionResult {
-  const result = emptyFinal(draft);
-  if (draft.seedResolutions?.length) throw new ModelContentValidationError('Memory additions cannot resolve existing seeds');
+export function additiveReconciliationResult(draft: ExtractionDraftResult, submission?: ReconciliationSubmission, drops: StateItemDrop[] = []): ExtractionResult {
+  const result = emptyFinal({...draft, seedResolutions: []});
+  (draft.seedResolutions ?? []).forEach((candidate,index) => drops.push({ path: ["seedResolutions",index], list: "seedResolutions", point: "C11:additive_seed", reason: "C11:additive_seed: Memory additions cannot resolve existing seeds", candidate }));
   const decisions = new Map((submission?.result?.decisions ?? []).map(item => [item.itemRef, item]));
   for (const observation of draft.stateObservations) {
+    const matches = submission?.result?.decisions.filter(decision => decision.itemRef === `observation:${observation.key}`);
+    if (matches && matches.length !== 1) {
+      drops.push({ path:["stateObservations",draft.stateObservations.indexOf(observation)], list:"stateObservations", key:observation.key, point:"C4:additive_decision_coverage", reason:"C4:additive_decision_coverage: missing or duplicate decision", candidate:{observation,decisions:matches} }); continue;
+    }
     const decision = decisions.get(`observation:${observation.key}`);
     if (decision && (!['create', 'coexist', 'ignore'].includes(decision.action) || decision.targetIds.length)) {
-      throw new ModelContentValidationError('Memory additions cannot change existing state');
+      drops.push({ path: ["stateObservations", draft.stateObservations.indexOf(observation)], list: "stateObservations", key: observation.key, point: "C11:additive_decision", reason: "C11:additive_decision: Memory additions cannot change existing state", candidate: { observation, decision } });
+      continue;
     }
     if (decision?.action !== 'ignore') addObservation(result, observation, decision?.action ?? 'create', [], undefined, decision?.compatibleWithIds);
   }
@@ -247,42 +307,66 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
     if (submission.error) throw new Error(`State reconciliation failed: ${submission.error}`);
     if (submission.candidateSetHash !== prepared.candidateSetHash) throw new Error("Candidate set changed before completion");
     parsed = ReconciliationResultSchema.parse(submission.result);
-    const expectedRefs = new Set(prepared.items.map((entry) => entry.itemRef));
-    const seen = new Set<string>();
-    for (const decision of parsed.decisions) {
-      if (!expectedRefs.has(decision.itemRef)) throw new ModelContentValidationError(`Model returned an unknown reconciliation itemRef: ${decision.itemRef}`);
-      if (seen.has(decision.itemRef)) throw new ModelContentValidationError(`Model returned duplicate reconciliation decisions for ${decision.itemRef}`);
-      seen.add(decision.itemRef);
-    }
-    for (const itemRef of expectedRefs) if (!seen.has(itemRef)) throw new ModelContentValidationError(`Missing model decision for ${itemRef}`);
+  } else if (submission?.result && !submission.error) {
+    parsed = ReconciliationResultSchema.parse(submission.result);
   }
-  for (const observation of prepared.local) addObservation(result, observation, "create", [], observation.kind === "promise_event" ? observation.promiseKeyHint : observation.predicateHint);
+
+  const repeatedLocal = new Set<string>();
+  for (const observation of prepared.local) {
+    const ref = `observation:${observation.key}`;
+    const matching = parsed?.decisions.filter(decision => decision.itemRef === ref) ?? [];
+    if (matching.length === 1 && repeatsLedgerEnd(db, chatId, observation, matching[0]!)) {
+      repeatedLocal.add(ref);
+      continue;
+    }
+    addObservation(result, observation, "create", [], observation.kind === "promise_event" ? observation.promiseKeyHint : observation.predicateHint);
+  }
+  if (prepared.required) {
+    const expected = new Set([...prepared.items.map(item => item.itemRef), ...repeatedLocal]);
+    appendJobStateDrops(db, jobId, parsed!.decisions.flatMap((candidate, index) => expected.has(candidate.itemRef) ? []
+      : [{ path: ["decisions", index], list: "decisions", point: "C4:decision_coverage", reason: "C4:decision_coverage: orphan decision", candidate }]));
+  }
+
   let pending = 0;
   for (const entry of prepared.deferred) {
     recordReconciliationReview(db, chatId, jobId, sourceIds, entry, undefined, `State candidate item and its required prior state exceed the configured ${maxInputTokens}-token input budget`);
     pending += 1;
   }
   if (!prepared.required) return { result, pending, autoResolved: prepared.local.length };
-  const decisions = new Map(parsed!.decisions.map((decision) => [decision.itemRef, decision]));
   let autoResolved = prepared.local.length;
   for (const entry of prepared.items) {
-    const decision = decisions.get(entry.itemRef)!;
+    const matches = parsed!.decisions.filter(decision => decision.itemRef === entry.itemRef);
+    const decision = matches.length === 1 ? matches[0]! : undefined;
+    if (!decision) {
+      recordReconciliationReview(db,chatId,jobId,sourceIds,entry,matches,"C4:decision_coverage: missing or duplicate decision"); pending++; continue;
+    }
     if (entry.reviewReason) {
       recordReconciliationReview(db,chatId,jobId,sourceIds,entry,decision,entry.reviewReason);
       pending++; continue;
     }
+    if (repeatsLedgerEnd(db, chatId, entry.observation, decision)) {
+      recordAutomatic(db, chatId, jobId, sourceIds, entry, decision, "ignored");
+      autoResolved += 1;
+      continue;
+    }
     const targets = decision.targetIds.map((id) => entry.candidates.find((candidate) => candidate.id === id)).filter(Boolean) as Candidate[];
-    if (targets.length !== decision.targetIds.length) throw new ModelContentValidationError(`Model selected a target outside the allowed candidates for ${entry.itemRef}`);
+    const invalidTarget = targets.length !== decision.targetIds.length;
     const needsTarget = ["reinforce", "supersede", "end", "dispute"].includes(decision.action);
-    if (needsTarget && targets.length === 0) throw new ModelContentValidationError(`${decision.action} requires a target for ${entry.itemRef}`);
-    if (["create", "coexist", "ignore"].includes(decision.action) && targets.length > 0) throw new ModelContentValidationError(`${decision.action} cannot select a target for ${entry.itemRef}`);
-    if (decision.compatibleWithIds?.some(id => !entry.candidates.some(candidate => candidate.id === id))) throw new ModelContentValidationError("Coexistence references an unavailable candidate");
+    if (invalidTarget || (needsTarget && !targets.length) || (!needsTarget && targets.length)
+      || decision.compatibleWithIds?.some(id => !entry.candidates.some(candidate => candidate.id === id))) {
+      recordReconciliationReview(db,chatId,jobId,sourceIds,entry,decision,"C5:decision_targets: unavailable target, scope or action"); pending++; continue;
+    }
     if(reviewItemRefs.has(entry.itemRef)) {
       recordReconciliationReview(db,chatId,jobId,sourceIds,entry,decision,UNSUPPLIED_STATE_REVIEW_REASON);
       pending++;continue;
     }
+    if (decision.action === "reinforce" && targets.length === 1 && repeatsPromiseOutcome(entry.observation, targets[0])) {
+      recordAutomatic(db, chatId, jobId, sourceIds, entry, decision, "ignored");
+      autoResolved += 1;
+      continue;
+    }
     if (requiresProtectedStateReview(entry, decision)) {
-      recordReconciliationReview(db, chatId, jobId, sourceIds, entry, decision, "User-managed canonical state cannot be changed automatically");
+      recordReconciliationReview(db, chatId, jobId, sourceIds, entry, decision, "C7:immutable_target: User-managed canonical state cannot be changed automatically");
       pending += 1;
       continue;
     }
@@ -310,6 +394,7 @@ export function listReconciliationReviews(db: RcmDatabase, chatId: string): Reco
 }
 
 export function resolveReconciliationReview(db: RcmDatabase, chatId: string, reviewId: string, input: { action: "merge" | "distinct" | "update" | "discard"; targetId?: string; editedItem?: unknown; automatic?: true }): void {
+  assertChatUnlocked(db,chatId);
   const row = db.prepare("SELECT * FROM reconciliation_items WHERE id=? AND chat_id=? AND status='pending'").get(reviewId, chatId) as Record<string, any> | undefined;
   if (!row) throw Object.assign(new Error("Reconciliation review is no longer pending"), { code: "RECONCILIATION_REVIEW_NOT_PENDING" });
   const observation = (input.editedItem ?? JSON.parse(row.incoming_json).item) as StateObservation;
@@ -318,6 +403,11 @@ export function resolveReconciliationReview(db: RcmDatabase, chatId: string, rev
     const result = ExtractionResultSchema.parse({ language: "en" });
     const target = candidates.find((candidate) => candidate.id === input.targetId);
     if ((input.action === "merge" || input.action === "update") && !target) throw new Error("Review target is unavailable; review remains pending");
+    if (target && observation.kind === "promise_event" && (input.action === "merge" || input.action === "update")) {
+      const savedDecision = ReconciliationDecisionSchema.safeParse(JSON.parse(row.model_decision_json ?? "null"));
+      const ids = savedDecision.success ? savedDecision.data.targetIds : [];
+      if (ids.length && (ids.length !== 1 || ids[0] !== target.id)) throw new Error("다른 약속이 선택됐어요. 플러그인을 업데이트하고 다시 확인해 주세요.");
+    }
     const action = input.action === "merge" ? "reinforce" : input.action === "update" ? "supersede" : "create";
     const canonical = observation.kind === "promise_event" ? String(target?.value.promise_key ?? observation.promiseKeyHint) : String(target?.value.predicate ?? observation.predicateHint);
     addObservation(result, observation, action, target ? [target.id] : [], canonical);
@@ -347,6 +437,7 @@ export function resolveReconciliationReview(db: RcmDatabase, chatId: string, rev
     })();
   }
   db.prepare("UPDATE reconciliation_items SET status=?,resolution_json=?,resolved_at=? WHERE id=?").run(input.action === "discard" ? "discarded" : input.action === "distinct" ? "kept_separate" : input.action === "update" ? "updated" : "merged", JSON.stringify(input), Date.now(), reviewId);
+  finishReviewedBatches(db,chatId);
 }
 
 /** One-time startup repair of reviews blocked only by unrelated protected properties.
@@ -366,6 +457,7 @@ export function reconcileUnrelatedProtectedReviews(db: RcmDatabase): number {
     let resolved = 0;
     let failed = 0;
     for (const row of rows) {
+      if (chatUpgradeLock(db,row.chat_id)) continue;
       try {
         const decision = ReconciliationResultSchema.parse({ decisions: [JSON.parse(row.model_decision_json)] }).decisions[0]!;
         if (!['create', 'coexist'].includes(decision.action) || decision.targetIds.length || decision.itemRef !== row.item_ref) continue;

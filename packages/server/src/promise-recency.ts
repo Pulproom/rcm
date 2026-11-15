@@ -2,6 +2,7 @@ import type { RcmDatabase } from "./db.js";
 import { structuredStoryTimeEnd, parseStoryTime, formatPromiseTime, storedTimeOccasion, type PromiseFirstMade, type StoredLandmarkKind } from '@rcm/shared';
 import { buildEntityIdentityResolver, normalizeEntityName } from './entities.js';
 import { parseLandmarkKinds } from './memory-search-document.js';
+import { loadPlotKnowers } from './item-access.js';
 
 export type { PromiseFirstMade } from '@rcm/shared';
 
@@ -12,7 +13,8 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
   const rows=db.prepare("SELECT promise_id,promisor,promisee,source_memory_id,evidence_json FROM promise_events WHERE chat_id=? AND active=1 AND status='open'").all(chatId) as Array<{promise_id:string;promisor:string;promisee:string;source_memory_id:string|null;evidence_json:string}>;
   if(!rows.length)return new Map();
   const sources=new Map((db.prepare("SELECT message_id,ordinal,canonical_hash,canonical_content FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') AND memory_excluded=0").all(chatId) as any[]).map(row=>[row.message_id,row]));
-  const memories=new Map((db.prepare('SELECT id,title,landmark,landmark_kinds_json,known_by_json,participants_json,story_time,story_time_normalized,evidence_json FROM memories WHERE chat_id=? AND active=1').all(chatId) as any[]).map(row=>[row.id,row]));
+  const memories=new Map((db.prepare('SELECT id,card_shape,title,landmark,landmark_kinds_json,known_by_json,participants_json,story_time,story_time_normalized,evidence_json FROM memories WHERE chat_id=? AND active=1').all(chatId) as any[]).map(row=>[row.id,row]));
+  const plotHolders=loadPlotKnowers(db,chatId,[...memories.values()]);
   const evidence=(value:string):any[]=>{try{return JSON.parse(value);}catch{return [];}};
   const valid=(item:any)=>{const source=sources.get(item.messageId);return source && (!item.canonicalHash || item.canonicalHash===source.canonical_hash) && (!item.quote || source.canonical_content.includes(item.quote));};
   const dated=[...memories.values()].map(memory=>({memory,refs:evidence(memory.evidence_json)}))
@@ -51,7 +53,7 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
     const landmark=dated.slice().sort((a,b)=>Number(b.memory.id===memory?.id)-Number(a.memory.id===memory?.id)
       || Math.min(...a.refs.map(e=>sources.get(e.messageId).ordinal))-Math.min(...b.refs.map(e=>sources.get(e.messageId).ordinal)))
       .flatMap(({memory:landmarkMemory})=>{
-        const known=(JSON.parse(landmarkMemory.known_by_json) as string[]).map(identity);
+        const known=(plotHolders.get(landmarkMemory.id) ?? JSON.parse(landmarkMemory.known_by_json) as string[]).map(identity);
         if(![event.promisor,event.promisee].every(name=>known.includes(identity(name)))) return [];
         return (parseLandmarkKinds(landmarkMemory.landmark_kinds_json) as StoredLandmarkKind[]).filter(mark=>eventPair && mark.pair && pair(mark.pair)===eventPair
           && (!mark.evidence?.length || mark.evidence.every(valid))

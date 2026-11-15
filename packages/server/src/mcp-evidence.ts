@@ -1,4 +1,5 @@
-import { projectMemoryScene, normalizeSearchTokens, type McpEvidence, type McpQuestionAnswer, type MemoryContextItem } from "@rcm/shared";
+import { emitsMemoryPlot, isAuthorCard, projectMemoryScene, normalizeSearchTokens, type McpEvidence, type McpQuestionAnswer, type MemoryContextItem } from "@rcm/shared";
+import { planMemoryCard } from "./emission-plan.js";
 import type { SemanticSearchResult } from "./embedding.js";
 import { memoryDetailAtomKey, memoryDialogueAtomKey, memorySummaryAtomKey } from "./memory-atoms.js";
 
@@ -64,6 +65,21 @@ function focusedSeedCandidates(candidates: AtomCandidate[]): AtomCandidate[] {
   return factualContext ? [factualContext, ...selected.slice(0, 5)] : selected.slice(0, 6);
 }
 
+/** Plot evidence is materialized from an authorized card, independently of focus ranking. */
+export function memoryPlotEvidence(item: MemoryContextItem): McpEvidence {
+  return {atomKey:memorySummaryAtomKey(item)!,memoryId:item.id,kind:"fact",text:item.content,context:item.title,
+    time:item.storyTime,knownBy:item.cardShape === 1 ? item.plotKnowers ?? [] : item.knownBy,
+    knownByEveryone:item.cardShape === 1 ? undefined : item.knownByEveryone,basis:"stored_record"};
+}
+
+/** Detail evidence uses the same stored scope in ranking and mandatory bundles. */
+export function memoryDetailEvidence(item: MemoryContextItem, detail: MemoryContextItem["details"][number]): McpEvidence {
+  const atomKey=memoryDetailAtomKey(detail);
+  return {atomKey,bundleKey:`anchor:${atomKey}`,memoryId:item.id,kind:"fact",text:detail.text,time:item.storyTime,
+    location:detail.locations.join(", "),knownBy:detail.knownBy,knownByEveryone:detail.knownByEveryone,
+    knownByLabels:detail.knownByLabels,basis:detail.epistemic,context:item.title};
+}
+
 /** Selects answer evidence per requested question. Parent summaries may locate a
  * scene; only independently authorized record summaries can be evidence. */
 export function rankMcpRecords(items: MemoryContextItem[], query: string, facets: string[], semantic: SemanticSearchResult[],
@@ -105,11 +121,10 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
       if (!target && sceneLexical < .14 && fullSceneLexical < .16 && sceneSemantic < .35 && fullSceneSemantic < .35) continue;
       // A standalone summary is itself a readable atom (for example a manual
       // timeline record). An atom-scoped parent's summary never grants access.
-      if (item.atomAccessVersion === 0 && item.content && !item.details.length && !item.keyDialogues.length) {
+      if (emitsMemoryPlot(item)) {
         const atomKey = memorySummaryAtomKey(item)!;
         candidates.push({memoryId:item.id,supplied:supplied.has(atomKey),score:Math.max(sceneLexical,sceneSemantic),directScore:sceneLexical,core:true,
-          evidence:{atomKey,memoryId:item.id,kind:"fact",text:item.content,context:item.title,
-            time:item.storyTime,knownBy:item.knownBy,basis:"stored_record"}});
+          evidence:memoryPlotEvidence(item)});
       }
       const directDetails = new Map((view?.atomHits?.get(item.id) ?? [])
         .filter(hit => hit.kind === "memory_detail" && hit.score >= .35).map(hit => [hit.sourceId, hit.score]));
@@ -120,11 +135,10 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
         const fullLexical = facets.length ? focusLexical : fullRank(atomText);
         const directSemantic = directDetails.get(detail.id) ?? 0;
         if (!target && focusLexical < .12 && fullLexical < .16 && directSemantic < .35) continue;
-        candidates.push({ memoryId:item.id, detailId:detail.id, supplied:supplied.has(atomKey), directScore:focusLexical + directSemantic, core:detail.role === "core",
+        candidates.push({ memoryId:item.id, detailId:detail.id, supplied:supplied.has(atomKey), directScore:focusLexical + directSemantic, core:isAuthorCard(item) ? planMemoryCard(item).minimumUnitIds.includes(detail.id) : detail.role === "core",
           score: focusLexical * .72 + fullLexical * .28 + directSemantic * .32
             + Math.max(sceneLexical, sceneSemantic) * .08 + Math.max(fullSceneLexical, fullSceneSemantic) * .03,
-          evidence:{atomKey,bundleKey:`anchor:${atomKey}`,memoryId:item.id,kind:"fact",text:detail.text,time:item.storyTime,
-            location:detail.locations.join(", "),knownBy:detail.knownBy,knownByLabels:detail.knownByLabels,basis:detail.epistemic,context:projectMemoryScene(item).title} });
+          evidence:memoryDetailEvidence(item,detail) });
       }
       for (const dialogue of item.keyDialogues) {
         const atomKey = memoryDialogueAtomKey(item.id, dialogue);
@@ -135,7 +149,7 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
         candidates.push({memoryId:item.id,supplied:supplied.has(atomKey),directScore:focusLexical,core:false,score:focusLexical*.72+fullLexical*.28
           +Math.max(sceneLexical,sceneSemantic)*.08+Math.max(fullSceneLexical,fullSceneSemantic)*.03,
           evidence:{atomKey,bundleKey:`anchor:${atomKey}`,memoryId:item.id,kind:"dialogue",text:dialogue.text,speaker:dialogue.speaker,
-            time:item.storyTime,knownBy:dialogue.knownBy,knownByLabels:dialogue.knownByLabels,context:projectMemoryScene(item).title,
+            time:item.storyTime,knownBy:dialogue.knownBy,knownByEveryone:dialogue.knownByEveryone,knownByLabels:dialogue.knownByLabels,context:projectMemoryScene(item).title,
             dialogueSourceRanges:dialogue.evidence.map(span=>({messageId:span.messageId,start:span.startOffset,end:span.endOffset}))} });
       }
     }
@@ -156,23 +170,21 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
     for (const memoryId of memoryIds) {
       const ranked = candidates.filter(candidate => candidate.memoryId === memoryId);
       const focused = Boolean(seed && query.trim());
-      chosen.push(...(focused ? focusedSeedCandidates(ranked) : ranked));
-      if (focused) continue;
+      const focusedCandidates = focused ? focusedSeedCandidates(ranked) : ranked;
+      chosen.push(...focusedCandidates);
+      if (focused && (!options.archiveView || !focusedCandidates.length)) continue;
       const item = items.find(item => item.id === memoryId)!;
       for (const detail of item.details) {
         const atomKey = memoryDetailAtomKey(detail);
         if (chosen.some(candidate => candidate.evidence.atomKey === atomKey)) continue;
-        chosen.push({ memoryId, detailId: detail.id, score: 0, directScore: 0, core:detail.role === "core", supplied: supplied.has(atomKey), evidence: {
-          atomKey, memoryId, bundleKey: `anchor:${atomKey}`, kind: "fact", text: detail.text,
-          context: projectMemoryScene(item).title, time: item.storyTime, location: detail.locations.join(", "), knownBy: detail.knownBy,knownByLabels:detail.knownByLabels, basis: detail.epistemic,
-        } });
+        chosen.push({ memoryId, detailId: detail.id, score: 0, directScore: 0, core:isAuthorCard(item) ? planMemoryCard(item).minimumUnitIds.includes(detail.id) : detail.role === "core", supplied: supplied.has(atomKey), evidence:memoryDetailEvidence(item,detail) });
       }
       for (const dialogue of item.keyDialogues) {
         const atomKey = memoryDialogueAtomKey(item.id, dialogue);
         if (chosen.some(candidate => candidate.evidence.atomKey === atomKey)) continue;
         chosen.push({ memoryId, score: 0, directScore: 0, core:false, supplied: supplied.has(atomKey), evidence: { atomKey, memoryId,
           bundleKey: `anchor:${atomKey}`, kind: "dialogue", text: dialogue.text, speaker: dialogue.speaker,
-          context: projectMemoryScene(item).title, time: item.storyTime, knownBy: dialogue.knownBy,knownByLabels:dialogue.knownByLabels,
+          context: projectMemoryScene(item).title, time: item.storyTime, knownBy: dialogue.knownBy,knownByEveryone:dialogue.knownByEveryone,knownByLabels:dialogue.knownByLabels,
           dialogueSourceRanges: dialogue.evidence.map(span => ({ messageId: span.messageId, start: span.startOffset, end: span.endOffset })),
         } });
       }
@@ -182,7 +194,7 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
       selectedMemories.add(candidate.memoryId);
       if(candidate.detailId) selectedDetails.add(candidate.detailId);
     }
-    if (!(seed && query.trim())) chosen.sort((a,b) => b.score - a.score);
+    if (options.archiveView || !(seed && query.trim())) chosen.sort((a,b) => b.score - a.score);
     return {question,evidence:chosen.map(candidate=>candidate.evidence),alreadyPresent:chosen.some(candidate=>candidate.supplied),
       relatedRecords:true,searchUnavailable:view?.searchUnavailable};
   });

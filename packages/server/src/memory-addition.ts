@@ -1,3 +1,13 @@
+import { assertChatUnlocked } from './upgrade-lock.js';
+import { assertUpgradeJobWritable } from './upgrade-lock.js';
+import { deletedMemoryKeys } from './user-deletions.js';
+import { responseTurns, sourceTurnMembership } from './turn-clock.js';
+import { batchHasStoredMaterial, finishReviewedBatches, coverageRetryFamilies, foldCoverageRetry } from './source-coverage.js';
+import { normalizeGeneratedCardShapes } from "./ingest.js";
+import { EVENT_ADDITION_GUIDANCE, EVENT_GAP_GUIDANCE } from "./event-prompt.js";
+import { appendExtractionContinuation } from "./jobs.js";
+import { extractionDraftSchema } from "@rcm/shared";
+import { appendJobStateDrops } from "./jobs.js";
 import { ModelContentValidationError } from "@rcm/shared";
 import { recordSmallReviews } from "./small-review.js";
 import { optionalSourceSelectorsOnly } from "@rcm/shared";
@@ -5,13 +15,14 @@ import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import { createHash, randomUUID } from 'node:crypto';
 import { MEMORY_ADDITION_GUIDANCE, memoryAdditionRequestGuidance, validateMemoryAdditionRequestOutcome, memoryAdditionUserNote, memoryAdditionStopsAfterEvents } from '@rcm/shared';
 import type { RecallCandidateSnapshot } from './recall-candidates.js';
-import { contiguousSourceRangeSelection, estimateTokens, ExtractionAggregateSchema, ExtractionResultSchema, Api38ExtractionDraftResultSchema, measureAuxiliaryPrompt, withAuxiliaryStoryFraming,
+import { contiguousSourceRangeSelection, estimateTokens, ExtractionAggregateSchema, ExtractionResultSchema, measureAuxiliaryPrompt, withAuxiliaryStoryFraming,
   type ExtractionDraftResult, type ExtractionAuditSubmission, type ReconciliationSubmission, type RpProfile, type MemoryLanguage, type LeasedJob } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
-import { adaptiveExtractionGroups, extractionUnits, buildPrompt, editProtectedMessageIds } from './jobs.js';
+import { adaptiveExtractionGroups, extractionUnits, buildPrompt } from './jobs.js';
 import { gapRecoveryHoles } from './gap-recovery.js';
 import { storeSourcePassages } from './source-evidence.js';
-import { rangeMessages, listSourceRanges, memoryTargetFingerprint, sourceAccessFingerprint, type RangeMessage } from './source-ranges.js';
+import { rangeMessages, listSourceRanges, memoryTargetFingerprint, sourceAccessFingerprint, additionMessageReason } from './source-ranges.js';
+export { additionMessageReason } from './source-ranges.js';
 import { sourceFingerprint, fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from './source-fingerprint.js';
 import { inspectDraftEvidence } from './evidence-review.js';
 import { applyExtractionAuditPatch } from './extraction-audit.js';
@@ -31,6 +42,9 @@ import { intimacyMilestoneKeys } from './intimacy-milestones.js';
 const fail = (message: string, code = 'MEMORY_ADDITION_INVALID') => Object.assign(new Error(message), { code });
 const contentFailure = (message: string) => Object.assign(new ModelContentValidationError(message), { code: 'MEMORY_ADDITION_INVALID' });
 interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
+  extractionLookup?: { key: string; value: ReturnType<typeof buildPrompt>["lookup"] };
+  promptContract?: "e1d" | "e1e" | "e1f";
+  stateContract?: "r10" | "r11" | null;
   mode?: 'gap_recovery'; memoryOnly?: boolean;
   contextMessageIds?: string[];
   sourceMessageIds: string[]; sourceFingerprint: SourceFingerprintItem[]; rangeIds: string[];
@@ -45,19 +59,6 @@ interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
 export function additionLedgerFingerprint(db: RcmDatabase, chatId: string): string {
   const tables = ['assertions', 'beliefs', 'promises', 'relationship_baselines', 'relationship_events', 'physical_intimacy_milestones', 'social_knowledge_events'];
   return createHash('sha256').update(JSON.stringify(tables.map(table => db.prepare(`SELECT * FROM ${table} WHERE chat_id=? ORDER BY id`).all(chatId)))).digest('hex');
-}
-
-/** Basic extraction owns processed markers. Additions never participate in it. */
-export function additionMessageReason(db: RcmDatabase, chatId: string, message: RangeMessage): string | null {
-  if (message.memoryExcluded) return '기억에서 제외된 메시지예요';
-  if (!['committed', 'client_pruned'].includes(message.lifecycle) || !['active', 'all_before'].includes(message.visibility)
-    || message.content === null || !message.canonicalHash) return '원문을 사용할 수 없어요';
-  if (!['done', 'encapsulated'].includes(message.extractionState)) return '기본 기억 처리 후 사용할 수 있어요';
-  const chat = db.prepare('SELECT edit_protection_turns FROM chats WHERE id=?').get(chatId) as { edit_protection_turns: number };
-  if (editProtectedMessageIds(db, chatId, chat.edit_protection_turns).has(message.id)) return '아직 수정 보호 중인 메시지예요';
-  if (db.prepare(`SELECT 1 FROM extraction_batches b,json_each(b.source_message_ids_json) s
-    WHERE b.chat_id=? AND b.generation_id='active' AND b.status NOT IN ('applied','superseded') AND s.value=? LIMIT 1`).get(chatId, message.id)) return '기본 기억 검수가 끝나지 않았어요';
-  return null;
 }
 
 export function additionSources(db: RcmDatabase, chatId: string, rangeIds: string[]) {
@@ -80,7 +81,7 @@ function linkedMemories(db: RcmDatabase, chatId: string, ids: string[]) {
     const details = db.prepare('SELECT * FROM memory_details WHERE memory_id=? AND active=1 ORDER BY id').all(row.id) as any[];
     const dialogues = db.prepare('SELECT * FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal,id').all(row.id) as any[];
     if (![row, ...details, ...dialogues].some(item => overlaps(item.evidence_json))) return [];
-    return [{ id: row.id, key: row.memory_key, title: row.title, content: row.content, evidence: JSON.parse(row.evidence_json),
+    return [{ id: row.id, cardShape: row.card_shape, key: row.memory_key, title: row.title, content: row.content, evidence: JSON.parse(row.evidence_json),
       knownBy: JSON.parse(row.known_by_json), details: details.map(d => ({ id: d.id, key: d.detail_key, text: d.text, evidence: JSON.parse(d.evidence_json) })),
       keyDialogues: dialogues.map(d => ({ text: d.text, speaker: d.speaker, evidence: JSON.parse(d.evidence_json) })) }];
   });
@@ -88,10 +89,15 @@ function linkedMemories(db: RcmDatabase, chatId: string, ids: string[]) {
 
 function prepareAddition(db: RcmDatabase, chatId: string, rangeIds: string[], messageIds: string[], userRequest: string, review: boolean): AdditionPayload {
   const source = additionSources(db, chatId, rangeIds);
-  const rows = source.messages.filter(row => messageIds.includes(row.id));
-  if (!rows.length || rows.length !== messageIds.length || new Set(messageIds).size !== messageIds.length) throw fail('사용할 메시지를 선택해 주세요');
+  const selected=source.messages.filter(row=>messageIds.includes(row.id));
+  if (selected.length!==messageIds.length || new Set(messageIds).size!==messageIds.length) throw fail('사용할 메시지를 선택해 주세요');
+  for (const row of selected) if (row.additionReason) throw fail(`메시지 ${row.ordinal + 1}: ${row.additionReason}`);
+  const turns=sourceTurnMembership(db,chatId).filter(turn=>turn.some(row=>messageIds.includes(row.message_id)));
+  const chat = db.prepare('SELECT memory_language,include_user_messages FROM chats WHERE id=?').get(chatId) as { memory_language: MemoryLanguage;include_user_messages:number };
+  const ids=new Set(turns.flatMap(turn=>turn.filter(row=>row.role==='assistant' || chat.include_user_messages!==0 && !['skipped_policy','excluded_episode'].includes(row.extraction_state)).map(row=>row.message_id)));
+  const rows=rangeMessages(db,chatId).filter(row=>ids.has(row.id)).map(row=>({...row,additionReason:additionMessageReason(db,chatId,row)}));
+  if (!rows.length || selected.some(row=>!turns.some(turn=>turn.some(source=>source.message_id===row.id)))) throw fail('사용할 메시지를 선택해 주세요');
   for (const row of rows) if (row.additionReason) throw fail(`메시지 ${row.ordinal + 1}: ${row.additionReason}`);
-  const chat = db.prepare('SELECT memory_language FROM chats WHERE id=?').get(chatId) as { memory_language: MemoryLanguage };
   const existingMemories = linkedMemories(db, chatId, rows.map(row => row.id));
   const memoryIds = existingMemories.map(row => row.id);
   return { rangeIds: source.rangeIds, sourceMessageIds: rows.map(row => row.id), sourceFingerprint: sourceFingerprint(db, chatId, rows.map(row => row.id)),
@@ -99,23 +105,24 @@ function prepareAddition(db: RcmDatabase, chatId: string, rangeIds: string[], me
     accessFingerprint: sourceAccessFingerprint(db, chatId, rows.map(row => row.id)), ledgerFingerprint: additionLedgerFingerprint(db, chatId), memoryLanguage: chat.memory_language, postExtractionReview: review };
 }
 
-export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, profile: RpProfile, attempt: number, payload: AdditionPayload): LeasedJob & RecallCandidateSnapshot {
+export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, profile: RpProfile, attempt: number, payload: AdditionPayload, eventWriting: boolean | "e1d" | "e1e" | "e1f" = false): LeasedJob & RecallCandidateSnapshot & { extractionLookup: NonNullable<AdditionPayload["extractionLookup"]> } {
   const allRows = rangeMessages(db, chatId);
   const rows = allRows.filter(row => payload.sourceMessageIds.includes(row.id));
-  const built = buildPrompt(db, chatId, profile, payload.memoryLanguage, rows.map(row => ({ message_id: row.id, role: row.role,
+  const lookupKey = JSON.stringify([payload.sourceFingerprint, payload.continuationDraft?.unfinishedSource, profile, payload.memoryLanguage]);
+  const { lookup, ...built } = buildPrompt(db, chatId, profile, payload.memoryLanguage, rows.map(row => ({ message_id: row.id, role: row.role,
     content: row.content!, content_hash: row.canonicalHash, ordinal: row.ordinal })), payload.continuationDraft?.unfinishedSource,
-    payload.recallCandidates && payload.recallAtomRefs ? { recallCandidates: payload.recallCandidates, recallAtomRefs: payload.recallAtomRefs } : undefined);
+    payload.extractionLookup?.key === lookupKey ? payload.extractionLookup.value : payload.recallCandidates && payload.recallAtomRefs ? { recallCandidates: payload.recallCandidates, recallAtomRefs: payload.recallAtomRefs } : undefined, eventWriting);
   const gaps = rows.slice(1).flatMap((row, index) => allRows.some(between => !between.memoryExcluded
     && ['pending','committed','client_pruned'].includes(between.lifecycle) && ['active','all_before'].includes(between.visibility)
     && between.ordinal > rows[index]!.ordinal && between.ordinal < row.ordinal)
     ? [{ afterMessage: rows[index]!.ordinal + 1, beforeMessage: row.ordinal + 1, omitted: true }] : []);
   const memoryAddition = { userRequest: payload.userRequest, existingMemories: payload.existingMemories };
   const recovery = payload.mode === 'gap_recovery';
-  const systemPrompt = `${built.systemPrompt}\n\n${MEMORY_ADDITION_GUIDANCE}\n${memoryAdditionRequestGuidance(payload.userRequest)}${recovery ? '\nGAP RECOVERY: Archive only the selected historical hole. Keep memories with details, keyDialogues and sourcePassages only. Return no entities, stateObservations, assertions, beliefs, promises, relationshipEvents, relationshipBaselines, physicalIntimacy, socialKnowledge, seedResolutions, atomRelations, or recall observations. Accumulated state is already correct. READ_ONLY_CONTEXT_JSON is context, never evidence. Evidence and unfinishedSource must refer only to selected hole messages. An empty memories array is a valid completed outcome when there is nothing worth adding.' : ''}`;
-  const userPrompt = `${built.userPrompt}\nADDITIVE_CONTEXT_JSON\n${JSON.stringify({ existingMemories: payload.existingMemories,
+  const systemPrompt = `${built.systemPrompt}\n\n${eventWriting ? EVENT_ADDITION_GUIDANCE : MEMORY_ADDITION_GUIDANCE}\n${memoryAdditionRequestGuidance(payload.userRequest)}${recovery ? eventWriting ? `\n${EVENT_GAP_GUIDANCE}` : '\nGAP RECOVERY: Archive only the selected historical hole. Keep memories with details, keyDialogues and sourcePassages only. Return no entities, stateObservations, assertions, beliefs, promises, relationshipEvents, relationshipBaselines, physicalIntimacy, socialKnowledge, seedResolutions, atomRelations, or recall observations. Accumulated state is already correct. READ_ONLY_CONTEXT_JSON is context, never evidence. Evidence and unfinishedSource must refer only to selected hole messages. An empty memories array is a valid completed outcome when there is nothing worth adding.' : ''}`;
+  const userPrompt = appendExtractionContinuation(`${built.userPrompt}\nADDITIVE_CONTEXT_JSON\n${JSON.stringify({ existingMemories: payload.existingMemories,
     selectedMessageNumbers: rows.map(row => ({ id: row.id, number: row.ordinal + 1 })), gaps,
-    userNote: memoryAdditionUserNote(payload.userRequest) })}\nEND_ADDITIVE_CONTEXT_JSON${recovery ? `\nREAD_ONLY_CONTEXT_JSON\n${JSON.stringify(allRows.filter(row=>payload.contextMessageIds?.includes(row.id)).map(row=>({id:row.id,role:row.role,content:row.content})))}\nEND_READ_ONLY_CONTEXT_JSON` : ''}`;
-  return { ...built, id, chatId, profile, kind: 'extract', memoryAddition, attempt, systemPrompt, userPrompt, prompt: `${systemPrompt}\n\n${userPrompt}`,
+    userNote: memoryAdditionUserNote(payload.userRequest) })}\nEND_ADDITIVE_CONTEXT_JSON${recovery ? `\nREAD_ONLY_CONTEXT_JSON\n${JSON.stringify(allRows.filter(row=>payload.contextMessageIds?.includes(row.id)).map(row=>({id:row.id,role:row.role,content:row.content})))}\nEND_READ_ONLY_CONTEXT_JSON` : ''}`, payload.continuationDraft, built.promptContract);
+  return { ...built, extractionLookup: { key: lookupKey, value: lookup }, id, chatId, profile, kind: 'extract', memoryAddition, attempt, systemPrompt, userPrompt, prompt: `${systemPrompt}\n\n${userPrompt}`,
     memoryLanguage: payload.memoryLanguage, sourceMessageIds: payload.sourceMessageIds, postExtractionReview: payload.postExtractionReview, memoryOnly: payload.memoryOnly,
     continuationDraft: payload.continuationDraft, auditSourceMessages: rows.map(row => ({ id: row.id, role: row.role, content: row.content!, canonicalHash: row.canonicalHash })) };
 }
@@ -123,7 +130,7 @@ export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, pr
 export function previewMemoryAddition(db: RcmDatabase, chatId: string, rangeIds: string[], messageIds: string[], request: string, review: boolean) {
   const payload = prepareAddition(db, chatId, rangeIds, messageIds, request, review);
   const profile = (db.prepare('SELECT profile FROM chats WHERE id=?').get(chatId) as { profile: RpProfile }).profile;
-  const job = buildAdditionJob(db, '', chatId, profile, 1, payload);
+  const job = buildAdditionJob(db, '', chatId, profile, 1, payload, true);
   const config = JSON.parse((db.prepare("SELECT value FROM server_meta WHERE key='server_llm_config'").get() as { value: string } | undefined)?.value ?? '{}');
   const measure = measureAuxiliaryPrompt(withAuxiliaryStoryFraming([{ role: 'system', content: job.systemPrompt! }, { role: 'user', content: job.userPrompt! }], config.relaxAuxiliaryCensorship === true), estimateTokens,
     { maxInputTokens: config.maxInputTokens ?? 80_000, maxOutputTokens: config.maxOutputTokens ?? 24_000 });
@@ -134,6 +141,7 @@ export function previewMemoryAddition(db: RcmDatabase, chatId: string, rangeIds:
 }
 
 export function startMemoryAddition(db: RcmDatabase, chatId: string, rangeIds: string[], messageIds: string[], request: string, review: boolean, idempotencyKey?:string) {
+  assertChatUnlocked(db,chatId);
   const id=idempotencyKey ? `addition_${createHash('sha256').update(JSON.stringify([chatId,idempotencyKey])).digest('hex')}` : randomUUID();
   const creationRequestFingerprint=createHash('sha256').update(JSON.stringify([[...rangeIds].sort(),[...messageIds].sort(),request.trim(),review])).digest('hex');
   const existing=db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='memory_addition'").get(id,chatId) as {payload_json:string}|undefined;
@@ -150,9 +158,11 @@ export function startMemoryAddition(db: RcmDatabase, chatId: string, rangeIds: s
 }
 
 function current(db: RcmDatabase, chatId: string, payload: AdditionPayload): boolean {
-  if (payload.mode === 'gap_recovery') return fingerprintMatches(db,chatId,payload.sourceFingerprint)
-    && payload.sourceMessageIds.every(id=>Boolean(db.prepare(`SELECT 1 FROM gap_recovery_messages g JOIN messages m ON m.chat_id=g.chat_id AND m.message_id=g.message_id
-      WHERE g.chat_id=? AND g.message_id=? AND m.memory_excluded=0 AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.extraction_state='pending'`).get(chatId,id)));
+  if (payload.mode === 'gap_recovery') {
+    if (!fingerprintMatches(db,chatId,payload.sourceFingerprint)) return false;
+    const membership=new Set(gapRecoveryHoles(db,chatId).flatMap(hole=>hole.sourceMessageIds));
+    return payload.sourceMessageIds.every(id=>membership.has(id));
+  }
   return fingerprintMatches(db, chatId, payload.sourceFingerprint)
     && rangeMessages(db, chatId).filter(row => payload.sourceMessageIds.includes(row.id)).every(row => !additionMessageReason(db, chatId, row))
     && memoryTargetFingerprint(db, chatId, payload.memoryIds) === payload.targetFingerprint
@@ -168,6 +178,7 @@ export function validatePendingAddition(db: RcmDatabase, chatId: string, id: str
 }
 
 export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId: string, value: ExtractionDraftResult, reconciliation?: ReconciliationSubmission, audit?: ExtractionAuditSubmission) {
+  assertUpgradeJobWritable(db,jobId);
   const job = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND type='memory_addition' AND status='leased' AND lease_owner=?").get(jobId, workerId) as { chat_id: string; payload_json: string } | undefined;
   if (!job) throw fail('Lease not found', 'LEASE_NOT_FOUND');
   const payload: AdditionPayload = JSON.parse(job.payload_json);
@@ -175,7 +186,7 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   if (!validatePendingAddition(db, job.chat_id, jobId, payload)) return { chatId: job.chat_id, warnings: ['원문 변경으로 후보를 중단했어요'], pendingReconciliations: 0 };
   let draft = validateMemoryAdditionRequestOutcome(ExtractionAggregateSchema.parse(payload.mode === 'gap_recovery'
     ? {language:value.language,memories:value.memories,sourcePassages:value.sourcePassages,unfinishedSource:value.unfinishedSource,requestOutcome:value.requestOutcome} : value), payload.userRequest);
-  Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: draft.memories, sourcePassages: draft.sourcePassages, unfinishedSource: draft.unfinishedSource, requestOutcome: draft.requestOutcome });
+  extractionDraftSchema(payload.promptContract).parse({ language: draft.language, memories: draft.memories, sourcePassages: draft.sourcePassages, unfinishedSource: draft.unfinishedSource, requestOutcome: draft.requestOutcome });
   if (draft.unfinishedSource?.length) {
     const {progress} = extractionContinuationProgress(db,job.chat_id,payload.sourceMessageIds,payload.continuationDraft?.unfinishedSource,draft.unfinishedSource);
     const reason = progress ? null : 'CONTINUATION_NO_PROGRESS: 남은 원문 범위가 줄지 않아 중단했어요. 선택을 줄여 다시 요청해 주세요';
@@ -189,12 +200,20 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
       const empty=ExtractionResultSchema.parse({language:draft.language,memories:[],sourcePassages:draft.sourcePassages});
       const errors=validateExtractionSources(db,job.chat_id,payload.sourceMessageIds,empty);
       if (errors.length) throw contentFailure(errors.join('; '));
-      finishGapRecovery(db,job.chat_id,jobId,payload,[],empty.sourcePassages);
+      db.transaction(()=>{
+        const owners=recordGapBatch(db,job.chat_id,jobId,payload);
+        for (const owner of new Set(payload.sourceMessageIds.map(id=>owners.get(id)!))) {
+          const passages=(empty.sourcePassages ?? []).filter(passage=>owners.get(passage.messageId)===owner);
+          storeSourcePassages(db,job.chat_id,passages,owner,payload.sourceMessageIds);
+          appendGapSnapshot(db,owner,[],passages);
+        }
+        finishGapRecovery(db,job.chat_id,jobId,payload,[]);
+      })();
       return {chatId:job.chat_id,warnings:[],pendingReconciliations:0};
     }
     if (draft.requestOutcome?.relatedMemoryIds?.some(id => !payload.memoryIds.includes(id))) throw contentFailure('요청 결과가 제공되지 않은 기억을 가리켜요');
     const refused = Boolean(payload.userRequest && !draft.requestOutcome);
-    const error = refused ? '모델이 요청을 처리하지 않았어요. 추가 검열 완화 (실험적)를 켜고 새로 요청해 보세요.' : null;
+    const error = refused ? '모델이 요청을 처리하지 않았어요. 추가 검열 완화 (실험적)를 켜고 새로 요청해 봐 주세요.' : null;
     db.prepare("UPDATE jobs SET status=?,lease_owner=NULL,leased_until=NULL,last_error=?,payload_json=?,updated_at=? WHERE id=?")
       .run(refused ? 'failed' : 'done', error, JSON.stringify({ ...payload, candidate: undefined, continuationDraft: undefined,
         validatedExtractionCheckpoint: undefined, validatedPreReconciliationCheckpoint: undefined,
@@ -220,7 +239,8 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     memories: draft.memories.map((memory, mi) => ({...memory, keyDialogues: memory.keyDialogues?.filter((_, di) => !issues.some(issue => issue.path.startsWith(`memories[${mi}].keyDialogues[${di}]`)))})),
   };
   const heldState=new Set(completed.stateReviews.map(review=>review.entry.itemRef));
-  const final = canonicalizeExtraction(db, job.chat_id, additiveReconciliationResult({...draft,stateObservations:draft.stateObservations.filter(o=>!heldState.has(`observation:${o.key}`))}, completed.reconciliation), payload.sourceMessageIds);
+  const additiveDrops: import("@rcm/shared").StateItemDrop[] = [];
+  const final = canonicalizeExtraction(db, job.chat_id, additiveReconciliationResult({...draft,stateObservations:draft.stateObservations.filter(o=>!heldState.has(`observation:${o.key}`))}, completed.reconciliation, additiveDrops), payload.sourceMessageIds);
   // Exact property identities only. Existing current state is never rewritten
   // by a late historical omission; its new memory detail remains available.
   final.assertions = final.assertions.filter(item => !(db.prepare("SELECT social_relation_json FROM assertions WHERE chat_id=? AND subject=? COLLATE NOCASE AND valid_to_revision IS NULL AND predicate=?")
@@ -233,7 +253,7 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
   final.relationshipBaselines = final.relationshipBaselines?.filter(item => !db.prepare('SELECT 1 FROM relationship_baselines WHERE chat_id=? AND from_entity=? AND to_entity=?').get(job.chat_id, item.from, item.to));
   final.physicalIntimacy = final.physicalIntimacy?.filter(item => {
     const [a,b] = [...item.participants].sort((left,right) => left.localeCompare(right));
-    return intimacyMilestoneKeys(item.act).some(key => !db.prepare('SELECT 1 FROM physical_intimacy_milestones WHERE chat_id=? AND participant_a=? AND participant_b=? AND milestone_key=?').get(job.chat_id,a,b,key));
+    return intimacyMilestoneKeys(item.act).some(key => !db.prepare('SELECT 1 FROM physical_intimacy_milestones WHERE chat_id=? AND participant_a=? AND participant_b=? AND milestone_key=? AND deleted_by_user=0').get(job.chat_id,a,b,key));
   });
   const memoryKeys = new Set(final.memories.map(memory => memory.key));
   const checkNewParent = (item: { memoryKey?: string }) => { if (item.memoryKey && !memoryKeys.has(item.memoryKey)) throw contentFailure('추가 후보는 기존 기억을 수정 대상으로 지정할 수 없어요'); };
@@ -244,13 +264,14 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
       && (memory.keyDialogues ?? []).every(dialogue => existing.keyDialogues.some((old: any) => old.text === dialogue.text && old.speaker === dialogue.speaker)));
     if (duplicate) throw contentFailure('기존 기억과 같은 후보가 반환됐어요. 빠진 내용을 더 구체적으로 요청해 주세요');
   }
+  normalizeGeneratedCardShapes(final, payload.promptContract);
   const candidate = validateDialogueEvidence(db, job.chat_id, payload.sourceMessageIds,
-    scopeExtractionMemoryKeys(final, `addition:${jobId}`));
+    scopeExtractionMemoryKeys(final, `addition:${jobId}`,deletedMemoryKeys(db,job.chat_id)));
   const errors = validateExtractionSources(db, job.chat_id, payload.sourceMessageIds, candidate);
   if (errors.length) throw contentFailure(errors.join('; '));
   db.transaction(()=>{
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
-      .run(JSON.stringify({ ...payload, stateReviews:completed.stateReviews, stateInput:JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}).payload_json).stateInput,
+      .run(JSON.stringify({ ...payload, stateRecovery:appendJobStateDrops(db,jobId,additiveDrops), stateReviews:completed.stateReviews, stateInput:JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}).payload_json).stateInput,
         candidateStatus: 'ready', candidate, smallReviewDraft, pipelineStage: 'complete' }), Date.now(), jobId);
     recordSeedResolutionDrops(db,jobId,completed.seedResolutionDrops);
     recordStateObservationDrops(db,jobId,completed.stateObservationDrops);
@@ -272,7 +293,20 @@ export function listMemoryAdditions(db: RcmDatabase, chatId: string) {
   });
 }
 
+function appendGapSnapshot(db:RcmDatabase,owner:string,memories:import('@rcm/shared').ExtractionResult['memories'],passages:import('@rcm/shared').SourcePassage[]):void {
+  const stored=db.prepare('SELECT final_json FROM extraction_batches WHERE id=?').get(owner) as {final_json:string|null};
+  // Partial additions cannot supply an absent event-and-state replay contract.
+  if (stored.final_json===null) return;
+  const snapshot=JSON.parse(stored.final_json);
+  const accepted=new Map((snapshot.memories ?? []).map((memory:typeof memories[number])=>[memory.key,memory]));
+  for (const memory of memories) accepted.set(memory.key,memory);
+  const sources=new Map<string,import('@rcm/shared').SourcePassage>((snapshot.sourcePassages ?? []).map((passage:import('@rcm/shared').SourcePassage)=>[JSON.stringify(passage),passage]));
+  for (const passage of passages) sources.set(JSON.stringify(passage),passage);
+  db.prepare('UPDATE extraction_batches SET final_json=?,updated_at=? WHERE id=?').run(JSON.stringify({...snapshot,memories:[...accepted.values()],sourcePassages:[...sources.values()]}),Date.now(),owner);
+}
+
 export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string) {
+  assertChatUnlocked(db,chatId);
   const row = db.prepare("SELECT payload_json FROM jobs WHERE id=? AND chat_id=? AND type='memory_addition'").get(id, chatId) as { payload_json: string } | undefined;
   if (!row) throw fail('기억 추가 작업을 찾을 수 없어요');
   const payload: AdditionPayload = JSON.parse(row.payload_json);
@@ -281,16 +315,39 @@ export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string)
   if (!validatePendingAddition(db, chatId, id, payload)) throw fail('원문이나 연결된 기억이 바뀌어 후보를 적용할 수 없어요', 'SOURCE_CHANGED');
   db.transaction(() => {
     const candidate = ExtractionResultSchema.parse(payload.candidate);
-    if (payload.mode === 'gap_recovery') recordGapBatch(db,chatId,id,payload);
+    const owners=payload.mode === 'gap_recovery' ? recordGapBatch(db,chatId,id,payload) : undefined;
     // Only persisted new Story atoms count; selected context and skipped ledger
     // candidates must not invalidate unrelated segments.
     const tables = ['memories','memory_details','memory_dialogues','assertions','beliefs','promise_events','relationship_events'] as const;
     const before = tables.map(table => (db.prepare(`SELECT COALESCE(MAX(rowid),0) last FROM ${table}`).get() as {last:number}).last);
-    ingestExtraction(db, chatId, candidate, id, undefined, { sourceMessageIds: payload.sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] }, 'additions');
+    if (owners) {
+      const byOwner=new Map<string,typeof candidate.memories>();
+      const ordinals=new Map(payload.sourceFingerprint.map(source=>[source.messageId,source.ordinal]));
+      for (const memory of candidate.memories) {
+        // A cross-owner memory belongs to its last cited source, so an earlier
+        // prefix cannot replay an event that depends on a replaced suffix.
+        const evidence=[...memory.evidence,...(memory.details ?? []).flatMap(detail=>detail.evidence),...(memory.keyDialogues ?? []).flatMap(dialogue=>dialogue.evidence ?? [])];
+        const last=evidence.filter(item=>owners.has(item.messageId)).sort((a,b)=>(ordinals.get(a.messageId) ?? -1)-(ordinals.get(b.messageId) ?? -1)).at(-1)?.messageId ?? payload.sourceMessageIds.at(-1)!;
+        const owner=owners.get(last);
+        if (!owner) throw fail('복구 기억의 원문 소유 배치를 확인할 수 없어요','SOURCE_CHANGED');
+        byOwner.set(owner,[...(byOwner.get(owner) ?? []),memory]);
+      }
+      for (const passage of candidate.sourcePassages ?? []) {
+        const owner=owners.get(passage.messageId);
+        if (owner && !byOwner.has(owner)) byOwner.set(owner,[]);
+      }
+      for (const [owner,memories] of byOwner) {
+        // Recovery has already assigned an owner. The general additions mode
+        // infers ownership from the first evidence batch and would undo it here.
+        ingestExtraction(db,chatId,{...candidate,memories,sourcePassages:[]},id,owner,{sourceMessageIds:payload.sourceMessageIds,atomRefs:payload.recallAtomRefs ?? []},false,{preserveStoredCardShapes:true});
+        const passages=(candidate.sourcePassages ?? []).filter(passage=>owners.get(passage.messageId)===owner);
+        storeSourcePassages(db,chatId,passages,owner,payload.sourceMessageIds);
+        appendGapSnapshot(db,owner,memories,passages);
+      }
+    } else ingestExtraction(db, chatId, candidate, id, undefined, { sourceMessageIds: payload.sourceMessageIds, atomRefs: payload.recallAtomRefs ?? [] }, 'additions', {preserveStoredCardShapes:true});
     for(const review of payload.stateReviews ?? []) recordReconciliationReview(db,chatId,id,payload.sourceMessageIds,review.entry,review.decision,UNSUPPLIED_STATE_REVIEW_REASON);
     if (payload.mode === 'gap_recovery') {
-      storeSourcePassages(db,chatId,candidate.sourcePassages,id);
-      const memories = db.prepare('SELECT id,title FROM memories WHERE chat_id=? AND source_batch_id=? ORDER BY rowid').all(chatId,id) as Array<{id:string;title:string}>;
+      const memories = db.prepare('SELECT id,title FROM memories WHERE chat_id=? AND rowid>? ORDER BY rowid').all(chatId,before[0]) as Array<{id:string;title:string}>;
       finishGapRecovery(db,chatId,id,payload,memories);
       return;
     }
@@ -307,30 +364,66 @@ export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string)
   }
 }
 
-function finishGapRecovery(db: RcmDatabase, chatId: string, id: string, payload: AdditionPayload, memories:Array<{id:string;title:string}>,passages:import('@rcm/shared').SourcePassage[]=[]): void {
+function finishGapRecovery(db: RcmDatabase, chatId: string, id: string, payload: AdditionPayload, memories:Array<{id:string;title:string}>): void {
   db.transaction(()=>{
-    recordGapBatch(db,chatId,id,payload);
-    storeSourcePassages(db,chatId,passages,id,payload.sourceMessageIds);
     for (const messageId of payload.sourceMessageIds) {
       db.prepare("UPDATE messages SET extraction_state='done',updated_at=? WHERE chat_id=? AND message_id=?").run(Date.now(),chatId,messageId);
       db.prepare('DELETE FROM gap_recovery_messages WHERE chat_id=? AND message_id=?').run(chatId,messageId);
     }
+    // Preserve accepted material before retiring an inherited family. Review
+    // placeholders are not executable jobs; their outstanding reviews stay pending.
+    for (const [retry,parent] of coverageRetryFamilies(db,chatId)) {
+      const ready=db.prepare(`SELECT b.job_id FROM extraction_batches b LEFT JOIN jobs j ON j.id=b.job_id
+        WHERE b.id=? AND (b.job_id IS NULL OR json_extract(j.payload_json,'$.inheritedReview')=1) AND b.status='pending_review' AND b.final_json IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM json_each(b.source_message_ids_json) s LEFT JOIN messages m ON m.chat_id=b.chat_id AND m.message_id=s.value
+          WHERE m.extraction_state IS NULL OR m.extraction_state NOT IN ('done','encapsulated','skipped_policy'))`).get(retry) as {job_id:string|null}|undefined;
+      if (ready) {
+        if (!db.prepare("SELECT 1 FROM reconciliation_items WHERE chat_id=? AND job_id=? AND status='pending'").get(chatId,ready.job_id)) {
+          db.prepare("UPDATE extraction_batches SET status='applied',updated_at=? WHERE id=?").run(Date.now(),retry);
+        }
+        foldCoverageRetry(db,chatId,retry,parent);
+      }
+    }
+    finishReviewedBatches(db,chatId);
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
       .run(JSON.stringify({...payload,candidateStatus:'applied',pipelineStage:'complete',result:{memories,outcome:memories.length ? 'created' : 'nothing_to_add'}}),Date.now(),id);
   })();
 }
 
-function recordGapBatch(db:RcmDatabase,chatId:string,id:string,payload:AdditionPayload):void {
-  const rows=rangeMessages(db,chatId,payload.sourceMessageIds);
-  db.prepare(`INSERT OR IGNORE INTO extraction_batches(id,chat_id,job_id,generation_id,kind,source_message_ids_json,source_fingerprint_json,start_ordinal,end_ordinal,status,created_at,updated_at)
-    VALUES(?,?,?,'active','gap_recovery',?,?,?,?,'applied',?,?)`).run(id,chatId,id,JSON.stringify(payload.sourceMessageIds),JSON.stringify(payload.sourceFingerprint),rows[0]!.ordinal,rows.at(-1)!.ordinal,Date.now(),Date.now());
+function recordGapBatch(db:RcmDatabase,chatId:string,id:string,payload:AdditionPayload):Map<string,string> {
+  const families=coverageRetryFamilies(db,chatId);
+  const batches=db.prepare(`SELECT id,status,source_message_ids_json,final_json IS NOT NULL has_snapshot FROM extraction_batches
+    WHERE chat_id=? AND generation_id='active' AND status<>'superseded' ORDER BY start_ordinal,id`).all(chatId) as
+    Array<{id:string;status:string;source_message_ids_json:string;has_snapshot:number}>;
+  // Applied NULL slices still own their sources. Keep NULL when appending a
+  // partial recovery, rather than creating overlapping ownership or fake state.
+  const replayable=new Set(batches.filter(batch=>batch.has_snapshot || batch.status==='applied').map(batch=>batch.id));
+  const owners=new Map<string,string>();
+  for (const batch of batches) {
+    const owner=families.get(batch.id) ?? batch.id;
+    if (!replayable.has(owner)) continue;
+    for (const messageId of JSON.parse(batch.source_message_ids_json) as string[]) owners.set(messageId,owner);
+  }
+  for (const turn of responseTurns(rangeMessages(db,chatId,payload.sourceMessageIds))) {
+    const owner=owners.get(turn.at(-1)!.id);
+    if (owner) for (const source of turn) if (!owners.has(source.id)) owners.set(source.id,owner);
+  }
+  const ids=payload.sourceMessageIds.filter(messageId=>!owners.has(messageId));
+  if (!ids.length) return owners;
+  const rows=rangeMessages(db,chatId,ids);
+  db.prepare(`INSERT OR IGNORE INTO extraction_batches(id,chat_id,job_id,generation_id,kind,source_message_ids_json,source_fingerprint_json,start_ordinal,end_ordinal,status,final_json,producer_event_contract,producer_state_contract,created_at,updated_at)
+    VALUES(?,?,?,'active','gap_recovery',?,?,?,?,'applied',?,?,?,?,?)`).run(id,chatId,id,JSON.stringify(ids),JSON.stringify(sourceFingerprint(db,chatId,ids)),rows[0]!.ordinal,rows.at(-1)!.ordinal,JSON.stringify(ExtractionResultSchema.parse({})),payload.promptContract ?? null,payload.stateContract ?? null,Date.now(),Date.now());
+  for (const messageId of ids) owners.set(messageId,id);
+  return owners;
 }
 
 export function startGapRecovery(db: RcmDatabase, chatId: string) {
+  assertChatUnlocked(db,chatId);
   return db.transaction(()=>{
     const chat=db.prepare('SELECT profile,memory_language FROM chats WHERE id=?').get(chatId) as {profile:RpProfile;memory_language:MemoryLanguage}|undefined;
     if (!chat) throw fail('Chat not found','CHAT_NOT_FOUND');
     const holes=gapRecoveryHoles(db,chatId);
+    if (!holes.length) return {holeCount:0,messageCount:0,queuedMessages:0,jobs:[]};
     const config=JSON.parse((db.prepare("SELECT value FROM server_meta WHERE key='server_llm_config'").get() as {value:string}|undefined)?.value ?? '{}');
     const budget=Number(config.maxInputTokens ?? 80_000);
     const all=rangeMessages(db,chatId);
@@ -350,7 +443,7 @@ export function startGapRecovery(db: RcmDatabase, chatId: string) {
         const payload: AdditionPayload={mode:'gap_recovery',memoryOnly:true,contextMessageIds:[...before,...after].map(row=>row.message_id),sourceMessageIds:ids,
           sourceFingerprint:sourceFingerprint(db,chatId,ids),rangeIds:[],userRequest:'',existingMemories:[],memoryIds:[],targetFingerprint:'',accessFingerprint:'',ledgerFingerprint:'',memoryLanguage:chat.memory_language,postExtractionReview:false};
         const id=randomUUID();
-        const built=buildAdditionJob(db,id,chatId,chat.profile,1,payload);
+        const built=buildAdditionJob(db,id,chatId,chat.profile,1,payload,true);
         const measure=measureAuxiliaryPrompt(withAuxiliaryStoryFraming([{role:'system',content:built.systemPrompt!},{role:'user',content:built.userPrompt!}],config.relaxAuxiliaryCensorship===true),estimateTokens,{maxInputTokens:budget,maxOutputTokens:config.maxOutputTokens ?? 24_000});
         if (!measure.fits) {
           const units=extractionUnits(group,true);

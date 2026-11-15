@@ -1,4 +1,14 @@
 import type { RcmDatabase } from './db.js';
+import { estimateBackfillCalls } from '@rcm/shared';
+
+export function estimateWholeChatCalls(db:RcmDatabase,chatId:string,turns:number,sourceTokens:number,groupTurns:number):number {
+  const calls = estimateBackfillCalls({completedTurns:turns,sourceTokens,groupTurns,
+    initialStatus:'unseeded',reviewIncluded:false});
+  // Backfill uses one event and one state call per group. Relationship and
+  // final ledger work depend on the produced state; include their baseline.
+  return calls.extractionGroups * 2 + calls.initialCalls + calls.storyCalls
+    + estimateRelationshipCalls(db,chatId) + (calls.extractionGroups ? 1 : 0);
+}
 
 export function estimateRelationshipCalls(db:RcmDatabase,chatId:string):number {
   const row=db.prepare(`SELECT count(*) count FROM (SELECT from_entity,to_entity FROM relationship_events WHERE chat_id=? AND active=1

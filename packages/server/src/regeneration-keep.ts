@@ -1,9 +1,10 @@
+import { retiredBatchSourceSql } from './source-processing.js';
 import { ExtractionResultSchema, type ExtractionResult } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
 import { refreshMemoryFts } from './memory-search-document.js';
 import { refreshDetailFts } from './memory-detail-edits.js';
 import { parseSourceFingerprintJson } from './source-fingerprint.js';
-import { readDetailAccessEdits, writeDetailAccessEdits } from './item-access.js';
+import { readDetailAccessEdits, writeDetailAccessEdits, promiseContributionChain, projectPromiseRow } from './item-access.js';
 import { snapshotRegenerationItems, structuralJson, type RegenerationItemChange, type RegenerationItemSnapshot } from './regeneration-items.js';
 import { parseSocialRelation } from './social-relations.js';
 
@@ -43,7 +44,7 @@ export function prepareRegenerationKeep(db: RcmDatabase, chatId: string, ids: st
   const rejections: KeepRejection[] = [];
   for (const id of plan.ids) {
     const item = snapshots.find(item => item.view.id === id);
-    if (!item || !diff?.some(change => change.id === id && change.status === 'lost' && change.canKeep)) {
+    if (!item || !diff?.flatMap(change => [change,...(change.changes ?? [])]).some(change => change.id === id && change.status === 'lost' && change.canKeep)) {
       rejections.push({ id, reason: 'not_a_lost_item' }); continue;
     }
     const selected = new Map<string, SavedRow>();
@@ -66,7 +67,8 @@ export function prepareRegenerationKeep(db: RcmDatabase, chatId: string, ids: st
       if (item.kind === 'landmark') {
         parent(item.view.source.memoryId);
       } else {
-        add(item.table, item.row); access(item.kind, item.row);
+        add(item.table, item.row);
+        if (item.kind!=='promise') access(item.kind, item.row);
         parent(item.row.memory_id ?? item.row.source_memory_id);
       }
       if (item.kind === 'memory') {
@@ -85,16 +87,28 @@ export function prepareRegenerationKeep(db: RcmDatabase, chatId: string, ids: st
         }
       }
       if (item.kind === 'promise') {
-        for (const event of db.prepare('SELECT * FROM promise_events WHERE chat_id=? AND promise_id=? AND active=1 ORDER BY source_ordinal,created_at,rowid').all(chatId, item.row.id) as Row[]) {
-          add('promise_events', event); parent(event.source_memory_id);
+        const chain=promiseContributionChain(db,chatId,item.row.id);
+        if (chain.some(event=>event.active!==1)) throw new Error('dependency_unavailable');
+        // Linked chains own their grants on details/events, not the parent's
+        // narrator-only placeholder left by the original R10 insertion.
+        if (!chain.some(event=>event.linked_detail_ids_json!=null) || chain.some(event=>event.linked_detail_ids_json==null
+          && !db.prepare("SELECT 1 FROM item_access WHERE chat_id=? AND item_kind='promise_event' AND item_id=?").get(chatId,event.id))) access('promise',item.row);
+        for (const event of chain) {
+          add('promise_events', {...event,content:projectPromiseRow(db,chatId,event,event.id).content}); access('promise_event',event); parent(event.source_memory_id);
         }
+      }
+      // Linked state keeps its exact atomic supports across regeneration too.
+      for (const {row} of [...selected.values()]) for (const detailId of parse(row.linked_detail_ids_json)) {
+        const detail = read('memory_details',detailId);
+        if (!detail || !detail.active) throw new Error('dependency_unavailable');
+        atom('memory_details',detail);
       }
       for (const { table, row } of selected.values()) {
         if (['promises','evidence_spans','memory_traces'].includes(table)) continue; // Parent/event records own their evidence.
         const batchId = row.originalBatchId ?? row.source_batch_id ?? (row.memory_id ? read('memories', row.memory_id)?.source_batch_id : undefined);
         const reason = evidenceFailure(db, chatId, parse(row.evidence_json), batchId);
         if (reason) throw new Error(`${table === 'item_access' ? 'access_' : ''}${reason}`);
-        if (row.seed_json && JSON.parse(row.seed_json).closureEvidence?.length) {
+        if (row.seed_json && JSON.parse(row.seed_json).status === 'fulfilled' && JSON.parse(row.seed_json).closureEvidence?.length) {
           const closureReason = evidenceFailure(db, chatId, JSON.parse(row.seed_json).closureEvidence, batchId);
           if (closureReason) throw new Error(closureReason);
         }
@@ -122,7 +136,7 @@ export function restoreRegenerationKeep(db: RcmDatabase, chatId: string, plan: R
   const memoryMap = new Map<string, string>();
   const reusedParents = new Set<string>();
   const detailMap = new Map<string, string>();
-  const appliedBatches = db.prepare("SELECT id,source_message_ids_json FROM extraction_batches WHERE chat_id=? AND generation_id='active' AND status='applied' ORDER BY start_ordinal").all(chatId) as Row[];
+  const appliedBatches = db.prepare(`SELECT b.id,b.source_message_ids_json FROM extraction_batches b WHERE b.chat_id=? AND b.generation_id='active' AND b.status='applied' AND NOT (${retiredBatchSourceSql}) ORDER BY b.start_ordinal`).all(chatId) as Row[];
   const sourceBatch = (row: Row) => {
     if (!row.source_batch_id) return row.source_batch_id;
     if (appliedBatches.some(batch => batch.id === row.source_batch_id)) return row.source_batch_id;
@@ -159,6 +173,7 @@ export function restoreRegenerationKeep(db: RcmDatabase, chatId: string, plan: R
       if (existing && existing.id !== row.id) throw failure(plan.ids.map(id => ({ id, reason: 'replacement_identity_conflict' })));
       detailMap.set(row.id, row.id);
     }
+    if (row.linked_detail_ids_json != null) row.linked_detail_ids_json = JSON.stringify(parse(row.linked_detail_ids_json).map((id: string) => detailMap.get(id) ?? id));
     if (row.source_detail_id) row.source_detail_id = detailMap.get(row.source_detail_id) ?? row.source_detail_id;
     if (table === 'social_knowledge_events') row.cognition_detail_ids_json = JSON.stringify(parse(row.cognition_detail_ids_json).map((id: string) => detailMap.get(id) ?? id));
     insert(table, row);
@@ -188,7 +203,7 @@ function persistKeptReplay(db: RcmDatabase, chatId: string, plan: RegenerationKe
     .map(row => ({ holder: row.holder, basis: row.basis, evidence: parse(row.evidence_json), confidence: row.confidence }));
   const memoryKey = (id: string | null | undefined) => id ? read('memories', memoryMap.get(id) ?? id)?.memory_key : undefined;
   const payload = (batchId: string): ExtractionResult => {
-    if (!batches.has(batchId)) batches.set(batchId, ExtractionResultSchema.parse(JSON.parse((read('extraction_batches', batchId)).final_json)));
+    if (!batches.has(batchId)) batches.set(batchId, ExtractionResultSchema.parse(JSON.parse((read('extraction_batches', batchId)).final_json ?? '{}')));
     return batches.get(batchId)!;
   };
   const ensureMemory = (id: string): any => {
@@ -201,6 +216,9 @@ function persistKeptReplay(db: RcmDatabase, chatId: string, plan: RegenerationKe
         landmarkKinds: parse(row.landmark_kinds_json), evidence: parse(row.evidence_json), salience: row.salience, retention: row.retention_class, associations: [], details: [], keyDialogues: [] };
       target.memories.push(memory!);
     }
+    // The kept row owns its shape, even if a replacement batch reused its key.
+    if (row.card_shape === 1) memory.cardShape = 1;
+    else delete memory.cardShape;
     return memory;
   };
   for (const {table, row: original} of plan.rows) {
@@ -211,18 +229,21 @@ function persistKeptReplay(db: RcmDatabase, chatId: string, plan: RegenerationKe
       const memory = ensureMemory(row.memory_id);
       if (table === 'memory_details') {
         const seed = row.seed_json ? JSON.parse(row.seed_json) : undefined;
-        if (seed?.closureEvidence?.length) {
+        if (seed?.status === 'fulfilled' && seed.closureEvidence?.length) {
           const batchId = read('memories', row.memory_id).source_batch_id;
           (payload(batchId).seedResolutions ??= []).push({detailId:row.id,status:seed.status,evidence:seed.closureEvidence});
           if (!keptSeedIds.has(batchId)) keptSeedIds.set(batchId,new Set());
           keptSeedIds.get(batchId)!.add(row.id);
         }
         memory.details ??= [];
-        if (!memory.details.some((detail: Row) => detail.key === row.detail_key)) memory.details.push({ key: row.detail_key, role: row.role, kind: row.kind, text: row.text,
-          epistemic: row.epistemic, participants: parse(row.participants_json), knownBy: parse(row.known_by_json), locations: parse(row.locations_json),
+        const keptDetail = { key: row.detail_key, role: row.role, kind: row.kind, text: row.text,
+          epistemic: row.epistemic, participants: parse(row.participants_json), knownBy: parse(row.known_by_json), hiddenFrom: parse(row.hidden_from_json), locations: parse(row.locations_json),
           evidence: parse(row.evidence_json), access: access('detail', row.id), salience: row.salience, retention: row.retention_class,
           originalKind: row.original_kind ?? undefined,
-          ...(seed ? { seed: { ...seed, status: 'open', closureEvidence: undefined } } : {}) });
+          ...(seed ? { seed: seed.status === 'fulfilled' ? { ...seed, status: 'open', closureEvidence: undefined } : seed } : {}) };
+        const existing = memory.details.findIndex((detail: Row) => detail.key === row.detail_key);
+        if (existing >= 0) memory.details[existing] = keptDetail;
+        else memory.details.push(keptDetail);
       } else {
         memory.keyDialogues ??= [];
         memory.keyDialogues.push({ speaker: row.speaker, text: row.text, messageId: row.message_id, kind: row.kind, evidence: parse(row.evidence_json), access: access('dialogue', row.id) });
@@ -230,21 +251,25 @@ function persistKeptReplay(db: RcmDatabase, chatId: string, plan: RegenerationKe
       continue;
     }
     const target = payload(row.source_batch_id), evidence = parse(row.evidence_json);
+    const supports: Row[] = parse(row.linked_detail_ids_json).map((id: string) => read('memory_details',id));
+    const links: {memoryKey?:string;detailKeys?:string[];support?:Array<{memoryKey:string;detailKey:string}>} = supports.length ? {memoryKey:memoryKey(supports[0]!.memory_id),detailKeys:supports.filter(detail=>detail.memory_id===supports[0]!.memory_id).map(detail => detail.detail_key),...(new Set(supports.map(detail=>detail.memory_id)).size>1 ? {support:supports.map(detail=>({memoryKey:memoryKey(detail.memory_id)!,detailKey:detail.detail_key}))} : {})} : {};
     if (table === 'assertions') {
       const relation = parseSocialRelation(row.social_relation_json);
       const supports = relation?.detailIds.map(id => read('memory_details', id));
-      target.assertions.push({ subject: row.subject, predicate: row.predicate, value: row.value, stateKind: row.state_kind,
+      target.assertions.push({ ...links, subject: row.subject, predicate: row.predicate, value: row.value, stateKind: row.state_kind,
         confidence: row.confidence, changeType: 'initial', evidence, retention: row.retention_class, validFromMemoryKey: memoryKey(row.source_memory_id),
         ...(relation ? { socialRelation: { kind: relation.kind, target: relation.target, direction: relation.direction, label: relation.label,
-          memoryKey: memoryKey(supports![0]!.memory_id)!, detailKeys: supports!.map(detail => detail.detail_key) } } : {}) });
+          memoryKey: memoryKey(supports![0]!.memory_id)!, detailKeys: supports!.filter(detail=>detail.memory_id===supports![0]!.memory_id).map(detail => detail.detail_key), ...(new Set(supports!.map(detail=>detail.memory_id)).size>1 ? {support:supports!.map(detail=>({memoryKey:memoryKey(detail.memory_id)!,detailKey:detail.detail_key}))} : {}) } } : {}) });
     }
-    if (table === 'beliefs') target.beliefs.push({ holder: row.holder, subject: row.subject, predicate: row.predicate, value: row.value, polarity: row.polarity,
+    if (table === 'beliefs') target.beliefs.push({ ...links, holder: row.holder, subject: row.subject, predicate: row.predicate, value: row.value, polarity: row.polarity,
       confidence: row.confidence, source: row.source ?? undefined, evidence, retention: row.retention_class, action: 'coexist' });
     if (table === 'promise_events') {
       const promise = read('promises', row.promise_id);
-      target.promises.push({ key: row.promise_key, promisor: row.promisor, promisee: row.promisee, content: row.content, status: row.status,
-        scheduledFor: row.scheduled_for ?? undefined, statusReason: row.status_reason ?? undefined, memoryKey: memoryKey(row.source_memory_id),
-        evidence, access: access('promise', row.promise_id) as any,
+      target.promises.push({ ...links, ...(row.event_kind ? {event:row.event_kind} : {}), storedAmendment:row.amendment_text,
+        ...(row.amendment_text ? {amendment:row.amendment_text} : {}), key: row.promise_key, promisor: row.promisor, promisee: row.promisee, content: row.content, status: row.status,
+        scheduledFor: (row.amendment_text==null ? row.scheduled_for : row.scheduled_for_delta) ?? undefined, statusReason: row.status_reason ?? undefined, memoryKey: links.memoryKey ?? memoryKey(row.source_memory_id),
+        evidence, access: (db.prepare("SELECT 1 FROM item_access WHERE chat_id=? AND item_kind='promise_event' AND item_id=?").get(chatId,row.id)
+          ? access('promise_event',row.id) : access('promise', row.promise_id)) as any,
         ...(['scene','future','recurring'].includes(promise.retention_scope) ? {scope:promise.retention_scope} : {}) });
     }
     if (table === 'relationship_events') (target.relationshipEvents ??= []).push({ from: row.from_entity, to: row.to_entity, reason: row.reason,
@@ -261,7 +286,10 @@ function persistKeptReplay(db: RcmDatabase, chatId: string, plan: RegenerationKe
     memory.landmarkKinds = parse(read('memories', memoryMap.get(item.view.source.memoryId!)!).landmark_kinds_json); memory.landmark = true;
   }
   for (const [id, value] of batches) {
-    const original = JSON.parse(read('extraction_batches',id).final_json);
+    const stored=read('extraction_batches',id).final_json;
+    // Keeping explicit rows does not complete a slice's absent state snapshot.
+    if (stored===null) continue;
+    const original = JSON.parse(stored);
     const seedIds = [...new Set<string>([...(original.regenerationKeptSeedIds ?? []),...(keptSeedIds.get(id) ?? [])])];
     db.prepare('UPDATE extraction_batches SET final_json=? WHERE id=? AND chat_id=?')
       .run(JSON.stringify({...original,...ExtractionResultSchema.parse(value),...(seedIds.length ? {regenerationKeptSeedIds:seedIds} : {})}), id, chatId);

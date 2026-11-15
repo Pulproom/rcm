@@ -1,5 +1,5 @@
 import { MemoryBudgetPresetSchema, MAX_MEMORY_BUDGET, RCM_API_REVISION, type MemoryLanguage, type ServerWorkerStatus } from "@rcm/shared";
-import { ServerClient } from "../api-client.js";
+import { ServerClient, ServerRequestError } from "../api-client.js";
 import type { DashboardData } from "../dashboard.js";
 import type { PluginSettings, RuntimeState } from "../types.js";
 import { isChatMemoryEnabled } from "../settings.js";
@@ -21,6 +21,7 @@ export interface ChatTurnLimits {
 }
 
 export interface ChatMemorySettings {
+  narrationViewpoint: PluginSettings["narrationViewpoint"];
   perChatGroupTurns: PluginSettings["extractionGroupTurns"];
   memoryLanguage: MemoryLanguage;
   memoryLanguages: PluginSettings["memoryLanguages"];
@@ -92,35 +93,37 @@ export function readChatMemorySettings(state: RuntimeState, values: FormValues, 
     if (values.chatMemoryBudget === "inherit") delete memoryBudgets[state.current.chatId];
     else if (values.chatMemoryBudget !== undefined) memoryBudgets[state.current.chatId] = readBudget("chatMemoryBudget");
   }
-  return { perChatGroupTurns, memoryLanguage, memoryLanguages, defaultMemoryBudget, memoryBudgets };
+  const narrationViewpoint = { ...state.settings.narrationViewpoint };
+  if (state.current && values.narrationViewpoint !== undefined) narrationViewpoint[state.current.chatId] = String(values.narrationViewpoint).trim();
+  return { narrationViewpoint, perChatGroupTurns, memoryLanguage, memoryLanguages, defaultMemoryBudget, memoryBudgets };
 }
 
 export function assertChatMemoryLanguageSupported(state: RuntimeState, memoryLanguage: MemoryLanguage, verifiedHealth: DashboardData["health"]): void {
   if (state.current && memoryLanguage !== (state.settings.memoryLanguages[state.current.chatId] ?? "en")
     && (Number(verifiedHealth?.apiRevision ?? 0) !== RCM_API_REVISION || !verifiedHealth?.capabilities?.multilingualCanonicalMemory)) {
-    throw new Error("현재 RCM 서버 계약에서만 기억 정본 언어를 변경할 수 있습니다.");
+    throw new Error("현재 RCM 서버 계약에서만 기억 정본 언어를 변경할 수 있어요.");
   }
 }
 
-export function readChatPerspectives(state: RuntimeState, values: FormValues): PluginSettings["perspectives"] {
-  const perspectives = { ...state.settings.perspectives };
-  const perspectiveNames = String(values.perspectives ?? "").split(/[,\n]/).map((name) => name.trim()).filter(Boolean);
-  if (state.current)
-    perspectives[state.current.chatId] = [...new Set(perspectiveNames)].slice(0, 4);
-  return perspectives;
-}
-
-export async function applyChatWorkSettings(state: RuntimeState, change: ChatSettingsChange, nextServerConnection: Pick<PluginSettings, "serverUrl" | "serverToken">, clearVisibleTranslations: () => void): Promise<void> {
+export async function applyChatWorkSettings(state: RuntimeState, change: ChatSettingsChange, nextServerConnection: Pick<PluginSettings, "serverUrl" | "serverToken">, clearVisibleTranslations: () => void, confirmCancel?: () => Promise<boolean>): Promise<void> {
   const { characterEnabled, effectiveEnabled, chatWasEnabled } = change;
   const { chatEnabled: chatEnabledById, chatCatchUpPending: catchUpPending } = change.settings;
   if (state.current) {
     const workClient = new ServerClient(() => ({ ...state.settings, ...nextServerConnection }));
+    const requestWork = async <T>(path:string, body:Record<string,unknown>):Promise<T> => {
+      try { return await workClient.request<T>(path,{method:'PUT',body:JSON.stringify(body)}); }
+      catch (error) {
+        if (!(error instanceof ServerRequestError) || error.code !== 'UPGRADE_ACTIVE' || !confirmCancel) throw error;
+        if (!await confirmCancel()) throw new Error('기억 끄기를 취소했어요.');
+        return workClient.request<T>(path,{method:'PUT',body:JSON.stringify({...body,cancelUpgrade:true})});
+      }
+    };
     const characterChanged = (state.settings.characterEnabled[state.current.characterId] !== false) !== characterEnabled;
     if (characterChanged) {
-      const result = await workClient.request<{
+      const result = await requestWork<{
         chatIds: string[];
       }>(`/v1/characters/${encodeURIComponent(state.current.characterId)}/work`, {
-        method: "PUT", body: JSON.stringify({ enabled: characterEnabled, chatEnabled: chatEnabledById, defaultChatEnabled: state.settings.defaultChatEnabled }),
+        enabled: characterEnabled, chatEnabled: chatEnabledById, defaultChatEnabled: state.settings.defaultChatEnabled,
       });
       for (const id of new Set([...result.chatIds, state.current.chatId])) {
         invalidateChatTranslations(id);
@@ -132,10 +135,10 @@ export async function applyChatWorkSettings(state: RuntimeState, change: ChatSet
       state.serverWorker = undefined;
     }
     else {
-      const result = await workClient.request<{
+      const result = await requestWork<{
         worker: ServerWorkerStatus;
       }>(`/v1/chats/${encodeURIComponent(state.current.chatId)}/work`, {
-        method: "PUT", body: JSON.stringify({ enabled: effectiveEnabled }),
+        enabled: effectiveEnabled,
       });
       state.serverWorker = result.worker;
     }

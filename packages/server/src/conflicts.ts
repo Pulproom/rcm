@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { ExtractionResultSchema } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { normalizeLedgerPredicate, normalizeLedgerText } from "./normalization.js";
-import { parseSocialRelation, resolveSocialRelation, sameSocialRelationScope } from "./social-relations.js";
+import { parseSocialRelation, resolveSocialRelation, resolveStateDetailLinks, sameSocialRelationScope } from "./social-relations.js";
+import { linkedDetailKnowledge, PENDING_ACCESS_HOLDER, snapshotKnowledgeGrants } from "./item-access.js";
+import { replaceItemAccess } from "./ingest.js";
 
 export type ConflictResolution = "accept_incoming" | "keep_existing" | "acknowledged";
 
@@ -62,6 +64,8 @@ export function resolveConflict(
       throw conflictError("Stored conflict candidate is invalid", "CONFLICT_CANDIDATE_INVALID");
     }
     const incoming = parsed.data.assertions[0]!;
+    const linkedDetails = resolveStateDetailLinks(db,chatId,incoming,new Map());
+    if (linkedDetails && !linkedDetails.length) throw conflictError("Candidate support is no longer active", "CONFLICT_SOURCE_STALE");
     const evidenceIds = [...new Set(incoming.evidence.map((item) => item.messageId))];
     const evidenceRows = db.prepare(`
       SELECT message_id,ordinal FROM messages
@@ -123,19 +127,21 @@ export function resolveConflict(
       }
       const evidence = [...JSON.parse(current.evidence_json), ...incoming.evidence].filter((item, index, all) =>
         all.findIndex((candidate) => candidate.messageId === item.messageId && (candidate.quote ?? "") === (item.quote ?? "")) === index);
-      db.prepare("UPDATE assertions SET state_kind=?,confidence=MAX(confidence,?),evidence_json=?,social_relation_json=? WHERE id=?")
-        .run(incomingStateKind, incoming.confidence, JSON.stringify(evidence), socialRelation, current.id);
+      db.prepare("UPDATE assertions SET state_kind=?,confidence=MAX(confidence,?),evidence_json=?,social_relation_json=?,linked_detail_ids_json=COALESCE(?,linked_detail_ids_json) WHERE id=?")
+        .run(incomingStateKind, incoming.confidence, JSON.stringify(evidence), socialRelation, JSON.stringify(linkedDetails) ?? null, current.id);
       assertionId = current.id;
     } else {
       if (current) db.prepare("UPDATE assertions SET valid_to_revision=? WHERE id=?").run(revision, current.id);
       assertionId = randomUUID();
       const validFromOrdinal = Math.min(...evidenceRows.map((row) => row.ordinal));
       db.prepare(`
-        INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,created_at,social_relation_json)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,created_at,social_relation_json,linked_detail_ids_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(assertionId, chatId, incoming.subject, normalizeLedgerPredicate(incoming.predicate), incoming.value,
-        incomingStateKind, incoming.confidence, revision, validFromOrdinal, sourceMemoryId, JSON.stringify(incoming.evidence), incoming.retention ?? "arc", timestamp, socialRelation);
+        incomingStateKind, incoming.confidence, revision, validFromOrdinal, sourceMemoryId, JSON.stringify(incoming.evidence), incoming.retention ?? "arc", timestamp, socialRelation, JSON.stringify(linkedDetails) ?? null);
     }
+    if (linkedDetails) replaceItemAccess(db,chatId,'assertion',assertionId,snapshotKnowledgeGrants(db,chatId,'assertion',assertionId,
+      {ids:linkedDetails,holders:linkedDetailKnowledge(db,chatId,linkedDetails) ?? [PENDING_ACCESS_HOLDER]}),revision,timestamp);
     db.prepare("UPDATE assertions SET user_edit_ordinal=? WHERE id=? AND chat_id=?").run(committedEditOrdinal(db,chatId),assertionId,chatId);
     db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, timestamp, chatId);
     db.prepare("UPDATE conflicts SET status='resolved',resolution='accept_incoming',resolved_at=? WHERE id=? AND chat_id=?")

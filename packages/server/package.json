@@ -1,6 +1,6 @@
 {
   "name": "@rcm/server",
-  "version": "1.0.28",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,6 +16,7 @@
     "fflate": "^0.8.2",
     "hono": "^4.12.8",
     "sqlite-vec": "0.1.9",
+    "undici": "7.30.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {

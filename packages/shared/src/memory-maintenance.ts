@@ -8,4 +8,4 @@ export interface GapRecoveryStatus {
   results:Array<{turnCount?:number;startTurn?:number;endTurn?:number;jobId:string;status:string;error:string|null;sourceMessageIds:string[];startOrdinal:number;endOrdinal:number;canRetry:boolean;
     result:{outcome:'created'|'nothing_to_add';memories:Array<{id:string;title:string}>}|null}>;
 }
-export interface AlwaysInjectEstimate { items:Array<{memoryId:string;estimatedTokens:number}>; estimatedTokens:number }
+export interface AlwaysInjectEstimate { items:Array<{memoryId:string;estimatedTokens:number;chargedTokens?:number}>; estimatedTokens:number; chargedTokens?:number }

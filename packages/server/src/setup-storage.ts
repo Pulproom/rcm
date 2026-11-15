@@ -22,8 +22,14 @@ export function cleanSetupJobPayload(type: unknown, status: unknown, value: unkn
   if (type !== "initial_calibration" && !payload.resolvedSetup) return JSON.stringify(payload);
   // Finished setup jobs keep operational metadata only, never input/response caches.
   const keep = ["sourceMessageIds", "setupFingerprint", "backfillRunId", "memoryLanguage", "trigger",
-    "pipelineStage", "pipelineStageUpdatedAt", "llmCallStats", "auxiliaryBudget"];
+    "pipelineStage", "pipelineStageUpdatedAt", "llmCallStats", "auxiliaryBudget", "upgradeRunId", "promptContract", "stateContract", "postExtractionReview"];
   const retained = Object.fromEntries(keep.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+  // A failed phase-1 calibration is resumable. Retain only its authorized
+  // picker input, not response caches; discard/success clears the shadow input.
+  if (type === 'initial_calibration' && status === 'failed' && typeof payload.upgradeRunId === 'string') {
+    const setup = PickerSetupProjectionSchema.safeParse(payload.resolvedSetup);
+    if (setup.success) retained.resolvedSetup = setup.data;
+  }
   const hints = object(payload.identityHints);
   retained.identityHints = Object.fromEntries(["hostCharacterName", "userPersonaName"].filter(key => typeof hints[key] === "string").map(key => [key, hints[key]]));
   return JSON.stringify(retained);
@@ -77,6 +83,8 @@ export function migrateSetupStorage(db: RcmDatabase): void {
 export function installSetupStorageGuards(db: RcmDatabase): void {
   db.function("clean_setup_job_payload", { deterministic: true }, cleanSetupJobPayload);
   db.exec(`
+    DROP TRIGGER IF EXISTS setup_terminal_insert;
+    DROP TRIGGER IF EXISTS setup_terminal_clear;
     CREATE TRIGGER IF NOT EXISTS setup_job_terminal_insert AFTER INSERT ON jobs
     WHEN NEW.status NOT IN ('queued','leased') AND (NEW.type='initial_calibration' OR json_type(NEW.payload_json,'$.resolvedSetup') IS NOT NULL)
     BEGIN UPDATE jobs SET payload_json=clean_setup_job_payload(NEW.type,NEW.status,NEW.payload_json) WHERE id=NEW.id; END;
@@ -86,9 +94,11 @@ export function installSetupStorageGuards(db: RcmDatabase): void {
     BEGIN UPDATE jobs SET payload_json=clean_setup_job_payload(NEW.type,NEW.status,NEW.payload_json) WHERE id=NEW.id; END;
     CREATE TRIGGER IF NOT EXISTS setup_terminal_insert AFTER INSERT ON initial_calibrations
     WHEN NEW.status NOT IN ('queued','awaiting_confirmation') AND NEW.setup_json IS NOT NULL
+      AND NOT (NEW.status='failed' AND EXISTS(SELECT 1 FROM jobs j WHERE j.chat_id=NEW.chat_id AND j.type='initial_calibration' AND j.status='failed' AND json_type(j.payload_json,'$.upgradeRunId')='text'))
     BEGIN UPDATE initial_calibrations SET setup_json=NULL WHERE chat_id=NEW.chat_id; END;
     CREATE TRIGGER IF NOT EXISTS setup_terminal_clear AFTER UPDATE OF status,setup_json ON initial_calibrations
     WHEN NEW.status NOT IN ('queued','awaiting_confirmation') AND NEW.setup_json IS NOT NULL
+      AND NOT (NEW.status='failed' AND EXISTS(SELECT 1 FROM jobs j WHERE j.chat_id=NEW.chat_id AND j.type='initial_calibration' AND j.status='failed' AND json_type(j.payload_json,'$.upgradeRunId')='text'))
     BEGIN UPDATE initial_calibrations SET setup_json=NULL WHERE chat_id=NEW.chat_id; END;
   `);
 }

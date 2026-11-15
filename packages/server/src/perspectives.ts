@@ -1,17 +1,10 @@
 import type { TurnPrepareRequest } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { normalizeEntityName } from "./entities.js";
-
-export interface PerspectiveResolution {
-  perspectives: string[];
-  source: "manual" | "cache" | "host" | "ledger" | "shared_fallback" | "unresolved";
-  unresolved: boolean;
-}
+import { buildEntityIdentityResolver, normalizeEntityName } from "./entities.js";
 
 interface Candidate {
   name: string;
   aliases: Set<string>;
-  score: number;
 }
 
 function parseNames(value: string | null | undefined): string[] {
@@ -23,19 +16,24 @@ function parseNames(value: string | null | undefined): string[] {
 
 function candidateLedger(db: RcmDatabase, chatId: string): Map<string, Candidate> {
   const candidates = new Map<string, Candidate>();
-  const add = (name: unknown, score = 1): Candidate | undefined => {
+  const nonPeople = new Set((db.prepare("SELECT name FROM entities WHERE chat_id=? AND type<>'character'").all(chatId) as Array<{name:string}>).map(row => normalizeEntityName(row.name)));
+  const resolve = buildEntityIdentityResolver(db, chatId);
+  const add = (name: unknown): Candidate | undefined => {
     if (typeof name !== "string" || !name.trim()) return undefined;
-    const normalized = normalizeEntityName(name);
-    if (!normalized || normalized === "narrator") return undefined;
-    const current = candidates.get(normalized) ?? { name: name.trim(), aliases: new Set<string>(), score: 0 };
-    current.score += score;
+    const identity = resolve(name);
+    if (identity.ambiguous) return undefined;
+    const normalized = normalizeEntityName(identity.canonical);
+    if (!normalized || ["narrator", "omniscient", "omniscient narrator", "__narrator_archive__", "__everyone__", "__author__", "__automatic_delivery__"].includes(normalized) || nonPeople.has(normalized)) return undefined;
+    const current = candidates.get(normalized) ?? { name: identity.canonical.trim(), aliases: new Set<string>() };
+    current.aliases.add(normalizeEntityName(name));
     candidates.set(normalized, current);
     return current;
   };
-  const entities = db.prepare("SELECT id,entity_key,name FROM entities WHERE chat_id=?").all(chatId) as Array<{ id: string; entity_key: string; name: string }>;
+  const entities = db.prepare("SELECT id,entity_key,name FROM entities WHERE chat_id=? AND type='character'").all(chatId) as Array<{ id: string; entity_key: string; name: string }>;
   const aliases = db.prepare("SELECT alias FROM aliases WHERE entity_id=?");
   for (const entity of entities) {
-    const candidate = add(entity.name, 12)!;
+    const candidate = add(entity.name);
+    if (!candidate) continue;
     candidate.aliases.add(normalizeEntityName(entity.entity_key));
     candidate.aliases.add(normalizeEntityName(entity.name));
     for (const row of aliases.all(entity.id) as Array<{ alias: string }>) candidate.aliases.add(normalizeEntityName(row.alias));
@@ -43,18 +41,21 @@ function candidateLedger(db: RcmDatabase, chatId: string): Map<string, Candidate
   for (const row of db.prepare(`SELECT DISTINCT json_extract(a.value,'$.holder') holder FROM source_passages p
     JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash,
     json_each(p.access_json) a WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned')
-    AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')`).all(chatId) as Array<{holder:string}>) add(row.holder, 1);
+    AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')`).all(chatId) as Array<{holder:string}>) add(row.holder);
   const memories = db.prepare("SELECT participants_json,known_by_json,perspective FROM memories WHERE chat_id=? AND active=1").all(chatId) as Array<{ participants_json: string; known_by_json: string; perspective: string | null }>;
   for (const memory of memories) {
-    for (const name of parseNames(memory.known_by_json)) add(name, 4);
-    for (const name of parseNames(memory.participants_json)) add(name, 1);
-    add(memory.perspective, 3);
+    for (const name of parseNames(memory.known_by_json)) add(name);
+    for (const name of parseNames(memory.participants_json)) add(name);
+    add(memory.perspective);
   }
   for (const row of db.prepare("SELECT holder,subject FROM beliefs WHERE chat_id=? AND active=1").all(chatId) as Array<{ holder: string; subject: string }>) {
-    add(row.holder, 4); add(row.subject, 1);
+    add(row.holder); add(row.subject);
   }
   for (const row of db.prepare("SELECT from_entity,to_entity FROM relationship_projections WHERE chat_id=?").all(chatId) as Array<{ from_entity: string; to_entity: string }>) {
-    add(row.from_entity, 2); add(row.to_entity, 2);
+    add(row.from_entity); add(row.to_entity);
+  }
+  for (const row of db.prepare("SELECT promisor,promisee FROM promises WHERE chat_id=? AND status<>'invalidated'").all(chatId) as Array<{promisor:string;promisee:string}>) {
+    add(row.promisor); add(row.promisee);
   }
   return candidates;
 }
@@ -64,7 +65,8 @@ function canonical(candidates: Map<string, Candidate>, value: unknown): string |
   const normalized = normalizeEntityName(value);
   const direct = candidates.get(normalized);
   if (direct) return direct.name;
-  for (const candidate of candidates.values()) if (candidate.aliases.has(normalized)) return candidate.name;
+  const matches = [...candidates.values()].filter(candidate => candidate.aliases.has(normalized));
+  if (matches.length === 1) return matches[0]!.name;
   return undefined;
 }
 
@@ -81,64 +83,38 @@ function unique(values: Array<string | undefined>, limit: number): string[] {
   return result;
 }
 
-export function resolveTurnPerspectives(db: RcmDatabase, request: TurnPrepareRequest, queryText: string): PerspectiveResolution {
+/** Scene identity is a ranking hint, never a knowledge-access boundary. */
+export function resolveSceneCharacters(db: RcmDatabase, request: TurnPrepareRequest, queryText: string, sceneHitParticipants: string[]): string[] {
   const candidates = candidateLedger(db, request.chatId);
-  const hints = request.identityHints;
-  if (request.perspectiveMode === "manual" && request.perspectives.length > 0) {
-    const manual = unique(request.perspectives.map((value) => canonical(candidates, value) ?? value.trim()).filter((value) => value && value !== request.characterId), 4);
-    if (manual.length) return { perspectives: manual, source: "manual", unresolved: false };
-  }
+  const text = normalizeEntityName([queryText, ...(request.querySignals ?? []).map(signal => signal.text)].join("\n"));
+  const latest = db.prepare(`SELECT participants_json FROM memories m WHERE chat_id=? AND active=1
+    AND (capsule_parent_id IS NULL OR capsule_parent_id IN (SELECT memory_id FROM episodes WHERE resolution='group' AND status='capsuled'))
+    ORDER BY COALESCE((SELECT MAX(msg.ordinal) FROM json_each(m.evidence_json) ev
+      JOIN messages msg ON msg.chat_id=m.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')),m.created_revision) DESC,m.id LIMIT 2`)
+    .all(request.chatId) as Array<{ participants_json: string }>;
+  return unique([
+    canonical(candidates, request.identityHints?.userPersonaName),
+    canonical(candidates, request.identityHints?.hostCharacterName),
+    ...(request.identityHints?.recentSpeakerNames ?? []).map(name => canonical(candidates, name)),
+    ...[...candidates.values()].filter(person => [normalizeEntityName(person.name), ...person.aliases].some(name => name && text.includes(name))).map(person => person.name),
+    ...sceneHitParticipants.map(name => canonical(candidates, name)),
+    ...latest.flatMap(row => parseNames(row.participants_json)).map(name => canonical(candidates, name)),
+  ], 8);
+}
 
-  const user = canonical(candidates, hints?.userPersonaName);
-  const automaticAiLimit = request.profile === "companion" ? 1 : 3;
-  const loweredQuery = queryText.toLocaleLowerCase();
-  const rankAutomaticAi = (values: string[]): string[] => unique(values, 16).sort((left, right) => {
-    const leftCandidate = candidates.get(normalizeEntityName(left));
-    const rightCandidate = candidates.get(normalizeEntityName(right));
-    const leftMentioned = [left, ...(leftCandidate?.aliases ?? [])].some((name) => name && loweredQuery.includes(name.toLocaleLowerCase()));
-    const rightMentioned = [right, ...(rightCandidate?.aliases ?? [])].some((name) => name && loweredQuery.includes(name.toLocaleLowerCase()));
-    return Number(rightMentioned) - Number(leftMentioned) || (rightCandidate?.score ?? 0) - (leftCandidate?.score ?? 0);
-  }).slice(0, automaticAiLimit);
-  const assemble = (ais: string[]): string[] => {
-    const ranked = rankAutomaticAi(ais.filter((name) => normalizeEntityName(name) !== normalizeEntityName(user ?? "")));
-    return unique([user, ...ranked], 1 + automaticAiLimit);
-  };
-  const includesAiPerspective = (values: string[]): boolean => values.some(
-    (name) => normalizeEntityName(name) !== normalizeEntityName(user ?? ""),
-  );
-  const resolvedFromHints = (values: string[]): boolean => values.length > 0
-    && (!user || includesAiPerspective(values));
+/** A stale viewpoint falls back to omniscient; it never contributes scene people. */
+export function resolveNarrationViewpoint(db: RcmDatabase, chatId: string, value?: string): string | undefined {
+  if (!value) return undefined;
+  const resolved = buildEntityIdentityResolver(db, chatId)(value);
+  if (resolved.ambiguous) return undefined;
+  return (db.prepare("SELECT name FROM entities WHERE chat_id=? AND type='character' AND name=? COLLATE NOCASE")
+    .get(chatId, resolved.canonical) as {name:string} | undefined)?.name;
+}
 
-  const host = unique([
-    canonical(candidates, hints?.hostCharacterName),
-    ...(hints?.recentSpeakerNames ?? []).map((value) => canonical(candidates, value)),
-    ...(request.perspectiveMode === "auto" ? request.perspectives.map((value) => canonical(candidates, value)) : []),
-  ], 16);
-  if (host.length || user) {
-    const values = assemble(host);
-    if (resolvedFromHints(values)) return { perspectives: values, source: "host", unresolved: false };
-  }
+export const narrationViewpointKey = (chatId: string): string => `narration_viewpoint:${chatId}`;
 
-  // The cache is a fail-safe, not a source of extra perspective blocks. A
-  // current host/recent speaker match must win so inactive side characters do
-  // not remain attached to every later packet.
-  const cached = unique((hints?.cachedPerspectives ?? []).map((value) => canonical(candidates, value)), 16);
-  if (cached.length) {
-    const values = assemble(cached);
-    if (resolvedFromHints(values)) return { perspectives: values, source: "cache", unresolved: false };
-  }
-
-  const lowered = loweredQuery;
-  const ranked = [...candidates.values()].map((candidate) => ({
-    name: candidate.name,
-    mentioned: [...candidate.aliases, normalizeEntityName(candidate.name)].some((alias) => alias && lowered.includes(alias)),
-    score: candidate.score + [...candidate.aliases, normalizeEntityName(candidate.name)].reduce((score, alias) => score + (alias && lowered.includes(alias) ? 20 : 0), 0),
-  })).sort((left, right) => right.score - left.score);
-  const rankedAi = ranked.filter((item) => normalizeEntityName(item.name) !== normalizeEntityName(user ?? ""));
-  const ledgerCandidates = rankedAi.some((item) => item.mentioned)
-    ? rankedAi.filter((item) => item.mentioned).slice(0, automaticAiLimit)
-    : rankedAi.slice(0, 1);
-  const ledger = assemble(ledgerCandidates.map((item) => item.name));
-  if (ledger.length) return { perspectives: ledger, source: "ledger", unresolved: false };
-  return { perspectives: [], source: candidates.size > 0 ? "shared_fallback" : "unresolved", unresolved: true };
+/** Re-resolve the last prepare setting so deleted or ambiguous identities fall back. */
+export function storedNarrationViewpoint(db: RcmDatabase, chatId: string): string | undefined {
+  const row=db.prepare("SELECT value FROM server_meta WHERE key=?").get(narrationViewpointKey(chatId)) as {value:string}|undefined;
+  return resolveNarrationViewpoint(db,chatId,row?.value);
 }

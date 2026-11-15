@@ -1,5 +1,6 @@
+import { recordIncident } from './incidents.js';
 import { cleanupUnengagedChats } from "./chat-engagement.js";
-import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD } from "./chat-work.js";
+import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD, userChatSql } from "./chat-work.js";
 import { completeQuizJob } from "./quiz.js";
 import { inspectDraftEvidence } from "./evidence-review.js";
 import { groupMemoriesWithServerLlm } from "./server-llm.js";
@@ -84,7 +85,11 @@ export class ServerExtractionWorker {
   #status(chatId?: string): ServerWorkerStatus {
     const engine = this.store.config.engine;
     const controlled = this.#controlLeaseUntil > Date.now();
-    const visible = [...this.#active.values()].filter(item => item.job.kind !== "quiz" && (!chatId || item.job.chatId === chatId));
+    const attributed = [...this.#active.values()].flatMap(item => {
+      const owner = this.#statusChatId(item.job.chatId);
+      return owner ? [{ ...item, chatId: owner }] : [];
+    });
+    const visible = attributed.filter(item => item.job.kind !== "quiz" && (!chatId || item.chatId === chatId));
     const chatHeld = Boolean(chatId && isChatWorkHeld(this.db, chatId));
     const state = chatHeld ? "paused" : engine === "risu" ? "risu"
       : this.#faulted ? "faulted"
@@ -92,28 +97,42 @@ export class ServerExtractionWorker {
           : visible.length ? "running"
             : controlled ? "standby" : "standby";
     const active = visible[0];
-    const quiz = [...this.#active.values()].find(item => item.job.kind === "quiz" && (!chatId || item.job.chatId === chatId));
+    const quiz = attributed.find(item => item.job.kind === "quiz" && (!chatId || item.chatId === chatId));
+    const other = chatId && attributed.find(item => item.job.kind !== "quiz" && item.chatId !== chatId);
+    const jobStatus = (item: typeof attributed[number]) => ({ chatId: item.chatId, sourceMessageCount: item.job.sourceMessageIds.length, sourceTurnCount: item.job.sourceTurnCount, startedAt: item.startedAt, kind: item.job.kind, sourceRecovery: item.job.sourceRecovery, sourceRecoveryMetadata: item.job.sourceRecoveryMetadata });
     return {
       state,
       chatHeld,
       ...(engine === "server" ? { modelConfigured: this.store.modelReady } : {}),
       embeddingConfigured: this.embeddings.status?.configured,
       activeCalls: visible.length,
-      ...(quiz ? { quizGenerating: { chatId: quiz.job.chatId, startedAt: quiz.startedAt } } : {}),
+      ...(quiz ? { quizGenerating: { chatId: quiz.chatId, startedAt: quiz.startedAt } } : {}),
       ...(controlled ? { controlLeaseUntil: this.#controlLeaseUntil } : {}),
       ...(chatHeld ? { lastError: CHAT_WORK_HELD } : this.#lastError ? { lastError: this.#lastError } : {}),
-      queuedJobs: (this.db.prepare("SELECT count(*) AS count FROM jobs WHERE status IN ('queued','leased') AND type<>'quiz'").get() as { count: number }).count,
+      queuedJobs: (this.db.prepare(`SELECT count(*) AS count FROM jobs j
+        LEFT JOIN regeneration_runs r ON r.shadow_chat_id=j.chat_id
+        JOIN chats c ON c.id=COALESCE(r.chat_id,j.chat_id)
+        WHERE j.status IN ('queued','leased') AND j.type<>'quiz' AND ${userChatSql('c')}
+        ${chatId ? 'AND c.id=?' : ''}`).get(...(chatId ? [chatId] : [])) as { count: number }).count,
       phase: chatHeld ? "paused" : this.#faulted ? "faulted" : this.#manualPaused ? "paused" : active?.phase ?? "idle",
-      ...(active ? { activeJob: { chatId: active.job.chatId, sourceMessageCount: active.job.sourceMessageIds.length, sourceTurnCount: active.job.sourceTurnCount, startedAt: active.startedAt, kind: active.job.kind, sourceRecovery: active.job.sourceRecovery, sourceRecoveryMetadata: active.job.sourceRecoveryMetadata } } : {}),
+      ...(active ? { activeJob: jobStatus(active) } : {}),
+      ...(other ? { otherChatActiveJob: jobStatus(other) } : {}),
       ...(chatId && this.#auxiliaryCalls.get(chatId)?.length ? { auxiliaryCalls: this.#auxiliaryCalls.get(chatId) } : {}),
       ...(this.#lastCompletedAt ? { lastCompletedAt: this.#lastCompletedAt } : {}),
     };
   }
 
+  #statusChatId(chatId: string): string | undefined {
+    return (this.db.prepare(`SELECT c.id FROM chats c WHERE c.id=COALESCE(
+      (SELECT chat_id FROM regeneration_runs WHERE shadow_chat_id=?),?) AND ${userChatSql('c')}`)
+      .get(chatId, chatId) as { id: string } | undefined)?.id;
+  }
+
   #recordAuxiliaryTiming(event: { id: string; jobId: string; purpose: string; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }): void {
     const active = this.#active.get(event.jobId);
     if (!active || active.job.kind === "quiz") return;
-    const chatId = active.job.chatId;
+    const chatId = this.#statusChatId(active.job.chatId);
+    if (!chatId) return;
     const calls = this.#auxiliaryCalls.get(chatId) ?? [];
     const existing = calls.find((call) => call.id === event.id);
     if (existing) Object.assign(existing, event);
@@ -168,7 +187,15 @@ export class ServerExtractionWorker {
 
   wake(): void {
     if (!this.#canRun() || this.#draining) return;
-    void this.#drain();
+    void this.#drain().catch(error => this.#fault(error));
+  }
+
+  #fault(error: unknown): void {
+    if (this.#faulted) return;
+    this.#faulted = true;
+    this.#lastError = (error instanceof Error ? error.message : String(error)).slice(0,4_000);
+    recordIncident(this.db,{chatId:null,kind:'worker_faulted',detail:this.#lastError});
+    this.#stopActive('Worker faulted');
   }
 
   #canRun(): boolean {
@@ -204,14 +231,14 @@ export class ServerExtractionWorker {
         // The only overlap admitted beside it is a fingerprint-guarded story job.
         const hasNonStory = [...this.#active.values()].some((item) => item.job.kind !== "story_consolidation");
         const owner = `${this.workerId}:${randomUUID()}`;
-        const job = attachAuxiliaryPlan(this.db, leaseJob(this.db, owner, this.leaseSeconds, { storyOnly: hasNonStory, excludeJobIds:[...this.#active.keys()] }), {
+        const job = attachAuxiliaryPlan(this.db, leaseJob(this.db, owner, this.leaseSeconds, { storyOnly: hasNonStory, excludeJobIds:[...this.#active.keys()], stateContract:true, stateWriting:true, eventWriting:true, eventWritingE1e:true,eventWritingE1f:true, stateWritingR10:true, stateWritingR11:true }), {
           maxInputTokens: this.store.config.maxInputTokens, maxOutputTokens: this.store.config.maxOutputTokens, llmTimeoutMs: this.store.config.llmTimeoutMs,
         });
         if (!job) break;
         this.store.snapshotJob(job.id);
         const active: ActiveJob = { owner, job, ...beginChatWork(this.db, job.chatId), startedAt: Date.now(), phase: job.kind === "quiz" ? "storing" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction" };
         this.#active.set(job.id, active);
-        void this.#process(active);
+        void this.#process(active).catch(error => this.#fault(error));
       }
     } finally {
       this.#draining = false;

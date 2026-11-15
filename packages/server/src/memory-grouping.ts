@@ -1,3 +1,7 @@
+import { assertChatUnlocked } from './upgrade-lock.js';
+import { assertUpgradeJobWritable } from './upgrade-lock.js';
+import { deletedMemoryKeys } from './user-deletions.js';
+import { availableMemoryKey } from './extraction-memory-keys.js';
 import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { randomUUID } from "node:crypto";
 import { buildSourceUnits, estimateTokens, groupingSystemPrompt, planGroupingInputs, validateGroupingResult,
@@ -7,7 +11,7 @@ import { now } from "./db.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { sourceAccessFingerprint, memoryTargetFingerprint, rangeMessages, rangeTargetFingerprint, selectSourceRanges } from "./source-ranges.js";
 import { fingerprintMatches, sourceFingerprint, type SourceFingerprintItem } from "./source-fingerprint.js";
-import { loadItemAccess, resolveItemAccess, pruneDetailAccessEdits } from "./item-access.js";
+import { loadPlotKnowers, loadItemAccess, resolveItemAccess, pruneDetailAccessEdits } from "./item-access.js";
 import { invalidateStorySupports, storyMemorySupportIds } from "./story-spine.js";
 
 interface GroupPayload {
@@ -32,6 +36,7 @@ function prepareGroup(db: RcmDatabase, chatId: string, batchIds: string[], revie
   const memories = (db.prepare("SELECT * FROM memories WHERE chat_id=? AND active=1 ORDER BY created_at,id").all(chatId) as any[])
     .filter((row) => selected.some((range) => range.memoryIds.includes(row.id)));
   const units: GroupInputUnit[] = [];
+  const plotHolders = loadPlotKnowers(db, chatId, memories);
   const access: Record<string, string[]> = {};
   const memberIds: string[] = [], partialIds: string[] = [];
   const sourceBatch = new Map(selected.flatMap((row) => row.sourceMessageIds.map((id) => [id, row.id] as const)));
@@ -52,7 +57,7 @@ function prepareGroup(db: RcmDatabase, chatId: string, batchIds: string[], revie
     memberIds.push(memory.id);
     const atomAccess = loadItemAccess(db, chatId, [...details.map((row) => ({ kind: 'detail' as const, id: row.id })), ...dialogues.map((row) => ({ kind: 'dialogue' as const, id: row.id }))]);
     const entries = [
-      { id: memory.id, text: JSON.stringify({ title: memory.title, content: memory.content, evidence: JSON.parse(memory.evidence_json) }), holders: JSON.parse(memory.known_by_json) as string[] },
+      { id: memory.id, text: JSON.stringify({ title: memory.title, content: memory.content, evidence: JSON.parse(memory.evidence_json) }), holders: plotHolders.get(memory.id) ?? JSON.parse(memory.known_by_json) as string[] },
       ...details.map((row) => ({ id: row.id, text: JSON.stringify(row), holders: resolveItemAccess(atomAccess, 'detail', row.id, JSON.parse(row.known_by_json)).holders })),
       ...dialogues.map((row) => ({ id: row.id, text: JSON.stringify(row), holders: resolveItemAccess(atomAccess, 'dialogue', row.id, []).holders })),
     ];
@@ -87,6 +92,7 @@ export function previewMemoryGroup(db: RcmDatabase, chatId: string, batchIds: st
 }
 
 export function startMemoryGroup(db: RcmDatabase, chatId: string, batchIds: string[], review: boolean): { runId: string; jobId: string } {
+  assertChatUnlocked(db,chatId);
   const payload = prepareGroup(db, chatId, batchIds, review);
   const id = randomUUID(), timestamp = now();
   const fingerprint = payload.sourceFingerprint;
@@ -118,6 +124,7 @@ export function buildMemoryGroupJob(id: string, chatId: string, profile: RpProfi
 }
 
 export function completeMemoryGroupJob(db: RcmDatabase, jobId: string, workerId: string, value: unknown) {
+  assertUpgradeJobWritable(db,jobId);
   const row = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND status='leased' AND lease_owner=? AND type='memory_group'").get(jobId, workerId) as { chat_id: string; payload_json: string } | undefined;
   if (!row) throw error('Lease not found', 'LEASE_NOT_FOUND');
   const payload: GroupPayload = JSON.parse(row.payload_json);
@@ -173,6 +180,7 @@ export function listMemoryGroups(db: RcmDatabase, chatId: string) {
 }
 
 export function applyMemoryGroup(db: RcmDatabase, chatId: string, episodeId: string): void {
+  assertChatUnlocked(db,chatId);
   const job = groupJob(db, chatId, episodeId), payload = job.payload;
   const episode = db.prepare("SELECT status FROM episodes WHERE id=? AND chat_id=?").get(episodeId, chatId) as { status: string };
   if (episode.status === 'capsuled') return;
@@ -188,7 +196,7 @@ export function applyMemoryGroup(db: RcmDatabase, chatId: string, episodeId: str
     // scope is the intersection of ALL inputs, never the union of child scopes.
     const holders = intersection(Object.values(payload.access));
     db.prepare(`INSERT INTO memories(id,chat_id,memory_key,type,title,content,known_by_json,evidence_json,created_revision,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,0,?,?)`).run(parentId, chatId, `group:${episodeId}`, holders.length ? 'episode' : 'secret', payload.candidate!.title,
+      VALUES(?,?,?,?,?,?,?,?,0,?,?)`).run(parentId, chatId, availableMemoryKey(`group:${episodeId}`,deletedMemoryKeys(db,chatId)), holders.length ? 'episode' : 'secret', payload.candidate!.title,
         payload.candidate!.sections.map((section) => section.summary).join('\n'), JSON.stringify(holders), JSON.stringify(payload.sourceMessageIds.map((messageId) => ({ messageId }))), timestamp, timestamp);
     for (const messageId of payload.sourceMessageIds) db.prepare("INSERT INTO evidence_spans(id,chat_id,memory_id,message_id,created_at) VALUES(?,?,?,?,?)").run(randomUUID(), chatId, parentId, messageId, timestamp);
     for (const [ordinal, section] of payload.candidate!.sections.entries()) {
@@ -286,6 +294,6 @@ export function resplitMemoryGroupInput(db: RcmDatabase, jobId: string, payload:
 export function validatePendingMemoryGroup(db: RcmDatabase, chatId: string, jobId: string, payload: GroupPayload): boolean {
   if (fingerprintMatches(db, chatId, payload.sourceFingerprint) && rangeTargetFingerprint(db, chatId, payload.sourceBatchIds) === payload.targetFingerprint) return true;
   db.prepare("UPDATE episodes SET status='stale',updated_at=? WHERE id=?").run(now(), payload.episodeId);
-  db.prepare("UPDATE jobs SET status='done',last_error='원문·기억·접근 권한이 바뀌어 생성을 중단했습니다',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE id=?").run(now(), jobId);
+  db.prepare("UPDATE jobs SET status='done',last_error='원문·기억·접근 권한이 바뀌어 생성을 중단했어요',lease_owner=NULL,leased_until=NULL,updated_at=? WHERE id=?").run(now(), jobId);
   return false;
 }

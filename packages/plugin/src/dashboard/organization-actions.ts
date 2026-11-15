@@ -17,6 +17,7 @@ interface GroupingEstimate {
 }
 
 interface RegenerationEstimate {
+  startOrdinal: number;
   batchCount: number;
   messageCount: number;
   rawTokens: number;
@@ -44,7 +45,13 @@ function keepRejectionReason(reason: string): string {
   return `${access ? '접근 권한의 ' : ''}${reasons[access ? reason.slice(7) : reason] ?? '보존 조건을 확인할 수 없어요'}`;
 }
 
+function replaySnapshotFailure(error:unknown):string|undefined {
+  return error instanceof ServerRequestError && error.code==='REPLAY_SNAPSHOT_MISSING'
+    ? error.rejectedItems?.[0]?.reason ?? '재생 기록이 없는 구간의 기억을 먼저 다시 만들어 주세요.' : undefined;
+}
+
 export interface OrganizationActionHost {
+  syncSources(chatId: string): Promise<void>;
   render(invalidate?: boolean): void;
   refresh(): Promise<void>;
   openTimeline(): void;
@@ -182,6 +189,7 @@ export function createOrganizationController(organizationView: OrganizationView,
           const operation = action!.split('-')[1];
           organizationView.busy = true; render();
           try {
+            if (operation !== 'discard') await host.syncSources(decodeURIComponent(chat));
             await client.request(`/v1/chats/${chat}/memory-additions/${encodeURIComponent(id)}/${operation}`, { method: 'POST' });
             if (operation !== 'retry') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = false; }
             else host.drainWorker();
@@ -225,14 +233,16 @@ export function createOrganizationController(organizationView: OrganizationView,
           requireChatMemoryEnabled(state, state.current!.chatId);
           const estimate = await client.request<GroupingEstimate>(`/v1/chats/${chat}/memory-groups/preview`, { method: 'POST', body: JSON.stringify({ batchIds: organizationView.selection, postExtractionReview: state.settings.postExtractionReview }) });
           const review = await host.chooseExtractionReviewOverride('선택한 원문 구간을 묶을까요?',
-            `원문 묶음 ${estimate.sourceBatchIds.length}개 · 메시지 ${estimate.messageCount}개\n원문 약 ${estimate.rawTokens.toLocaleString()}토큰 · 전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰\n처음 ${estimate.initialCalls}회${estimate.mergeRequired ? ' + 단계별 통합' : ''}로 처리합니다. 재검수를 사용하면 검수 단계가 추가됩니다. 이 수치는 실제 청구량이 아닙니다.\n기존 세부·대사·상태는 보존되며, 결과를 확인한 뒤 적용할 수 있습니다.${estimate.partialIds.length ? ` 범위 밖 근거도 가진 기억 ${estimate.partialIds.length}개는 원래 위치에 남습니다.` : ''}`,
+            `원문 묶음 ${estimate.sourceBatchIds.length}개 · 메시지 ${estimate.messageCount}개\n원문 약 ${estimate.rawTokens.toLocaleString()}토큰 · 전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰\n처음 ${estimate.initialCalls}회${estimate.mergeRequired ? ' + 단계별 통합' : ''}로 처리해요. 재검수를 사용하면 검수 단계가 추가돼요. 이 수치는 실제 청구량이 아니에요.\n기존 세부·대사·상태는 보존되며, 결과를 확인한 뒤 적용할 수 있어요.${estimate.partialIds.length ? ` 범위 밖 근거도 가진 기억 ${estimate.partialIds.length}개는 원래 위치에 남아요.` : ''}`,
             state.settings.postExtractionReview);
           if (review === undefined) return;
+          await host.syncSources(decodeURIComponent(chat));
           const created = await client.request<{ runId: string }>(`/v1/chats/${chat}/memory-groups/create`, { method: 'POST', body: JSON.stringify({ batchIds: organizationView.selection, postExtractionReview: review }) });
           organizationView.candidateId = `group:${created.runId}`; organizationView.mobileDetail = true;
           host.drainWorker();
           await host.refresh(); return;
         } else if (action === 'organization-release-hold') {
+          await host.syncSources(decodeURIComponent(chat));
           const result = await client.request<{ active?: EpisodeActivity | null }>(`/v1/chats/${chat}/episodes/${encodeURIComponent(id)}/release`, { method: 'POST' });
           state.episodeActivity = result.active ?? null;
           await host.refresh(); return;
@@ -241,6 +251,7 @@ export function createOrganizationController(organizationView: OrganizationView,
           return;
         } else if (action === 'organization-ungroup' || action.endsWith('-group')) {
           const operation = action === 'organization-ungroup' ? 'ungroup' : action.includes('-apply-') ? 'apply' : action.includes('-discard-') ? 'discard' : 'retry';
+          if (operation === 'apply' || operation === 'retry') await host.syncSources(decodeURIComponent(chat));
           await client.request(`/v1/chats/${chat}/memory-groups/${encodeURIComponent(id)}/${operation}`, { method: 'POST' });
           if (operation !== 'retry') { organizationView.candidateId = ''; organizationView.selection = []; organizationView.mobileDetail = false; }
           else host.drainWorker();
@@ -249,6 +260,7 @@ export function createOrganizationController(organizationView: OrganizationView,
           // A persisted itemDiff can outlive a server downgrade. The dedicated route fails closed on old servers.
           const keepLostItemIds = [...root.querySelectorAll<HTMLInputElement>('input[name="keep-lost"]:checked')].map((input) => input.value);
           const operation = keepLostItemIds.length ? 'apply-with-keep' : 'apply';
+          await host.syncSources(decodeURIComponent(chat));
           await client.request(`/v1/chats/${chat}/regenerations/${encodeURIComponent(id)}/${operation}`, { method: 'POST', ...(keepLostItemIds.length ? { body: JSON.stringify({ keepLostItemIds }) } : {}) }, 120_000)
             .catch(error => {
               if (keepLostItemIds.length && isMissingServerRoute(error)) throw new Error('고른 기록을 보존하려면 RCM 서버를 업데이트해 주세요. 아직 적용하지 않았어요.');
@@ -265,7 +277,7 @@ export function createOrganizationController(organizationView: OrganizationView,
             .find(run => `regeneration:${run.id}` === organizationView.candidateId)?.preview?.itemDiff;
           const reasons = error.rejectedItems?.map(item => `${diff?.find(change => change.id === item.id)?.before?.text ?? item.id}: ${keepRejectionReason(item.reason)}`) ?? [];
           organizationView.error = ['고른 기록을 보존할 수 없어 적용하지 않았어요.', ...reasons].join(' · ');
-        } else organizationView.error = message;
+        } else organizationView.error = replaySnapshotFailure(error) ?? message;
       }
       render();
       if (action === 'organization-select') {
@@ -293,12 +305,15 @@ export function createOrganizationController(organizationView: OrganizationView,
           || organizationView.selection.length !== 1 || organizationView.selection[0] !== batchId) return;
         organizationView.busy = false;
         render();
+        const widened = canonical && estimate.startOrdinal < range.startOrdinal
+          ? `\n복사할 때 나뉜 구간이 있어서 메시지 ${estimate.startOrdinal + 1}부터 다시 만들어요.` : '';
         const review = await host.chooseExtractionReviewOverride(
           canonical ? "여기부터 기억 후보를 다시 만들까요?" : "이 구간의 기억 후보를 다시 만들까요?",
-          `${canonical ? "선택한 지점부터 최신 원문까지 기억과 상태를 다시 계산합니다." : "선택한 원문 묶음의 기억·세부·대사만 다시 만들고 상태 장부는 유지합니다."} 결과는 자동으로 적용되지 않습니다.\n묶음 ${estimate.batchCount}개 · 메시지 ${estimate.messageCount}개 · 원문 약 ${estimate.rawTokens.toLocaleString()}토큰\n전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰, 기본 추출 약 ${estimate.estimatedExtractionCalls}회입니다.${canonical && estimate.estimatedStoryCalls ? `\n적용하면 줄거리 약 ${estimate.estimatedStoryCalls.total}회(구간 ${estimate.estimatedStoryCalls.segment} · 줄거리 묶음 ${estimate.estimatedStoryCalls.arc} · 전체 개요 ${estimate.estimatedStoryCalls.overview})와 관계 약 ${estimate.estimatedRelationshipCalls}회가 이어집니다.` : ''} 재검수·보정에 따라 호출이 늘 수 있고, 실제 청구량과는 다릅니다.`,
+          `${canonical ? "최신 원문까지 기억과 상태를 다시 계산해요." : "선택한 원문 묶음의 기억·세부·대사만 다시 만들고 상태 장부는 유지해요."} 결과는 자동으로 적용되지 않아요.${widened}\n묶음 ${estimate.batchCount}개 · 메시지 ${estimate.messageCount}개 · 원문 약 ${estimate.rawTokens.toLocaleString()}토큰\n전체 예상 입력 약 ${estimate.estimatedInputTokens.toLocaleString()}토큰, 기본 추출 약 ${estimate.estimatedExtractionCalls}회예요.${canonical && estimate.estimatedStoryCalls ? `\n적용하면 줄거리 약 ${estimate.estimatedStoryCalls.total}회(구간 ${estimate.estimatedStoryCalls.segment} · 줄거리 묶음 ${estimate.estimatedStoryCalls.arc} · 전체 개요 ${estimate.estimatedStoryCalls.overview})와 관계 약 ${estimate.estimatedRelationshipCalls}회가 이어져요.` : ''} 재검수·보정에 따라 호출이 늘 수 있고, 실제 청구량과는 달라요.`,
           state.settings.postExtractionReview,
         );
         if (review === undefined) return;
+        await host.syncSources(decodeURIComponent(chat));
         const started = await client.request<{ runId: string }>(`/v1/chats/${chat}/extraction-batches/${encodeURIComponent(batchId)}/${action}`, { method: "POST", body: JSON.stringify({ postExtractionReview: review }) }, 120_000);
         organizationView.candidateId = `regeneration:${started.runId}`;
         organizationView.mobileDetail = true;
@@ -307,7 +322,8 @@ export function createOrganizationController(organizationView: OrganizationView,
       } catch (error) {
         organizationView.errorReport = formatServerError(error);
         const message = error instanceof Error ? error.message : String(error);
-        organizationView.error = `기억 후보 생성을 준비하지 못했습니다. ${message}`;
+        organizationView.error = error instanceof ServerRequestError && error.code==='SOURCE_SNAPSHOT_HELD'
+          ? message : replaySnapshotFailure(error) ?? `기억 후보 생성을 준비하지 못했어요. ${message}`;
         host.regenerationFailed(error);
       } finally {
         organizationView.busy = false;
@@ -344,6 +360,7 @@ export function createOrganizationController(organizationView: OrganizationView,
           const serialized=JSON.stringify(body);
           if(addition.submission?.body!==serialized) addition.submission={key:crypto.randomUUID(),body:serialized};
           organizationView.busy = true; render();
+          await host.syncSources(decodeURIComponent(chat));
           const created = await client.request<{ runId: string }>(`/v1/chats/${chat}/memory-additions/create`, {
             method: 'POST', body: JSON.stringify({...body,idempotencyKey:addition.submission!.key}),
           });
@@ -399,6 +416,7 @@ export function createOrganizationController(organizationView: OrganizationView,
 
 // Timeline selection and display state; the dashboard retains dirty-editor/navigation gates.
 export interface TimelineViewState {
+  retryDeletion?: { day:string; ids:string[]; selected:Set<string>; busy:boolean; failures:Array<{id:string;title:string;error:string}> };
   query: string;
   landmarkOnly: boolean;
   bookmarkedOnly: boolean;
@@ -416,6 +434,8 @@ export interface TimelineViewState {
 
 export interface TimelineMemory {
   id: string;
+  userOnlyRetry?: boolean;
+  title?: string;
   active?: boolean;
   landmark?: boolean;
   bookmarked?: boolean;
@@ -431,6 +451,35 @@ export interface TimelineMemory {
 }
 
 export const createTimelineView = (): TimelineViewState => ({ query: "", landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false, includeInactive: false, editing: false, creating: false, mobileDetail: false });
+
+export function beginRetryMemorySelection(view:TimelineViewState,day:string,memories:TimelineMemory[]):void {
+  const ids=memories.filter(memory=>memory.userOnlyRetry===true).map(memory=>memory.id);
+  view.retryDeletion=ids.length ? {day,ids,selected:new Set(ids),busy:false,failures:[]} : undefined;
+}
+
+export async function deleteRetryMemorySelection(view:TimelineViewState,memories:TimelineMemory[],client:Pick<ServerClient,'request'>,chatId:string,
+  confirm:(message:string,labels:{title:string;confirm:string;cancel:string;danger:boolean})=>Promise<boolean>):Promise<void> {
+  const selection=view.retryDeletion;
+  if (!selection || selection.busy) return;
+  const eligible=new Map(memories.filter(memory=>memory.userOnlyRetry===true).map(memory=>[memory.id,memory]));
+  const ids=selection.ids.filter(id=>selection.selected.has(id) && eligible.has(id));
+  if (!ids.length) return;
+  selection.busy=true;
+  try {
+    if (!await confirm('고른 기억을 지워요. 지운 기억은 되돌릴 수 없어요.',{title:`기억 ${ids.length}개를 지울까요?`,confirm:`기억 ${ids.length}개 삭제`,cancel:'취소',danger:true})) return;
+    if (view.retryDeletion!==selection) return;
+    selection.failures=[];
+    for (const id of ids) {
+      try {
+        const result=await client.request<{ok:boolean}>(`/v1/chats/${encodeURIComponent(chatId)}/memories/${encodeURIComponent(id)}`,{method:'DELETE'});
+        if (!result.ok) throw new Error('Memory not found');
+        selection.selected.delete(id);
+      } catch (error) { selection.failures.push({id,title:eligible.get(id)?.title ?? id,error:error instanceof Error?error.message:String(error)}); }
+    }
+    if (selection.failures.length) selection.selected=new Set(selection.failures.map(item=>item.id));
+    else if (view.retryDeletion===selection) view.retryDeletion=undefined;
+  } finally { selection.busy=false; }
+}
 
 export function filterTimelineMemories<T extends TimelineMemory>(memories: T[], view: Pick<TimelineViewState, "landmarkOnly" | "bookmarkedOnly" | "pinnedOnly" | "includeInactive">): T[] {
   const filtered = memories.filter((memory) => !isRecognitionMemory(memory)

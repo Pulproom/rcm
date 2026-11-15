@@ -213,7 +213,7 @@ export function createPeopleController(peopleView: PeopleViewState, management: 
     },
     async deleteInitialPerson(target, chat, confirmDelete) {
       const name = target.dataset.name ?? "이 인물";
-      if (!await confirmDelete(`${name}을(를) 초기 이름 장부에서 삭제할까요? 연결된 초기 관계축도 함께 제거됩니다.`)) return;
+      if (!await confirmDelete(`${name}을(를) 초기 이름 장부에서 삭제할까요? 연결된 초기 관계축도 함께 제거돼요.`)) return;
       await client.request(`/v1/chats/${chat}/initial-calibration/entities/${encodeURIComponent(target.dataset.id ?? "")}`, { method: "DELETE" });
       peopleView.selectedId = "";
       peopleView.editing = false;
@@ -227,7 +227,7 @@ export function createPeopleController(peopleView: PeopleViewState, management: 
         const values = new FormData(form);
         const sourceId = String(values.get("sourceId") ?? "");
         const targetId = String(values.get("targetId") ?? "");
-        if (!sourceId || !targetId || sourceId === targetId) throw new Error("서로 다른 두 인물을 선택하세요.");
+        if (!sourceId || !targetId || sourceId === targetId) throw new Error("서로 다른 두 인물을 선택해 주세요.");
         management.mergePreview = await client.request<EntityMergePreview>(`/v1/chats/${chat}/entities/merge-preview`, { method: "POST", body: JSON.stringify({ sourceId, targetId }) });
         render();
         return { refresh: false };
@@ -245,7 +245,7 @@ export function createPeopleController(peopleView: PeopleViewState, management: 
         const normalize = (value: unknown) => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
         const name = normalize(target.dataset.personName);
         const entity = getData().entities.find((item) => [item.name, item.displayName].some((value) => normalize(value) === name));
-        if (!entity) throw new Error("삭제할 인물을 찾지 못했습니다.");
+        if (!entity) throw new Error("삭제할 인물을 찾지 못했어요.");
         management.deletePreview = undefined;
         peopleView.management = "delete";
         peopleView.mobileDetail = true;
@@ -263,9 +263,9 @@ export function createPeopleController(peopleView: PeopleViewState, management: 
         } catch (error) {
           management.deletePreview = { ...management.deletePreview, busy: false };
           const text = String(error);
-          throw new Error(text.includes("ENTITY_DELETE_BUSY") ? "기억 정리가 진행 중이라 지금은 삭제할 수 없습니다. 잠시 후 다시 시도하세요."
-            : text.includes("ENTITY_DELETE_STALE") ? "확인한 뒤 기록이 바뀌었습니다. 인물 삭제를 다시 열어 확인해 주세요."
-              : text.includes("ENTITY_IS_PERSONA") ? "페르소나는 삭제할 수 없습니다. 먼저 페르소나 지정을 해제하세요." : text);
+          throw new Error(text.includes("ENTITY_DELETE_BUSY") ? "기억 정리가 진행 중이라 지금은 삭제할 수 없어요. 잠시 후 다시 시도해 주세요."
+            : text.includes("ENTITY_DELETE_STALE") ? "확인한 뒤 기록이 바뀌었어요. 인물 삭제를 다시 열어 확인해 주세요."
+              : text.includes("ENTITY_IS_PERSONA") ? "페르소나는 삭제할 수 없어요. 먼저 페르소나 지정을 해제해 주세요." : text);
         }
         const deletedName = String(management.deletePreview?.entity?.name ?? "");
         management.deletePreview = undefined;

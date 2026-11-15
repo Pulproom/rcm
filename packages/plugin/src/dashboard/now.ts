@@ -9,14 +9,15 @@ import { assertionChainKey, buildRecordChains, liveChainKey, renderRecordDetail,
 import { nameHtml } from "./film/names.js";
 import { lex } from "./lexicon.js";
 
-export type NowFilter = "all" | "promise" | "belief" | "condition" | "goal" | "secret";
+export type NowFilter = "all" | "seed" | "promise" | "belief" | "condition" | "goal" | "secret";
 export type NowSort = "recent" | "stale";
 /** 현재 lists live records; 지난 기록 lists chains that ended. Both open one record's history beside the list. */
 export type NowMode = "now" | "past";
 /** `listOnly`: on a wide screen the reader is closed and the list stands alone. */
-export type NowView = { mode: NowMode; selected: string; mobileDetail: boolean; listOnly?: boolean };
+export type NowView = { mode: NowMode; selected: string; mobileDetail: boolean; listOnly?: boolean; accessEditing?: string; selection?: Set<string>; selectionBusy?: boolean };
 export type NowGroup = { owner: string | null; isPersona: boolean; rank: number; rows: NowRow[] };
 export type NowRow = {
+  seed?: NonNullable<DashboardData["seeds"]>[number];
   id: string;
   /** The record chain this row belongs to (see record-history). */
   key: string;
@@ -26,7 +27,7 @@ export type NowRow = {
   textKey?: string;
   endedAt?: number | null;
   deleted?: boolean;
-  type: "promise" | "belief" | "condition" | "goal" | "secret";
+  type: "seed" | "promise" | "belief" | "condition" | "goal" | "secret";
   text: string;
   subject?: string;
   socialRelation?: { kind: string; target: string };
@@ -63,7 +64,7 @@ export async function runPromiseStatusMutation(
 
 type OwnedNowRow = NowRow & { owner: string | null; ownerRank: number };
 
-const FILTERS: NowFilter[] = ["all", "promise", "belief", "condition", "goal", "secret"];
+const FILTERS: NowFilter[] = ["all", "seed", "promise", "belief", "condition", "goal", "secret"];
 const normalizeName = (value: unknown): string => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
 const escapeHtml = (value: unknown): string => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -173,7 +174,7 @@ export function buildNowPage(
   }
   for (const item of data.assertions ?? []) {
     const owner = ownerFor(item?.subject);
-    const type = FILTERS.includes(item?.stateKind) && item.stateKind !== "all" && item.stateKind !== "promise" && item.stateKind !== "belief"
+    const type = FILTERS.includes(item?.stateKind) && item.stateKind !== "seed" && item.stateKind !== "all" && item.stateKind !== "promise" && item.stateKind !== "belief"
       ? item.stateKind as "condition" | "goal" | "secret"
       : "condition";
     rows.push({
@@ -185,8 +186,13 @@ export function buildNowPage(
   }
   }
 
-  const counts = Object.fromEntries(FILTERS.map((value) => [value, value === "all" ? rows.length : rows.filter((row) => row.type === value).length])) as Record<NowFilter, number>;
-  const selected = filter === "all" ? rows : rows.filter((row) => row.type === filter);
+  for (const seed of data.seeds ?? []) {
+    if ((seed.status !== 'open') !== (mode === 'past')) continue;
+    rows.push({id:seed.id,key:`seed:${seed.id}`,type:'seed',seed,text:seed.text,textKey:`${seed.memoryId}:detail:${seed.id}`,changes:0,
+      lastMention:seed.lastMention,overdue:false,owner:null,ownerRank:3});
+  }
+  const counts = Object.fromEntries(FILTERS.map((value) => [value, value === "all" ? rows.filter(row=>row.type !== "seed").length : rows.filter((row) => row.type === value).length])) as Record<NowFilter, number>;
+  const selected = filter === "all" ? rows.filter(row=>row.type !== "seed") : rows.filter((row) => row.type === filter);
   const compareRows = (left: OwnedNowRow, right: OwnedNowRow): number => {
     const leftOrdinal = left.lastMention.ordinal;
     const rightOrdinal = right.lastMention.ordinal;
@@ -217,14 +223,14 @@ export function overduePromiseEntries(page: ReturnType<typeof buildNowPage>): Ar
 }
 
 const FILTER_ICONS: Record<NowFilter, string> = {
-  all: "clip", promise: "check", belief: "eye", condition: "pencil", goal: "landmark", secret: "inactive",
+  all: "clip", seed: "sprout", promise: "check", belief: "eye", condition: "pencil", goal: "landmark", secret: "inactive",
 };
 const FILTER_LABELS: Record<NowFilter, string> = {
-  all: "전체", promise: "약속", belief: "인식", condition: "상태", goal: "목표", secret: "비밀",
+  all: "전체", seed: "복선", promise: "약속", belief: "인식", condition: "상태", goal: "목표", secret: "비밀",
 };
 const RANK_LABELS: Record<number, string> = { 0: "주요", 1: "보조", 2: "배경" };
 const TYPE_LABELS: Record<NowRow["type"], string> = {
-  promise: "약속", belief: "인식", condition: "상태", goal: "목표", secret: "비밀",
+  seed: "복선", promise: "약속", belief: "인식", condition: "상태", goal: "목표", secret: "비밀",
 };
 
 /** The scene of the last mention, opening that memory on the timeline. */
@@ -232,12 +238,29 @@ const renderMention = (scene: SceneRef | null): string => scene
   ? `<button class="linkbtn" type="button" data-action="open-timeline-memory" data-memory-id="${escapeHtml(scene.memoryId)}">${escapeHtml(scene.label)}</button>`
   : "";
 
+const seedRecall = (seed: NonNullable<NowRow['seed']>): string => seed.turnsSinceLastDelivery === null
+  ? '아직 안 떠올림' : `떠올림 · ${seed.turnsSinceLastDelivery}턴 전`;
+
+function renderSeedDetail(row: NowRow, sceneAt: (target: unknown) => SceneRef | null, translations: ReadonlyMap<string,string>, display: TranslationDisplay, busy: boolean): string {
+  const seed=row.seed!;
+  const actions=menu({label:'복선 더보기',items:[{label:'삭제',icon:'delete',action:'edit-seed',data:{id:row.id,operation:'delete'},danger:true,disabled:busy}]});
+  const state=seed.status === 'open' ? '열림' : seed.status === 'fulfilled' ? `회수 · ${renderMention(sceneAt(seed.closureOrdinal))}` : '닫음';
+  return `<article class="reader rec seed-rec"><div class="reader__bar">${btn('현재',{kind:'quiet',icon:'back',action:'now-back',hit:true})}<div class="reader__acts">${actions}</div></div><p class="rec-who"><span class="seed-kind">${icon('sprout')}복선</span></p><h2 class="reader__title seed-title">${rowText(row,translations,display)}</h2><div class="rec-now"><dl class="rec-now__meta"><div><dt>상태</dt><dd>${state}</dd></div><div><dt>알아챈 사람</dt><dd>${escapeHtml(seed.noticedBy.join(', ') || '기록 없음')}</dd></div><div><dt>장면</dt><dd>${renderMention(sceneAt(seed.memoryId) ?? sceneAt(seed.lastMention.ordinal))}</dd></div><div><dt>떠올림</dt><dd>${seed.deliveryCount ? `${seed.deliveryCount}번 · 마지막 ${seed.turnsSinceLastDelivery}턴 전` : '아직 없어요'}</dd></div></dl></div><div class="seed-acts">${btn(seed.status === 'open' ? '닫기' : '다시 열기',{kind:'secondary',icon:seed.status === 'open' ? 'inactive' : 'refresh',action:'edit-seed',data:{id:row.id,operation:seed.status === 'open' ? 'close' : 'reopen'},disabled:busy})}</div>${seed.status === 'open' ? '<p class="seed-foot">닫으면 지난 기록으로 옮겨요. 장면 기억은 그대로예요.</p>' : ''}</article>`;
+}
+
+function renderSelection(rows: NowRow[], view: NowView): string {
+  const selected=rows.filter(row=>view.selection?.has(row.key) && row.type !== 'promise');
+  const n=selected.length, past=view.mode === 'past';
+  const reopen=n>0 && selected.every(row=>row.type === 'seed');
+  return `<div class="org-sel now-sel" aria-live="polite"><div class="org-sel__sum"><b>${n}개 선택</b><span>${past ? '복선은 다시 열 수 있어요' : '끝내면 지난 기록으로 옮겨요'}</span></div><div class="org-sel__acts">${btn(`${n}개 ${past ? '다시 열기' : '끝내기'}`,{kind:'primary',action:'now-cleanup',data:{operation:past ? 'reopen' : 'end'},disabled:Boolean(view.selectionBusy) || (past ? !reopen : !n)})}${btn('삭제',{kind:'danger',action:'now-cleanup',data:{operation:'delete'},disabled:!n || view.selectionBusy})}</div></div>`;
+}
+
 const POLARITY_LABELS: Record<string, string> = { believes: "믿음", suspects: "의심", denies: "부정", knows: "앎", heard: "전해 들음" };
 
 /** Rows grouped under a person omit that person; ungrouped (world) rows must name their own subject. */
 const rowLead = (row: NowRow, owner: string | null, translations: ReadonlyMap<string, string>, display: TranslationDisplay): string => {
   const predicate = row.predicate ? displayText(row.predicate, translations.get(`assertion-predicate:${row.id}`), display) : "";
-  return row.type === "promise"
+  return row.type === "seed" ? escapeHtml(row.seed?.noticedBy.join(", ")) : row.type === "promise"
     ? `${row.promisor ? `${escapeHtml(row.promisor)} ` : ""}→ ${escapeHtml(row.promisee)}`
     : row.type === "belief"
       ? `${row.holder ? `${escapeHtml(row.holder)} → ` : ""}${escapeHtml(row.subject)}`
@@ -248,7 +271,7 @@ const rowLead = (row: NowRow, owner: string | null, translations: ReadonlyMap<st
 
 const rowText = (row: NowRow, translations: ReadonlyMap<string, string>, display: TranslationDisplay): string => {
   const translationKey = row.textKey ?? (row.type === "promise" ? `promise:${row.id}` : row.type === "belief" ? `belief:${row.id}` : `assertion:${row.id}`);
-  return displayText(row.text || "내용 없음", translations.get(translationKey), display);
+  return displayText(row.text || "내용 없음", row.seed?.userEdited ? undefined : translations.get(translationKey), display);
 };
 
 /**
@@ -261,11 +284,19 @@ const renderRow = (
   promiseStatusBusy: boolean,
   translations: ReadonlyMap<string, string>,
   display: TranslationDisplay,
-  opts: { verbsVisible: boolean; sceneAt?: (target: unknown) => SceneRef | null; selected?: boolean; past?: boolean },
+  opts: { verbsVisible: boolean; sceneAt?: (target: unknown) => SceneRef | null; selected?: boolean; past?: boolean; selection?: Set<string>; selectionBusy?: boolean },
 ): string => {
   const id = row.id;
+  const selecting=Boolean(opts.selection);
+  const check=selecting ? `<label class="org-check nr__check"><input type="checkbox" data-action="now-check" data-key="${escapeHtml(row.key)}" aria-label="${row.type === 'promise' ? '약속은 여기서 정리하지 않아요' : `선택: ${escapeHtml(row.text)}`}"${opts.selection?.has(row.key) ? ' checked' : ''}${row.type === 'promise' || opts.selectionBusy ? ' disabled' : ''}></label>` : '';
+  if (row.type === 'seed' && row.seed) {
+    const seed=row.seed;
+    const status=seed.status === 'open' ? `<span class="seed-when${seed.deliveryCount ? '' : ' is-new'}">${seedRecall(seed)}</span>`
+      : seed.status === 'fulfilled' ? `<span class="seed-st is-paid">${icon('check')}회수</span>${renderMention(opts.sceneAt?.(seed.closureOrdinal) ?? null) ? ` · ${renderMention(opts.sceneAt?.(seed.closureOrdinal) ?? null)}` : ''}` : '<span class="seed-st">닫음</span>';
+    return `<div class="nr nr--seed${opts.selected ? ' is-selected' : ''}${selecting ? ' is-pickable' : ''}${opts.past ? ' is-closed' : ''}" data-kind="seed">${check}<span class="seed-ic" aria-hidden="true">${icon('sprout')}</span><button class="nr__what" type="button" data-action="select-now-record" data-key="${escapeHtml(row.key)}"${opts.selected ? ' aria-current="true"' : ''}><span class="nr__k"><b class="nr__kind">복선</b> · ${escapeHtml(seed.noticedBy.join(', '))}</span><span class="nr__t">${rowText(row,translations,display)}</span></button><span class="nr__m">${status}${seed.status === "fulfilled" ? "" : ` · ${renderMention(opts.sceneAt?.(seed.memoryId) ?? opts.sceneAt?.(seed.lastMention.ordinal) ?? null)}`}</span></div>`;
+  }
   // A finished promise has nothing left to decide.
-  const promiseVerbs = row.type === "promise" && !opts.past
+  const promiseVerbs = row.type === "promise" && !opts.past && !selecting
     ? [
       { label: "지켜짐", icon: "check", action: "edit-world", data: { kind: "promise", id, status: "kept" }, disabled: promiseStatusBusy },
       { label: "깨짐", icon: "close", action: "edit-world", data: { kind: "promise", id, status: "broken" }, disabled: promiseStatusBusy },
@@ -293,7 +324,7 @@ const renderRow = (
   const head = `<span class="nr__k"><b class="nr__kind">${TYPE_LABELS[row.type]}</b>${lead ? ` · ${lead}` : ""}</span>`;
   // A row opens its own record; selecting the open one again closes the reader.
   const what = `<button class="nr__what" type="button" data-action="select-now-record" data-key="${escapeHtml(row.key)}"${opts.selected ? ' aria-current="true"' : ""}>${head}<span class="nr__t">${rowText(row, translations, display)}</span></button>`;
-  return `<div class="nr${row.overdue ? " is-due" : ""}${opts.selected ? " is-selected" : ""}${ring ? " has-ring" : ""}" data-kind="${row.type}">${ring}${what}${meta || relation ? `<span class="nr__m">${[relation, meta].filter(Boolean).join(" · ")}</span>` : ""}${verbs}</div>`;
+  return `<div class="nr${selecting ? ` is-pickable${row.type === 'promise' ? ' is-locked' : ''}` : ''}${row.overdue ? " is-due" : ""}${opts.selected ? " is-selected" : ""}${ring ? " has-ring" : ""}" data-kind="${row.type}">${check}${ring}${what}${meta || relation ? `<span class="nr__m">${[relation, meta].filter(Boolean).join(" · ")}</span>` : ""}${verbs}</div>`;
 };
 
 /** Rows shown before a person's group folds; the most recent mentions come first. */
@@ -312,7 +343,7 @@ export function renderNowPage(
   const past = view.mode === "past";
   const page = buildNowPage(data, personaEntity, filter, sort, view.mode);
   const sceneAt = sceneLocator(data.memories ?? [], (time) => formatStoryTime(time, true));
-  const attention = page.pendingAttention > 0 && !past
+  const attention = page.pendingAttention > 0 && !past && filter !== "seed" && !view.selection
     ? `<button type="button" class="now-note" data-action="open-now-attention">확인할 기록 <b>${page.pendingAttention}건</b><span>관리로${icon("chevron")}</span></button>`
     : "";
   const ledgerMenu = menu({ label: "현재 기록 추가", trigger: { icon: "add", className: "now-add" }, items: [
@@ -329,17 +360,18 @@ export function renderNowPage(
   const sortControl = past ? "" : `<label class="now-sort">${icon("swap")}<span class="now-sort__t">${sortLabels[sort]}</span><select data-action="now-sort" aria-label="정렬">${(Object.keys(sortLabels) as NowSort[]).map((value) => `<option value="${value}" ${sort === value ? "selected" : ""}>${sortLabels[value]}</option>`).join("")}</select></label>`;
   const busy = (row: NowRow) => row.type === "promise" && promiseStatusInFlight.has(row.id);
   // Overdue promises ask for a decision, so they lead the page; they leave their person's group so nothing shows twice.
-  const due = past ? [] : overduePromiseEntries(page);
-  const ordered = [...due.map(({ row }) => row), ...page.groups.flatMap((group) => group.rows.filter((row) => !row.overdue))];
+  const due = past || view.selection ? [] : overduePromiseEntries(page);
+  const ordered = [...due.map(({ row }) => row), ...page.groups.flatMap((group) => group.rows.filter((row) => view.selection || !row.overdue))];
   // On a wide screen the reader shows the first record until another is chosen, unless the list was asked for alone.
   const selected = view.listOnly ? "" : view.selected || ordered[0]?.key || "";
-  const rowOpts = (row: NowRow, verbsVisible: boolean) => ({ verbsVisible, sceneAt, selected: row.key === selected, past });
+  const rowOpts = (row: NowRow, verbsVisible: boolean) => ({ verbsVisible, sceneAt, selected: row.key === selected, past, selection:view.selection, selectionBusy:view.selectionBusy });
   const dueSection = due.length
     ? `<section class="who who--due"><h2 class="who-h">기한 지난 약속<span class="n">${due.length}</span></h2>${due.map(({ row, owner }) => renderRow(row, owner, busy(row), translations, display, rowOpts(row, true))).join("")}</section>`
     : "";
   const groups = page.groups.map((group) => {
-    const rows = group.rows.filter((row) => !row.overdue);
+    const rows = group.rows.filter((row) => view.selection || !row.overdue);
     if (!rows.length) return "";
+    if (filter === 'seed') return `<section class="who seedbook">${rows.map(row=>renderRow(row,null,false,translations,display,rowOpts(row,false))).join('')}</section>`;
     const rank = group.owner === null ? "" : [group.isPersona ? "페르소나" : "", RANK_LABELS[group.rank] ?? ""].filter(Boolean).join(" · ");
     // World facts are one more lead in the call sheet, credited like a person.
     const head = nameHtml(group.owner ?? "World");
@@ -350,16 +382,17 @@ export function renderNowPage(
     return `<section class="who"><h2 class="who-h">${head}<span class="n">${[rank, `${rows.length}`].filter(Boolean).join(" · ")}</span></h2>${rendered.slice(0, GROUP_LIMIT).join("")}${more}</section>`;
   }).join("");
   const body = dueSection + groups;
-  const hint = past
+  const hint = filter === 'seed' ? `<p class="now-hint seed-hint">${past ? '회수됐거나 닫은 복선이에요. 다시 열면 가끔 떠오르는 자리로 돌아가요.' : `${icon('sprout')}<span>열린 복선은 한 번에 하나씩, 가끔 기억 속에 섞여 떠올라요.</span>`}</p>` : past
     ? `<p class="now-hint">끝난 기록이에요. 이어지는 기록의 지난 모습은 각 기록 안에 있어요.</p>`
     : `<p class="now-hint">지금도 이어지는 것만 모여요. 일어난 일은 타임라인에 있어요.</p>`;
-  const emptyList = past ? empty("끝난 기록이 없습니다", "상태·인식이 끝나거나 약속이 마무리되면 여기에 모입니다.") : empty("표시할 현재 기록이 없습니다", "대화에서 약속·인식·상태가 생기면 인물별로 모입니다.");
+  const emptyList = past ? empty("끝난 기록이 없어요", "상태·인식이 끝나거나 약속이 마무리되면 여기에 모여요.") : empty("표시할 현재 기록이 없어요", "대화에서 약속·인식·상태가 생기면 인물별로 모여요.");
   const chain = ordered.some(row => row.key === selected) ? page.chains.get(selected) : undefined;
-  const detail = chain ? renderRecordDetail(chain, data, { translations, display, back: past ? "지난 기록" : "현재", actions: detailActions(chain, data, busy), fact: beliefFact(chain, data) }) : "";
+  const seedRow=ordered.find(row=>row.key === selected && row.type === "seed");
+  const detail = seedRow ? renderSeedDetail(seedRow,sceneAt,translations,display,Boolean(view.selectionBusy)) : chain ? renderRecordDetail(chain, data, { accessEditing: view.accessEditing, translations, display, back: past ? "지난 기록" : "현재", actions: detailActions(chain, data, busy), fact: beliefFact(chain, data) }) : "";
   // Title, then the range and kinds as one pinned bar, then the list and the record scrolling on their own.
-  const bar = `<div class="now-bar">${modes}${chips}<span class="now-bar__end">${sortControl}${past ? "" : ledgerMenu}</span></div>`;
+  const bar = `<div class="now-bar">${modes}${chips}<span class="now-bar__end">${sortControl}${past || view.selection ? "" : ledgerMenu}${btn(view.selection ? "취소" : "선택",{kind:"quiet",action:"now-select",disabled:view.selectionBusy}).replace('class="',`class="now-select${view.selection ? " is-on" : ""} `)}</span></div>`;
   const state = `${view.mobileDetail && (detail || view.selected) ? " is-detail" : ""}${view.listOnly ? " is-list-only" : ""}`;
-  return `<div class="worldbook nowbook${state}"><h1 class="pagetitle">현재</h1>${bar}<div class="split"><div class="listcol"><div class="now-rows" data-preserve-scroll="now-list:${view.mode}">${attention}${hint}${body || emptyList}</div></div><div class="readercol">${detail || (view.selected ? empty("기록이 바뀌었거나 더 이상 없어요", "현재 목록에서 다른 기록을 고를 수 있어요.") : empty("기록을 고르세요", "목록에서 기록을 고르면 지금 내용과 변화가 열립니다."))}</div></div></div>`;
+  return `<div class="worldbook nowbook${state}"><h1 class="pagetitle">현재</h1>${bar}<div class="split"><div class="listcol"><div class="now-rows" data-preserve-scroll="now-list:${view.mode}">${attention}${hint}${body || (filter === "seed" ? empty(past ? "지난 복선이 없어요" : "열린 복선이 없어요", "대화 속 작은 개인적 순간이 여기에 모여요.") : emptyList)}${view.selection ? renderSelection(ordered,view) : ""}</div></div><div class="readercol">${detail || (view.selected ? empty("기록이 바뀌었거나 더 이상 없어요", "현재 목록에서 다른 기록을 고를 수 있어요.") : empty("기록을 골라 주세요", "목록에서 기록을 고르면 지금 내용과 변화가 열려요."))}</div></div></div>`;
 }
 
 /** The verbs of the open record: a live one is edited or ended in place; a finished one can only be deleted when it was wrong. */

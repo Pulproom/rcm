@@ -1,7 +1,9 @@
+import { assertChatUnlocked } from './upgrade-lock.js';
 import { now, type RcmDatabase } from "./db.js";
 import type { RetrievalSelectionRole } from "./retrieval.js";
 
 const DELIVERY_PERSPECTIVE = "__automatic_delivery__";
+export const AUTHOR_ACTIVATION_KEY = "__author__";
 
 /** Passive receipt history shares the existing lifecycle/FKs, never character activation. */
 export function automaticDeliveryHistory(db: RcmDatabase, chatId: string): Map<string, number> {
@@ -10,13 +12,29 @@ export function automaticDeliveryHistory(db: RcmDatabase, chatId: string): Map<s
     .map(row => [row.memory_id, row.last_turn_seq]));
 }
 
-export function recordAutomaticDelivery(db: RcmDatabase, chatId: string, memoryIds: string[]): void {
+const LONGTERM_DELIVERY_PERSPECTIVE = "__longterm_delivery__";
+
+/** Receipts are stamped at prepare's completed-turn count. Retry at the same
+ * boundary and the next two completed turns must not reserve another floor. */
+export function longtermFloorActive(db: RcmDatabase, chatId: string, budget: number, completedTurn: number): boolean {
+  if (budget >= 8000) return true;
+  const row = db.prepare(`SELECT MAX(last_turn_seq) AS turn FROM memory_activation_state
+    WHERE chat_id=? AND perspective=?`).get(chatId,LONGTERM_DELIVERY_PERSPECTIVE) as {turn:number|null};
+  return row.turn === null || completedTurn - row.turn > 2;
+}
+
+export function recordAutomaticDelivery(db: RcmDatabase, chatId: string, memoryIds: string[], longtermMemoryIds: string[] = []): void {
+  assertChatUnlocked(db,chatId);
   const chat = db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(chatId) as {completed_turn_count:number}|undefined;
   if (!chat) return;
   const write = db.prepare(`INSERT INTO memory_activation_state(chat_id,perspective,memory_id,activation,last_turn_seq,updated_at)
     SELECT chat_id,?,id,0,?,? FROM memories WHERE chat_id=? AND id=? AND active=1
     ON CONFLICT(chat_id,perspective,memory_id) DO UPDATE SET last_turn_seq=MAX(last_turn_seq,excluded.last_turn_seq),updated_at=excluded.updated_at`);
-  db.transaction(() => { for (const id of new Set(memoryIds)) write.run(DELIVERY_PERSPECTIVE, chat.completed_turn_count, now(), chatId, id); })();
+  db.transaction(() => {
+    for (const id of new Set(memoryIds)) write.run(DELIVERY_PERSPECTIVE, chat.completed_turn_count, now(), chatId, id);
+    for (const id of new Set(longtermMemoryIds)) if (memoryIds.includes(id))
+      write.run(LONGTERM_DELIVERY_PERSPECTIVE, chat.completed_turn_count, now(), chatId, id);
+  })();
 }
 
 /** Turn-scoped recall history. This state cannot establish a typed connection
@@ -70,6 +88,7 @@ export function persistAutomaticActivationObservations(
   completedTurn: number,
   observations: AutomaticActivationObservation[],
 ): void {
+  assertChatUnlocked(db,chatId);
   if (["narrator", "__shared__", "shared"].includes(perspective.toLocaleLowerCase()) || observations.length === 0) return;
   const read = db.prepare(`SELECT activation,last_turn_seq,via_memory_id,path_expires_turn
     FROM memory_activation_state WHERE chat_id=? AND perspective=? COLLATE NOCASE AND memory_id=?`);

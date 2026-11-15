@@ -1,4 +1,4 @@
-import { inspectSourceReferences, normalizeRecognitionReferences, type ExtractionDraftResult, type SourceReferenceIssue } from "@rcm/shared";
+import { inspectSourceReferences, rescueDialogueEvidence, sourceRangeIsVisible, normalizeRecognitionReferences, type ExtractionDraftResult, type SourceReferenceIssue } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 export type EvidenceIssue = SourceReferenceIssue;
 
@@ -10,8 +10,8 @@ export type WithheldRecognition = {
 
 const shortDisplayText = (value: unknown): string => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
 
-export function describeWithheldRecognitions(draft: ExtractionDraftResult): WithheldRecognition[] {
-  const normalized = normalizeRecognitionReferences(draft);
+export function describeWithheldRecognitions(draft: ExtractionDraftResult, resolveIdentity?: (value:string)=>import("@rcm/shared").ResolvedEntityIdentity): WithheldRecognition[] {
+  const normalized = normalizeRecognitionReferences(draft,resolveIdentity);
   return normalized.rejected.flatMap((issue) => {
     const social = draft.socialKnowledge?.[issue.index];
     if (!social) return [];
@@ -38,11 +38,41 @@ export function countBlockingExtractionAudits(db: RcmDatabase, chatId: string): 
   }).length;
 }
 
-export function inspectDraftEvidence(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult): EvidenceIssue[] {
-  const messages = db.prepare(`SELECT message_id AS id,canonical_content AS content,canonical_hash AS canonicalHash FROM messages WHERE chat_id=?
+function sourceMessages(db: RcmDatabase, chatId: string, sourceIds: string[]) {
+  return db.prepare(`SELECT message_id AS id,canonical_content AS content,canonical_hash AS canonicalHash FROM messages WHERE chat_id=?
     AND message_id IN (SELECT value FROM json_each(?)) AND lifecycle IN ('committed','client_pruned')
     AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).all(chatId, JSON.stringify(sourceIds)) as Array<{ id: string; content: string; canonicalHash: string }>;
-  return inspectSourceReferences(draft, messages);
+}
+
+export function rescueDraftDialogues(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult): ExtractionDraftResult {
+  const messages = sourceMessages(db, chatId, sourceIds);
+  const exact = (quote: string) => {
+    if (!quote.trim()) return;
+    let match: { messageId: string; canonicalHash: string; startOffset: number; endOffset: number; quote: string } | undefined;
+    for (const message of messages) {
+      const startOffset = message.content.indexOf(quote);
+      if (startOffset < 0) continue;
+      // Count repeated occurrences too, even inside one message. No fuzzy matching.
+      if (match || message.content.indexOf(quote, startOffset + 1) >= 0
+        || !sourceRangeIsVisible(message.content, startOffset, startOffset + quote.length)) return;
+      match = { messageId: message.id, canonicalHash: message.canonicalHash, startOffset, endOffset: startOffset + quote.length, quote };
+    }
+    return match;
+  };
+  const rescued = structuredClone(draft);
+  for (const memory of rescued.memories) for (const dialogue of memory.keyDialogues ?? []) {
+    const span = exact(dialogue.text);
+    if (span) { dialogue.messageId = span.messageId; dialogue.evidence = [span]; }
+  }
+  for (const passage of rescued.sourcePassages ?? []) {
+    const span = exact(passage.quote);
+    if (span) { passage.messageId = span.messageId; passage.startOffset = span.startOffset; }
+  }
+  return rescueDialogueEvidence(rescued, messages);
+}
+
+export function inspectDraftEvidence(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult): EvidenceIssue[] {
+  return inspectSourceReferences(draft, sourceMessages(db, chatId, sourceIds));
 }
 
 export function describeEvidenceReview(db: RcmDatabase, chatId: string, jobId: string, draft: ExtractionDraftResult, sourceIds: string[]) {

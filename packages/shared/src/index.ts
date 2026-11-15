@@ -1,6 +1,13 @@
+import { createEntityIdentityResolver, normalizeEntityName, type ResolvedEntityIdentity } from "./entity-identity.js";
+export * from "./entity-identity.js";
 import { MAX_MEMORY_BUDGET, MemoryBudgetPresetSchema } from "./memory-budget.js";
 import { PairProgressPatchesSchema, SetupPairProgressSchema } from "./pair-progress.js";
 export * from "./pair-progress.js";
+export * from "./album.js";
+export * from "./album-draft.js";
+export * from "./album-update.js";
+export * from "./album-photo-fit.js";
+export * from "./album-pair.js";
 export { SHARED_PAST_GUIDANCE } from "./social-memory-guidance.js";
 export { withKoreanParticle } from "./korean-particle.js";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
@@ -10,6 +17,11 @@ import { z } from "zod";
 import { EntityBirthdaySchema } from "./birthday.js";
 export { EntityBirthdaySchema, birthdayMonthDays, type EntityBirthday } from "./birthday.js";
 import { resolveModelSourceReferences } from "./source-references.js";
+import { normalizeStateEnvelope, StateRecoveryReportSchema, StateItemValidationError, stateDecisionIssues, inspectStateSourceSelectors } from "./state-response-recovery.js";
+export * from "./state-response-recovery.js";
+export * from "./state-writing-format.js";
+export * from "./event-writing-format.js";
+import { isNarrowState, stateDetailSupport, stateDetailLinkIssues, statePromiseLifecycleIssues, stateR11SupportIssues, stateWritingContext, type StateWritingContext } from "./state-writing-format.js";
 import { buildAuxiliaryRepairMessages, type AuxiliaryRepairMessage } from "./structured-repair.js";
 import { ModelContentValidationError } from "./structured-repair.js";
 export { ModelContentValidationError, isModelContentRejection } from "./structured-repair.js";
@@ -31,12 +43,12 @@ import {
 } from "./structured-contract-values.js";
 export { describeModelResponse, type ModelResponseDiagnostic, sanitizeDiagnosticText, CONNECTION_FAILURE_LABELS, connectionFailureReason, isProviderAuthenticationError, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type ConnectionFailureCode } from "./support-diagnostics.js";
 export { isPermanentProviderError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES, type RisuAuxiliaryCallDiagnostic } from "./support-diagnostics.js";
-export { providerFailureMetadata, assertProviderOutputAllowed, type ProviderFailureMetadata } from './support-diagnostics.js';
+export { providerFailureMetadata, auxiliaryUsageMetadata, assertProviderOutputAllowed, type ProviderFailureMetadata } from './support-diagnostics.js';
 export { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from './support-diagnostics.js';
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 99;
+export const RCM_API_REVISION = 100;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -65,13 +77,14 @@ import { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "
 export { DIALOGUE_SOURCE_FORM_GUIDANCE, KEY_DIALOGUE_SELECTION_GUIDANCE } from "./dialogue-source-guidance.js";
 import { STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
 export { ACCESS_BASIS_GUIDANCE, STATE_CLASSIFICATION_GUIDANCE, FIRST_MEETING_GUIDANCE, WHOLE_ATOM_ACCESS_GUIDANCE } from "./state-classification.js";
-export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, sharedPastPacket, withMemoryGuidance, memoryEvidenceKind } from "./memory-presentation.js";
+export { INVALID_MEMORY_REF_MESSAGE, MEMORY_GUIDANCE, memoryGuidanceBlock, initialMemoryGuidanceBlock, sharedPastPacket, withMemoryGuidance, memoryEvidenceKind, sameMemoryLabels } from "./memory-presentation.js";
 export { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, isInitialCalibrationMemory, isRecognitionMemory } from "./memory-origin.js";
 import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-grouping.js";
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
 export { auxiliaryInputBudgetMessage, auxiliaryRepairTooLargeError, AUXILIARY_REPAIR_TOO_LARGE_MESSAGE, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
-export { buildSourceUnits, findAtomicDisplaySpans, resolveSourceQuote, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
+export { buildSourceUnits, findAtomicDisplaySpans, joinSplitEmphasisQuote, resolveSourceQuote, sourceRangeIsVisible, dialogueSourceMatches, rescueDialogueEvidence, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
+export { segmentSentences, type SentenceSegment } from "./sentence-segmentation.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";
 export { applySourceAccessPatch, validateSourceRecoveryPatch } from "./source-access-patch.js";
 export { planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan } from "./source-access-repair.js";
@@ -456,6 +469,7 @@ export const TurnPrepareRequestSchema = z.object({
   backfillApproved: z.boolean().optional(),
   perspectives: z.array(z.string()).default([]),
   perspectiveMode: z.enum(["auto", "manual"]).optional(),
+  narrationViewpoint: z.string().trim().min(1).max(160).optional(),
   identityHints: z.object({
     userPersonaName: z.string().trim().max(160).optional(),
     hostCharacterName: z.string().trim().max(160).optional(),
@@ -507,9 +521,9 @@ export const DialogueEvidenceSchema = z.object({
 export type DialogueEvidence = z.infer<typeof DialogueEvidenceSchema>;
 
 export const SeedMarkerSchema = z.object({
-  type: z.enum(["wish", "plan", "noticed", "promise", "curiosity"]),
+  type: z.enum(["wish", "plan", "noticed", "promise", "curiosity"]).optional(),
   noticedBy: z.array(z.string().trim().min(1)),
-  status: z.enum(["open", "fulfilled", "abandoned"]).default("open"),
+  status: z.enum(["open", "fulfilled", "abandoned", "closed"]).default("open"),
 });
 export type SeedMarker = z.infer<typeof SeedMarkerSchema>;
 
@@ -537,10 +551,14 @@ export const MemoryContextItemSchema = z.object({
   ref: z.string().regex(/^m[0-9a-f]{16}$/).optional(),
   signature: z.string().optional(),
   atomAccessVersion: z.number().int().nonnegative().default(0),
+  cardShape: z.union([z.literal(0), z.literal(1)]).default(0),
+  // Full stored plot scope, computed before child visibility/selection changes.
+  plotKnowers: z.array(z.string()).optional(),
   type: z.string(),
   title: z.string(),
   content: z.string(),
   detail: MemoryDetailSchema,
+  clarity: z.array(z.object({ name: z.string(), level: z.enum(["hazy", "faint"]) })).optional(),
   perspective: z.string().optional(),
   storyTime: z.string().optional(),
   sourceOrdinal: z.number().int().optional(),
@@ -562,6 +580,7 @@ export const MemoryContextItemSchema = z.object({
     messageId: z.string(),
     quote: z.string().optional(),
   })).default([]),
+  summaryEvidence: z.array(z.object({ messageId: z.string(), quote: z.string().optional() })).optional(),
   keyDialogues: z.array(z.object({
     id: z.string().optional(),
     ordinal: z.number().int().optional(),
@@ -586,6 +605,7 @@ export const MemoryContextItemSchema = z.object({
     participants: z.array(z.string()).default([]),
     knownBy: z.array(z.string()).default([]),
     knownByEveryone: z.boolean().optional(),
+    hiddenFrom: z.array(z.string().trim().min(1)).optional(),
     knownByLabels: z.array(z.string()).optional(),
     locations: z.array(z.string()).default([]),
     salience: z.number(),
@@ -617,6 +637,7 @@ export const TurnPrepareResponseSchema = z.object({
   apiRevision: z.number().int().positive(),
   serverInstanceId: z.string(),
   chatRevision: z.number().int(),
+  memoryEpoch: z.string().default(''),
   sourceRevision: z.number().int().nonnegative().optional(),
   sourceInventory: z.string().optional(),
   sourceChangeHeld: z.enum(['proof_required', 'incomplete', 'stale', 'position_changed']).optional(),
@@ -627,6 +648,7 @@ export const TurnPrepareResponseSchema = z.object({
   requiresLanguageReprocess: z.boolean().optional().default(false),
   packet: z.string(),
   stableAnchors: z.string(),
+  assembly: z.object({chargedTokens:z.number().int().nonnegative(),renderedTokens:z.number().int().nonnegative()}).passthrough().optional(),
   estimatedTokens: z.number().int(),
   selected: z.array(MemoryContextItemSchema),
   // Inspector-only copies of final rendered state lines; never retrieval grants.
@@ -636,6 +658,7 @@ export const TurnPrepareResponseSchema = z.object({
     perspectives: z.array(z.string()).default([]),
     memoryIds: z.array(z.string()).default([]),
     alwaysInjectMemoryIds: z.array(z.string()).optional(),
+    longtermMemoryIds: z.array(z.string()).optional(),
     detailIds: z.array(z.string()).default([]),
     sourceEvidenceIds: z.array(z.string()).optional(),
     stateEvidenceIds: z.array(z.string()).optional(),
@@ -649,6 +672,9 @@ export const TurnPrepareResponseSchema = z.object({
   }).optional(),
   memoryToolsAvailable: z.boolean().optional(),
   memoryToolOpportunity: MemoryToolOpportunitySchema.optional(),
+  sceneCharacters: z.array(z.string()).max(8).optional(),
+  narrationViewpoint: z.string().trim().min(1).max(160).optional(),
+  narrationDiagnostics: z.array(z.literal("viewpoint_unresolved")).optional(),
   perspectiveResolution: z.object({
     perspectives: z.array(z.string()),
     source: z.enum(["manual", "cache", "host", "ledger", "shared_fallback", "unresolved"]),
@@ -693,7 +719,7 @@ export const ItemAccessBasisSchema = z.enum(ITEM_ACCESS_BASIS_VALUES);
 export type ItemAccessBasis = z.infer<typeof ItemAccessBasisSchema>;
 export interface MemoryDetailAccess {
   everyone: boolean;
-  holders: Array<{ name: string; basis: ItemAccessBasis }>;
+  holders: Array<{ name: string; basis?: ItemAccessBasis }>;
   narratorOnly: boolean;
 }
 export const ItemAccessGrantSchema = z.object({
@@ -831,13 +857,18 @@ export const KeyDialogueSchema = z.object({
 
 export const StorySeedSchema = SeedMarkerSchema.extend({
   closureEvidence: z.array(DialogueEvidenceSchema).min(1).optional(),
+  delivery: z.object({ count: z.number().int().nonnegative(), lastTurn: z.number().int().nonnegative(), receipt: z.string() }).optional(),
 }).superRefine((seed, context) => {
-  if ((seed.status !== "open") !== Boolean(seed.closureEvidence?.length)) context.addIssue({ code: "custom", message: "Closed seeds require closure evidence; open seeds cannot have closure evidence." });
+  // Legacy abandoned rows exist both with and without evidence. A new user close
+  // uses a distinct JSON status, so old backups need no in-place migration.
+  if (seed.status === "fulfilled" && !seed.closureEvidence?.length || ["open", "closed"].includes(seed.status) && seed.closureEvidence?.length) context.addIssue({ code: "custom", message: "Fulfilled seeds require closure evidence; open and user-closed seeds cannot have it." });
 });
 export const SeedResolutionSchema = z.object({
   detailId: z.string().min(1),
+  support: z.array(z.object({memoryKey:z.string(),detailKey:z.string()})).optional(),
   status: z.enum(["fulfilled", "abandoned"]),
-  evidence: z.array(DialogueEvidenceSchema).min(1),
+  // Invalid/missing closure evidence is isolated by seed-resolution diagnostics.
+  evidence: z.array(DialogueEvidenceSchema).default([]),
 }).strict();
 export type SeedResolution = z.infer<typeof SeedResolutionSchema>;
 export const ExtractedMemoryDetailSchema = z.object({
@@ -855,8 +886,8 @@ export const ExtractedMemoryDetailSchema = z.object({
   retention: z.enum(["scene", "arc", "durable"]).default("arc"),
   evidence: z.array(EvidenceSchema).min(1),
   access: z.array(ItemAccessGrantSchema).optional(),
+  hiddenFrom: z.array(z.string().trim().min(1)).optional(),
 }).superRefine((detail, context) => {
-  if (detail.seed && detail.seed.status !== "open") context.addIssue({code:"custom",path:["seed","status"],message:"New seed details must be open; closure requires a second-pass evidence patch."});
   const normalize = (name: string) => name.normalize("NFKC").trim().toLocaleLowerCase();
   const holders = new Set(detail.knownBy.map(normalize));
   for (const name of detail.seed?.noticedBy ?? []) if (!holders.has(normalize(name))) context.addIssue({ code: "custom", path: ["seed", "noticedBy"], message: "Seed noticedBy must be a subset of detail knownBy." });
@@ -931,13 +962,18 @@ export const SocialRelationSchema = z.object({
   direction: z.enum(["directed", "mutual"]),
   label: z.string().trim().min(1),
 });
+const StateSupportSchema = z.array(z.object({memoryKey:z.string().trim().min(1),detailKey:z.string().trim().min(1)})).min(1);
 export const ExtractedSocialRelationSchema = SocialRelationSchema.extend({
+  support: StateSupportSchema.optional(),
   memoryKey: z.string().trim().min(1),
   detailKeys: z.array(z.string().trim().min(1)).min(1),
 });
 export type SocialRelation = z.infer<typeof SocialRelationSchema>;
 
+const StateDetailLinks = { support: StateSupportSchema.optional(), memoryKey: z.string().trim().min(1).optional(), detailKeys: z.array(z.string().trim().min(1)).min(1).optional() };
+
 const AssertionSchema = z.object({
+  ...StateDetailLinks,
   socialRelation: ExtractedSocialRelationSchema.optional(),
   subject: z.string(),
   predicate: z.string(),
@@ -953,6 +989,7 @@ const AssertionSchema = z.object({
 });
 
 const BeliefSchema = z.object({
+  ...StateDetailLinks,
   holder: z.string(),
   subject: z.string(),
   predicate: z.string(),
@@ -996,7 +1033,6 @@ export const RelationshipEventSchema = z.object({
 export type RelationshipEvent = z.infer<typeof RelationshipEventSchema>;
 
 const RelationshipAxisProjectionSchema = z.object({
-  level: z.string().trim().min(1),
   trend: z.enum(RELATIONSHIP_TREND_VALUES),
 });
 
@@ -1011,12 +1047,12 @@ export const RelationshipProjectionItemSchema = z.object({
   from: z.string().trim().min(1),
   to: z.string().trim().min(1),
   axes: z.object({
-    affection: RelationshipAxisProjectionSchema,
-    trust: RelationshipAxisProjectionSchema,
-    intimacy: RelationshipAxisProjectionSchema,
-    fear: RelationshipAxisProjectionSchema,
-    jealousy: RelationshipAxisProjectionSchema,
-    hostility: RelationshipAxisProjectionSchema,
+    affection: RelationshipAxisProjectionSchema.extend({ level: z.string().trim().pipe(z.enum(INITIAL_AFFECTION_LEVELS)) }),
+    trust: RelationshipAxisProjectionSchema.extend({ level: z.string().trim().pipe(z.enum(INITIAL_TRUST_LEVELS)) }),
+    intimacy: RelationshipAxisProjectionSchema.extend({ level: z.string().trim().pipe(z.enum(INITIAL_INTIMACY_LEVELS)) }),
+    fear: RelationshipAxisProjectionSchema.extend({ level: z.string().trim().pipe(z.enum(INITIAL_INTENSITY_LEVELS)) }),
+    jealousy: RelationshipAxisProjectionSchema.extend({ level: z.string().trim().pipe(z.enum(INITIAL_INTENSITY_LEVELS)) }),
+    hostility: RelationshipAxisProjectionSchema.extend({ level: z.string().trim().pipe(z.enum(INITIAL_INTENSITY_LEVELS)) }),
   }),
   summary: z.string().trim().min(1),
   activeTensions: z.array(z.string().trim().min(1)).default([]),
@@ -1028,11 +1064,34 @@ export const RelationshipProjectionResultSchema = z.object({
 });
 export type RelationshipProjectionResult = z.infer<typeof RelationshipProjectionResultSchema>;
 
+/** Product-owned identities, never inferred from the prompt's natural-language text. */
+export function validateExactItemSet(returned: readonly string[], expected: readonly string[], field: string): void {
+  const allowed = new Set(expected), seen = new Set<string>();
+  for (const value of returned) {
+    if (!allowed.has(value)) throw new ModelContentValidationError(`${field} ${JSON.stringify(value)} is unexpected`);
+    if (seen.has(value)) throw new ModelContentValidationError(`${field} ${JSON.stringify(value)} is duplicated`);
+    seen.add(value);
+  }
+  for (const value of allowed) if (!seen.has(value)) throw new ModelContentValidationError(`${field} ${JSON.stringify(value)} is missing`);
+}
+
+export function validateRelationshipProjection(result: RelationshipProjectionResult, pairs: readonly { from: string; to: string }[]): RelationshipProjectionResult {
+  const key = (pair: { from: string; to: string }) => JSON.stringify([pair.from, pair.to]);
+  validateExactItemSet(result.items.map(key), pairs.map(key), "relationship pair");
+  return result;
+}
+
+const PromiseEventSchema = z.enum(["established", "reinforced", "kept", "broken", "released", "scheduled_passed"]);
 export const PromiseSchema = z.object({
+  ...StateDetailLinks,
   key: z.string(),
   promisor: z.string(),
   promisee: z.string(),
   content: z.string(),
+  event: PromiseEventSchema.optional(),
+  amendment: z.string().trim().min(1).optional(),
+  // Server-owned keep/replay provenance; model output cannot establish it.
+  storedAmendment: z.string().nullable().optional(),
   status: z.enum(["open", "kept", "broken", "released", "offscreen"]).default("open"),
   scheduledFor: z.string().trim().min(1).optional(),
   statusReason: z.string().trim().min(1).optional(),
@@ -1046,6 +1105,7 @@ export const PromiseSchema = z.object({
 export const StateObservationSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("world_fact"),
+    ...StateDetailLinks,
     socialRelation: ExtractedSocialRelationSchema.optional(),
     key: z.string().trim().min(1),
     subject: z.string().trim().min(1),
@@ -1058,6 +1118,7 @@ export const StateObservationSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("character_belief"),
+    ...StateDetailLinks,
     key: z.string().trim().min(1),
     holder: z.string().trim().min(1),
     subject: z.string().trim().min(1),
@@ -1071,12 +1132,14 @@ export const StateObservationSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("promise_event"),
+    ...StateDetailLinks,
     key: z.string().trim().min(1),
     promisor: z.string().trim().min(1),
     promisee: z.string().trim().min(1),
     promiseKeyHint: z.string().trim().min(1),
     content: z.string().trim().min(1),
-    event: z.enum(["established", "reinforced", "kept", "broken", "released", "scheduled_passed"]),
+    event: PromiseEventSchema,
+    amendment: z.string().trim().min(1).optional(),
     scheduledFor: z.string().trim().min(1).optional(),
     statusReason: z.string().trim().min(1).optional(),
     memoryKey: z.string().trim().min(1).optional(),
@@ -1236,14 +1299,38 @@ export const ExtractionAggregateSchema = z.object({ ...ExtractionDraftResultSche
   memoryRecallObservations: z.array(MemoryRecallObservationSchema).optional(),
 }).strict().superRefine(extractionStructureRefinement);
 
-export function mergeExtractionPages(previous: ExtractionDraftResult | undefined, page: ExtractionDraftResult): ExtractionDraftResult {
+export function mergeExtractionPages(previous: ExtractionDraftResult | undefined, page: ExtractionDraftResult, promptContract?: "e1d" | "e1e" | "e1f"): ExtractionDraftResult {
   if (!previous) return page;
+  page = structuredClone(page);
+  if ((promptContract === 'e1d' || promptContract === 'e1e' || promptContract === 'e1f')) {
+    const used = new Set([...previous.memories, ...page.memories].map(memory => memory.key));
+    const renamed = new Map<string, string>();
+    for (const memory of page.memories) if (previous.memories.some(old => old.key === memory.key)) {
+      const key = memory.key;
+      let index = 2;
+      while (used.has(`${key}#${index}`)) index++;
+      memory.key = `${key}#${index}`;
+      used.add(memory.key);
+      renamed.set(key, memory.key);
+    }
+    // Associations to an earlier key keep that meaning. Typed local endpoints
+    // unambiguously refer to this page and follow the renamed memory.
+    const remap = (value: unknown): void => {
+      if (Array.isArray(value)) { value.forEach(remap); return; }
+      if (!value || typeof value !== 'object') return;
+      const item = value as Record<string, unknown>;
+      if (typeof item.memoryKey === 'string' && renamed.has(item.memoryKey)) item.memoryKey = renamed.get(item.memoryKey)!;
+      Object.values(item).forEach(remap);
+    };
+    remap(page);
+  }
   if (!page.unfinishedSource) throw new ModelContentValidationError("Continuation output must explicitly report unfinishedSource, including an empty array when complete.");
   const result = structuredClone(previous);
   const unique = <T>(items: T[]): T[] => [...new Map(items.map((item) => [JSON.stringify(item), item])).values()];
   for (const memory of page.memories) {
     const old = result.memories.find((item) => item.key === memory.key);
     if (!old) { result.memories.push(memory); continue; }
+    if (memory.content.trim() && memory.content !== old.content) old.content = [old.content, memory.content].filter(Boolean).join('\n\n');
     for (const detail of memory.details ?? []) {
       const existing = old.details?.find((item) => item.key === detail.key);
       if (existing && JSON.stringify(existing) !== JSON.stringify(detail)) throw new ModelContentValidationError(`Conflicting continuation detail key: ${detail.key}`);
@@ -1311,7 +1398,8 @@ export const ExtractionResultSchema = z.object({
   sourcePassages: z.array(SourcePassageSchema).optional(),
   language: MemoryLanguageSchema.default("en"),
   entities: z.array(EntitySchema).default([]),
-  memories: z.array(ExtractedMemorySchema.safeExtend({ details: z.array(ExtractedMemoryDetailSchema).optional(), keyDialogues: z.array(KeyDialogueSchema).optional(), landmarkKinds: z.array(LandmarkKindSchema).optional() })).default([]),
+  // Server-owned batch provenance is deliberately absent from every model draft schema.
+  memories: z.array(ExtractedMemorySchema.safeExtend({ cardShape: z.literal(1).optional(), details: z.array(ExtractedMemoryDetailSchema).optional(), keyDialogues: z.array(KeyDialogueSchema).optional(), landmarkKinds: z.array(LandmarkKindSchema).optional() })).default([]),
   assertions: z.array(AssertionSchema).default([]),
   beliefs: z.array(BeliefSchema).default([]),
   relationshipEvents: z.array(RelationshipEventSchema).optional(),
@@ -1603,16 +1691,26 @@ Check only the unresolved excerpts in this frozen draft against the supplied sou
   ];
 }
 
-function recognitionDetailHasAccess(result: Pick<ExtractionDraftResult, "memories">, social: SocialKnowledge, key: string): boolean {
+function recognitionDetailHasAccess(result: Pick<ExtractionDraftResult, "memories">, social: SocialKnowledge, key: string, resolveIdentity?: (value:string)=>ResolvedEntityIdentity): boolean {
   const detail = result.memories.find(memory => memory.key === social.memoryKey)?.details?.find(detail => detail.key === key);
-  return Boolean(detail?.access?.some(grant => grant.holder.trim().toLocaleLowerCase() === social.holder.trim().toLocaleLowerCase()));
+  const entities=(result as {entities?: ExtractionDraftResult["entities"]}).entities ?? [];
+  const resolve=resolveIdentity ?? createEntityIdentityResolver(entities.map(entity=>({id:entity.key,name:entity.name,terms:[entity.key,entity.name,...entity.aliases]})));
+  const holder=resolve(social.holder);
+  return !holder.ambiguous && Boolean(detail?.access?.some(grant => {const access=resolve(grant.holder);return !access.ambiguous&&normalizeEntityName(access.canonical)===normalizeEntityName(holder.canonical);}));
 }
 
 /** Completion withholds optional recognition links without another model call. */
-export function normalizeRecognitionReferences<T extends Pick<ExtractionDraftResult, "memories" | "socialKnowledge">>(result: T) {
+export function normalizeRecognitionReferences<T extends Pick<ExtractionDraftResult, "memories" | "socialKnowledge">>(result: T, storedResolve?: (value:string)=>ResolvedEntityIdentity) {
+  const entities=(result as T & {entities?: ExtractionDraftResult["entities"]}).entities ?? [];
+  const declaredResolve=createEntityIdentityResolver(entities.map(entity=>({id:entity.key,name:entity.name,terms:[entity.key,entity.name,...entity.aliases]})));
+  const resolve=(value:string):ResolvedEntityIdentity=>{
+    const declared=declaredResolve(value), stored=storedResolve?.(value), resolved=storedResolve?.(declared.canonical) ?? declared;
+    const conflict=stored && normalizeEntityName(declared.canonical)!==normalizeEntityName(value) && normalizeEntityName(stored.canonical)!==normalizeEntityName(value) && normalizeEntityName(stored.canonical)!==normalizeEntityName(resolved.canonical);
+    return {...resolved,ambiguous:!!(declared.ambiguous||stored?.ambiguous||resolved.ambiguous||conflict)};
+  };
   const rejected: Array<{ index: number; detailKeys: string[]; reasonCode: "holder_access_unverified"; reason: string }> = [];
   const socialKnowledge = result.socialKnowledge?.flatMap((social, index) => {
-    const cognitionDetailKeys = (social.cognitionDetailKeys ?? []).filter(key => recognitionDetailHasAccess(result, social, key));
+    const cognitionDetailKeys = (social.cognitionDetailKeys ?? []).filter(key => recognitionDetailHasAccess(result, social, key, resolve));
     const detailKeys = (social.cognitionDetailKeys ?? []).filter(key => !cognitionDetailKeys.includes(key));
     if (detailKeys.length || !cognitionDetailKeys.length) rejected.push({ index, detailKeys, reasonCode: "holder_access_unverified",
       reason: "Cognition requires a detail in memoryKey with explicit holder access; invalid links removed, empty recognition withheld from canonical state." });
@@ -1635,20 +1733,27 @@ function requireCoreDetail(memory: z.infer<typeof ExtractedMemorySchema>, contex
 }
 /** Current first-pass extraction contract. It deliberately omits canonical
  * assertion, belief, and promise lifecycle decisions. */
-export const Api38ExtractionDraftResultSchema = ExtractionDraftResultSchema.superRefine((result, context) => {
+export const extractionDraftSchema = (promptContract?: "e1d" | "e1e" | "e1f") => ExtractionDraftResultSchema.superRefine((result, context) => {
   if (result.requestOutcome && (result.memories.length || result.unfinishedSource?.length)) context.addIssue({code:"custom",path:["requestOutcome"],message:"requestOutcome is only for a completed request with no new memories."});
   if (result.seedResolutions?.length) context.addIssue({code:"custom",path:["seedResolutions"],message:"Seed resolution patches belong to the second state pass."});
   for (const field of ["sourcePassages", "unfinishedSource"] as const) if (!Array.isArray(result[field])) context.addIssue({ code: "custom", path: [field], message: `Current extraction must explicitly return ${field}, using [] when empty.` });
   result.memories.forEach((memory, index) => {
     if (!memory.retention) context.addIssue({ code: "custom", path: ["memories", index, "retention"], message: "Current extraction memories require a retention class." });
-    requireCoreDetail(memory, context, ["memories", index]);
+    if ((promptContract === 'e1d' || promptContract === 'e1e' || promptContract === 'e1f')) requirePlot(memory, context, ['memories', index]);
+    else requireCoreDetail(memory, context, ["memories", index]);
     for (const [detailIndex, detail] of (memory.details ?? []).entries()) {
+      if (detail.seed && detail.seed.status !== "open") context.addIssue({code:"custom",path:["memories",index,"details",detailIndex,"seed","status"],message:"New seed details must be open; closure requires a second-pass evidence patch."});
       if (!detail.role) context.addIssue({ code: "custom", path: ["memories", index, "details", detailIndex, "role"], message: "Declare core or supporting; core is essential event context, not a relevance score." });
       if (detail.access === undefined) context.addIssue({ code: "custom", path: ["memories", index, "details", detailIndex, "access"], message: "Explicit whole-record access is required; use [] for narrator-only and split partially known claims." });
     }
   });
   validateRecognitionReferences(result, context);
 });
+function requirePlot(memory: z.infer<typeof ExtractedMemorySchema>, context: z.RefinementCtx, path: (string | number)[]): void {
+  if (!memory.content.trim()) context.addIssue({code:'custom',path:[...path,'content'],message:'E1d requires a non-empty plot.'});
+  // Non-empty evidence is enforced by ExtractedMemorySchema for both contracts.
+}
+export const Api38ExtractionDraftResultSchema = extractionDraftSchema();
 
 export const ReconciliationDecisionSchema = z.object({
   itemRef: z.string().min(1),
@@ -1681,15 +1786,26 @@ export type ReconciliationResult = z.infer<typeof ReconciliationResultSchema>;
 
 /** Both workers preview this exact completion view. Retain the authored submission
  * separately so the server can preserve rejected recognition in the existing audit review. */
-export function mergeStateExtraction(draft: ExtractionDraftResult, result: ReconciliationResult) {
+export function mergeStateExtraction(draft: ExtractionDraftResult, result: ReconciliationResult, resolveIdentity?: (value:string)=>ResolvedEntityIdentity, stateContract?: "r10" | "r11") {
   if (!result.state) throw new Error("State extraction response is missing state");
   const state = StateExtractionSchema.parse(result.state);
-  Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: state.memories, sourcePassages: [], unfinishedSource: [] });
-  const keys = new Set(draft.memories.map(memory => memory.key));
-  for (const memory of state.memories) {
-    if (keys.has(memory.key)) throw new ModelContentValidationError("State extraction cannot replace an event memory");
-    keys.add(memory.key);
+  try { Api38ExtractionDraftResultSchema.parse({ language: draft.language, memories: state.memories, sourcePassages: [], unfinishedSource: [] }); }
+  catch(error) {
+    if(!(error instanceof z.ZodError)||error.issues.some(issue=>issue.path[0]!=="memories"||typeof issue.path[1]!=="number"))throw error;
+    throw new StateItemValidationError(error.issues.map(issue=>({path:["state",...issue.path] as (string|number)[],point:"C3:state_merge_schema",message:issue.message})));
   }
+  const keys = new Set(draft.memories.map(memory => memory.key));
+  const collisions: StateItemValidationError["issues"] = [];
+  state.memories.forEach((memory,index)=>{
+    if(keys.has(memory.key)||state.memories.filter(item=>item.key===memory.key).length>1) collisions.push({path:["state","memories",index],point:"C3:state_merge",message:"State memory collides with an existing or repeated key"});
+  });
+  const parents=[...draft.memories,...state.memories];
+  state.detailAdditions.forEach((addition,index)=>{
+    const parent=parents.find(memory=>memory.key===addition.memoryKey);
+    if(!parent||parent.details?.some(detail=>detail.key===addition.detail.key)
+      || state.detailAdditions.filter(item=>item.memoryKey===addition.memoryKey&&item.detail.key===addition.detail.key).length>1) collisions.push({path:["state","detailAdditions",index],point:"C3:state_merge",message:"State detail addition needs an existing parent and a fresh unique key"});
+  });
+  if(collisions.length)throw new StateItemValidationError(collisions);
   const memories = structuredClone([...draft.memories, ...state.memories]);
   for (const addition of state.detailAdditions) {
     const parent = memories.find(memory => memory.key === addition.memoryKey);
@@ -1699,21 +1815,119 @@ export function mergeStateExtraction(draft: ExtractionDraftResult, result: Recon
   const { detailAdditions: _additions, ...stateRecords } = state;
   const authored = ExtractionAggregateSchema.parse({ ...draft, ...stateRecords,
     entities: [...draft.entities, ...state.entities], memories, pairProgress: result.pairProgress, seedResolutions: result.seedResolutions ?? [] });
-  const normalized = normalizeRecognitionReferences(authored);
-  return { draft: normalized.result, recognitionReviewDraft: normalized.rejected.length ? authored : undefined, recognitionIssues: normalized.rejected };
+  const normalized = normalizeRecognitionReferences(authored, resolveIdentity);
+  const stateSupportDiagnostics: Array<{itemRef:string;reason:string}> = [];
+  if ((stateContract === "r10" || stateContract === "r11")) {
+    const issues=stateDetailLinkIssues(result,normalized.result.memories);
+    if (issues.length) throw new StateItemValidationError(issues);
+    const available = new Set(normalized.result.memories.flatMap(memory=>(memory.details ?? []).map(detail=>JSON.stringify([memory.key,detail.key]))));
+    const declaredResolve=createEntityIdentityResolver(authored.entities.map(entity=>({id:entity.key,name:entity.name,terms:[entity.key,entity.name,...entity.aliases]})));
+    const identity=(value:string)=>{
+      const declared=declaredResolve(value);
+      const stored=resolveIdentity?.(declared.canonical);
+      return declared.ambiguous ? declared : stored?.known || stored?.ambiguous ? stored : declared.known ? declared : stored ?? declared;
+    };
+    if(stateContract==='r11') {
+      const supportIssues=stateR11SupportIssues(result,normalized.result.memories,identity);
+      if(supportIssues.length)throw new StateItemValidationError(supportIssues);
+    }
+    for (const item of normalized.result.stateObservations) {
+      if (!isNarrowState(item)) continue;
+      const refs=stateDetailSupport(item);
+      let reason='invalid_narrow_support references missing details';
+      if (refs?.length && refs.every(ref=>available.has(JSON.stringify([ref.memoryKey,ref.detailKey])))) {
+        const owner=identity(item.kind==='character_belief' ? item.holder : item.kind==='world_fact' ? item.subject : '');
+        // Membership in every detail is membership in their knowers intersection.
+        // Unknown/ambiguous owners retain the existing linked-support behavior.
+        if (!owner.known || owner.ambiguous || refs.every(ref=>normalized.result.memories.find(memory=>memory.key===ref.memoryKey)!.details!
+          .find(detail=>detail.key===ref.detailKey)!.access?.some(grant=>{
+            const holder=identity(grant.holder);
+            return !holder.ambiguous && normalizeEntityName(holder.canonical)===normalizeEntityName(owner.canonical);
+          }))) continue;
+        reason='narrow_support_misses_owner linked details exclude the owner';
+      }
+      // Preserve authored links; the unlinked storage view is owner-only.
+      delete item.support; delete item.memoryKey; delete item.detailKeys;
+      if (refs?.length) stateSupportDiagnostics.push({itemRef:`observation:${item.key}`,reason:`R10:${reason}; using owner-only knowledge`});
+    }
+  }
+  return { stateSupportDiagnostics, draft: normalized.result, recognitionReviewDraft: normalized.rejected.length ? authored : undefined, recognitionIssues: normalized.rejected };
 }
-export function parseReconciliationResult(input: unknown, sourceUnits?: SourceUnit[]): ReconciliationResult {
+export function parseReconciliationResult(input: unknown, sourceUnits?: SourceUnit[], context?: StateWritingContext): ReconciliationResult {
+  input = normalizeStateEnvelope(input, context, sourceUnits).value;
+  const lifecycleIssues = statePromiseLifecycleIssues(input, context);
+  if (lifecycleIssues.length) throw new StateItemValidationError(lifecycleIssues);
+  if (sourceUnits && input && typeof input === "object" && "state" in input) inspectStateSourceSelectors(input, sourceUnits);
   const resolved = structuredClone(sourceUnits && input && typeof input === "object" && "state" in input
     ? resolveModelSourceReferences(input, sourceUnits) : input);
   if (resolved && typeof resolved === "object" && "state" in resolved && resolved.state && typeof resolved.state === "object") {
     normalizeAdvisoryDetailKinds(resolved.state as Record<string, unknown>);
   }
-  return ReconciliationResultSchema.parse(resolved);
+  const parsed=ReconciliationResultSchema.parse(resolved);
+  if ((context?.stateContract === 'r10' || context?.stateContract === 'r11') && context.eventDraft && parsed.state) {
+    const parents=structuredClone([...context.eventDraft.memories,...parsed.state.memories]);
+    for (const addition of parsed.state.detailAdditions) {
+      const parent=parents.find(memory=>memory.key===addition.memoryKey);
+      if (parent) parent.details=[...(parent.details ?? []),addition.detail];
+    }
+    const issues=stateDetailLinkIssues(parsed,parents);
+    if (issues.length) throw new StateItemValidationError(issues);
+  }
+  return parsed;
+}
+
+/** Parse only the JSON envelope produced by our prompt builder, never RP prose. */
+export function validateReconciliationResult(result: ReconciliationResult, context: { userPrompt: string; stateExtraction?: boolean; groundingDraft?: ExtractionDraftResult; sourceUnits?: SourceUnit[]; reviewExemptItemRefs?: string[] }): ReconciliationResult {
+  const input = JSON.parse(context.userPrompt);
+  if (context.stateExtraction) {
+    if (!result.state) throw new ModelContentValidationError("State extraction response is missing state");
+    const lifecycleIssues = statePromiseLifecycleIssues(result, stateWritingContext(context.userPrompt));
+    if (lifecycleIssues.length) throw new StateItemValidationError(lifecycleIssues);
+    const merged = context.groundingDraft ? mergeStateExtraction(context.groundingDraft, result, undefined, input.stateContract).draft : result.state;
+    const ids = new Set<string>((input.priorLedger ?? []).map((item: { id: string }) => item.id));
+    const issues = stateDecisionIssues(result, ids);
+    if (issues.length) throw new StateItemValidationError(issues);
+    // Completion filters local decisions and recognition before checking their
+    // remaining candidates. Do not reject advisory IDs or a candidate it drops.
+    if (context.sourceUnits) validateAuxiliarySourceIds(merged, [...new Set(context.sourceUnits.map(unit => unit.messageId))]);
+  } else if (Array.isArray(input.items)) {
+    const items = input.items as Array<{ itemRef: string; candidates: Array<{ id: string }> }>;
+    validateExactItemSet(result.decisions.map(item => item.itemRef), items.map(item => item.itemRef), "decisions.itemRef");
+    for (const decision of result.decisions) {
+      const item = items.find(item => item.itemRef === decision.itemRef)!;
+      // Older servers omit this metadata. Their prompt does not reveal which
+      // candidates completion preserves for review, so only check the item set.
+      if (context.reviewExemptItemRefs === undefined || context.reviewExemptItemRefs.includes(item.itemRef)) continue;
+      const ids = new Set(item.candidates.map(candidate => candidate.id));
+      for (const id of [...decision.targetIds, ...(decision.compatibleWithIds ?? [])]) if (!ids.has(id)) throw new ModelContentValidationError(`decisions.${decision.itemRef}.targetIds ${JSON.stringify(id)} is outside the allowed candidates`);
+      const needsTarget = ["reinforce", "supersede", "end", "dispute"].includes(decision.action);
+      if (needsTarget && !decision.targetIds.length) throw new ModelContentValidationError(`${decision.action} requires a target for ${decision.itemRef}`);
+      if (!needsTarget && decision.targetIds.length) throw new ModelContentValidationError(`${decision.action} cannot select a target for ${decision.itemRef}`);
+    }
+  }
+  return result;
+}
+
+/** Walk typed JSON references only. Source liveness and exact grounding remain server-owned. */
+export function validateAuxiliarySourceIds<T>(result: T, sourceIds: readonly string[]): T {
+  const allowed = new Set(sourceIds);
+  const visit = (value: unknown, path: string) => {
+    if (Array.isArray(value)) value.forEach((item, index) => visit(item, `${path}.${index}`));
+    else if (value && typeof value === "object") for (const [key, item] of Object.entries(value)) {
+      // Optional excerpts and skip hints already have a server review/drop path.
+      if (["keyDialogues", "sourcePassages", "sourceFieldReviews", "skippedSource", "atomRelations", "access", "sections"].includes(key)) continue;
+      if (key === "messageId" && typeof item === "string" && !allowed.has(item)) throw new ModelContentValidationError(`${path}.messageId ${JSON.stringify(item)} is outside this job`);
+      visit(item, `${path}.${key}`);
+    }
+  };
+  visit(result, "result");
+  return result;
 }
 
 export const ReconciliationSubmissionSchema = z.object({
   candidateSetHash: z.string().min(1).optional(),
   result: ReconciliationResultSchema.optional(),
+  stateRecovery: StateRecoveryReportSchema.optional(),
   error: z.string().max(4_000).optional(),
 });
 export type ReconciliationSubmission = z.infer<typeof ReconciliationSubmissionSchema>;
@@ -1742,9 +1956,12 @@ export const ReconciliationReviewResolutionSchema = z.object({
 });
 
 const ChatWorkSettingsSchema = z.record(z.string().min(1).max(500), z.boolean()).optional();
-const chatWorkPolicy = { chatEnabled: ChatWorkSettingsSchema, characterEnabled: ChatWorkSettingsSchema, defaultChatEnabled: z.boolean().optional() };
+const chatWorkPolicy = { chatEnabled: ChatWorkSettingsSchema, characterEnabled: ChatWorkSettingsSchema, defaultChatEnabled: z.boolean().optional(), cancelUpgrade: z.boolean().optional() };
 export const CharacterWorkRequestSchema = z.object({ ...chatWorkPolicy, enabled: z.boolean() });
-export const LeaseJobRequestSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional() });
+export const LeaseJobRequestSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional(), capabilities:z.object({stateExtractionV2:z.boolean().optional(),stateWritingFormat:z.boolean().optional(),eventWritingFormat:z.boolean().optional(),eventWritingFormatE1e:z.boolean().optional(),eventWritingFormatE1f:z.boolean().optional(),stateWritingFormatR10:z.boolean().optional(),stateWritingFormatR11:z.boolean().optional()}).optional() });
+export function usesStateExtraction(type:string,payload:Record<string,any>):boolean {
+  return ["extract","audit_retry","memory_addition"].includes(type)&&!payload.memoryOnly&&!payload.regenerationRunId&&!payload.sourceRecovery&&!payload.dialogueRecovery;
+}
 export const CompleteJobRequestSchema = z.object({
   workerId: z.string().min(1),
   // The stored job kind selects the result schema at the completion boundary.
@@ -1883,6 +2100,8 @@ export interface ServerWorkerStatus {
   queuedJobs?: number;
   phase?: import("./operation-labels.js").WorkerPhase;
   activeJob?: { chatId?: string; sourceMessageCount: number; sourceTurnCount?: number; startedAt: number; kind?: LeasedJob["kind"]; sourceRecovery?: boolean; sourceRecoveryMetadata?: import("./source-recovery.js").SourceRecoveryMetadata };
+  /** Another live chat's work, separate from the requested chat's counts and phase. */
+  otherChatActiveJob?: ServerWorkerStatus["activeJob"];
   /** Recent server-side auxiliary generation calls for the requested chat only. */
   auxiliaryCalls?: ServerAuxiliaryCallTiming[];
   /** Active quiz generation, separate from memory processing and queue counts. */
@@ -1907,6 +2126,9 @@ export interface AuxiliaryBudgetSnapshot {
 }
 
 export interface LeasedJob {
+  promptContract?: "e1d" | "e1e" | "e1f";
+  stateContract?: "r10" | "r11";
+  relationshipProjection?: { pairs: Array<{ from: string; to: string }> };
   relaxAuxiliaryCensorship?: boolean;
   sourceUnits?: SourceUnit[];
   id: string;
@@ -1948,6 +2170,7 @@ export interface LeasedJob {
   recallCandidates?: Array<{ memoryId: string; title: string; gist: string; accessibleTo: string[];
     atoms?: Array<{ atomRef: string; text: string; accessibleTo: string[] }> }>;
   storyConsolidation?: {
+    outputScopes?: Array<{ scope: string; holder: string | null }>;
     level: "segment" | "arc" | "overview";
     generationId: string;
     startOrdinal: number;
@@ -2022,11 +2245,11 @@ export const McpSourceRangeSchema = z.object({
   end: z.number().int().min(1),
 }).refine(range => range.end > range.start, "source range end must follow start");
 
+// Legacy perspective arguments are unknown fields: strip them without validating their value.
 export const RecallRequestSchema = z.object({
   memoryOnlyInjection: z.boolean().optional(),
   memoryGeneration: z.string().min(1).max(120).optional(),
   query: z.string().min(1),
-  perspective: z.string().default("narrator"),
   tokenBudget: z.number().int().min(128).max(4000).default(1800),
   excludeMemoryIds: z.array(z.string().min(1)).max(128).optional(),
   excludeMemorySignatures: z.array(z.string().min(1)).max(128).optional(),
@@ -2157,7 +2380,7 @@ export const augmentSearchText = (text: string, language?: MemoryLanguage): stri
 
 export { renderMcpAnswer, type McpEvidence, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange } from "./mcp-answer.js";
 
-export { projectMemoryScene, renderMemoryScene, type MemoryScene } from "./memory-scene.js";
+export { projectMemoryScene, renderMemoryScene, povSlots, isAuthorCard, emitsMemoryPlot, type MemoryScene, type CardRenderOptions } from "./memory-scene.js";
 
 export { AUXILIARY_CENSORSHIP_RELAXATION, withAuxiliaryStoryFraming, ROLEPLAY_ARCHIVE_FRAMING, SOCIAL_MEMORY_GUIDANCE, PHYSICAL_CONTACT_GUIDANCE, OBSERVATION_CAUSE_GUIDANCE } from "./social-memory-guidance.js";
 export { MEMORY_ADDITION_GUIDANCE, memoryAdditionRequestGuidance, validateMemoryAdditionRequestOutcome, memoryAdditionUserNote, memoryAdditionStopsAfterEvents } from "./memory-addition-guidance.js";
@@ -2171,4 +2394,21 @@ export { sourceRecoverySummary, type SourceRecoveryMetadata } from "./source-rec
 export { JOB_KIND_VALUES, JOB_PIPELINE_STAGE_VALUES, WORKER_PHASE_VALUES, AUXILIARY_PURPOSE_VALUES, JOB_TRIGGER_VALUES, JOB_TRIGGER_LABELS, OPERATION_LABELS, operationLabel, type JobKind, type JobPipelineStage, type WorkerPhase, type AuxiliaryPurpose, type JobTrigger } from "./operation-labels.js";
 
 export * from "./occasions.js";
+
+export * from "./album-presentation.js";
+
+export * from "./relationship-flow.js";
+export * from "./album-bond.js";
+export * from "./album-photos.js";
 export { formatPromiseTime, storedTimeOccasion, type PromiseFirstMade } from './promise-time.js';
+
+export { normalizeAndValidateSetupEvidence } from "./setup-evidence.js";
+export { applyExtractionAuditPatchToDraft } from "./audit-patch.js";
+
+export { NARRATOR_ARCHIVE_HOLDER, scopeOf, scopeRelation, includesPerson, isException, plotKnowers, headerScopeText, standaloneScopeText, lineScopeTag, secretTargets, formatTagNames, boundedNarrationName, viewpointUnknownTag, narrationLine, NARRATION_NAME_MAX_CHARACTERS, type KnowledgeScope } from "./knowledge-scope.js";
+
+export { escapeMemoryText, escapeMemoryAttribute } from "./memory-escaping.js";
+
+export { normalizeAuxiliaryShape, AuxiliaryShapeDiagnosticSchema, type AuxiliaryShapeDiagnostic, type AuxiliaryShapeContext } from "./auxiliary-shape.js";
+export { normalizeAuxiliaryResponse } from "./auxiliary-response-shape.js";
+export { estimateBackfillCalls } from './backfill-estimate.js';

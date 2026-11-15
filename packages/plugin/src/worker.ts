@@ -1,24 +1,35 @@
+import { consumeIncidentFeed, incidentCursorQuery, type IncidentFeed } from './toasts.js';
+import { noteHeartbeatResult } from './connection.js';
+import { normalizeAuxiliaryResponse, type AuxiliaryShapeDiagnostic } from "@rcm/shared";
+import { expandEventWritingFormat, extractionDraftSchema } from "@rcm/shared";
+import { recoverStateResponse, stateWritingContext, normalizeStateEnvelope, sanitizeStateResponseForStaging, type StateRecoveryReport } from "@rcm/shared";
+import { validateRelationshipProjection, validateExactItemSet, validateReconciliationResult, validateAuxiliarySourceIds, normalizeAndValidateSetupEvidence, applyExtractionAuditPatchToDraft, validateQuizResult } from "@rcm/shared";
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { isStructuredOutputTruncated, modelOutputTruncatedError } from "@rcm/shared";
 import { optionalSourceSelectorsOnly, isModelContentRejection } from "@rcm/shared";
 import { parseExtractionAuditResponse } from "@rcm/shared";
 import { sha256 } from './context.js';
-import { operationLabel, providerFailureMetadata, assertProviderOutputAllowed } from "@rcm/shared";
+import { operationLabel, providerFailureMetadata, auxiliaryUsageMetadata, sanitizeDiagnosticText, assertProviderOutputAllowed } from "@rcm/shared";
 import { auxiliaryInputBudgetMessage, auxiliaryRepairTooLargeError, withAuxiliaryStoryFraming } from "@rcm/shared";
 import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { parseReconciliationResult, mergeStateExtraction, type SourceUnit } from "@rcm/shared";
-import { prepareAuxiliaryText, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
+import { prepareAuxiliaryText, rescueDialogueEvidence, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
 import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch } from "@rcm/shared";
-import { Api38ExtractionDraftResultSchema, EpisodeCapsuleResultSchema, EpisodeDraftResultSchema, buildAuxiliaryRepairMessages, buildExtractionAuditMessages, extractionAuditDraftForJob, ExtractionAuditPatchSchema, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, RelationshipProjectionResultSchema, StorySpineConsolidationResultSchema, StructuredJsonSyntaxError, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, estimateTokens, groupEpisodeDrafts, normalizeEpisodeCapsuleInput, normalizeEpisodeDraftInput, normalizeExtractionDraftInput, normalizeStructuredModelOptionals, parseStructuredModelJson, structuredValidationDiagnostic, validateStorySpineConsolidation, type EpisodeDraftResult, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type ReconciliationSubmission } from "@rcm/shared";
+import { EpisodeCapsuleResultSchema, EpisodeDraftResultSchema, buildAuxiliaryRepairMessages, buildExtractionAuditMessages, extractionAuditDraftForJob, ExtractionAuditPatchSchema, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, RelationshipProjectionResultSchema, StorySpineConsolidationResultSchema, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, estimateTokens, groupEpisodeDrafts, normalizeEpisodeCapsuleInput, normalizeEpisodeDraftInput, normalizeExtractionDraftInput, normalizeStructuredModelOptionals, parseStructuredModelJson, structuredValidationDiagnostic, validateStorySpineConsolidation, type EpisodeDraftResult, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type ReconciliationSubmission } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
 import { addLog, saveSettings } from "./settings.js";
 import type { RuntimeState } from "./types.js";
 import { showWorkerPauseNotice, updateWorkerMenuButton } from "./attention.js";
 import { noteServerConnectionFailure, isServerApiIncompatible, isServerConfigured } from "./connection.js";
 import { finishTiming, startTiming } from "./timing.js";
+import { isChatUpgrading } from "./activity-state.js";
+
+function ignoreProgressFailure(error: unknown): void {
+  if (isChatUpgrading(error)) throw error;
+}
 
 const attentionReconciliationFlights = new WeakMap<RuntimeState, Promise<boolean>>();
 
@@ -154,6 +165,16 @@ async function auxiliaryCallDiagnostic(state: RuntimeState, options: Parameters<
     hostResolutionAvailable: true, model: resolution?.model, provider: resolution?.provider, authPresent: resolution?.authPresent });
 }
 
+function risuResponseMetadata(response: any) {
+  const reason = String(response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.promptFeedback?.blockReason ?? response?.candidates?.[0]?.finishReason ?? "").toUpperCase();
+  return {
+    provider: typeof response?.provider === "string" ? sanitizeDiagnosticText(response.provider, [], 160) : "host_unknown",
+    model: typeof response?.model === "string" ? sanitizeDiagnosticText(response.model, [], 160) : "host_unknown",
+    finishReason: /^[A-Z0-9_]{1,80}$/.test(reason) ? reason : "unknown",
+    usage: auxiliaryUsageMetadata(response?.usage ?? response?.usageMetadata),
+  };
+}
+
 export async function responseText(response: any, signal?: AbortSignal): Promise<string> {
   if (typeof response === "string") return response;
   if (response?.type === "fail") throw risuAuxiliaryError(Object.assign(new Error(`Auxiliary model failed: ${failureText(response.result)}`), {
@@ -186,10 +207,15 @@ export function parseJson(text: string): unknown {
 type WorkerJsonPurpose = import("@rcm/shared").AuxiliaryPurpose;
 
 async function generateQuiz(state: RuntimeState, job: LeasedJob): Promise<unknown> {
-  return parseWorkerJson(state, await runModel(state, [
-    { role: "system", content: job.systemPrompt ?? "" },
-    { role: "user", content: job.userPrompt ?? "" },
-  ], "quiz"), "quiz");
+  const messages = [{ role: "system", content: job.systemPrompt ?? "" }, { role: "user", content: job.userPrompt ?? "" }];
+  const validate = (output: string, purpose: WorkerJsonPurpose) => validateQuizResult(parseWorkerJson(state, output, purpose), new Set(Object.keys(job.quiz?.refs ?? {})));
+  const first = await runModel(state, messages, "quiz");
+  try { return validate(first, "quiz"); }
+  catch (error) {
+    const repaired = await runModel(state, buildAuxiliaryRepairMessages({ originalMessages: messages, invalidOutput: first, validationError: error, request: { kind: "quiz" } }), "quiz_repair");
+    return validateStructuredRepairOrRegenerate({ original: first, repaired, purpose: "quiz", regenerate: () => runModel(state, messages, "quiz"),
+      validate: (output, phase) => validate(output, phase === "repair" ? "quiz_repair" : "quiz") });
+  }
 }
 
 async function groupMemories(state: RuntimeState, job: LeasedJob): Promise<unknown> {
@@ -210,16 +236,23 @@ async function groupMemories(state: RuntimeState, job: LeasedJob): Promise<unkno
     });
   }
 }
-const validatedPartRecorders = new WeakMap<RuntimeState, (purpose: "initial_calibration" | "ledger_consistency" | "reconciliation", part: { systemPrompt: string; userPrompt: string }, result: unknown) => Promise<unknown>>();
+const validatedPartRecorders = new WeakMap<RuntimeState, (purpose: "initial_calibration" | "ledger_consistency" | "reconciliation", part: { systemPrompt: string; userPrompt: string; stateRecovery?: StateRecoveryReport }, result: unknown) => Promise<unknown>>();
 const modelPromptRelaxation = new WeakMap<RuntimeState, boolean>();
 const modelJobBudgets = new WeakMap<RuntimeState, NonNullable<LeasedJob["auxiliaryBudget"]>>();
+const modelShapeContexts = new WeakMap<RuntimeState,{contract:string;diagnostics:AuxiliaryShapeDiagnostic[]}>();
 const modelDraftRecorders = new WeakMap<RuntimeState, (output: string, storyValidationReason?: string) => Promise<unknown>>();
 const modelCallRecorders = new WeakMap<RuntimeState, (purpose: WorkerJsonPurpose, outcome: "started" | "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => Promise<void>>();
 
-function parseWorkerJson(state: RuntimeState, text: string, purpose: WorkerJsonPurpose): unknown {
-  const parsed = parseStructuredModelJson(text);
+function parseWorkerJson(state: RuntimeState, text: string, purpose: WorkerJsonPurpose, normalStop = false, onFix?: (fixes: string[]) => void): unknown {
+  const parsed = parseStructuredModelJson(text, { normalStop });
+  onFix?.(parsed.repairs);
   if (parsed.repaired) addLog(state.logs, "warn", `Local JSON syntax repair applied (${purpose}: ${parsed.repairs.join(", ")})${parsed.keyQuoteInsertions === undefined ? "" : ` keyQuoteInsertions=${parsed.keyQuoteInsertions}`}.`);
-  return normalizeStructuredModelOptionals(parsed.value);
+  // State responses are normalized with their writing contract before expansion.
+  if(purpose.startsWith("reconciliation")||purpose.startsWith("state_response"))return normalizeStructuredModelOptionals(parsed.value);
+  const context=modelShapeContexts.get(state);
+  const shaped=normalizeAuxiliaryResponse(parsed.value,{contract:context?.contract ?? "legacy",purpose});
+  context?.diagnostics.push(...shaped.diagnostics);
+  return normalizeStructuredModelOptionals(shaped.value);
 }
 
 export function risuModelSlot(slot: import("./types.js").AuxiliaryMode | "translate", model: string) {
@@ -265,6 +298,7 @@ export async function runRisuModel(state: RuntimeState, options: Parameters<type
     return await Promise.race([call(), deadline]);
   } catch (error) {
     const failure = risuAuxiliaryError(error);
+    Object.assign(failure, { auxiliaryMetadata: risuResponseMetadata(resolution) });
     failure.risuCall = await auxiliaryCallDiagnostic(state, options, job, resolution ?? error);
     addLog(state.logs, "error", "Risu auxiliary call failed", supportFailure("auxiliary_call", failure, { target: "risu", attempt: job?.attempt }));
     throw failure;
@@ -376,10 +410,12 @@ async function waitForMainGeneration(state: RuntimeState): Promise<void> {
   while (mainGenerationOpen(state)) await new Promise<void>(resolve => (state.mainGenerationWaiters ??= new Set()).add(resolve));
 }
 
-async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose): Promise<string> {
+async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose, onNormalStop?: (normalStop: boolean) => void): Promise<string> {
+  let metadata = risuResponseMetadata(undefined);
+  let dispatched = false;
   const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
     try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
-    catch (reportError) { addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`); }
+    catch (reportError) { if (isChatUpgrading(reportError)) throw reportError; addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`); }
   };
   const timing = state.currentJob?.kind !== "quiz" && state.currentJob
     ? startTiming(state, { chatId: state.currentJob.chatId, kind: "auxiliary_llm", label: `보조 모델 · ${operationLabel(purpose)}` })
@@ -399,26 +435,40 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
     // the dispatch boundary; the main path never waits for this worker.
     while (mainGenerationOpen(state)) await waitForMainGeneration(state);
     if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
+    dispatched = true;
     const response = await runRisuModel(state, {
       messages: preparedMessages,
       ...risuModelSlot(state.settings.auxiliaryMode, state.settings.staticModel),
     }, state.currentJob);
+    metadata = risuResponseMetadata(response);
     const output = await responseText(response);
-    await modelDraftRecorders.get(state)?.(output);
+    const staged = onNormalStop ? sanitizeStateResponseForStaging(output) : output;
+    if (staged !== undefined) await modelDraftRecorders.get(state)?.(staged);
     const finishReason = response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.candidates?.[0]?.finishReason;
-    if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase()) || isStructuredOutputTruncated(output)) {
+    const normalStop = String(finishReason ?? "").trim().toUpperCase() === "STOP";
+    let locallyComplete = false;
+    if (onNormalStop && normalStop) {
+      try { parseStructuredModelJson(output, { normalStop: true }); locallyComplete = true; } catch { /* Preserve truncation handling. */ }
+    }
+    onNormalStop?.(normalStop);
+    if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase()) || (!normalStop && !locallyComplete && isStructuredOutputTruncated(output))) {
       throw modelOutputTruncatedError(finishReason === undefined ? undefined : String(finishReason));
     }
-    const rawUsage = response?.usage ?? response?.usageMetadata;
-    const inputTokens = rawUsage?.prompt_tokens ?? rawUsage?.input_tokens ?? rawUsage?.promptTokenCount;
-    const outputTokens = rawUsage?.completion_tokens ?? rawUsage?.output_tokens ?? rawUsage?.candidatesTokenCount;
-    const usage = Object.fromEntries([["inputTokens", inputTokens], ["outputTokens", outputTokens]].filter(([, value]) => typeof value === "number" && Number.isFinite(value)));
-    await reportOutcome("succeeded", undefined, usage);
+    await reportOutcome("succeeded", undefined, metadata.usage);
     if (timing) finishTiming(state, timing, "succeeded");
     return output;
   } catch (error) {
+    if (isChatUpgrading(error)) {
+      if (timing) finishTiming(state, timing, "failed");
+      throw error;
+    }
+    metadata = (error as { auxiliaryMetadata?: typeof metadata })?.auxiliaryMetadata ?? metadata;
+    console.warn(`[RCM] Risu LLM request failed purpose=${purpose} provider=${metadata.provider} model=${metadata.model}`
+      + ` sentMaxOutputTokens=${dispatched ? "host_unknown" : "not_sent"} thinkingConfig=host_unknown finishReason=${metadata.finishReason}`
+      + ` promptTokens=${metadata.usage.promptTokens ?? "unknown"} completionTokens=${metadata.usage.completionTokens ?? "unknown"}`
+      + ` reasoningTokens=${metadata.usage.reasoningTokens ?? "unknown"}`);
     addLog(state.logs, "error", "Auxiliary model call failed", supportFailure("auxiliary_call", error, { purpose, attempt: state.currentJob?.attempt }));
-    await reportOutcome("failed", error);
+    await reportOutcome("failed", error, metadata.usage);
     if (timing) finishTiming(state, timing, "failed");
     throw error;
   }
@@ -429,11 +479,13 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
     ? [{ role: "system", content: job.systemPrompt }, { role: "user", content: job.userPrompt }]
     : [{ role: "user", content: job.prompt }];
   const first = await runModel(state, sourceMessages, "extraction");
+  const expand = (raw: unknown) => (job.promptContract === 'e1d' || job.promptContract === 'e1e' || job.promptContract === 'e1f') ? expandEventWritingFormat(raw, undefined, undefined, job.sourceUnits, job.promptContract) : raw;
   const validate = (output: string, purpose: "extraction" | "extraction_repair"): ExtractionDraftResult => {
-    const parsed = Api38ExtractionDraftResultSchema.parse(normalizeExtractionDraftInput(job.sourceUnits
-      ? resolveModelSourceReferences(parseWorkerJson(state, output, purpose), job.sourceUnits)
-      : parseWorkerJson(state, output, purpose)), { reportInput: true });
+    const raw = expand(parseWorkerJson(state, output, purpose));
+    const parsed = extractionDraftSchema(job.promptContract).parse(normalizeExtractionDraftInput(job.sourceUnits
+      ? resolveModelSourceReferences(raw, job.sourceUnits) : raw), { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
+    validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
     return validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest);
   };
   const validateRepair = (repaired: string): Promise<ExtractionDraftResult> => validateStructuredRepairOrRegenerate({
@@ -446,10 +498,11 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
   let raw: unknown;
   let resolved: unknown;
   try {
-    raw = parseWorkerJson(state, first, "extraction");
+    raw = expand(parseWorkerJson(state, first, "extraction"));
     resolved = normalizeExtractionDraftInput(job.sourceUnits ? resolveModelSourceReferences(raw, job.sourceUnits) : raw);
-    const parsed = Api38ExtractionDraftResultSchema.parse(resolved, { reportInput: true });
+    const parsed = extractionDraftSchema(job.promptContract).parse(resolved, { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
+    validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
     return validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest);
   } catch (firstError) {
     onRepair?.();
@@ -457,22 +510,22 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
     if (fieldRepair) {
       const response = await runModel(state, fieldRepair.messages, "extraction_repair");
       if (isUnchangedStructuredRepair(first, response)) return validateRepair(response);
-      let fieldRepairOutput: unknown;
-      try {
-        fieldRepairOutput = parseWorkerJson(state, response, "extraction_repair");
-      } catch (error) {
-        if (error instanceof StructuredJsonSyntaxError) return validateRepair(response);
-        throw error;
-      }
-      const corrected = applyExtractionFieldRepair(raw, fieldRepair, fieldRepairOutput);
-      const repaired = JSON.stringify(corrected);
-      return validateRepair(repaired);
+      const result = await validateStructuredRepairOrRegenerate({
+        original: first, repaired: response, purpose: "extraction",
+        regenerate: () => runModel(state, sourceMessages, "extraction"),
+        validate: (output, phase) => {
+          if (phase === "regeneration") return validate(output, "extraction");
+          const patch = parseWorkerJson(state, output, "extraction_repair");
+          return validate(JSON.stringify(applyExtractionFieldRepair(raw, fieldRepair, patch)), "extraction_repair");
+        },
+      });
+      return result;
     }
     const repaired = await runModel(state, buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages,
       invalidOutput: first,
       validationError: firstError,
-      request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids" },
+      request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids", promptContract: job.promptContract },
       inputBudget: { maxInputTokens: modelJobBudgets.get(state)?.maxInputTokens ?? 80000, estimate: estimateTokens, relaxed: modelPromptRelaxation.get(state) },
     }), "extraction_repair");
     return validateRepair(repaired);
@@ -484,10 +537,15 @@ async function checkLedgerConsistency(state: RuntimeState, job: LeasedJob, onRep
   const merged = new Map<string, { itemRef: string; closures: Array<{ targetId: string; replacementId: string; reason: string }> }>();
   for (const part of parts) {
     const messages = part.systemPrompt ? [{ role: "system", content: part.systemPrompt }, { role: "user", content: part.userPrompt }] : [{ role: "user", content: part.userPrompt }];
+    const validate = (value: unknown) => {
+      const parsed = LedgerConsistencyResultSchema.parse(value, { reportInput: true });
+      validateExactItemSet(parsed.groups.map(group => group.itemRef), "itemRefs" in part ? part.itemRefs : job.ledgerConsistency?.groups.map(group => group.itemRef) ?? [], "groups.itemRef");
+      return parsed;
+    };
     const cachedResult = "cachedResult" in part ? part.cachedResult : undefined;
     const first = cachedResult === undefined ? await runModel(state, messages, "ledger_consistency") : "";
     let parsed;
-    try { parsed = LedgerConsistencyResultSchema.parse(cachedResult ?? parseWorkerJson(state, first, "ledger_consistency")); }
+    try { parsed = validate(cachedResult ?? parseWorkerJson(state, first, "ledger_consistency")); }
     catch (firstError) {
       if (cachedResult !== undefined) throw firstError;
       onRepair?.();
@@ -498,12 +556,10 @@ async function checkLedgerConsistency(state: RuntimeState, job: LeasedJob, onRep
         original: first, repaired, purpose: "ledger_consistency",
         regenerate: () => runModel(state, messages, "ledger_consistency"),
         validate: (output, phase) => {
-          return LedgerConsistencyResultSchema.parse(parseWorkerJson(state, output, phase === "repair" ? "ledger_consistency_repair" : "ledger_consistency"));
+          return validate(parseWorkerJson(state, output, phase === "repair" ? "ledger_consistency_repair" : "ledger_consistency"));
         },
       });
     }
-    const expected = new Set("itemRefs" in part ? part.itemRefs : job.ledgerConsistency?.groups.map(group => group.itemRef) ?? []);
-    if (parsed.groups.length !== expected.size || new Set(parsed.groups.map(group => group.itemRef)).size !== expected.size || parsed.groups.some(group => !expected.has(group.itemRef))) throw new Error("Ledger page did not return every supplied group exactly once");
     if (cachedResult === undefined) await validatedPartRecorders.get(state)?.("ledger_consistency", part, parsed);
     for (const group of parsed.groups) {
       const prior = merged.get(group.itemRef);
@@ -517,15 +573,19 @@ async function calibrateInitialSetup(state: RuntimeState, job: LeasedJob): Promi
   const parts = job.initialCalibration?.promptParts?.length ? job.initialCalibration.promptParts
     : [{ systemPrompt: job.systemPrompt ?? "", userPrompt: job.userPrompt ?? job.prompt }];
   const results = [];
+  const validate = (value: unknown) => {
+    const parsed = InitialCalibrationResultSchema.parse(value, { reportInput: true });
+    return job.initialCalibration?.resolvedSetup ? normalizeAndValidateSetupEvidence(job.initialCalibration.resolvedSetup, parsed, job.initialCalibration.identityHints) : parsed;
+  };
   for (const part of parts) {
     if ("cachedResult" in part && part.cachedResult !== undefined) {
-      results.push(InitialCalibrationResultSchema.parse(part.cachedResult));
+      results.push(validate(part.cachedResult));
       continue;
     }
     const messages = part.systemPrompt ? [{ role: "system", content: part.systemPrompt }, { role: "user", content: part.userPrompt }]
       : [{ role: "user", content: part.userPrompt }];
     const first = await runModel(state, messages, "initial_calibration");
-    try { results.push(InitialCalibrationResultSchema.parse(parseWorkerJson(state, first, "initial_calibration"))); }
+    try { results.push(validate(parseWorkerJson(state, first, "initial_calibration"))); }
     catch (firstError) {
       const repaired = await runModel(state, buildAuxiliaryRepairMessages({
         originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "initial_calibration" },
@@ -534,7 +594,7 @@ async function calibrateInitialSetup(state: RuntimeState, job: LeasedJob): Promi
         original: first, repaired, purpose: "initial_calibration",
         regenerate: () => runModel(state, messages, "initial_calibration"),
         validate: (output, phase) => {
-          return InitialCalibrationResultSchema.parse(parseWorkerJson(state, output, phase === "repair" ? "initial_calibration_repair" : "initial_calibration"));
+          return validate(parseWorkerJson(state, output, phase === "repair" ? "initial_calibration_repair" : "initial_calibration"));
         },
       }));
     }
@@ -597,6 +657,7 @@ async function runEpisode(state: RuntimeState, job: LeasedJob): Promise<unknown>
   const first = await runModel(state, messages, "episode_finalize");
   try {
     const parsed = EpisodeCapsuleResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeCapsuleInput(parseWorkerJson(state, first, "episode_finalize"), job.sourceMessageIds),job.sourceUnits??[]));
+    validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
     return parsed;
   }
@@ -609,6 +670,7 @@ async function runEpisode(state: RuntimeState, job: LeasedJob): Promise<unknown>
       regenerate: () => runModel(state, messages, "episode_finalize"),
       validate: (output, phase) => {
         const parsed = EpisodeCapsuleResultSchema.parse(resolveDirectDialogueEvidence(normalizeEpisodeCapsuleInput(parseWorkerJson(state, output, phase === "repair" ? "episode_finalize_repair" : "episode_finalize"), job.sourceMessageIds),job.sourceUnits??[]));
+        validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
         if (parsed.language !== job.memoryLanguage) throw new Error(`Canonical language is still ${parsed.language}; expected ${job.memoryLanguage}`);
         return parsed;
       },
@@ -631,9 +693,11 @@ async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unkn
   const validatePatch = (value: unknown): ExtractionAuditSubmission => {
     const resolved = resolveDirectDialogueEvidence(value, job.sourceUnits ?? [], Boolean(job.sourceRecovery));
     // Recovery is a restricted correction protocol, not a general additive audit.
-    return job.sourceRecovery
+    const submission = job.sourceRecovery
       ? { patch: validateSourceRecoveryPatch(ExtractionAuditPatchSchema.parse(resolved), draft) }
       : parseExtractionAuditResponse(resolved);
+    if (submission.patch) applyExtractionAuditPatchToDraft(job.sourceMessageIds, draft, submission.patch);
+    return submission;
   };
   try { return validatePatch(parseWorkerJson(state, first, "audit")); }
   catch (firstError) {
@@ -651,18 +715,34 @@ async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unkn
   }
 }
 
-async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; groundingDraft?: ExtractionDraftResult; canRepairStateResponse?: () => boolean; systemPrompt?: string; userPrompt?: string; parts?: Array<{ systemPrompt: string; userPrompt: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; cachedResult?: unknown }> }, onRepair?: () => void,
+export async function reconcileState(state: RuntimeState, prepared: { stateFieldRecovery?: boolean; reviewExemptItemRefs?: string[]; candidateSetHash?: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; groundingDraft?: ExtractionDraftResult; canRepairStateResponse?: () => boolean; systemPrompt?: string; userPrompt?: string; parts?: Array<{ reviewExemptItemRefs?: string[]; systemPrompt: string; userPrompt: string; sourceUnits?: SourceUnit[]; stateExtraction?: boolean; cachedResult?: unknown; cachedStateRecovery?: StateRecoveryReport }> }, onRepair?: () => void,
   accessRepair?: { plan: SourceAccessRepairPlan; apply: (response: unknown) => void }): Promise<ReconciliationSubmission> {
   if (prepared.candidateSetHash && prepared.parts?.length) {
     const decisions = [];
     const seedResolutions = [];
     const pairProgress = [];
     let extractedState;
+    let stateRecovery: StateRecoveryReport | undefined;
     for (const [index, part] of prepared.parts.entries()) {
-      const submission = part.cachedResult !== undefined
+      let submission: ReconciliationSubmission;
+      if(part.cachedResult!==undefined && part.stateExtraction) {
+        // Cached pages already contain resolved evidence. Recheck the current
+        // merge/decision contract without re-resolving selectors or model calls.
+        const recovered=await recoverStateResponse({first:JSON.stringify(part.cachedResult),parse:JSON.parse,
+          validate:raw=>validateReconciliationResult(ReconciliationResultSchema.parse(raw),{...part,groundingDraft:prepared.groundingDraft}),
+          callModel:async()=>{throw new Error("Cached state must not request field repair");},wholeRepair:async error=>{throw error;}});
+        const report=part.cachedStateRecovery;
+        submission={candidateSetHash:prepared.candidateSetHash,result:recovered.result,
+          ...(report||recovered.report.drops.length||recovered.report.localFixes.length ? {stateRecovery:{...recovered.report,...report,
+            localFixes:[...new Set([...(report?.localFixes??[]),...recovered.report.localFixes])],drops:[...(report?.drops??[]),...recovered.report.drops]}} : {})};
+      } else submission = part.cachedResult !== undefined
         ? { candidateSetHash: prepared.candidateSetHash, result: ReconciliationResultSchema.parse(part.cachedResult) }
-        : await reconcileState(state, { candidateSetHash: prepared.candidateSetHash, groundingDraft: prepared.groundingDraft, canRepairStateResponse: prepared.canRepairStateResponse, ...part }, onRepair, index === 0 ? accessRepair : undefined);
-      if (part.cachedResult === undefined) await validatedPartRecorders.get(state)?.("reconciliation", part, submission.result);
+        : await reconcileState(state, { candidateSetHash: prepared.candidateSetHash, groundingDraft: prepared.groundingDraft, canRepairStateResponse: prepared.canRepairStateResponse, ...part, stateFieldRecovery:prepared.stateFieldRecovery }, onRepair, index === 0 ? accessRepair : undefined);
+      if (part.cachedResult === undefined) await validatedPartRecorders.get(state)?.("reconciliation", {...part,...(submission.stateRecovery ? {stateRecovery:submission.stateRecovery} : {})}, submission.result);
+      if ("stateRecovery" in submission && submission.stateRecovery) {
+        const normalizations=[...(stateRecovery?.normalizations ?? []),...(submission.stateRecovery.normalizations ?? [])];
+        stateRecovery={...submission.stateRecovery,...(normalizations.length ? {normalizations} : {})};
+      }
       decisions.push(...(submission.result?.decisions ?? []));
       seedResolutions.push(...(submission.result?.seedResolutions ?? []));
       pairProgress.push(...(submission.result?.pairProgress ?? []));
@@ -671,7 +751,7 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
         extractedState = submission.result.state;
       }
     }
-    return { candidateSetHash: prepared.candidateSetHash, result: { decisions, seedResolutions, pairProgress, ...(extractedState ? {state: extractedState} : {}) } };
+    return { candidateSetHash: prepared.candidateSetHash, ...(stateRecovery ? { stateRecovery } : {}), result: { decisions, seedResolutions, pairProgress, ...(extractedState ? {state: extractedState} : {}) } };
   }
   if (!prepared.candidateSetHash || !prepared.systemPrompt || !prepared.userPrompt) return {};
   const messages = [{ role: "system", content: prepared.systemPrompt }, { role: "user", content: prepared.userPrompt }];
@@ -680,33 +760,56 @@ async function reconcileState(state: RuntimeState, prepared: { candidateSetHash?
     messages[1]!.content += `\n\n${accessRepair.plan.userPrompt}`;
   }
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
-  const first = await runModel(state, messages, purpose);
-  const validate = (output: string, label: WorkerJsonPurpose): ReconciliationSubmission => {
-    const raw = parseWorkerJson(state, output, label);
-    const result = parseReconciliationResult(raw, prepared.sourceUnits);
-    if (prepared.stateExtraction && !result.state) throw new Error("State extraction response is missing state");
-    accessRepair?.apply(raw);
-    return { candidateSetHash: prepared.candidateSetHash, result };
+  const stops = new Map<string, boolean>();
+  const call = async (messages: any[], label: WorkerJsonPurpose) => {
+    let normalStop = false;
+    const output = await runModel(state, messages, label, prepared.stateExtraction ? value => { normalStop = value; } : undefined);
+    stops.set(output, normalStop);
+    return output;
   };
-  let submission: ReconciliationSubmission;
-  try { submission = validate(first, purpose); }
-  catch (firstError) {
+  const first = await call(messages, purpose);
+  const localFixes: string[] = [];
+  let regenerated = false;
+  const parse = (output: string, label: WorkerJsonPurpose = purpose) => parseWorkerJson(state, output, label, stops.get(output), fixes => localFixes.push(...fixes));
+  const writing = prepared.stateExtraction ? stateWritingContext(prepared.userPrompt) : undefined;
+  const validationNormalizations:AuxiliaryShapeDiagnostic[]=[];
+  const validateRaw = (raw: unknown) => {
+    const normalized=normalizeStateEnvelope(raw,writing,prepared.sourceUnits);
+    raw=normalized.value;
+    validationNormalizations.push(...(normalized.normalizations ?? []));
+    const result = parseReconciliationResult(raw, prepared.sourceUnits, writing);
+    validateReconciliationResult(result, prepared as { userPrompt: string; stateExtraction?: boolean; groundingDraft?: ExtractionDraftResult });
+    accessRepair?.apply(raw);
+    return result;
+  };
+  const validate = (output: string, label: WorkerJsonPurpose) => validateRaw(parse(output, label));
+  const wholeRepair = async (firstError: unknown) => {
+    if (prepared.stateExtraction && prepared.canRepairStateResponse?.() === false) throw firstError;
     onRepair?.();
     const repairPurpose = prepared.stateExtraction ? "state_response_repair" : "reconciliation_repair";
     const reason = structuredValidationDiagnostic(firstError);
     addLog(state.logs, "warn", `상태 응답 검증 실패: ${reason}; repair=${repairPurpose}`);
-    let repaired: string;
-    try { repaired = await runModel(state, buildAuxiliaryRepairMessages({
+    const repaired = await call(buildAuxiliaryRepairMessages({
       originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "reconciliation" },
-    }), repairPurpose); }
-    catch (error) { throw new Error(`State response repair failed: ${String(error)}; initial_validation=${reason}`); }
-    submission = await validateStructuredRepairOrRegenerate({
+    }), repairPurpose);
+    return validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "reconciliation",
-      regenerate: () => runModel(state, messages, "reconciliation"),
+      regenerate: () => { regenerated = true; return call(messages, "reconciliation"); },
       validate: (output, phase) => validate(output, phase === "repair" ? repairPurpose : "reconciliation"),
     });
+  };
+  if (prepared.stateExtraction && prepared.stateFieldRecovery === true) {
+    const recovered = await recoverStateResponse({ first, parse, validate: validateRaw, sourceUnits: prepared.sourceUnits, writing, callModel: call, wholeRepair });
+    recovered.report.localFixes = [...new Set([...localFixes, ...recovered.report.localFixes])];
+    recovered.report.regenerated = regenerated;
+    if(validationNormalizations.length)recovered.report.normalizations=[...(recovered.report.normalizations ?? []),...validationNormalizations];
+    addLog(state.logs, "warn", `State recovery localFixes=${recovered.report.localFixes.join(",")} fieldRepairCalls=${recovered.report.fieldRepairCalls} correctedFields=${recovered.report.correctedFields} drops=${recovered.report.drops.length} wholeRepair=${recovered.report.wholeRepair} regenerated=${recovered.report.regenerated}`);
+    return { candidateSetHash: prepared.candidateSetHash, result: recovered.result, stateRecovery: recovered.report };
   }
-  return submission;
+  let result;
+  try { result = validate(first, purpose); } catch (error) { result = await wholeRepair(error); }
+  modelShapeContexts.get(state)?.diagnostics.push(...validationNormalizations);
+  return { candidateSetHash: prepared.candidateSetHash, result };
 }
 
 async function projectRelationships(state: RuntimeState, job: LeasedJob): Promise<unknown> {
@@ -714,7 +817,14 @@ async function projectRelationships(state: RuntimeState, job: LeasedJob): Promis
     ? [{ role: "system", content: job.systemPrompt }, { role: "user", content: job.userPrompt }]
     : [{ role: "user", content: job.prompt }];
   const first = await runModel(state, messages, "relationship_projection");
-  try { return RelationshipProjectionResultSchema.parse(parseWorkerJson(state, first, "relationship_projection"), { reportInput: true }); }
+  const validate = (output: string, purpose: WorkerJsonPurpose) => {
+    const parsed = RelationshipProjectionResultSchema.parse(parseWorkerJson(state, output, purpose), { reportInput: true });
+    // API99 servers already carry the exact requested pairs in their owned JSON envelope.
+    const pairs = job.relationshipProjection?.pairs ?? JSON.parse(job.userPrompt ?? "{}").pairs;
+    if (!Array.isArray(pairs)) throw new Error("Relationship projection metadata unavailable");
+    return validateRelationshipProjection(parsed, pairs);
+  };
+  try { return validate(first, "relationship_projection"); }
   catch (firstError) {
     const repaired = await runModel(state, buildAuxiliaryRepairMessages({
       originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "relationship_projection" },
@@ -723,7 +833,7 @@ async function projectRelationships(state: RuntimeState, job: LeasedJob): Promis
       original: first, repaired, purpose: "relationship_projection",
       regenerate: () => runModel(state, messages, "relationship_projection"),
       validate: (output, phase) => {
-        return RelationshipProjectionResultSchema.parse(parseWorkerJson(state, output, phase === "repair" ? "relationship_projection_repair" : "relationship_projection"), { reportInput: true });
+        return validate(output, phase === "repair" ? "relationship_projection_repair" : "relationship_projection");
       },
     });
   }
@@ -771,9 +881,21 @@ export function scheduleWorker(state: RuntimeState, client: ServerClient): void 
 }
 
 export async function heartbeatServerWorker(state: RuntimeState, client: ServerClient): Promise<void> {
-  if (state.unloaded || isServerApiIncompatible(state) || state.settings.workerPaused || state.settings.extractionEngine !== "server" || !isServerConfigured(state.settings)) return;
+  if (state.unloaded || isServerApiIncompatible(state) || !isServerConfigured(state.settings)) return;
   try {
-    state.serverWorker = await client.heartbeat(state.workerId, state.current?.chatId);
+    const serverUrl=state.settings.serverUrl;
+    if (state.settings.workerPaused || state.settings.extractionEngine !== 'server') {
+      const cursor=state.settings.incidentServerUrl===serverUrl ? state.settings.incidentCursor : undefined;
+      const feed=await client.request<IncidentFeed>(`/v1/update/status?${incidentCursorQuery(state.settings)}`);
+      if (state.unloaded || state.settings.serverUrl!==serverUrl) return;
+      await consumeIncidentFeed(state,feed,serverUrl,cursor);
+      noteHeartbeatResult(state,false);
+      return;
+    }
+    const worker=await client.heartbeat(state.workerId, state.current?.chatId);
+    if (state.unloaded || state.settings.serverUrl!==serverUrl) return;
+    state.serverWorker=worker;
+    noteHeartbeatResult(state,false);
     if (!isServerApiIncompatible(state)) {
       state.serverConnectionIssue = undefined;
       state.activityStatusError = undefined;
@@ -785,6 +907,7 @@ export async function heartbeatServerWorker(state: RuntimeState, client: ServerC
   } catch (error) {
     noteServerConnectionFailure(state, state.settings, error);
     state.publishActivity?.();
+    noteHeartbeatResult(state,true);
     addLog(state.logs, "warn", `Server worker heartbeat failed: [오류 원문 제외]`, supportFailure("worker_heartbeat", error));
   }
 }
@@ -806,8 +929,12 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       state.serverConnectionIssue = undefined;
       state.activityStatusError = undefined;
       if (!job) break;
+      let revokedByUpgrade: unknown;
       const leaseHeartbeat = globalThis.setInterval(() => {
-        void client.renewLease(job.id, state.workerId).catch((error) => addLog(state.logs, "warn", `작업 lease 갱신 실패: [오류 원문 제외]`));
+        void client.renewLease(job.id, state.workerId).catch(error => {
+          if (isChatUpgrading(error)) { revokedByUpgrade = error; clearInterval(leaseHeartbeat); }
+          else addLog(state.logs, "warn", `작업 lease 갱신 실패: [오류 원문 제외]`);
+        });
       }, 20_000);
       state.leaseHeartbeatTimer = leaseHeartbeat;
       // A send can race the lease HTTP response. Retain/renew the lease while
@@ -816,13 +943,19 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       if (state.unloaded) { clearInterval(leaseHeartbeat); state.leaseHeartbeatTimer = undefined; break; }
       const firstStage = job.kind === "relationship_projection" ? "relationship_projection" : job.kind === "story_consolidation" ? "story_consolidation" : job.kind === "ledger_consistency" ? "ledger_consistency" : "first_extraction";
       const llmCallStats: OperationLlmCallStats = { total: job.llmCallStats?.total ?? 0, repairs: job.llmCallStats?.repairs ?? 0, byPurpose: { ...(job.llmCallStats?.byPurpose ?? {}) } };
-      let repairBudgetUsed = job.repairBudgetUsed ?? (llmCallStats.repairs > (llmCallStats.byPurpose.state_response_repair ?? 0));
+      let repairBudgetUsed = job.repairBudgetUsed ?? (llmCallStats.repairs > (llmCallStats.byPurpose.state_response_repair ?? 0) + (llmCallStats.byPurpose.state_field_repair ?? 0));
       let stateRepairBudgetUsed = job.stateRepairBudgetUsed ?? ((llmCallStats.byPurpose.state_response_repair ?? 0) > 0);
+      modelShapeContexts.set(state,{contract:job.promptContract ?? "legacy",diagnostics:[]});
+      const flushShapeDiagnostics=async()=>{
+        const diagnostics=modelShapeContexts.get(state)!.diagnostics;
+        if(diagnostics.length){await client.progress(job.id,state.workerId,firstStage,0,undefined,undefined,diagnostics);diagnostics.length=0;}
+      };
       modelPromptRelaxation.set(state, job.relaxAuxiliaryCensorship === true);
       if (job.auxiliaryBudget) modelJobBudgets.set(state, job.auxiliaryBudget);
       validatedPartRecorders.set(state, async (purpose, part, result) => client.validatedAuxiliaryPart?.(job.id, state.workerId, purpose, part, result));
       modelDraftRecorders.set(state, async (output, storyValidationReason) => client.stageDraft?.(job.id, state.workerId, output, storyValidationReason));
       modelCallRecorders.set(state, async (purpose, outcome, error, usage) => {
+        if (revokedByUpgrade) throw revokedByUpgrade;
         if (outcome === "started") {
           ({ repairBudgetUsed, stateRepairBudgetUsed } = consumeAuxiliaryRepair(purpose, { repairBudgetUsed, stateRepairBudgetUsed }));
           llmCallStats.total += 1;
@@ -842,15 +975,16 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       state.currentJob = { id: job.id, chatId: job.chatId, attempt: job.attempt, sourceMessageCount: job.sourceMessageIds.length, sourceTurnCount: job.sourceTurnCount, startedAt: Date.now(), kind: job.kind, sourceRecovery: job.sourceRecovery, sourceRecoveryMetadata: job.sourceRecoveryMetadata, phase: job.kind === "episode" ? "capsule" : job.kind === "social_backfill" ? "social_backfill" : job.kind === "initial_calibration" ? "initial_calibration" : firstStage };
       state.publishActivity?.();
       try {
-        if (job.kind !== "initial_calibration" && job.kind !== "social_backfill" && job.kind !== "episode" && job.kind !== "quiz") await client.progress(job.id, state.workerId, firstStage).catch(() => undefined);
-        const checkpointInput=JSON.stringify([modelSettingsFingerprint,job.profile,job.memoryLanguage,job.prompt,job.systemPrompt,job.userPrompt,job.sourceUnits,job.sourceMessageIds,job.memoryAddition,job.postExtractionReview,job.relaxAuxiliaryCensorship,job.sourceRecovery,job.sourceRecoveryContext]);
+        if (job.kind !== "initial_calibration" && job.kind !== "social_backfill" && job.kind !== "episode" && job.kind !== "quiz") await client.progress(job.id, state.workerId, firstStage).catch(ignoreProgressFailure);
+        const checkpointInput=JSON.stringify([modelSettingsFingerprint,job.promptContract,job.profile,job.memoryLanguage,job.prompt,job.systemPrompt,job.userPrompt,job.sourceUnits,job.sourceMessageIds,job.memoryAddition,job.postExtractionReview,job.relaxAuxiliaryCensorship,job.sourceRecovery,job.sourceRecoveryContext]);
         const extractionHash=await sha256(checkpointInput);
         const cachedExtraction=job.risuStageCheckpoints?.extraction;
-        let result = job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : cachedExtraction?.inputHash===extractionHash ? Api38ExtractionDraftResultSchema.parse(cachedExtraction.result) : await extract(state, job);
+        let result = job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : cachedExtraction?.inputHash===extractionHash ? extractionDraftSchema(job.promptContract).parse(cachedExtraction.result) : await extract(state, job);
         if(job.kind==='extract' && cachedExtraction?.inputHash!==extractionHash) await client.validatedStage?.(job.id,state.workerId,'extraction',extractionHash,result);
-        if (job.kind === "extract" && job.continuationDraft) result = mergeExtractionPages(job.continuationDraft, result as any);
+        if (job.kind === "extract" && job.continuationDraft) result = mergeExtractionPages(job.continuationDraft, result as any, job.promptContract);
         const recoveringDialogues = job.kind === "audit_retry" && job.sourceRecovery
           && Boolean(job.auditDraft?.memories.some(memory => memory.keyDialogues?.length));
+        result = rescueDialogueEvidence(result, job.auditSourceMessages ?? [], job.sourceUnits);
         if (recoveringDialogues && job.sourceUnits) {
           const issues = inspectSourceReferences(result, job.auditSourceMessages ?? [])
             .filter(issue => issue.reason !== "access_unverified");
@@ -858,7 +992,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           if (messages) {
             try {
               const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
-              result = applySourceRepairs(result, repaired, issues, job.sourceUnits);
+              result = rescueDialogueEvidence(applySourceRepairs(result, repaired, issues, job.sourceUnits), job.auditSourceMessages ?? [], job.sourceUnits);
             } catch (error) { addLog(state.logs, "warn", `대사 원문 보완 미해결: [오류 원문 제외]`); }
           }
         }
@@ -868,7 +1002,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         if (!incomplete && job.postExtractionReview && reviewable && state.currentJob) {
           state.currentJob.phase = "post_extraction_audit";
           state.publishActivity?.();
-          await client.progress(job.id, state.workerId, "post_extraction_audit").catch(() => undefined);
+          await client.progress(job.id, state.workerId, "post_extraction_audit").catch(ignoreProgressFailure);
         }
         const auditHash=await sha256(JSON.stringify([checkpointInput,result,job.auditSourceMessages,job.auditExistingOpenPromises,job.recallCandidates]));
         const cachedAudit=job.risuStageCheckpoints?.audit;
@@ -880,13 +1014,14 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           let prepared = await client.prepareReconciliation(job.id, state.workerId, reconciliationDraft, audit);
           const repairIssues = prepared.evidenceIssues?.filter((issue) => issue.reason !== "access_unverified") ?? [];
           if (job.sourceUnits && prepared.groundingDraft && repairIssues.length && (job.smallReviewRetry || !optionalSourceSelectorsOnly(repairIssues))) {
-            result = prepared.groundingDraft;
+            result = rescueDialogueEvidence(prepared.groundingDraft, job.auditSourceMessages ?? [], job.sourceUnits);
             if (audit?.patch) audit = { ...audit, patch: ExtractionAuditPatchSchema.parse({ keepPendingItemRefs: audit.patch.keepPendingItemRefs }) };
             try {
-              const messages = sourceRepairMessages(result, repairIssues, job.sourceUnits);
+              const remainingIssues = inspectSourceReferences(result, job.auditSourceMessages ?? []).filter(issue => issue.reason !== "access_unverified");
+              const messages = sourceRepairMessages(result, remainingIssues, job.sourceUnits);
               if (messages) {
                 const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
-                result = applySourceRepairs(result, repaired, repairIssues, job.sourceUnits);
+                result = rescueDialogueEvidence(applySourceRepairs(result, repaired, remainingIssues, job.sourceUnits), job.auditSourceMessages ?? [], job.sourceUnits);
               }
             } catch (error) { addLog(state.logs, "warn", `원문 보완 미해결: [오류 원문 제외]`); }
             prepared = await client.prepareReconciliation(job.id, state.workerId, result, audit);
@@ -903,7 +1038,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           if (prepared.required && !job.memoryOnly && !job.sourceRecovery) {
             if (state.currentJob) state.currentJob.phase = "state_reconciliation";
             state.publishActivity?.();
-            await client.progress(job.id, state.workerId, "state_reconciliation").catch(() => undefined);
+            await client.progress(job.id, state.workerId, "state_reconciliation").catch(ignoreProgressFailure);
             reconciliation = await reconcileState(state, { ...prepared, groundingDraft: prepared.groundingDraft ?? result as ExtractionDraftResult, canRepairStateResponse: () => !stateRepairBudgetUsed }, undefined, accessPlan ? { plan: accessPlan, apply: applyAccess } : undefined);
             if (reconciliation.result?.state) {
               const completion = mergeStateExtraction(prepared.groundingDraft ?? result as ExtractionDraftResult, reconciliation.result);
@@ -922,17 +1057,22 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         if (job.kind !== "quiz") {
           if (state.currentJob) state.currentJob.phase = "storing";
           state.publishActivity?.();
-          await client.progress(job.id, state.workerId, "storing").catch(() => undefined);
+          await client.progress(job.id, state.workerId, "storing").catch(ignoreProgressFailure);
         }
+        await flushShapeDiagnostics();
         const completed = await client.complete(job.id, state.workerId, result, reconciliation, audit);
         if (completed?.pendingReconciliations) state.statusSummary = { ...(state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 }), pendingReviews: (state.statusSummary?.pendingReviews ?? 0) + completed.pendingReconciliations, pendingReconciliations: (state.statusSummary?.pendingReconciliations ?? 0) + completed.pendingReconciliations };
         if (completed?.pendingReconciliations) state.publishStatusSummary?.();
         if (completed?.warnings?.length) addLog(state.logs, "warn", "Auxiliary job completed with warnings");
         addLog(state.logs, "info", `${job.kind === "quiz" ? "Quiz batch" : job.kind === "episode" ? "Episode capsule" : job.kind === "story_consolidation" ? "Story spine consolidation" : "Memory extraction"} completed (${job.sourceMessageIds.length} messages)`);
       } catch (error) {
+        // Upgrade start revoked this live lease. Never replay its writes against the new canon;
+        // the next lease poll resumes the server-owned queue, including valid shadow jobs.
+        if (isChatUpgrading(error)) continue;
         addLog(state.logs, "error", "Auxiliary job failed", supportFailure("worker_job", error, { kind: job.kind, attempt: job.attempt }));
         const metadata=providerFailureMetadata(error);
         const typedFailure=metadata.status!==undefined || metadata.finishReason!==undefined || metadata.refusal!==undefined || metadata.retryAfterMs!==undefined;
+        await flushShapeDiagnostics();
         const failure = isModelContentRejection(error) ? await client.fail(job.id,state.workerId,String(error),metadata,true)
           : typedFailure ? await client.fail(job.id,state.workerId,String(error),metadata) : await client.fail(job.id, state.workerId, String(error));
         if (failure.status === "queued") {
@@ -964,6 +1104,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       } finally {
         clearInterval(leaseHeartbeat);
         state.leaseHeartbeatTimer = undefined;
+        modelShapeContexts.delete(state);
         modelDraftRecorders.delete(state);
         validatedPartRecorders.delete(state);
         modelJobBudgets.delete(state);
@@ -974,6 +1115,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       }
     }
   } catch (error) {
+    if (isChatUpgrading(error)) return;
     noteServerConnectionFailure(state, state.settings, error);
     addLog(state.logs, "warn", `Worker queue connection failed without pausing processing: [오류 원문 제외]`, supportFailure("worker_queue", error));
   } finally {

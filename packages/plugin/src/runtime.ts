@@ -1,9 +1,10 @@
+import { consumeIncidentFeed } from './toasts.js';
 import { supportFailure } from "./support-diagnostics.js";
 import { captureSetupRequest, discardSetupCapture, observeSetupAttention, completeSetupAttentionTurn } from "./setup-sources.js";
 declare const __RCM_DISTRIBUTION__: boolean;
 import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
 import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
-import { ServerClient, type PrepareClientTimings } from "./api-client.js";
+import { ServerClient, UpgradeBlockedError, type UpgradeLock, type PrepareClientTimings } from "./api-client.js";
 import { injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readCurrentChatId, readCurrentChatScope, readCurrentContext, resolvedSetupProjection, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
 import { CACHE_KEY, addLog, isChatMemoryEnabled, loadSettings, loadStoredJson, saveSettings, saveStoredJson } from "./settings.js";
 import type { CachedChatState, RuntimeState } from "./types.js";
@@ -69,9 +70,9 @@ async function persistCache(state: RuntimeState): Promise<void> {
   }
 }
 
-export const MISSING_RCM_MARKER_MESSAGE = "RCM이 이 채팅에서 켜져 있지만 최종 프롬프트에서 [[RCM]] 위치 표식을 찾지 못했습니다. 프리셋·카드·로어북에 [[RCM]]을 추가하거나 이 채팅의 RCM을 끈 뒤 다시 보내세요.";
-export const MEMORY_INJECTION_BLOCKED_MESSAGE = "RCM 기억을 준비하거나 최종 프롬프트에 넣지 못해 모델 요청을 차단했습니다. 메인 모델 요청은 전송하지 않았습니다. 서버 연결과 RCM 상태를 확인한 뒤 다시 보내세요.";
-export const RCM_INITIALIZING_MESSAGE = "RCM이 아직 초기화 중이어서 모델 요청을 차단했습니다. 잠시 후 다시 보내세요.";
+export const MISSING_RCM_MARKER_MESSAGE = "RCM이 이 채팅에서 켜져 있지만 최종 프롬프트에서 [[RCM]] 위치 표식을 찾지 못했어요. 프리셋·카드·로어북에 [[RCM]]을 추가하거나 이 채팅의 RCM을 끈 뒤 다시 보내 주세요.";
+export const MEMORY_INJECTION_BLOCKED_MESSAGE = "RCM 기억을 준비하거나 최종 프롬프트에 넣지 못해 모델 요청을 차단했어요. 메인 모델 요청은 전송하지 않았어요. 서버 연결과 RCM 상태를 확인한 뒤 다시 보내 주세요.";
+export const RCM_INITIALIZING_MESSAGE = "RCM이 아직 초기화 중이어서 모델 요청을 차단했어요. 잠시 후 다시 보내 주세요.";
 
 export class MissingRcmMarkerError extends Error {
   constructor() {
@@ -86,9 +87,9 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
   // Receipt metadata drives cooldown even when private diagnostic prose is disabled.
   if (!state.retrievalTraceEnabled || typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) {
     if (!injection.blocked && !injection.omitted && ["fresh", "reused"].includes(injection.prepareOutcome ?? "")) {
-      void client.traceRetrieval({ id: injection.prepareRequestId ?? injection.turnKey, kind: "automatic_injection",
+      void client.traceRetrieval({ id: crypto.randomUUID(), kind: "automatic_injection",
         chatId: injection.chatId, receiptOnly: true, prepareOutcome: injection.prepareOutcome, blocked: false, omitted: false,
-        manifest: { memoryIds: injection.manifest.memoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`));
+        manifest: { memoryIds: injection.manifest.memoryIds, atomKeys: injection.manifest.atomKeys, longtermMemoryIds: injection.manifest.longtermMemoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`));
     }
     if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return;
   }
@@ -242,6 +243,7 @@ function isPreparedContextRetry(state: RuntimeState, chatId: string, contexts: s
     || (prepared.upcomingOccasions ?? true) !== (state.settings.upcomingOccasions[chatId] ?? true)
     || (prepared.pairProgress ?? false) !== (state.settings.pairProgress[chatId] ?? false)
     || (prepared.memoryOnlyInjection ?? false) !== (state.settings.memoryOnlyInjection[chatId] ?? false)
+    || prepared.narrationViewpoint !== (state.settings.narrationViewpoint[chatId] || undefined)
     || injection.turnKey !== prepared.turnKey || injection.omitted || contexts.length !== 1) return false;
   return contexts[0]!.trim() === injection.packet.trim();
 }
@@ -305,6 +307,7 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
     addLog(state.logs, "warn", `Post-response memory sync deferred: [오류 원문 제외]`);
   } finally {
     if (completed) completeSetupAttentionTurn(state, chatId, requestId);
+    state.requestActivityRefresh?.();
     scheduleWorker(state, client);
   }
 }
@@ -335,7 +338,9 @@ export async function createRuntime(): Promise<{ state: RuntimeState; client: Se
     lastPromptSourceMessageIds: [],
     internalModelCalls: new Set(),
   };
-  return { state, client: new ServerClient(() => state.settings) };
+  const client=new ServerClient(() => state.settings);
+  client.onIncidentFeed=(feed,serverUrl,cursor)=>consumeIncidentFeed(state,feed,serverUrl,cursor);
+  return { state, client };
 }
 
 export function installRequestHooks(state: RuntimeState, client: ServerClient): Promise<void[]> {
@@ -409,6 +414,26 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
           throw new MemoryInjectionBlockedError("server URL or token is not configured");
         }
+        // Cached provider retries also honour the live lock before reusing a packet.
+        if (state.automaticTurnPacket?.chatId === currentChatId || state.cache[currentChatId] || state.statusSummary?.upgrade?.lock || state.upgradeBlocked?.chatId === currentChatId) {
+          const head = await new ServerClient(() => state.settings).request<{upgradeLock?:UpgradeLock; memoryEpoch?:string}>(`/v1/chats/${encodeURIComponent(currentChatId)}/source-head`,{signal:controller.signal});
+          await assertCurrentRequest();
+          if (head.upgradeLock) {
+            state.upgradeBlocked = {chatId:currentChatId,lock:head.upgradeLock};
+            state.refreshStatusWidget?.();
+            throw new UpgradeBlockedError(head.upgradeLock);
+          }
+          const epoch=head.memoryEpoch ?? '';
+          const prepared=state.automaticTurnPacket?.chatId===currentChatId ? state.automaticTurnPacket : undefined;
+          if (prepared && (prepared.response.memoryEpoch ?? '')!==epoch
+            || state.cache[currentChatId] && (state.cache[currentChatId]!.memoryEpoch ?? '')!==epoch) {
+            state.automaticTurnPacket=undefined;
+            state.lastInjection=undefined;
+            delete state.cache[currentChatId];
+            void persistCache(state);
+          }
+        }
+        if (state.upgradeBlocked?.chatId === currentChatId) state.upgradeBlocked = undefined;
         const existing = inspectMemoryPrompt(messages);
         const knownRetryChatId = state.automaticTurnPacket?.chatId;
         if (knownRetryChatId === currentChatId) {
@@ -434,6 +459,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           && (state.automaticTurnPacket?.upcomingOccasions ?? true) === (state.settings.upcomingOccasions[knownRetryChatId] ?? true)
           && (state.automaticTurnPacket?.pairProgress ?? false) === (state.settings.pairProgress[knownRetryChatId] ?? false)
           && (state.automaticTurnPacket?.memoryOnlyInjection ?? false) === (state.settings.memoryOnlyInjection[knownRetryChatId] ?? false)
+          && state.automaticTurnPacket?.narrationViewpoint === (state.settings.narrationViewpoint[knownRetryChatId] || undefined)
           && isIntentionalEmptyPrepare(state.automaticTurnPacket?.response);
         if (preparedEmptyRetry) {
           if (currentChatId !== knownRetryChatId) {
@@ -527,6 +553,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         if (autoBudget > 0 || catchUpPending || needsSetupCapture) {
           const reusable = !state.settings.memoryToolsEnabled && !catchUpPending && !needsSetupCapture && state.automaticTurnPacket?.turnKey === turnKey
             && state.automaticTurnPacket.chatId === context.chatId
+            && state.automaticTurnPacket.narrationViewpoint === context.narrationViewpoint
             && state.automaticTurnPacket.requestedBudget === autoBudget
             && JSON.stringify(state.automaticTurnPacket.promptSourceMessageIds) === JSON.stringify(protectedPromptSourceMessageIds(messages, sourceProtectionTurns));
           if (reusable) {
@@ -595,7 +622,6 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               const parentId = response.lineage?.status === "inherited" ? response.lineage.parentChatId : undefined;
               if (parentId) {
                 await inheritLineageSettings(state, context, parentId, response.memoryLanguage);
-                const inheritedPerspectives = [...new Set((state.settings.perspectives[context.chatId] ?? []).map((name) => name.trim()).filter(Boolean))].slice(0, 4);
                 const inheritedBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
                 context.profile = state.settings.profiles[context.chatId] ?? state.settings.defaultProfile;
                 context.includeUserMessages = state.settings.includeUserMessages[context.chatId] ?? true;
@@ -604,8 +630,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 context.memoryOnlyInjection = state.settings.memoryOnlyInjection[context.chatId] ?? false;
                 context.extractionGroupTurns = Math.min(50, Math.max(1, Math.round(state.settings.extractionGroupTurns[context.chatId] ?? 6)));
                 context.memoryLanguage = state.settings.memoryLanguages[context.chatId] ?? response.memoryLanguage;
-                context.activePerspectives = inheritedPerspectives;
-                context.perspectiveMode = inheritedPerspectives.length > 0 ? "manual" : "auto";
+                context.narrationViewpoint = state.settings.narrationViewpoint[context.chatId] || undefined;
                 state.current = context;
                 void syncQuizEnabled(state, client).catch(() => undefined);
                 const inheritedEnabled = isChatMemoryEnabled(state.settings, context.chatId, context.characterId);
@@ -617,8 +642,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                   || prepareRequest.extractionGroupTurns !== context.extractionGroupTurns
                   || prepareRequest.memoryLanguage !== context.memoryLanguage
                   || prepareRequest.memoryBudgetPreset !== inheritedBudget
-                  || prepareRequest.perspectiveMode !== context.perspectiveMode
-                  || JSON.stringify(prepareRequest.perspectives) !== JSON.stringify(context.activePerspectives);
+                  || prepareRequest.narrationViewpoint !== context.narrationViewpoint;
                 if (!inheritedEnabled) {
                   effectiveAutoBudget = 0;
                   response = {
@@ -655,19 +679,6 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               await assertCurrentRequest();
               choice.check();
               choice.dispose();
-              const resolution = response.perspectiveResolution;
-              state.perspectiveStatus = resolution ? {
-                perspectives: resolution.perspectives,
-                unresolved: resolution.unresolved,
-                omissionReason: response.omissionReason,
-              } : undefined;
-              if (resolution && !resolution.unresolved && resolution.perspectives.length > 0 && context.perspectiveMode === "auto") {
-                const detectedKey = `${response.serverInstanceId}:${context.chatId}`;
-                if (JSON.stringify(state.settings.detectedPerspectives[detectedKey] ?? []) !== JSON.stringify(resolution.perspectives)) {
-                  state.settings.detectedPerspectives[detectedKey] = resolution.perspectives;
-                  void saveSettings(state.settings).catch((error) => addLog(state.logs, "warn", `Perspective cache persistence failed: [오류 원문 제외]`));
-                }
-              }
               packet = renderMemoryReferences(state, response.packet, response.selected, state.settings.memoryToolsEnabled, new Set(response.memoryToolOpportunity?.followCandidates.map((item) => item.memoryId) ?? []));
               state.lastPrepare = response;
               state.memoryToolAvailability ??= {};
@@ -681,6 +692,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               state.automaticTurnPacket = {
                 turnKey,
                 chatId: context.chatId,
+                narrationViewpoint: context.narrationViewpoint,
                 memoryOnlyInjection: context.memoryOnlyInjection ?? false,
                 upcomingOccasions: context.upcomingOccasions ?? true,
                 pairProgress: context.pairProgress ?? false,
@@ -691,6 +703,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               };
               state.cache[context.chatId] = {
                 serverInstanceId: response.serverInstanceId,
+                memoryEpoch: response.memoryEpoch,
                 stableAnchors: response.stableAnchors,
                 lastPacket: packet,
                 lastRevision: response.chatRevision,
@@ -699,6 +712,10 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               void persistCache(state);
             } catch (error) {
               await assertCurrentRequest();
+              if (error instanceof UpgradeBlockedError) {
+                state.upgradeBlocked = {chatId:context.chatId,lock:error.lock};
+                throw error;
+              }
               if (error instanceof MemoryInjectionBlockedError) throw error;
               prepareElapsedMs = Date.now() - prepareStartedAt;
               if (error instanceof PrepareChoiceError && error.choice === "omit") {
@@ -831,6 +848,14 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         }
       } catch (error) {
         endMainGeneration(state, generationId);
+        if (error instanceof UpgradeBlockedError) {
+          state.activeModelRequest = undefined;
+          state.automaticTurnPacket = undefined;
+          state.memoryToolOpportunity = undefined;
+          await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
+          state.refreshStatusWidget?.();
+          throw new MemoryInjectionBlockedError('CHAT_UPGRADING');
+        }
         if (error instanceof MissingRcmMarkerError || error instanceof MemoryInjectionBlockedError) throw error;
         if (state.modelRequestEpoch === requestEpoch) state.activeModelRequest = undefined;
         addLog(state.logs, "error", `beforeRequest blocked: [오류 원문 제외]`, supportFailure("before_request", error));

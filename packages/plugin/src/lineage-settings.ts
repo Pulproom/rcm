@@ -3,6 +3,7 @@ import type { ChatLineageStatus, MemoryLanguage } from "@rcm/shared";
 import type { RuntimeState } from "./types.js";
 import type { ServerClient } from "./api-client.js";
 import { makePrepareRequest, readCurrentContext } from "./context.js";
+import { isChatUpgrading, runBackgroundChatWrite } from "./activity-state.js";
 
 export function lineageFailureMessage(error: unknown): string {
   const message = String(error);
@@ -86,6 +87,10 @@ export async function runLineageOperation(state: RuntimeState, chatId: string, k
       await inheritLineageSettings(state, chatId, result.lineage.parentChatId, result.memoryLanguage);
     }
   } catch (error) {
+    if (kind === "open" && isChatUpgrading(error)) {
+      if (state.lineageOperation === operation) { state.lineageOperation = undefined; state.publishActivity?.(); }
+      throw error;
+    }
     addLog(state.logs, "error", `Lineage operation failed: ${String(error)}`);
     if (state.current?.chatId === chatId && state.settings.serverUrl === serverUrl && state.lineageOperation === operation) {
       state.statusStale = true;
@@ -100,27 +105,30 @@ export async function runLineageOperation(state: RuntimeState, chatId: string, k
 export async function resolveOpenedChat(state: RuntimeState, client: ServerClient): Promise<void> {
   const chatId = state.current?.chatId;
   if (!chatId) return;
-  const key = `${state.settings.serverUrl}\0${chatId}`;
-  if (state.chatOpen?.key === key) return state.chatOpen.pending;
-  let sourceHeld = false;
-  const pending = runLineageOperation(state, chatId, "open", async () => {
-    const context = await readCurrentContext(state);
-    if (context.chatId !== chatId || key !== `${state.settings.serverUrl}\0${state.current?.chatId}`) throw new Error("Chat changed before lineage resolution");
-    const result = await client.request<LineageResult & { sourceChangeHeld?: string }>(
-      `/v1/chats/${encodeURIComponent(chatId)}/open`, {
-        method: "POST", body: JSON.stringify({ ...makePrepareRequest(context, 0, { deferExtraction: true }), workerId: state.workerId }),
-      }, 60_000);
-    sourceHeld = Boolean(result.sourceChangeHeld);
-    return result;
+  await runBackgroundChatWrite(state, chatId, "open", async () => {
+    if (state.current?.chatId !== chatId) return;
+    const key = `${state.settings.serverUrl}\0${chatId}`;
+    if (state.chatOpen?.key === key) return state.chatOpen.pending;
+    let sourceHeld = false;
+    const pending = runLineageOperation(state, chatId, "open", async () => {
+      const context = await readCurrentContext(state);
+      if (context.chatId !== chatId || key !== `${state.settings.serverUrl}\0${state.current?.chatId}`) throw new Error("Chat changed before lineage resolution");
+      const result = await client.request<LineageResult & { sourceChangeHeld?: string }>(
+        `/v1/chats/${encodeURIComponent(chatId)}/open`, {
+          method: "POST", body: JSON.stringify({ ...makePrepareRequest(context, 0, { deferExtraction: true }), workerId: state.workerId }),
+        }, 60_000);
+      sourceHeld = Boolean(result.sourceChangeHeld);
+      return result;
+    });
+    const opening: NonNullable<RuntimeState["chatOpen"]> = { key, pending };
+    state.chatOpen = opening;
+    try {
+      await pending;
+      if (sourceHeld) { if (state.chatOpen === opening) state.chatOpen = undefined; }
+      else opening.resolved = true;
+    }
+    catch (error) { if (state.chatOpen === opening) state.chatOpen = undefined; throw error; }
   });
-  const opening: NonNullable<RuntimeState["chatOpen"]> = { key, pending };
-  state.chatOpen = opening;
-  try {
-    await pending;
-    if (sourceHeld) { if (state.chatOpen === opening) state.chatOpen = undefined; }
-    else opening.resolved = true;
-  }
-  catch (error) { if (state.chatOpen === opening) state.chatOpen = undefined; throw error; }
 }
 
 export async function inheritLineageSettings(state: RuntimeState, target: string | { chatId: string }, parentId: string, inheritedMemoryLanguage?: MemoryLanguage): Promise<void> {
@@ -140,7 +148,7 @@ export async function inheritLineageSettings(state: RuntimeState, target: string
   copy(state.settings.extractionGroupTurns, 6);
   copy(state.settings.memoryLanguages, inheritedMemoryLanguage ?? "en");
   copy(state.settings.memoryBudgets, state.settings.defaultMemoryBudget);
-  copy(state.settings.perspectives, []);
+  copy(state.settings.narrationViewpoint, "");
   if (!changed) return;
   try { await saveSettings(state.settings); }
   catch (error) { addLog(state.logs, "warn", `Lineage setting persistence failed: [오류 원문 제외]`); }

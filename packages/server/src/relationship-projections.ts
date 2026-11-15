@@ -1,3 +1,5 @@
+import { assertUpgradeJobWritable, chatUpgradeLock } from './upgrade-lock.js';
+import { refreshChatUpgrade } from './upgrade-run.js';
 import { auxiliaryInputFingerprint, auxiliaryInputOutcome, recordAuxiliaryInput } from './auxiliary-input-cache.js';
 import { randomUUID } from "node:crypto";
 import {
@@ -18,6 +20,7 @@ import { canAutomaticallyChange, committedEditOrdinal, correctionView, isAutoLoc
 export const RELATIONSHIP_PROJECTION_AXES = ["affection", "trust", "intimacy", "fear", "jealousy", "hostility"] as const;
 export type RelationshipProjectionAxis = typeof RELATIONSHIP_PROJECTION_AXES[number];
 export type RelationshipProjectionMode = "incremental" | "replay";
+export const RELATIONSHIP_LEVEL_DEFINITION_VERSION = 2;
 
 export const RELATIONSHIP_LEVELS: Record<RelationshipProjectionAxis, readonly string[]> = {
   affection: INITIAL_AFFECTION_LEVELS,
@@ -33,6 +36,7 @@ export interface RelationshipProjectionView {
   to: string;
   axes: Record<RelationshipProjectionAxis, { level: string; trend: string }>;
   summary: string;
+  summaryReady: boolean;
   activeTensions: string[];
   basisEventIds: string[];
   overrides: Record<string, unknown>;
@@ -47,6 +51,8 @@ export interface RelationshipProjectionView {
 const unknownAxes = (): RelationshipProjectionView["axes"] => Object.fromEntries(
   RELATIONSHIP_PROJECTION_AXES.map((axis) => [axis, { level: "unknown", trend: "unclear" }]),
 ) as RelationshipProjectionView["axes"];
+// Product-owned placeholder for a projection that has never supplied a summary.
+const PENDING_RELATIONSHIP_SUMMARY = "Projection pending";
 
 const parseObject = (value: string | null | undefined): Record<string, any> => {
   try { const parsed = JSON.parse(value ?? "{}"); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; }
@@ -129,6 +135,8 @@ export function queueLaggingRelationshipProjections(db: RcmDatabase, chatId: str
 }
 
 export function flushRelationshipProjectionQueue(db: RcmDatabase, chatId: string, backfillRunId?: string): number {
+  const lock = chatUpgradeLock(db,chatId);
+  if (lock && (lock.phase !== 2 || backfillRunId !== lock.runId)) return 0;
   if (hasActiveBackfillBarrier(db, chatId)) return 0;
   // Keep new changes coalesced in the pair queue while the previous wave (and
   // any continuation pages) runs, rather than enqueuing duplicate pair jobs.
@@ -149,6 +157,7 @@ export function flushRelationshipProjectionQueue(db: RcmDatabase, chatId: string
       const batch = pairs.slice(index, index + 4);
       const timestamp = now();
       insert.run(randomUUID(), chatId, JSON.stringify({ sourceMessageIds: [], pairs: batch,
+        ...(lock?.phase === 2 ? {upgradePhase2RunId:backfillRunId} : {}),
         ...(backfillRunId ? { backfillRunId, operationStage: "relationship_projection", operationStageOrdinal: Math.floor(index / 4) + 1, operationStageTotal: total } : {}) }), timestamp, timestamp);
       batch.forEach((pair) => remove.run(chatId, pair.from, pair.to));
       jobs += 1;
@@ -172,7 +181,9 @@ export function projectionInput(db: RcmDatabase, chatId: string, pairs: Projecti
       const previous = db.prepare(`SELECT *
         FROM relationship_projections WHERE chat_id=? AND from_entity=? AND to_entity=?`).get(chatId, pair.from, pair.to) as
         Record<string,any> | undefined;
-      const mode: RelationshipProjectionMode = pair.mode === "replay" || !previous ? "replay" : "incremental";
+      const oldModelLevels = previous?.projection_origin === "llm"
+        && previous.level_definition_version < RELATIONSHIP_LEVEL_DEFINITION_VERSION;
+      const mode: RelationshipProjectionMode = pair.mode === "replay" || !previous || oldModelLevels ? "replay" : "incremental";
       const cursor = projectionCursor(previous?.event_cursor_json);
       const eventColumns = "id,changes_json AS changes,reason,evidence_json AS evidence,source_start_ordinal AS sourceOrdinal,created_revision AS createdRevision,created_at AS createdAt";
       const allEvents = db.prepare(`SELECT ${eventColumns} FROM relationship_events WHERE chat_id=? AND from_entity=? AND to_entity=? AND active=1
@@ -264,6 +275,7 @@ export function planProjectionInput(db: RcmDatabase, chatId: string, pairs: Proj
 }
 
 export function completeRelationshipProjectionJob(db: RcmDatabase, jobId: string, workerId: string, result: RelationshipProjectionResult): { chatId: string; warnings: string[]; pendingReconciliations: number } {
+  assertUpgradeJobWritable(db,jobId);
   const job = db.prepare("SELECT chat_id,payload_json FROM jobs WHERE id=? AND lease_owner=? AND status='leased' AND type='relationship_projection'").get(jobId, workerId) as { chat_id: string; payload_json: string } | undefined;
   if (!job) throw Object.assign(new Error("Lease not found"), { code: "LEASE_NOT_FOUND" });
   const payload = JSON.parse(job.payload_json) as { pairs?: ProjectionPairInput[]; projectionCursors?: Record<string, ProjectionCursor>; allowedBasisIds?: Record<string, string[]>; projectionRemainingPairs?: ProjectionPairInput[]; [key: string]: any };
@@ -297,12 +309,12 @@ export function completeRelationshipProjectionJob(db: RcmDatabase, jobId: string
       const cursor = payload.projectionCursors?.[pairKey] ?? { revision: -1, eventIds: [] };
       const dirty = db.prepare('SELECT 1 FROM relationship_projection_queue WHERE chat_id=? AND from_entity=? AND to_entity=?').get(job.chat_id,item.from,item.to);
       db.prepare(`INSERT INTO relationship_projections(chat_id,from_entity,to_entity,axes_json,summary,active_tensions_json,basis_event_ids_json,
-        overrides_json,event_cursor_json,projection_origin,stale,updated_revision,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,'llm',?,?,?) ON CONFLICT(chat_id,from_entity,to_entity) DO UPDATE SET
+        overrides_json,event_cursor_json,projection_origin,level_definition_version,stale,updated_revision,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,'llm',?,?,?,?) ON CONFLICT(chat_id,from_entity,to_entity) DO UPDATE SET
           axes_json=excluded.axes_json,summary=excluded.summary,active_tensions_json=excluded.active_tensions_json,
           basis_event_ids_json=excluded.basis_event_ids_json,event_cursor_json=excluded.event_cursor_json,projection_origin='llm',
-          stale=excluded.stale,updated_revision=excluded.updated_revision,updated_at=excluded.updated_at`)
-        .run(job.chat_id, item.from, item.to, JSON.stringify(axes), summary, JSON.stringify(tensions), JSON.stringify(validBasis), JSON.stringify(overrides), JSON.stringify(cursor), Number(Boolean(dirty)), revision, timestamp);
+          level_definition_version=excluded.level_definition_version,stale=excluded.stale,updated_revision=excluded.updated_revision,updated_at=excluded.updated_at`)
+        .run(job.chat_id, item.from, item.to, JSON.stringify(axes), summary, JSON.stringify(tensions), JSON.stringify(validBasis), JSON.stringify(overrides), JSON.stringify(cursor), RELATIONSHIP_LEVEL_DEFINITION_VERSION, Number(Boolean(dirty)), revision, timestamp);
     }
     recordRelationshipInputs(db,job.chat_id,payload,'succeeded');
     for(const pair of payload.pairs ?? []) {
@@ -319,6 +331,7 @@ export function completeRelationshipProjectionJob(db: RcmDatabase, jobId: string
     } else db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=? WHERE id=?").run(timestamp, jobId);
   })();
   flushRelationshipProjectionQueue(db,job.chat_id,payload.backfillRunId);
+  refreshChatUpgrade(db,job.chat_id);
   return { chatId: job.chat_id, warnings: [], pendingReconciliations: 0 };
 }
 
@@ -330,6 +343,7 @@ export function listRelationshipProjections(db: RcmDatabase, chatId: string): Re
     to: row.to_entity,
     axes: { ...unknownAxes(), ...parseObject(row.axes_json) },
     summary: row.summary,
+    summaryReady: Boolean(row.summary?.trim()) && row.summary !== PENDING_RELATIONSHIP_SUMMARY,
     activeTensions: parseList(row.active_tensions_json),
     basisEventIds: parseList(row.basis_event_ids_json),
     overrides: parseObject(row.overrides_json),
@@ -350,21 +364,21 @@ export function listRelationshipProjections(db: RcmDatabase, chatId: string): Re
     views.push({
       from: pair.from, to: pair.to,
       axes: hasInitial ? Object.fromEntries(RELATIONSHIP_PROJECTION_AXES.map((axis) => [axis, { level: initial[axis] ?? "unknown", trend: "unclear" }])) as RelationshipProjectionView["axes"] : unknownAxes(),
-      summary: hasInitial ? pair.initialSummary : "Projection pending", activeTensions: [], basisEventIds: [], overrides: {}, userEdited:false,userEditOrdinal:null,locked:false,
+      summary: hasInitial ? pair.initialSummary : PENDING_RELATIONSHIP_SUMMARY, summaryReady: hasInitial, activeTensions: [], basisEventIds: [], overrides: {}, userEdited:false,userEditOrdinal:null,locked:false,
       stale: !hasInitial, updatedRevision: Number(pair.createdRevision ?? 0), updatedAt: Number(pair.createdAt ?? 0),
     });
     known.add(key);
   }
   const pendingEvents = db.prepare(`SELECT DISTINCT from_entity AS "from",to_entity AS "to" FROM relationship_events
     WHERE chat_id=? AND active=1 ORDER BY from_entity,to_entity`).all(chatId) as Array<{ from: string; to: string }>;
-  for (const pair of pendingEvents) if (!known.has(`${pair.from}\0${pair.to}`)) views.push({ from: pair.from, to: pair.to, axes: unknownAxes(), summary: "Projection pending", activeTensions: [], basisEventIds: [], overrides: {}, userEdited:false,userEditOrdinal:null,locked:false, stale: true, updatedRevision: 0, updatedAt: 0 });
+  for (const pair of pendingEvents) if (!known.has(`${pair.from}\0${pair.to}`)) views.push({ from: pair.from, to: pair.to, axes: unknownAxes(), summary: PENDING_RELATIONSHIP_SUMMARY, summaryReady: false, activeTensions: [], basisEventIds: [], overrides: {}, userEdited:false,userEditOrdinal:null,locked:false, stale: true, updatedRevision: 0, updatedAt: 0 });
   return views;
 }
 
 export function setRelationshipProjectionOverride(db: RcmDatabase, chatId: string, from: string, to: string, patch: Record<string, unknown>): RelationshipProjectionView {
   if (!patch.clear && patch.summary === undefined && patch.activeTensions === undefined && patch.axis === undefined && patch.locked === undefined) throw new Error("A qualitative relationship field is required");
   const existing = listRelationshipProjections(db, chatId).find((item) => item.from === from && item.to === to) ?? {
-    from, to, axes: unknownAxes(), summary: "Manually observed relationship", activeTensions: [], basisEventIds: [], overrides: {}, userEdited:false,userEditOrdinal:null,locked:false, stale: false, updatedRevision: 0, updatedAt: 0,
+    from, to, axes: unknownAxes(), summary: "Manually observed relationship", summaryReady: true, activeTensions: [], basisEventIds: [], overrides: {}, userEdited:false,userEditOrdinal:null,locked:false, stale: false, updatedRevision: 0, updatedAt: 0,
   };
   const overrides = {axes:structuredClone(existing.axes),summary:existing.summary,activeTensions:[...existing.activeTensions]} as Record<string, any>;
   const requiresRegeneration = patch.clear === true || (patch.axis && patch.level === null);

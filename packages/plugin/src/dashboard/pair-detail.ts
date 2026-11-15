@@ -9,11 +9,10 @@ import { anniversaryDayOffset, buildAnniversaries, daysSinceFirstMet, earliestFi
 import { birthdayPeople } from "./birthdays.js";
 import { chartPersonColors } from "./person-colors.js";
 import { buildSceneLog, type SceneCard, type SceneChip, type SceneDay } from "./scene-log.js";
-import { milestoneLabel, normalizeName, type PairSummary, pairKey, relationshipLabelTranslationKey } from "./pairs.js";
-import { buildCast } from "./film/cast.js";
+import { intimacyLabelTranslationKey, milestoneLabel, normalizeName, type PairSummary, pairKey, relationshipLabelTranslationKey } from "./pairs.js";
 import { isLatinName, nameHtml } from "./film/names.js";
 import { sceneDate } from "./film/scene.js";
-import { avatar, btn, contactRow, empty, field, filters, fold, icon, menu, seg, type MenuItem } from "./film/ui.js";
+import { detailAccessLine, avatar, btn, contactRow, empty, field, filters, fold, icon, menu, seg, type MenuItem } from "./film/ui.js";
 import { promiseChainKey } from "./record-history.js";
 import { sceneLocator, sceneNumbers } from "./scenes.js";
 import { lex } from "./lexicon.js";
@@ -25,6 +24,7 @@ export type PairDiarySort = "newest" | "oldest";
 type RelationshipAxisValue = { level: string; trend: string };
 
 export type PairDetailRenderOptions = {
+  accessEditing?: string;
   copy(canonical: string, translationKey: string): string;
   diaryFilter: PairDiaryFilter;
   diarySort: PairDiarySort;
@@ -53,11 +53,11 @@ const MARK_ICON: Partial<Record<SceneChip["kind"], string>> = {
 };
 const MARK_TONE: Partial<Record<SceneChip["kind"], string>> = { landmark: " is-key", love: " is-key", promise_broken: " is-cut", down: " is-cut" };
 
-const renderMark = (chip: SceneChip): string => {
+const renderMark = (chip: SceneChip, options: PairDetailRenderOptions): string => {
   const plain = chip.kind === "minor" ? (chip.trend === "down" ? "down" : "up") : MARK_ICON[chip.kind];
   // The phone reads rises and falls as arrows; film keeps its carets.
   const name = lex().skin === "phone" && plain ? ({ up: "rise", down: "fall" } as Record<string, string>)[plain] ?? plain : plain;
-  const label = escapeHtml(chip.label);
+  const label = chip.translationKey ? options.copy(chip.label, chip.translationKey) : escapeHtml(chip.label);
   return `<span class="mark${MARK_TONE[chip.kind] ?? ""}">${name ? icon(name) : ""}${label}</span>`;
 };
 
@@ -73,7 +73,7 @@ const renderScene = (scene: SceneCard, options: PairDetailRenderOptions): string
   const editor = scene.memoryId && entryId === options.anniversaryEditorEntryId
     ? `<form id="anniversary-form" class="form" data-memory-id="${escapeHtml(scene.memoryId)}">${anniversaryKindPicker()}${field({ id: `anniversary-label-${escapeHtml(scene.memoryId)}`, label: "기념일 이름", control: `<input id="anniversary-label-${escapeHtml(scene.memoryId)}" class="input" name="label" maxlength="120" required>` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-anniversary" })}${btn("저장", { kind: "primary", action: "submit-form" })}</div></form>`
     : "";
-  return `<article class="scene${scene.key ? " is-key" : ""}" data-scene="${escapeHtml(scene.memoryId)}"><div class="scene__slug"><b>${slate || "장면"}</b>${actions}</div>${opener}${chips.length ? `<div class="marks">${chips.map((chip) => renderMark(chip)).join("")}</div>` : ""}${editor}</article>`;
+  return `<article class="scene${scene.key ? " is-key" : ""}" data-scene="${escapeHtml(scene.memoryId)}"><div class="scene__slug"><b>${slate || "장면"}</b>${actions}</div>${opener}${chips.length ? `<div class="marks">${chips.map((chip) => renderMark(chip, options)).join("")}</div>` : ""}${editor}</article>`;
 };
 
 /** Native radio controls keep the selected kind in FormData without relying on host form submission. */
@@ -120,7 +120,7 @@ const renderChronicle = (entries: LogEntry[], options: PairDetailRenderOptions):
 };
 
 const renderSceneLog = (days: SceneDay[], options: PairDetailRenderOptions, preserveKey: string): string => {
-  if (!days.length) return empty("이 조건에 맞는 장면이 없습니다", "필터를 바꿔 보세요.");
+  if (!days.length) return empty("이 조건에 맞는 장면이 없어요", "필터를 바꿔 봐 주세요.");
   const collapseQuiet = options.diaryFilter === "all";
   const entries: LogEntry[] = days.flatMap((day) => day.scenes.map((scene) => ({ day, scene, quiet: collapseQuiet && !scene.key && scene.chips.length === 0 })));
   let shown = 0;
@@ -214,10 +214,10 @@ export const pairOpenPromises = (data: DashboardData, pair: PairSummary): Dashbo
   (data.promises ?? []).filter((item: any) => item.status === "open" && pairKey(String(item.promisor), String(item.promisee)) === pair.key);
 
 /** A promise as an app row: what was promised, then who → whom as small avatars, 예정 and its scene. Shared by the pair and person sheets. */
-export function appPromiseRow(item: any, copy: (text: string, key: string) => string, sceneAt: (target: unknown) => { label: string } | null): string {
+export function appPromiseRow(item: any, copy: (text: string, key: string) => string, sceneAt: (target: unknown) => { label: string } | null, accessEditing?: string): string {
   const scene = sceneAt(item.source_memory_id ?? item.sourceMemoryId ?? item.lastMention?.ordinal);
   const meta = [item.scheduled_for ? `<span class="pair-pill">예정</span>${escapeHtml(formatStoryTime(item.scheduled_for))}` : "", scene ? escapeHtml(scene.label) : ""].filter(Boolean).join('<span class="dot">·</span>');
-  return `<li class="entry"><button type="button" class="entry__face entry__tap pair-row" data-action="open-now-record" data-key="${escapeHtml(promiseChainKey(item))}"><span class="pair-row__ic is-blue">${icon("check")}</span><span class="pair-row__tx"><span class="pair-row__t">${copy(String(item.content ?? ""), `promise:${item.id ?? item.promise_key ?? ""}`)}</span><span class="pair-row__s"><span class="pair-row__who">${avatar(String(item.promisor ?? ""), "sm")}${icon("arrow-right")}${avatar(String(item.promisee ?? ""), "sm")}<span class="pair-row__names">${escapeHtml(String(item.promisor ?? ""))} → ${escapeHtml(String(item.promisee ?? ""))}</span></span>${meta}</span></span>${icon("chevron")}</button></li>`;
+  return `<li class="entry"><button type="button" class="entry__face entry__tap pair-row" data-action="open-now-record" data-key="${escapeHtml(promiseChainKey(item))}"><span class="pair-row__ic is-blue">${icon("check")}</span><span class="pair-row__tx"><span class="pair-row__t">${copy(String(item.content ?? ""), `promise:${item.id ?? item.promise_key ?? ""}`)}</span><span class="pair-row__s"><span class="pair-row__who">${avatar(String(item.promisor ?? ""), "sm")}${icon("arrow-right")}${avatar(String(item.promisee ?? ""), "sm")}<span class="pair-row__names">${escapeHtml(String(item.promisor ?? ""))} → ${escapeHtml(String(item.promisee ?? ""))}</span></span>${meta}</span></span>${icon("chevron")}</button>${detailAccessLine("", item, accessEditing === item.id, "promise")}</li>`;
 }
 
 /** App rows in one card; past `limit` the rest fold behind 더 보기. */
@@ -247,12 +247,6 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   const role = [pair.label ? options.copy(pair.label, relationshipLabelTranslationKey(pair)) : "", `${allScenes}장면 함께함`].filter(Boolean).join(" · ");
   const socialKnowledge = (data.socialKnowledge ?? []) as SocialKnowledgeApiItem[];
   const isPersonaPair = Boolean(persona) && normalizeName(lead) === persona;
-  const leads = isPersonaPair && Array.isArray(data.entities) ? buildCast(data, data.personaEntity).leads : [];
-  const picker = leads.length > 1
-    ? `<div class="pairs" role="group" aria-label="주연 고르기">${leads.map((member) => {
-      const key = pairKey(lead, member.name);
-      return `<button type="button" class="pair" data-action="open-relationship" data-key="${escapeHtml(key)}" aria-pressed="${key === pair.key}">${nameHtml(lead)}<span class="x">×</span>${nameHtml(member.name)}</button>`;
-    }).join("")}</div>` : "";
   const titles = lex().credits ? `<section class="titles" aria-label="${escapeHtml(lead)}와 ${escapeHtml(other)}"><div class="starring credit">${lex().starring}</div><div class="cast"><button type="button" class="titles__name" data-action="open-relationship-person" data-person-name="${escapeHtml(lead)}">${creditName(lead)}</button><div class="and credit">${lex().and}</div><button type="button" class="titles__name" data-action="open-relationship-person" data-person-name="${escapeHtml(other)}">${creditName(other)}</button></div><div class="tie">${role}</div></section>` : `<section class="titles titles--plain"><div class="pair-avs">${avatar(lead, "xl")}${avatar(other, "xl")}</div><h2 class="pair-name">${[lead, other].map((name) => `<button type="button" class="pair-name__who" data-action="open-relationship-person" data-person-name="${escapeHtml(name)}">${nameHtml(name)}</button>`).join(" &amp; ")}</h2><p class="pair-tie">${role}</p></section>`;
   const basicRelations = (data.assertions ?? []).filter((item: any) => item?.socialRelation?.kind === "interpersonal"
     && pairKey(String(item?.subject), String(item?.socialRelation?.target)) === pair.key);
@@ -293,7 +287,7 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
   const basisIds = new Set(directions.flatMap(([, , item]) => item?.basisEventIds ?? []));
   const basisItems = (data.relationshipEvents ?? []).filter((item: any) => basisIds.has(item.id));
   const picking = options.anniversaryEditorEntryId === `pick:${pair.key}`;
-  const pickBar = picking ? `<div class="pickbar" role="status"><span>기념일로 만들 장면을 고르세요</span>${btn("취소", { kind: "quiet", action: "cancel-anniversary", hit: true })}</div>` : "";
+  const pickBar = picking ? `<div class="pickbar" role="status"><span>기념일로 만들 장면을 골라 주세요</span>${btn("취소", { kind: "quiet", action: "cancel-anniversary", hit: true })}</div>` : "";
   const log = `<section class="psec" data-pair-section="diary"><h2 class="sec">기록 <span class="n">${sceneCount}</span></h2>${pickBar}<div class="logbar">${filterBar}${sortControl}</div>${renderSceneLog(sceneDays, { ...options, picking }, `scenelog:${pair.key}:${options.diaryFilter}:${options.diarySort}`)}</section>`;
   const promises = pairOpenPromises(data, pair);
   const sceneAt = sceneLocator(data.memories ?? [], (time) => formatStoryTime(time, true));
@@ -355,7 +349,7 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
     const basisFooter = basisItems.length ? `<details class="meters__basis" data-preserve-open="pair-basis:${escapeHtml(pair.key)}"><summary>이 감정의 판단 근거 ${basisItems.length}</summary><ul>${basisItems.map((item: any) => `<li>${options.copy(String(item?.reason ?? ""), `relationship-event:${item.id}:reason`)}</li>`).join("")}</ul></details>` : "";
     const hearts = `<section class="psec"><h2 class="sec">서로의 마음</h2><div class="povs">${directions.map(([from, to, item]) => renderView(item, from, to, options)).join("")}</div></section>`;
 
-    const promiseList = promises.map((item: any) => appPromiseRow(item, options.copy, sceneAt));
+    const promiseList = promises.map((item: any) => appPromiseRow(item, options.copy, sceneAt, options.accessEditing));
     const promiseCard = promises.length ? `<section class="psec"><h2 class="sec">약속 <span class="n">${promises.length}</span></h2>${appListCard(promiseList, `pair-promises:${pair.key}`)}</section>` : "";
 
     const currentStoryTime = latestStoryTime(data);
@@ -373,15 +367,17 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
       const scene = [`S#${numbers.get(item.memoryId) ?? "?"}`, item.place ?? ""].filter(Boolean).map(escapeHtml).join(" · ");
       return `<article class="anni anni--row"><button type="button" class="anni__open" data-action="open-timeline-memory" data-memory-id="${escapeHtml(item.memoryId)}"><span class="anni__date">${escapeHtml(shortDate(item.storyTime))}${offset === null ? "" : `<small>D+${offset}</small>`}</span><span class="anni__tx"><span class="anni__label">${label}${item.alwaysInject ? `<span class="anni__pin" title="항상 전달">${icon("pin")}</span>` : ""}</span><span class="anni__slug">${scene}${memory ? ` · ${options.copy(String(memory.title ?? ""), `${item.memoryId}:title`)}` : ""}</span></span></button><div class="anni__acts">${anniversaryActions(item)}</div></article>`;
     }).join("");
-    const markCard = `<section class="psec"><div class="sec-head"><h2 class="sec">기념일 <span class="n">${anniversaries.length}</span></h2>${addMark}</div>${newMark}${nextCard}${anniversaryRows ? `<div class="reel">${anniversaryRows}</div>` : creatingMark ? "" : empty("아직 기념일이 없습니다", "추가에서 날짜로 만들거나 기록의 장면에서 고를 수 있습니다.")}</section>`;
+    const markCard = `<section class="psec"><div class="sec-head"><h2 class="sec">기념일 <span class="n">${anniversaries.length}</span></h2>${addMark}</div>${newMark}${nextCard}${anniversaryRows ? `<div class="reel">${anniversaryRows}</div>` : creatingMark ? "" : empty("아직 기념일이 없어요", "추가에서 날짜로 만들거나 기록의 장면에서 고를 수 있어요.")}</section>`;
 
     const keepsake = (item: any) => {
       const scene = sceneAt(item.source_memory_id ?? item.sourceMemoryId);
       const circumstance = String(item?.circumstance ?? "").trim();
+      const labelKey = intimacyLabelTranslationKey(item);
+      const label = labelKey ? options.copy(milestoneLabel(item), labelKey) : escapeHtml(milestoneLabel(item));
       return `<li class="entry">${menu({ label: `${milestoneLabel(item)} 스킨십 기록`, items: [
         { label: "수정", icon: "edit", action: "edit-intimacy", data: { id: String(item.id) } },
         { label: "삭제", icon: "delete", action: "delete-intimacy", data: { id: String(item.id) }, danger: true },
-      ], face: { className: "entry__face pair-row", html: `<span class="pair-row__tx"><span class="pair-row__t"><b>${escapeHtml(milestoneLabel(item))}</b></span>${circumstance ? `<span class="pair-row__clamp">${options.copy(circumstance, `intimacy:${item.id}:circumstance`)}</span>` : ""}${scene ? `<span class="pair-row__s">${escapeHtml(scene.label)}</span>` : ""}</span>` } })}</li>`;
+      ], face: { className: "entry__face pair-row", html: `<span class="pair-row__tx"><span class="pair-row__t"><b>${label}</b></span>${circumstance ? `<span class="pair-row__clamp">${options.copy(circumstance, `intimacy:${item.id}:circumstance`)}</span>` : ""}${scene ? `<span class="pair-row__s">${escapeHtml(scene.label)}</span>` : ""}</span>` } })}${detailAccessLine("", item, options.accessEditing === item.id, "physical_milestone")}</li>`;
     };
     const keepsakes = intimacyItems.map(keepsake);
     const intimacyCard = keepsakes.length ? `<section class="psec"><h2 class="sec">스킨십 기록 <span class="n">${keepsakes.length}</span></h2>${appListCard(keepsakes, `intimacy:${pair.key}`)}</section>` : "";
@@ -390,6 +386,6 @@ export function renderPairDetail(data: DashboardData, pair: PairSummary, options
     const initialCard = initialItems.length ? `<section class="psec">${film ? "" : '<h2 class="sec">처음 설정된 관계</h2>'}${fold(film ? "처음 설정된 관계" : "캐릭터 카드에서 읽은 처음 모습", `${initialFelt ? emotionMeters(initialDirections, canonicalAxes, initialAxis, options, "처음 설정된 감정") : ""}<div class="povs povs--initial">${initialViews}</div>`, { role: "section", preserveKey: `pair-initial:${pair.key}` })}</section>` : "";
 
     const chronicle = log.replace('<h2 class="sec">기록 ', '<h2 class="sec">함께한 장면 ');
-    return `<article class="reader pairsheet pairsheet--app appsheet">${bar}${picker}${hero}${callCard}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes }, basisFooter)}${hearts}${promiseCard}${renderProgress(data.pairProgress?.find(p => pairKey(p.persona,p.character)===pair.key),data.memories,data.pairProgressUnavailableReason)}${markCard}${chronicle}${intimacyCard}${initialCard}</article>`;
+    return `<article class="reader pairsheet pairsheet--app appsheet">${bar}${hero}${callCard}${renderEmotions(data, directions, options, { anniversaries, days, scenes: allScenes }, basisFooter)}${hearts}${promiseCard}${renderProgress(data.pairProgress?.find(p => pairKey(p.persona,p.character)===pair.key),data.memories,data.pairProgressUnavailableReason)}${markCard}${chronicle}${intimacyCard}${initialCard}</article>`;
   }
 }

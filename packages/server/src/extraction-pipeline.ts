@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import type { RcmDatabase } from "./db.js";
 import { applyExtractionAuditPatch } from "./extraction-audit.js";
 import { completeExtractionJob } from "./extraction-completion.js";
-import { inspectDraftEvidence } from "./evidence-review.js";
+import { inspectDraftEvidence, rescueDraftDialogues } from "./evidence-review.js";
 import { prepareReconciliation } from "./reconciliation.js";
 import { recordProgressSent, prepareStateExtraction } from "./state-extraction.js";
 import {
@@ -47,7 +47,8 @@ export async function finalizeExtractPage(options: FinalizeExtractPageOptions) {
   const { db, store, job, workerId, pageDraft, signal } = options;
   if (job.kind !== "extract") throw new Error("Extraction pipeline requires an extract job");
   const warn = options.onWarning ?? ((message: string) => console.warn(message));
-  let result = job.continuationDraft ? mergeExtractionPages(job.continuationDraft, pageDraft) : pageDraft;
+  let result = rescueDraftDialogues(db, job.chatId, job.sourceMessageIds,
+    job.continuationDraft ? mergeExtractionPages(job.continuationDraft, pageDraft, job.promptContract) : pageDraft);
   if (job.memoryAddition && memoryAdditionStopsAfterEvents(result)) {
     signal.throwIfAborted();
     options.onStage?.("storing");

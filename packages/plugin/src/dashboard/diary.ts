@@ -7,7 +7,7 @@ import {
 } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import { isRecognitionMemory } from "@rcm/shared";
-import { MILESTONE_LABELS, type PairSummary } from "./pairs.js";
+import { intimacyLabelTranslationKey, milestoneLabel, type PairSummary } from "./pairs.js";
 
 export type DiaryEntry = {
   id: string;
@@ -16,6 +16,7 @@ export type DiaryEntry = {
   storyTime: string | null;
   ordinal: number | null;
   title: string;
+  titleTranslationKey?: string;
   text: string;
   memoryId: string | null;
 };
@@ -94,7 +95,8 @@ export function buildDiary(data: DashboardData, pair: PairSummary): DiaryEntry[]
       minor: false,
       storyTime: memoryStoryTime(memory),
       ordinal: ordinalOf(item) ?? ordinalOf(memory),
-      title: String(item?.customLabel ?? "").trim() || MILESTONE_LABELS[key] || key || "스킨십 기록",
+      title: milestoneLabel(item),
+      ...(intimacyLabelTranslationKey(item) ? { titleTranslationKey: intimacyLabelTranslationKey(item) } : {}),
       text: String(item?.circumstance ?? item?.sourceMemoryTitle ?? memory?.title ?? ""),
       memoryId: memoryIdOf(item),
     });

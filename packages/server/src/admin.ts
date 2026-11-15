@@ -1,19 +1,24 @@
+import { markSourceDeleted } from "./albums.js";
+import { assertUserChat, userChatSql } from './chat-work.js';
+import { assertChatUnlocked, upgradeLockSql } from './upgrade-lock.js';
 import { lineageRevisionKey } from './lineage-revisions.js';
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { clearAuxiliaryInputs } from './auxiliary-input-cache.js';
 import type { RcmDatabase } from "./db.js";
 import type { EmbeddingService } from "./embedding.js";
-import { deleteDerivedRows } from "./derived-state.js";
+import { deleteDerivedRows, renewMemoryEpoch } from "./derived-state.js";
 import { rewindAutomaticSuccessorsToCorrections } from "./user-corrections.js";
 import { materializeInitialRelationshipProjections } from "./initial-calibration.js";
-import { memoryBookmarksKey } from "./memory-bookmarks.js";
+import { memoryBookmarksKey, memoryPreferencesKey } from "./memory-bookmarks.js";
 import { readPersonaName, viewPreferencesKey, writePersonaHint } from "./view-preferences.js";
 import { removedAliasesKey } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 import { chatPacketBudgetKey } from "./story-spine.js";
+import { narrationViewpointKey } from "./perspectives.js";
 
 export interface ChatAdminSummary {
   id: string;
+  upgradeLocked: boolean;
   chatTitle: string;
   characterId: string;
   characterName: string;
@@ -59,12 +64,14 @@ function activeLeaseCount(db: RcmDatabase, chatIds: string[]): number {
 }
 
 function requireNoActiveLease(db: RcmDatabase, chatIds: string[]): void {
+  chatIds.forEach(chatId=>{ assertUserChat(db,chatId); assertChatUnlocked(db,chatId); });
   if (activeLeaseCount(db, chatIds) > 0) throw new Error("Active extraction call must finish before deleting memory data");
 }
 
 export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = false): ChatAdminSummary[] {
   const rows = db.prepare(`
     SELECT c.engaged_at,c.last_seen_at,c.id,c.chat_title,c.character_id,c.profile,c.memory_language,c.pending_memory_language,c.static_json,c.ingestion_state,c.updated_at,
+      ${upgradeLockSql('c.id')} AS upgrade_locked,
       l.status AS lineage_status,l.kind AS lineage_kind,l.parent_chat_id,
       COALESCE((SELECT chat_title FROM chats p WHERE p.id=l.parent_chat_id),l.parent_title) AS parent_title,l.fork_ordinal,
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id) AS messages,
@@ -89,8 +96,9 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       (SELECT count(*) FROM messages m WHERE m.chat_id=c.id AND m.lifecycle IN ('committed','client_pruned') AND m.host_visibility IN ('active','all_before') AND m.memory_excluded=0 AND m.content IS NOT NULL AND m.extraction_state='cancelled') AS recoverable_messages,
       COALESCE((SELECT sum(length(CAST(content AS BLOB))) FROM messages m WHERE m.chat_id=c.id),0)
         + COALESCE((SELECT sum(length(CAST(title AS BLOB))+length(CAST(content AS BLOB))) FROM memories m WHERE m.chat_id=c.id),0) AS approximate_bytes
-    FROM chats c LEFT JOIN chat_lineage l ON l.child_chat_id=c.id ORDER BY c.updated_at DESC
+    FROM chats c LEFT JOIN chat_lineage l ON l.child_chat_id=c.id WHERE ${userChatSql('c')} ORDER BY c.updated_at DESC
   `).all() as Array<{
+    upgrade_locked: number;
     engaged_at: number | null; last_seen_at: number; id: string; chat_title: string | null; character_id: string; profile: string; memory_language: "en" | "ko" | "ja" | "zh"; pending_memory_language: "en" | "ko" | "ja" | "zh" | null; static_json: string | null; ingestion_state: "historical_pending" | "managed" | "cleared"; updated_at: number;
     messages: number; active_messages: number; has_imported_memory: number; committed_messages: number; client_pruned_messages: number; disabled_messages: number; memories: number; relationships: number; assertions: number; beliefs: number; promises: number; pending_reviews: number; pending_conflicts: number; embeddings: number; jobs: number; retrieval_diagnostics_enabled: number; reprocessable_messages: number; buffered_messages: number; waiting_for_assistant: number; recoverable_messages: number; approximate_bytes: number;
     lineage_status: string | null; lineage_kind: string | null; parent_chat_id: string | null; parent_title: string | null; fork_ordinal: number | null;
@@ -103,6 +111,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
     } catch { /* character ID remains a stable fallback */ }
     return {
       id: row.id,
+      upgradeLocked:Boolean(row.upgrade_locked),
       chatTitle: row.chat_title?.trim() || "",
       characterId: row.character_id,
       characterName,
@@ -202,20 +211,23 @@ export function deleteChats(db: RcmDatabase, embeddings: EmbeddingService, chatI
   const unique = [...new Set(chatIds)];
   if (unique.length === 0) return 0;
   requireNoActiveLease(db, unique);
-  unique.forEach((chatId) => embeddings.removeChat(chatId));
   const placeholders = unique.map(() => "?").join(",");
+  const children = db.prepare(`SELECT child_chat_id FROM chat_lineage
+    WHERE status='inherited' AND parent_chat_id IN (${placeholders})
+      AND child_chat_id NOT IN (${placeholders})`).all(...unique, ...unique) as Array<{ child_chat_id: string }>;
+  children.forEach(child=>assertChatUnlocked(db,child.child_chat_id));
+  unique.forEach((chatId) => embeddings.removeChat(chatId));
   return db.transaction(() => {
     // Resolve before deleting any ancestor, including multi-generation bulk cleanup.
-    const children = db.prepare(`SELECT child_chat_id FROM chat_lineage
-      WHERE status='inherited' AND parent_chat_id IN (${placeholders})
-        AND child_chat_id NOT IN (${placeholders})`).all(...unique, ...unique) as Array<{ child_chat_id: string }>;
     for (const child of children) writePersonaHint(db, child.child_chat_id, readPersonaName(db, child.child_chat_id));
     db.prepare(`DELETE FROM memory_fts WHERE chat_id IN (${placeholders})`).run(...unique);
     for (const chatId of unique) {
+      markSourceDeleted(db, chatId);
+      renewMemoryEpoch(db,chatId);
       clearAuxiliaryInputs(db,chatId);
-      db.prepare("DELETE FROM server_meta WHERE key IN (?,?,?,?,?,?,?,?,?,?,?,?)").run(`retrieval_trace_chat:${chatId}`, memoryBookmarksKey(chatId), viewPreferencesKey(chatId), `user_deletions:${chatId}`, `persona_hint:${chatId}`, `ledger_edit_origins:${chatId}`, removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `source_coverage_retry:${chatId}`, lineageRevisionKey(chatId));
+      db.prepare("DELETE FROM server_meta WHERE key IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(`retrieval_trace_chat:${chatId}`, memoryBookmarksKey(chatId), memoryPreferencesKey(chatId), viewPreferencesKey(chatId), `user_deletions:${chatId}`, `persona_hint:${chatId}`, `ledger_edit_origins:${chatId}`, removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `source_coverage_retry:${chatId}`, `source_coverage_family:${chatId}`, `source_coverage_folded:${chatId}`, lineageRevisionKey(chatId));
     }
-    for (const chatId of unique) db.prepare("DELETE FROM server_meta WHERE key=?").run(chatPacketBudgetKey(chatId));
+    for (const chatId of unique) db.prepare("DELETE FROM server_meta WHERE key IN (?,?)").run(chatPacketBudgetKey(chatId),narrationViewpointKey(chatId));
     return db.prepare(`DELETE FROM chats WHERE id IN (${placeholders})`).run(...unique).changes;
   })();
 }

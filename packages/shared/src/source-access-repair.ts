@@ -71,7 +71,9 @@ export function applySourceAccessRepair(draft: ExtractionDraftResult, plan: Sour
     if (matches.length !== 1) continue;
     const patch = matches[0] as any, passage = result.sourcePassages?.[target.index];
     if (!passage || passage.messageId !== target.messageId || passage.quote !== target.quote || passage.startOffset !== target.startOffset || validSourcePassageAccess(passage, sources, passage.access).length) continue;
-    if (!Array.isArray(patch.grants) || patch.grants.length > 24) continue;
+    // A failed repair must retain its invalid scope for review; it cannot
+    // convert uncertainty into an explicit narrator-only declaration.
+    if (!Array.isArray(patch.grants) || !patch.grants.length || patch.grants.length > 24) continue;
     try {
       const seenHolders = new Set<string>();
       const grants = patch.grants.map((grant: any) => {

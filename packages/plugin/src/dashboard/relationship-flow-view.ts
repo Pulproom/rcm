@@ -6,7 +6,7 @@ import { dayPart } from "./film/scene.js";
 import { type Anniversary, landmarkLabel } from "./diary.js";
 import { lex } from "./lexicon.js";
 import { MILESTONE_LABELS, pairKey } from "./pairs.js";
-import { buildAxisFlow, FLOW_AXES, firstFlowSync, flowKnots, flowPinLabels, flowValueAt, flowY, sharedFlowScale, type AxisFlow, type FlowAxis, type FlowPoint, type CurveSeries, type FlowScale } from "./relationship-flow.js";
+import { buildAxisFlow, FLOW_AXES, firstFlowSync, flowKnots, flowPinLabels, flowValueAt, flowY, ladderScale, ladderTop, ladderTopLevel, toLadderFlow, type AxisFlow, type FlowAxis, type FlowPoint, type CurveSeries, type FlowScale } from "./relationship-flow.js";
 import { sceneLocator, sceneNumbers } from "./scenes.js";
 
 export type RelationshipFlowView = { mode?: "now" | "flow"; axis?: string; scene?: number };
@@ -20,13 +20,16 @@ const sign = (delta: number) => delta > 0 ? "▲" : delta < 0 ? "▼" : "•";
 const r = (value: number) => Math.round(value * 1000) / 1000;
 const xOf = (scene: number, range: readonly [number, number]) => (scene - range[0]) / (range[1] - range[0]) * 100;
 
-function pairFlows(data: DashboardData, a: string, b: string) {
+/** Both directions on the level ladder; `currentLevel` is absent where only the changes are read. */
+function pairFlows(data: DashboardData, a: string, b: string, currentLevel?: (from: string, axis: FlowAxis) => string | undefined) {
   const numbers = sceneNumbers(data.memories ?? []);
   const locate = sceneLocator(data.memories ?? [], () => "");
   const events = (data.relationshipEvents ?? []).map((event: any) => ({ ...event, sourceMemoryId: event.sourceMemoryId || locate(event.sourceOrdinal)?.memoryId || "" }));
   const direction = (from: string, to: string) => {
     const initial = data.initialCalibration?.relationships?.find((item: any) => item.from === from && item.to === to);
-    return buildAxisFlow(events, from, to, id => numbers.get(id), axis => initial?.axes?.[axis]);
+    const flows = buildAxisFlow(events, from, to, id => numbers.get(id), axis => initial?.axes?.[axis]);
+    for (const axis of FLOW_AXES) flows[axis] = toLadderFlow(flows[axis], initial?.axes?.[axis], currentLevel?.(from, axis), ladderTop(axis));
+    return flows;
   };
   return { series: [direction(a, b), direction(b, a)] as const, range: [1, Math.max(2, ...numbers.values())] as [number, number], numbers };
 }
@@ -34,7 +37,7 @@ const changesOf = (series: readonly Record<FlowAxis, AxisFlow>[], axis?: FlowAxi
   (axis ? [axis] : FLOW_AXES).flatMap(axis => flows[axis].points.map(point => ({ point, axis, person }))));
 
 export function renderFlowReadout(data: DashboardData, names: readonly [string, string], axis: FlowAxis, scene: number | undefined, copy: Copy): string {
-  if (scene === undefined) return '<p class="duet-hint">그래프를 누르거나 밀어 보세요. 그 장면에서 두 사람의 마음이 어떻게 바뀌었는지 보여줘요.</p>';
+  if (scene === undefined) return '<p class="duet-hint">그래프를 누르거나 밀어 봐 주세요. 그 장면에서 두 사람의 마음이 어떻게 바뀌었는지 보여줘요.</p>';
   const { series, range, numbers } = pairFlows(data, ...names);
   // That scene's own changes; when it has none, the nearest change within two scenes, so a near miss still answers.
   const all = changesOf(series, axis);
@@ -77,7 +80,8 @@ function chartPins(data: DashboardData, meta: RelationshipFlowMeta, names: reado
 
 export function renderRelationshipFlow(data: DashboardData, directions: readonly Direction[], options: PairDetailRenderOptions, meta: RelationshipFlowMeta): string {
   const names: [string, string] = [directions[0]![0], directions[0]![1]];
-  const { series, range, numbers } = pairFlows(data, ...names);
+  const levelOf = (from: string, axis: FlowAxis) => options.axisValue(directions.find(direction => direction[0] === from)?.[2], axis).level;
+  const { series, range, numbers } = pairFlows(data, ...names, levelOf);
   const all = changesOf(series);
   const turning = all.filter(({ point }) => point.turning).sort((a, b) => b.point.scene - a.point.scene)[0];
   const memoryChange = turning ?? all.filter(({ point }) => point.impact === "major").sort((a, b) => b.point.scene - a.point.scene)[0];
@@ -89,7 +93,7 @@ export function renderRelationshipFlow(data: DashboardData, directions: readonly
     return `<button type="button" class="duet-chip${hasEvents(axisKey) ? "" : " is-quiet"}" data-action="pair-flow-axis" data-axis="${axisKey}" aria-pressed="${axisKey === axis}"><b>${labels[axisKey]}</b><small>${hasEvents(axisKey) ? `${esc(options.levelLabels[value.level] ?? value.level)} ${value.trend === "rising" ? "▲" : value.trend === "falling" ? "▼" : ""}` : "조용함"}</small></button>`;
   }).join("");
   const flows = series.map(flows => flows[axis]);
-  const scale = sharedFlowScale(flows);
+  const top = ladderTop(axis), scale = ladderScale(top);
   const scene = options.flowView?.scene === undefined ? undefined : Math.max(range[0], Math.min(range[1], options.flowView.scene));
   const colors = chartPersonColors(...names);
   const style = colors.map((color, index) => `--flow-${index === 0 ? "a" : "b"}-h:${r(color.h)};--flow-${index === 0 ? "a" : "b"}-s:${r(color.s)}%;--flow-${index === 0 ? "a" : "b"}-l:${r(color.l)}%`).join(";");
@@ -101,7 +105,17 @@ export function renderRelationshipFlow(data: DashboardData, directions: readonly
     const path = curve(flow, range, scale), id = `duet-fade-${person}`;
     return `<g class="duet-person-${person}"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".22"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path class="duet-area" fill="url(#${id})" d="${path} L100,100 L0,100 Z"/><path class="duet-line" pathLength="1" d="${path}"/></g>`;
   }).join("");
-  const dots = flows.map((flow, person) => `<i class="duet-end duet-person-${person}" style="left:100%;top:${r(flowY(flow.end, scale))}%"></i>`).join("");
+  const ends = flows.map(flow => flowY(flow.end, scale));
+  const dots = ends.map((end, person) => `<i class="duet-end duet-person-${person}" style="left:100%;top:${r(end)}%"></i>`).join("");
+  // Only the two ends are named: the heights between them are the shape of the changes, not recorded levels.
+  const levels = names.map(name => levelOf(name, axis));
+  const near = Math.abs(ends[0]! - ends[1]!) < 11;
+  const word = (level: string, top: number, cls: string) => level === "unknown" ? "" : `<span class="duet-end-word${cls}" style="top:${r(top)}%">${esc(options.levelLabels[level] ?? level)}</span>`;
+  // Two lines arriving at the same level share one word; otherwise the lower line's word hangs below it.
+  const endWords = near && levels[0] === levels[1] ? word(levels[0]!, Math.min(ends[0]!, ends[1]!), "")
+    : levels.map((level, person) => word(level, ends[person]!, ` duet-person-${person}${near && (ends[person]! > ends[1 - person]! || ends[person] === ends[1 - person] && person === 1) ? " is-below" : ""}`)).join("");
+  const edges = `<span class="duet-edge is-top" style="top:${r(flowY(top, scale))}%">${esc(options.levelLabels[ladderTopLevel(axis)] ?? "")}</span><span class="duet-edge is-floor" style="top:${r(flowY(0, scale))}%">${esc(options.levelLabels.none ?? "")}</span>`;
+  const rungs = Array.from({ length: top }, (_, index) => `M0,${r(flowY(index + 1, scale))} H100`).join(" ");
   const sync = axis === "affection" ? firstFlowSync(flows[0]!, flows[1]!, range) : undefined;
   const syncHtml = sync ? `<span class="duet-sync" style="left:${r(xOf(sync.scene, range))}%;top:${r(flowY(sync.value, scale))}%"><i></i><small>${lex().skin === "phone" ? "같은 마음" : "IN SYNC"}</small></span>` : "";
   const axisTurning = changesOf(series, axis).filter(({ point }) => point.turning).sort((a, b) => b.point.scene - a.point.scene)[0];
@@ -110,7 +124,7 @@ export function renderRelationshipFlow(data: DashboardData, directions: readonly
   // Draw the lines in once per pair and axis; scrubbing and other re-renders must not replay it.
   const drawKey = `${names.join("|")}|${axis}`, fresh = !drawnFlows.has(drawKey);
   drawnFlows.add(drawKey);
-  const chart = `<div class="duet-chart${fresh ? " is-drawing" : ""}" role="img" tabindex="0" data-action="pair-flow-scrub" data-axis="${axis}" data-from="${esc(names[0])}" data-to="${esc(names[1])}" data-first="${range[0]}" data-last="${range[1]}" data-scene="${scene ?? ""}" data-curves="${esc(JSON.stringify(flows.map(flow => ({ start: flow.start, points: flow.points.map(({ scene, value }) => ({ scene, value })) }))))}" aria-label="${esc(names.join("와 "))}의 ${labels[axis]} 흐름, S#${range[0]}부터 S#${range[1]}까지. 좌우 화살표로 장면을 고를 수 있어요."><div class="duet-plot"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="duet-grid" d="M0,25 H100 M0,50 H100 M0,75 H100"/>${paths}<path class="duet-baseline" d="M0,100 H100"/></svg>${pins.map(pin => `<i class="duet-pin-rule" style="left:${r(xOf(pin.scene, range))}%"></i>`).join("")}${dots}${syncHtml}${turnHtml}${cursor}</div><div class="duet-pins" aria-hidden="true">${pinHtml}</div><div class="duet-ruler" aria-hidden="true"><span>S#${range[0]}</span><span>S#${Math.round((range[0] + range[1]) / 2)}</span><span>S#${range[1]}</span></div></div>`;
+  const chart = `<div class="duet-chart${fresh ? " is-drawing" : ""}" role="img" tabindex="0" data-action="pair-flow-scrub" data-axis="${axis}" data-from="${esc(names[0])}" data-to="${esc(names[1])}" data-first="${range[0]}" data-last="${range[1]}" data-scene="${scene ?? ""}" data-top="${top}" data-curves="${esc(JSON.stringify(flows.map(flow => ({ start: flow.start, points: flow.points.map(({ scene, value }) => ({ scene, value })) }))))}" aria-label="${esc(names.join("와 "))}의 ${labels[axis]} 흐름, S#${range[0]}부터 S#${range[1]}까지. ${names.map((name, person) => `${esc(name)} ${esc(options.levelLabels[levels[person]!] ?? levels[person])}`).join(", ")}. 좌우 화살표로 장면을 고를 수 있어요."><div class="duet-plot"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="duet-grid" d="${rungs}"/><path class="duet-floor" d="M0,${r(flowY(0, scale))} H100"/>${paths}<path class="duet-baseline" d="M0,100 H100"/></svg>${pins.map(pin => `<i class="duet-pin-rule" style="left:${r(xOf(pin.scene, range))}%"></i>`).join("")}${edges}${dots}${endWords}${syncHtml}${turnHtml}${cursor}</div><div class="duet-pins" aria-hidden="true">${pinHtml}</div><div class="duet-ruler" aria-hidden="true"><span>S#${range[0]}</span><span>S#${Math.round((range[0] + range[1]) / 2)}</span><span>S#${range[1]}</span></div></div>`;
   const legend = `<div class="duet-legend">${names.map((name, person) => `<span class="duet-person-${person}"><i></i>${esc(name)}의 마음</span>`).join("")}</div>`;
   // Only the axis being looked at speaks up when it is quiet; the chips already mark the others as 조용함.
   const quietLines: Record<FlowAxis, string> = {
@@ -141,7 +155,7 @@ export function installRelationshipFlowScrub(root: HTMLElement): void {
     if (chart.dataset.scene === String(at)) return;
     chart.dataset.scene = String(at);
     const flows = JSON.parse(chart.dataset.curves!) as CurveSeries[];
-    const scale = sharedFlowScale(flows), cursor = chart.querySelector<HTMLElement>(".duet-cursor")!;
+    const scale = ladderScale(Number(chart.dataset.top)), cursor = chart.querySelector<HTMLElement>(".duet-cursor")!;
     cursor.hidden = false; cursor.style.left = `${xOf(at, [first, last])}%`;
     cursor.classList.toggle("is-start", at - first < (last - first) * .1);
     cursor.classList.toggle("is-end", last - at < (last - first) * .1);

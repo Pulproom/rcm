@@ -3,7 +3,7 @@ import { queueRelationshipProjection, flushRelationshipProjectionQueue } from '.
 
 export const lineageRevisionKey=(chatId:string)=>`lineage_revision_clock:${chatId}`;
 const itemKinds:Record<string,string[]>= {
-  memories:['memory'], memory_details:['memory_detail'], memory_recall_events:['memory_recall_event'],
+  memories:['memory'], memory_dialogues:['dialogue'], memory_details:['memory_detail'], memory_recall_events:['memory_recall_event'],
   assertions:['assertion'], beliefs:['belief','belief_tombstone'], social_knowledge_events:['social_knowledge'],
   promises:['promise'], promise_events:['promise_event'], conflicts:['conflict'], reconciliation_items:['reconciliation_review'],
   atom_relations:['atom_relation'], relationship_baselines:['relationship_baseline'], relationship_events:['relationship_event'],

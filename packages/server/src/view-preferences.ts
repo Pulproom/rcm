@@ -1,3 +1,4 @@
+import { assertChatUnlocked } from './upgrade-lock.js';
 import { z } from "zod";
 import type { RcmDatabase } from "./db.js";
 
@@ -39,6 +40,7 @@ export const personaHintKey = (chatId: string): string => `persona_hint:${chatId
 
 /** An unavailable host identity is not an instruction to erase the last known persona. */
 export function writePersonaHint(db: RcmDatabase, chatId: string, hint: unknown): void {
+  assertChatUnlocked(db,chatId);
   if (typeof hint !== "string" || !hint.trim()) return;
   db.prepare("INSERT INTO server_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
     .run(personaHintKey(chatId), JSON.stringify(hint.trim()));

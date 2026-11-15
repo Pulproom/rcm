@@ -13,6 +13,7 @@ const escapeHtml = (value: unknown): string => String(value ?? "")
 
 const tabLabels: Record<Tab, string> = {
   overview: "홈",
+  albums: "추억",
   initial: "인물",
   story: "기억",
   timeline: "기억",
@@ -75,10 +76,12 @@ export function renderFoldSummary(label: string, count?: number): string {
 /** Gives every plain disclosure the film fold shape. Menus, inline evidence (`.cite`), collapsed acts, in-place clamps, scene gaps, contact rows (`.acq`) and the pair-progress add form and done rows (`.prog__add`, `.prog__fold`) keep their own shape. */
 export function decorateFoldSummaries(scope: ParentNode): void {
   scope.querySelectorAll<HTMLDetailsElement>("details:not([data-menu]):not(.cite):not(.msg):not(.clamp):not(.gap):not(.acq):not(.prog__add):not(.prog__fold):not(.fam__fold)").forEach((details) => {
+    // The album's chapter/day picker owns its disclosure layout and chevrons.
+    if (details.closest(".album-scene-picker")) return;
     const summary = Array.from(details.children).find((child): child is HTMLElement => child instanceof HTMLElement && child.tagName === "SUMMARY");
     if (!summary) return;
-    // Inset card rows keep their own row styling; only the chevron is shared.
-    if (!details.classList.contains("memory-detail-row")) details.classList.add("fold");
+    // Inset card rows and job diagnostics have their own disclosure styling.
+    if (!details.matches(".memory-detail-row, .job-tech")) details.classList.add("fold");
     if (summary.querySelector(".chev")) return;
     summary.insertAdjacentHTML("beforeend", foldChevron());
   });
@@ -89,6 +92,7 @@ const shellTabs: Array<{ tab: Tab; label: string; icon: string }> = [
   { tab: "timeline", label: "기억", icon: "film" },
   { tab: "initial", label: "인물", icon: "people" },
   { tab: "world", label: "현재", icon: "clip" },
+  { tab: "albums", label: "추억", icon: "album" },
   { tab: "reviews", label: "관리", icon: "sliders" },
 ];
 
@@ -99,17 +103,21 @@ const activeShellTab = (tab: Tab): Tab => {
   return tab;
 };
 
+/** Screen chrome belongs to the dashboard skin, including full-screen album routes. */
+export const renderScreenBar = (content: string, classes = "") => `<header class="topbar screen-bar ${classes}">${content}</header>`;
+
 export function renderShell(opts: {
   tab: Tab;
   crumbs: Crumb[];
   translation: "ko" | "en";
   pencilCount: number;
   setupPending?: boolean;
+  memoryAlbum?: boolean;
   chatTitle?: string;
 }): { nav: string; bar: string } {
   const selectedTab = activeShellTab(opts.tab);
   const brand = `<div class="brand"><span class="credit">RCM</span>${opts.chatTitle ? `<small>${escapeHtml(opts.chatTitle)}</small>` : ""}</div>`;
-  const nav = `${brand}${shellTabs.map((item) => {
+  const nav = `${brand}${shellTabs.filter(item => item.tab !== "albums" || opts.memoryAlbum).map((item) => {
     const current = item.tab === selectedTab ? ' aria-current="page"' : "";
     const badge = item.tab === "world" && opts.pencilCount > 0
       ? `<span class="badge" aria-label="대조 필요 ${opts.pencilCount}개">${opts.pencilCount}</span>`

@@ -1,4 +1,17 @@
 import { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX } from "@rcm/shared";
+import type { RcmDatabase } from "./db.js";
+
+/** Restoring a hidden detail retains user ownership without a text-edit badge. */
+export function isUserOwnedMemoryDetail(row: {user_edited?:number;user_hidden?:number;original_text?:string|null}): boolean {
+  return !!row.user_edited || !!row.user_hidden || row.original_text != null;
+}
+
+/** An explicit replacement link distinguishes protected parents from Call 2
+ * state memories that legitimately share the same extraction batch. */
+export function preservedLegacyParentIds(db: RcmDatabase, chatId: string): Set<string> {
+  return new Set((db.prepare(`SELECT id FROM memories WHERE chat_id=? AND active=1 AND card_shape=0
+    AND user_managed=0 AND replacement_memory_key IS NOT NULL`).all(chatId) as Array<{id:string}>).map(row=>row.id));
+}
 
 /** Product-owned keys and typed social links identify cognition, never prose. */
 export function recognitionDetailSql(alias = 'd'): string {
@@ -9,10 +22,10 @@ export function recognitionDetailSql(alias = 'd'): string {
 
 /** Mixed event parents remain scenes; only standalone cognition is state-only. */
 export function recognitionOnlyMemorySql(alias = 'm'): string {
-  return `(instr(COALESCE(${alias}.memory_key,''),'${INITIAL_CALIBRATION_MEMORY_KEY_PREFIX}')=1 OR (
+  return `(${alias}.card_shape=0 AND (instr(COALESCE(${alias}.memory_key,''),'${INITIAL_CALIBRATION_MEMORY_KEY_PREFIX}')=1 OR (
     EXISTS (SELECT 1 FROM memory_details cognition_detail WHERE cognition_detail.chat_id=${alias}.chat_id AND cognition_detail.memory_id=${alias}.id AND ${recognitionDetailSql('cognition_detail')})
     AND NOT EXISTS (SELECT 1 FROM memory_details scene_detail WHERE scene_detail.chat_id=${alias}.chat_id AND scene_detail.memory_id=${alias}.id AND NOT ${recognitionDetailSql('scene_detail')})
-    AND NOT EXISTS (SELECT 1 FROM memory_dialogues scene_dialogue WHERE scene_dialogue.memory_id=${alias}.id)))`;
+    AND NOT EXISTS (SELECT 1 FROM memory_dialogues scene_dialogue WHERE scene_dialogue.memory_id=${alias}.id))))`;
 }
 
 /** Cognition belongs to the state ledger, not recalled scenes.

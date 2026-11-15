@@ -34,7 +34,8 @@ export interface AuxiliaryRepairMessage {
 
 export type AuxiliaryRepairRequest =
   | { kind: "memory_group" }
-  | { kind: "extraction"; sourceMode: "source_units" | "message_ids" }
+  | { kind: "quiz" }
+  | { kind: "extraction"; sourceMode: "source_units" | "message_ids"; promptContract?: "e1d" | "e1e" | "e1f" }
   | { kind: "initial_calibration" }
   | { kind: "episode_draft" }
   | { kind: "episode_finalize" }
@@ -56,6 +57,13 @@ function diagnosticValue(value: unknown): string | undefined {
 
 /** A bounded, non-secret-bearing repair diagnostic shared by server and Risu workers. */
 export function structuredValidationDiagnostic(error: unknown): string {
+  if (error instanceof SyntaxError) {
+    // Only parser-owned location suffixes are metadata. A quoted response may
+    // itself contain words such as "position", so never search arbitrary prose.
+    const position = /\bat position (\d+)(?: \(line \d+ column \d+\))?$/i.exec(error.message)?.[1];
+    const location = /\bat line (\d+) column (\d+)(?: of the JSON data)?$/i.exec(error.message);
+    return `invalid_json${position ? `: position=${position}` : location ? `: line=${location[1]} column=${location[2]}` : ""}`;
+  }
   const issues = (error as { issues?: Array<{ path?: PropertyKey[]; code?: string; message?: string; values?: unknown[]; input?: unknown }> } | undefined)?.issues;
   if (Array.isArray(issues) && issues.length > 0) {
     return issues.slice(0, 12).map((issue) => {
@@ -67,7 +75,6 @@ export function structuredValidationDiagnostic(error: unknown): string {
       return parts.join(" ");
     }).join("; ");
   }
-  if (error instanceof SyntaxError) return `invalid_json: ${error.message.replace(/\s+/g, " ").slice(0, 500)}`;
   if (error instanceof Error) return `${error.name}: ${error.message.replace(/\s+/g, " ").slice(0, 500)}`;
   return `unknown_validation_error: ${String(error).replace(/\s+/g, " ").slice(0, 500)}`;
 }
@@ -88,18 +95,18 @@ export async function validateStructuredRepairOrRegenerate<T>(args: {
     try {
       return await args.validate(regenerated, "regeneration");
     } catch (error) {
-      throw new Error(`UNCHANGED_INVALID_REPAIR: ${args.purpose} returned the same invalid JSON and fresh regeneration was invalid`, { cause: error });
+      throw new Error(`UNCHANGED_INVALID_REPAIR: ${args.purpose} returned the same invalid JSON and fresh regeneration was invalid; ${structuredValidationDiagnostic(error)}`, { cause: error instanceof SyntaxError ? new SyntaxError(structuredValidationDiagnostic(error)) : error });
     }
   }
   try {
     return await args.validate(args.repaired, "repair");
   } catch (error) {
-    if (!(error instanceof StructuredJsonSyntaxError)) throw error;
+    const code = error instanceof StructuredJsonSyntaxError ? "INVALID_REPAIR_SYNTAX" : "INVALID_REPAIR_CONTENT";
     const regenerated = await args.regenerate();
     try {
       return await args.validate(regenerated, "regeneration");
     } catch (cause) {
-      throw new Error(`INVALID_REPAIR_SYNTAX: ${args.purpose} repair was not valid JSON and fresh regeneration was invalid`, { cause });
+      throw new Error(`${code}: ${args.purpose} repair was ${error instanceof StructuredJsonSyntaxError ? "not valid JSON" : "invalid"} and fresh regeneration was invalid; ${structuredValidationDiagnostic(cause)}`, { cause: cause instanceof SyntaxError ? new SyntaxError(structuredValidationDiagnostic(cause)) : cause });
     }
   }
 }
@@ -190,9 +197,14 @@ const commonInstruction ="Correct only the previous response. Preserve valid, su
 
 function taskInstruction(request: AuxiliaryRepairRequest): string {
   switch (request.kind) {
+    case "quiz":
+      return "Match the original quiz schema. Use only supplied memoryRef values, allowed format/difficulty enums, distinct options and an answerIndex within the options. An explicit {items:[]} is allowed when no supported question can be made.";
     case "memory_group":
       return "Use only supplied evidence IDs and keep every valid grouping section and member.";
     case "extraction": {
+      if ((request.promptContract === "e1d" || request.promptContract === "e1e" || request.promptContract === "e1f")) return request.sourceMode === "source_units"
+        ? `Keep the original ${request.promptContract} event writing format and sourceRef contract. Preserve valid plots, details, keys and source evidence; details are optional, not core replicas. Correct only the reported structural error.`
+        : `Keep the original ${request.promptContract} event contract: each memory needs a non-empty plot and source evidence; details are optional. Evidence uses [{messageId,quote?}] with supplied message IDs and exact optional quotes. Preserve valid fields, keys and content; do not introduce state lifecycle fields or invent evidence.`;
       if (request.sourceMode === "source_units") {
         return "Use the same sourceRef and evidenceSourceRefs contract as the original system prompt. Preserve valid items and their keys. Do not replace missing evidence with invented facts.";
       }

@@ -8,6 +8,7 @@ export interface StorySpineValidationContext {
   level: "segment" | "arc" | "overview";
   allowedSupportItemIds: readonly string[];
   supportAccess: Record<string, StorySpineSupportAccess>;
+  outputScopes?: Array<{ scope: string; holder: string | null }>;
 }
 
 interface StoryBeat {
@@ -36,6 +37,9 @@ export function validateStorySpineConsolidation(result: StoryResult, context: St
   const allowed = new Set(context.allowedSupportItemIds);
   const outputScopes = new Set<string>();
   for (const node of result.nodes) {
+    if (context.outputScopes && !context.outputScopes.some(scope => scope.scope === node.scope && (scope.holder ?? null) === (node.holder ?? null))) {
+      throw new Error(`Story rewrite produced an unaffected scope: scope=${JSON.stringify(node.scope)} holder=${JSON.stringify(node.holder ?? null)}`);
+    }
     const outputKey = `${node.scope}:${normalizedHolder(node.holder)}`;
     if (outputScopes.has(outputKey)) throw new Error(`Duplicate story spine scope in one generation group: ${outputKey}`);
     outputScopes.add(outputKey);

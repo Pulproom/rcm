@@ -25,7 +25,7 @@ export function selectorBundles(db:RcmDatabase,chatId:string,query:string,answer
   const orders=new Map((db.prepare("SELECT message_id,ordinal FROM messages WHERE chat_id=?").all(chatId) as Array<{message_id:string;ordinal:number}>).map(row=>[row.message_id,row.ordinal]));
   const entries=[...groups.values()].map(evidence=>{
     const parts=evidence.map(e=>{
-      const scope=e.knownBy ? publicKnowledgeScope(e.knownBy) : undefined;
+      const scope=e.knownBy ? publicKnowledgeScope(e.knownBy, e.knownByEveryone) : undefined;
       return {kind:e.kind,text:e.text,speaker:e.speaker,knowledge:scope?.knownBy,everyone:scope?.knownByEveryone,basis:e.basis,
         time:e.time,record:e.context,sourceOrder:e.sourceRange?orders.get(e.sourceRange.messageId):undefined};
     });

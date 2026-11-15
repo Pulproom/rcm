@@ -1,4 +1,5 @@
 import { ProviderBudget } from "./provider-budget.js";
+import { reattachUpgradeRuns } from './upgrade-run.js';
 import { serve } from "@hono/node-server";
 import { createApp } from "./api.js";
 import { loadConfig } from "./config.js";
@@ -8,11 +9,14 @@ import { EmbeddingService } from "./embedding.js";
 import { ServerLlmStore } from "./server-llm.js";
 import { ServerExtractionWorker } from "./server-worker.js";
 import { UpdateService } from "./update-service.js";
+import { dirname, join } from "node:path";
+import { createAlbumPhotoStore } from "./album-photos.js";
 
 const config = loadConfig();
 if (process.env.RCM_TASK_BUDGET_PATH) globalThis.fetch = new ProviderBudget(process.env.RCM_TASK_BUDGET_PATH).wrap(globalThis.fetch);
 const handle = openDatabase(config.dbPath);
 reconcileUnrelatedProtectedReviews(handle.db);
+createAlbumPhotoStore(join(dirname(config.dbPath), "albums")).sweepOrphans(handle.db);
 const embeddings = new EmbeddingService(handle.db, {
   enabled: config.embeddings === "voyage",
   vectorEnabled: handle.vectorEnabled,
@@ -25,6 +29,7 @@ const llmStore = new ServerLlmStore(handle.db, config.secretsPath, config.llmApi
 const serverWorker = new ServerExtractionWorker(handle.db, llmStore, embeddings, config.leaseSeconds);
 const updateService = new UpdateService(config);
 const app = createApp({ db: handle.db, config, embeddings, vectorEnabled: handle.vectorEnabled, llmStore, serverWorker, updateService });
+reattachUpgradeRuns(handle.db);
 
 serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) => {
   console.log(`[RCM] Server listening on http://${info.address}:${info.port}`);

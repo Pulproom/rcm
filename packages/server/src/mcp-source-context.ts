@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { estimateTokens, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange, type MemoryContextItem } from "@rcm/shared";
+import { segmentSentences, estimateTokens, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange, type MemoryContextItem } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import type { SemanticSearchResult, SemanticSourceHit } from "./embedding.js";
 import { memoryAtomKey, memoryDetailAtomKey, memoryDialogueAtomKey } from "./memory-atoms.js";
@@ -15,10 +15,10 @@ export interface McpProvidedSourceDiagnostic { sources:number;windows:number;can
 const hash=(text:string)=>createHash("sha256").update(text).digest("hex");
 
 function sentenceRanges(text:string,offset=0):Array<{start:number;end:number}>{
-  try{return [...new Intl.Segmenter(undefined,{granularity:"sentence"}).segment(text)].flatMap(segment=>{
+  return segmentSentences(text).flatMap(segment=>{
     const leading=segment.segment.search(/\S/u);if(leading<0)return[];
     return [{start:offset+segment.index+leading,end:offset+segment.index+segment.segment.trimEnd().length}];
-  });}catch{return [...text.matchAll(/\S[\s\S]*?(?:[.!?。！？]+(?=\s|$)|$)/gu)].map(match=>({start:offset+match.index!,end:offset+match.index!+match[0].trimEnd().length}));}
+  });
 }
 
 function sentenceWindow(source:Source,start:number,end:number,paragraphStart:number,paragraphEnd:number,ceiling:number):SourcePassage|undefined{

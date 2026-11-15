@@ -1,6 +1,15 @@
 import type { ServerClient } from "../api-client.js";
 import type { DashboardData } from "../dashboard.js";
 
+export function reconciliationTarget(
+  review: { candidates: Array<{ id: string; value?: Record<string, unknown> }>; decision?: { targetIds?: unknown; targetId?: unknown } },
+) {
+  const decision = review.decision;
+  const ids = decision?.targetIds ?? (typeof decision?.targetId === "string" ? [decision.targetId] : []);
+  if (!Array.isArray(ids) || ids.length !== 1 || typeof ids[0] !== "string") return undefined;
+  return review.candidates.find(candidate => candidate.id === ids[0]);
+}
+
 export type AttentionFilter = "all" | "duplicate" | "conflict" | "audit" | "small";
 export type AttentionViewState = { selectedId: string; query: string; filter: AttentionFilter; mobileDetail: boolean };
 type AttentionData = Pick<DashboardData, "reconciliationReviews" | "extractionAudits">;
@@ -29,7 +38,7 @@ export interface AttentionController {
 
 /** The caller keeps the shared refresh, dirty-form and error boundaries. */
 export function createAttentionController(view: AttentionViewState, root: HTMLElement,
-  render: () => void, client: Pick<ServerClient, "request">): AttentionController {
+  render: () => void, client: Pick<ServerClient, "request">, syncSources: (chatId: string) => Promise<void>): AttentionController {
   return {
     applyTabFilter(filter) {
       if (!isAttentionFilter(filter)) return;
@@ -50,6 +59,22 @@ export function createAttentionController(view: AttentionViewState, root: HTMLEl
       if (empty) empty.hidden = !query || visible > 0;
     },
     handleViewAction(action, target) {
+      if (action === 'choose-small-review-source') {
+        const input = target as HTMLInputElement;
+        input.checked = true;
+        const save = root.querySelector<HTMLButtonElement>('[data-source-selection="true"]');
+        if (save) save.disabled = false;
+        return true;
+      }
+      if (action === "edit-small-review") {
+        const form = root.querySelector<HTMLFormElement>("#small-review-form");
+        if (form) {
+          form.hidden = false; target.hidden = true;
+          form.nextElementSibling?.querySelector('[data-resolution="keep_as_written"]')?.classList.replace("btn--primary", "btn--secondary");
+          form.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+        }
+        return true;
+      }
       if (action === "attention-filter") {
         const next = target.dataset.filter;
         if (!isAttentionFilter(next)) return true;
@@ -71,6 +96,8 @@ export function createAttentionController(view: AttentionViewState, root: HTMLEl
         const resolution = target.dataset.resolution as ReconciliationResolution;
         const review = data.reconciliationReviews.find((item) => item.id === reviewId);
         if (!review) return;
+        const targetId = resolution === "merge" || resolution === "update" ? reconciliationTarget(review)?.id : undefined;
+        if ((resolution === "merge" || resolution === "update") && (!targetId || target.dataset.targetId !== targetId)) return;
         const form = root.querySelector<HTMLFormElement>(`.reconciliation-edit[data-review-id="${CSS.escape(reviewId)}"]`);
         const values = form ? new FormData(form) : undefined;
         const editedItem = { ...review.incoming };
@@ -79,23 +106,52 @@ export function createAttentionController(view: AttentionViewState, root: HTMLEl
           else if ("value" in editedItem) editedItem.value = String(values.get("canonicalValue") ?? editedItem.value);
           else editedItem.content = String(values.get("canonicalValue") ?? editedItem.content);
         }
-        await client.request(`/v1/chats/${chat}/reconciliation-reviews/${encodeURIComponent(reviewId)}`, { method: "PATCH", body: JSON.stringify({ action: resolution, targetId: target.dataset.targetId || undefined, editedItem }) });
+        await client.request(`/v1/chats/${chat}/reconciliation-reviews/${encodeURIComponent(reviewId)}`, { method: "PATCH", body: JSON.stringify({ action: resolution, targetId, editedItem }) });
         return { kind: "reconciliation", reviewId, resolution };
       }
       if (action === "resolve-small-review" || action === "resolve-small-review-bulk") {
         const visibleIds = new Set([...root.querySelectorAll<HTMLElement>("[data-attention-row]")].filter(row => !row.hidden).map(row => row.dataset.id));
         const items = action === "resolve-small-review-bulk"
-          ? data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending" && visibleIds.has(`small:${audit.id}:${item.id}`)).map((item: any) => ({auditId: audit.id, candidateId: item.id})))
+          ? data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending" && (target.dataset.resolution !== "keep_as_written" || item.kind === "dialogue" || item.kind === "passage") && visibleIds.has(`small:${audit.id}:${item.id}`)).map((item: any) => ({auditId: audit.id, candidateId: item.id})))
           : [{auditId: target.dataset.auditId, candidateId: target.dataset.id}];
         if (!items.length) return;
-        const response = await client.request<{items: Array<{message: string}>}>(`/v1/chats/${chat}/small-reviews/resolve`, {method: "POST", body: JSON.stringify({items, action: target.dataset.resolution})});
-        showSmallReviewSaved(response.items[0]?.message ?? "후보를 처리했어요.");
+        if (target.dataset.sourceSelection === 'true') {
+          const selected = root.querySelector<HTMLInputElement>('input[name="small-review-source"]:checked');
+          if (!selected) return;
+          Object.assign(items[0]!, {sourceChoiceId: selected.value});
+        }
+        const edited = target.dataset.resolution === "keep_edited";
+        const text = edited ? String(new FormData(target as HTMLFormElement).get("text") ?? "") : undefined;
+        if (target.dataset.resolution === 'retry') await syncSources(decodeURIComponent(chat));
+        const response = await client.request<{items: Array<{message: string; status?: string; reason?:string}>; counts?:{kept:number;pending:number;missingSource:number;skipped:number;stale:number}}>(`/v1/chats/${chat}/small-reviews/resolve`, {method: "POST", body: JSON.stringify({items, action: target.dataset.resolution, ...(edited ? {text} : {})})});
+        if (edited && response.items[0]?.status === "pending") {
+          const error = target.querySelector<HTMLElement>("[data-small-review-error]");
+          if (error) { error.textContent = response.items[0].message; error.hidden = false; }
+          target.querySelector("textarea")?.setAttribute("aria-invalid", "true");
+          return;
+        }
+        items.forEach((selection, index) => {
+          const saved = response.items[index];
+          const candidate = data.extractionAudits.find(audit => audit.id === selection.auditId)?.smallReviews?.find((item: any) => item.id === selection.candidateId);
+          if (candidate && saved?.status) candidate.status = saved.status;
+        });
+        if (target.dataset.resolution === "keep_as_written" && action === "resolve-small-review-bulk" && response.counts) {
+          const {kept,pending,missingSource,stale} = response.counts;
+          showSmallReviewSaved([
+            kept ? `${kept}개를 남겼어요.` : "",
+            missingSource ? `${missingSource}개는 원문 위치가 없어 남겨 뒀어요.` : "",
+            pending > missingSource ? `${pending - missingSource}개는 확인이 필요해 남겨 뒀어요.` : "",
+            stale ? `${stale}개는 원문이 바뀌어 닫았어요.` : "",
+          ].filter(Boolean).join(" ") || "후보를 처리했어요.");
+        } else showSmallReviewSaved(response.items[0]?.message ?? "후보를 처리했어요.");
+        if (target.dataset.resolution === "keep_as_written" && action !== "resolve-small-review-bulk" && response.items[0]?.status === "pending") return;
         view.mobileDetail = false;
         view.selectedId = "";
         return { kind: "small" };
       }
       if (action === "retry-extraction-audit") {
         const auditId = target.dataset.id ?? "";
+        await syncSources(decodeURIComponent(chat));
         await client.request(`/v1/chats/${chat}/extraction-audits/${encodeURIComponent(auditId)}/retry`, { method: "POST" });
         return { kind: "audit" };
       }

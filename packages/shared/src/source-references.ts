@@ -1,6 +1,7 @@
 import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { modelImageRanges } from "./model-text.js";
 import { DIALOGUE_SOURCE_FORM_GUIDANCE } from "./dialogue-source-guidance.js";
+import { segmentSentences } from "./sentence-segmentation.js";
 /** Model-facing source selectors. Canonical storage continues to use message evidence. */
 export interface SourceUnit {
   ref: string;
@@ -16,6 +17,67 @@ export interface SourceUnit {
 }
 
 export interface SourceUnitBuildOptions { granularity?: "sentence" | "display" }
+
+/** Recognize unambiguous, same-run Markdown asterisk pairs. */
+function emphasisClosers(text: string): Map<number, number> {
+  const closers = new Map<number, number>();
+  // Code spans can contain literal markers. Leave runs with backticks untouched.
+  if (text.includes("`")) return closers;
+  let openingLength = 0;
+  for (const match of text.matchAll(/\*+/gu)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const length = end - start;
+    let escapeStart = start;
+    while (escapeStart > 0 && text[escapeStart - 1] === "\\") escapeStart--;
+    if ((start - escapeStart) % 2 || length > 3) { openingLength = 0; continue; }
+    const beforeSpace = start === 0 || /\s/u.test(text[start - 1]!);
+    const afterSpace = end === text.length || /\s/u.test(text[end]!);
+    const beforePunctuation = /[\p{P}\p{S}]$/u.test(text.slice(Math.max(0, start - 2), start));
+    const afterPunctuation = /^[\p{P}\p{S}]/u.test(text.slice(end, end + 2));
+    const opens = !afterSpace && (!afterPunctuation || beforeSpace || beforePunctuation);
+    const closes = !beforeSpace && (!beforePunctuation || afterSpace || afterPunctuation);
+    if (closes && !opens && openingLength === length) closers.set(start, length);
+    openingLength = opens && !closes && !openingLength ? length : 0;
+  }
+  return closers;
+}
+
+/** Rejoin legacy evidence only when the exact concatenation identifies one visible closing delimiter. */
+export function joinSplitEmphasisQuote(source: string, preceding: string, marker: string): string | undefined {
+  if (!preceding.trim() || !/^\*{1,3}$/u.test(marker)) return undefined;
+  const quote = preceding + marker;
+  const start = source.indexOf(quote);
+  if (start < 0 || source.indexOf(quote, start + 1) >= 0 || !sourceRangeIsVisible(source, start, start + quote.length)) return undefined;
+  const markerStart = start + preceding.length;
+  for (const run of source.matchAll(/[^\r\n<>]+/gu)) {
+    if (run.index > markerStart) break;
+    if (markerStart < run.index + run[0].length) {
+      return emphasisClosers(run[0]).get(markerStart - run.index) === marker.length ? quote : undefined;
+    }
+  }
+  return undefined;
+}
+
+function* sourceChunkEnds(text: string, start: number, end: number, closers?: Map<number, number>): Generator<number> {
+  const chunks = /[\s\S]{1,800}/uy;
+  while (start < end) {
+    chunks.lastIndex = start;
+    let boundary = Math.min(chunks.exec(text) ? chunks.lastIndex : end, end);
+    if (boundary < end && closers?.size) {
+      for (let part = 0; part < 3; part++) {
+        const markerStart = boundary - part;
+        if ((closers.get(markerStart) ?? 0) <= part) continue;
+        // Leave the last content character with the entire closer in the next chunk.
+        const preceding = /.$/su.exec(text.slice(Math.max(0, markerStart - 2), markerStart))![0];
+        boundary = markerStart - preceding.length;
+        break;
+      }
+    }
+    yield boundary;
+    start = boundary;
+  }
+}
 
 function displaySpanInLine(line: string): { start: number; end: number } | undefined {
   const start = line.search(/\S/u);
@@ -69,7 +131,6 @@ export function findAtomicDisplaySpans(content: string): Array<{ start: number; 
 
 export function buildSourceUnits(messages: Array<{ id: string; content: string; canonicalHash: string }>, options: SourceUnitBuildOptions = {}): SourceUnit[] {
   const units: SourceUnit[] = [];
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
   const emit = (message: { id: string; content: string; canonicalHash: string }, start: number, end: number, atomicDisplaySpan = false): void => {
     const raw = message.content.slice(start, end);
     const trimmed = raw.trim();
@@ -109,21 +170,41 @@ export function buildSourceUnits(messages: Array<{ id: string; content: string; 
       for (const piece of pieces) {
         if (piece.atomic) { emit(message, piece.start, piece.end, true); continue; }
         const text = message.content.slice(piece.start, piece.end);
-      // Keep line and markup boundaries even when the sentence segmenter joins them.
-      for (const run of text.matchAll(/[^\r\n<>]+|<[^>\r\n]*>|[<>]/g)) {
-        for (const sentence of segmenter.segment(run[0])) {
-          let offset = piece.start + run.index! + sentence.index;
-          for (const part of sentence.segment.matchAll(/[\s\S]{1,800}/gu)) {
-            const raw = part[0];
-            emit(message, offset, offset + raw.length);
-            offset += raw.length;
+        // Keep line and markup boundaries even when the sentence segmenter joins them.
+        for (const run of text.matchAll(/[^\r\n<>]+|<[^>\r\n]*>|[<>]/g)) {
+          const closers = run[0].startsWith("<") ? undefined : emphasisClosers(run[0]);
+          const runStart = piece.start + run.index!;
+          let consumed = 0;
+          for (const sentence of segmentSentences(run[0])) {
+            const start = Math.max(sentence.index, consumed);
+            const boundary = sentence.index + sentence.segment.length;
+            if (start >= boundary) continue;
+            const end = boundary + (closers?.get(boundary) ?? 0);
+            let offset = start;
+            for (const chunkEnd of sourceChunkEnds(run[0], start, end, closers)) {
+              emit(message, runStart + offset, runStart + chunkEnd);
+              offset = chunkEnd;
+            }
+            consumed = end;
           }
         }
-      }
       }
     }
   }
   return units;
+}
+
+function normalizedSourceText(text: string, offset = 0) {
+  const chars: string[] = [];
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (const match of text.matchAll(/\s+|\S/gu)) {
+    const token = /^\s+$/u.test(match[0]) ? " " : match[0];
+    for (let i = 0; i < token.length; i++) {
+      chars.push(token[i]!); starts.push(offset + match.index!); ends.push(offset + match.index! + match[0].length);
+    }
+  }
+  return { text: chars.join(""), starts, ends };
 }
 
 /** Whitespace and an added outer quotation wrapper may differ. No words or
@@ -133,16 +214,7 @@ export function resolveSourceQuote(text: string, quote?: string): string | undef
   if (!quote.trim()) return undefined;
   const exact = text.indexOf(quote);
   if (exact >= 0) return text.indexOf(quote, exact + 1) < 0 ? quote : undefined;
-  const chars: string[] = [];
-  const starts: number[] = [];
-  const ends: number[] = [];
-  for (const match of text.matchAll(/\s+|\S/gu)) {
-    const token = /^\s+$/u.test(match[0]) ? " " : match[0];
-    for (let i = 0; i < token.length; i++) {
-      chars.push(token[i]!); starts.push(match.index!); ends.push(match.index! + match[0].length);
-    }
-  }
-  const normalized = chars.join("");
+  const { text: normalized, starts, ends } = normalizedSourceText(text);
   const target = quote.replace(/\s+/gu, " ").trim();
   const at = normalized.indexOf(target);
   if (at < 0) {
@@ -154,6 +226,139 @@ export function resolveSourceQuote(text: string, quote?: string): string | undef
   }
   if (normalized.indexOf(target, at + 1) >= 0) return undefined;
   return text.slice(starts[at], ends[at + target.length - 1]);
+}
+
+export function sourceRangeIsVisible(content: string, start: number, end: number): boolean {
+  return !sourceExcludedRanges(content).some(range => start < range.end && end > range.start);
+}
+
+function sourceExcludedRanges(content: string) {
+  return [...modelImageRanges(content), ...[...content.matchAll(/<thoughts\b[^>]*>[\s\S]*?<\/thoughts\s*>/gi)]
+    .map(match => ({ start: match.index!, end: match.index! + match[0].length }))].sort((a, b) => a.start - b.start);
+}
+
+/** Exact excerpt joins only. Punctuation locates possible joins, never speakers or meaning. */
+export function dialogueSourceMatches(text: string, content: string, allowed = [{ start: 0, end: content.length }]): {
+  complete: boolean; segments: Array<{ textStart: number; textEnd: number; startOffset: number; endOffset: number; quote: string }>;
+} {
+  const hidden = sourceExcludedRanges(content);
+  const runs: Array<{ text: string; starts: number[]; ends: number[] }> = [];
+  let cursor = 0;
+  for (const range of [...hidden, { start: content.length, end: content.length }]) {
+    if (range.start > cursor) {
+      for (const span of allowed) {
+        const start = Math.max(cursor, span.start), end = Math.min(range.start, span.end);
+        if (start < end) runs.push(normalizedSourceText(content.slice(start, end), start));
+      }
+    }
+    cursor = Math.max(cursor, range.end);
+  }
+  const boundaries = [0, ...[...text.matchAll(/[,.!?;:。！？、，；：]["“”]*(?:\s+|$)|["“”]\s+|\r?\n+/gu)].map(match => match.index! + match[0].length), text.length];
+  const points = [...new Set(boundaries)].sort((a, b) => a - b);
+  const cache = new Map<string, ReturnType<typeof matchSegment>>();
+  function matchSegment(from: number, to: number) {
+    const raw = text.slice(from, to);
+    const trimmed = raw.trim().replace(/^["“”]+|["“”]+$/gu, "").trim();
+    if (!trimmed) return;
+    const target = trimmed.replace(/\s+/gu, " ");
+    const variants = new Set([target, target.replace(/[,.]$/u, mark => mark === "," ? "." : ",")]);
+    const matches = new Map<string, { startOffset: number; endOffset: number }>();
+    for (const run of runs) for (const variant of variants) {
+      for (let at = run.text.indexOf(variant); at >= 0; at = run.text.indexOf(variant, at + 1)) {
+        const startOffset = run.starts[at]!, endOffset = run.ends[at + variant.length - 1]!;
+        if (/[\p{L}\p{N}\p{M}]$/u.test(content.slice(0, startOffset))
+          || /^[\p{L}\p{N}\p{M}]/u.test(content.slice(endOffset))) continue;
+        matches.set(`${startOffset}:${endOffset}`, { startOffset, endOffset });
+        if (matches.size > 1) return;
+      }
+    }
+    if (matches.size !== 1) return;
+    const span = [...matches.values()][0]!;
+    return { ...span, textStart: from, textEnd: to, quote: content.slice(span.startOffset, span.endOffset) };
+  }
+  const match = (from: number, to: number) => {
+    const key = `${from}:${to}`;
+    if (!cache.has(key)) cache.set(key, matchSegment(from, to));
+    return cache.get(key);
+  };
+  type Segment = NonNullable<ReturnType<typeof matchSegment>>;
+  const failed = new Set<string>();
+  const search = (index: number, end: number): Segment[] | undefined => {
+    if (index === points.length - 1) return [];
+    const key = `${index}:${end}`;
+    if (failed.has(key)) return;
+    for (let next = points.length - 1; next > index; next--) {
+      const span = match(points[index]!, points[next]!);
+      if (!span || span.startOffset < end) continue;
+      const rest = search(next, span.endOffset);
+      if (rest) return [span, ...rest];
+    }
+    failed.add(key);
+    return;
+  };
+  const full = text.trim() ? search(0, 0) : undefined;
+  if (full?.length) return { complete: true, segments: full };
+  const partial: Segment[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const span = match(points[i]!, points[i + 1]!);
+    if (span && span.startOffset >= (partial.at(-1)?.endOffset ?? 0)) partial.push(span);
+  }
+  return { complete: false, segments: partial };
+}
+
+/** Fill missing citations only within model-selected units; verified ranges stay intact. */
+export function rescueDialogueEvidence<T>(draft: T, messages: Array<{ id: string; content: string; canonicalHash?: string }>, units: SourceUnit[] = []): T {
+  const result = structuredClone(draft);
+  let rescued = false;
+  for (const memory of (result as any)?.memories ?? []) for (const dialogue of memory.keyDialogues ?? []) {
+    const evidence = Array.isArray(dialogue.evidence) ? dialogue.evidence : [];
+    const verified = evidence.filter((item: any) => messages.some(message => message.id === item.messageId
+      && (message.canonicalHash ?? units.find(unit => unit.messageId === message.id)?.canonicalHash) === item.canonicalHash
+      && item.messageId === dialogue.messageId
+      && Number.isInteger(item.startOffset) && Number.isInteger(item.endOffset) && item.startOffset >= 0
+      && item.endOffset > item.startOffset && item.endOffset <= message.content.length && message.content.slice(item.startOffset, item.endOffset) === item.quote
+      && sourceRangeIsVisible(message.content, item.startOffset, item.endOffset)));
+    if (evidence.length && verified.length === evidence.length) continue;
+    const refs = [dialogue.messageId, ...evidence.filter((item: any) => !verified.includes(item)).map((item: any) => item.messageId)]
+      .filter((id: unknown): id is string => typeof id === "string" && id.startsWith("unresolved:"))
+      .flatMap((id: string) => id.slice("unresolved:".length).split(","))
+      .flatMap((ref: string) => {
+        const range = /^s(\d+)-s(\d+)$/.exec(ref);
+        if (!range) return [ref];
+        const start = Number(range[1]), end = Number(range[2]);
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start || end - start >= units.length) return [ref];
+        return Array.from({ length: end - start + 1 }, (_, index) => `s${start + index}`);
+      });
+    const selected = [...new Set(refs)].map(ref => units.find(unit => unit.ref === ref));
+    if (!selected.length || selected.some(unit => !unit) || selected.some((unit, i) => i > 0 && unit!.start <= selected[i - 1]!.start)
+      || new Set(selected.map(unit => `${unit!.messageId}:${unit!.canonicalHash}`)).size !== 1) continue;
+    let messageId = dialogue.messageId;
+    if (typeof messageId !== "string") continue;
+    if (messageId.startsWith("unresolved:")) {
+      messageId = selected[0]!.messageId;
+    }
+    const message = messages.find(message => message.id === messageId);
+    const canonicalHash = message?.canonicalHash ?? units.find(unit => unit.messageId === messageId)?.canonicalHash;
+    if (!message || !canonicalHash || typeof dialogue.text !== "string") continue;
+    if (selected.some(unit => unit!.messageId !== messageId || unit!.canonicalHash !== canonicalHash)) continue;
+    const allowed = [...selected.map(unit => ({ start: unit!.start, end: unit!.end })),
+      ...verified.map((item: any) => ({ start: item.startOffset, end: item.endOffset }))].sort((a, b) => a.start - b.start);
+    const ranges: typeof allowed = [];
+    for (const span of allowed) {
+      const last = ranges.at(-1);
+      if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+      else ranges.push({ ...span });
+    }
+    const matched = dialogueSourceMatches(dialogue.text, message.content, ranges);
+    if (!matched.complete) continue;
+    const missing = matched.segments.filter(segment => !verified.some((item: any) => item.startOffset <= segment.startOffset && item.endOffset >= segment.endOffset));
+    if (missing.some(segment => verified.some((item: any) => segment.startOffset < item.endOffset && segment.endOffset > item.startOffset))) continue;
+    rescued = true;
+    dialogue.messageId = messageId;
+    dialogue.evidence = [...verified, ...missing.map(({ startOffset, endOffset, quote }) => ({ messageId, canonicalHash, startOffset, endOffset, quote }))]
+      .sort((a, b) => a.startOffset - b.startOffset);
+  }
+  return rescued ? result : draft;
 }
 
 export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]): unknown {
@@ -303,7 +508,17 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
     }
     return output;
   };
-  return walk(value, "draft");
+  // Preserve source offsets when only the supplied, visible units are available.
+  const messages = [...new Set(units.map(unit => unit.messageId))].map(id => {
+    const selected = units.filter(unit => unit.messageId === id);
+    const chars = Array<string>(Math.max(...selected.map(unit => unit.end))).fill("\0");
+    for (const unit of selected) {
+      if (unit.joinBefore !== undefined) chars.splice(unit.start - unit.joinBefore.length, unit.joinBefore.length, ...unit.joinBefore.split(""));
+      chars.splice(unit.start, unit.text.length, ...unit.text.split(""));
+    }
+    return { id, content: chars.join(""), canonicalHash: selected[0]!.canonicalHash };
+  });
+  return rescueDialogueEvidence(walk(value, "draft"), messages, units);
 }
 
 /** Resolves direct episode/audit quote evidence without using authored dialogue text as an anchor. */
@@ -409,7 +624,10 @@ export function inspectSourceReferences(draft: unknown, messages: Array<{ id: st
         else {
           const access = Array.isArray(item.access) ? item.access : [];
           const validAccess = validSourcePassageAccess(item as { messageId: string }, sources, access);
-          if (!validAccess.length) reason = "access_unverified";
+          // An explicitly empty scope is a narrator-only declaration. Missing
+          // access or rejected nonempty grants remain unverified.
+          if ((!validAccess.length && (!Array.isArray(item.access) || access.length > 0))
+            || (Array.isArray(fieldReviews) && fieldReviews.some(review => review.messageId === item.messageId && review.quote === quote))) reason = "access_unverified";
           for (let index = 0; index < access.length; index++) {
             if (!validSourcePassageAccess(item as { messageId: string }, sources, [access[index]]).length) {
               issues.push({ path: `${path}.access[${index}]`, blocking: false, messageId: item.messageId, quote, reason: "access_unverified" });

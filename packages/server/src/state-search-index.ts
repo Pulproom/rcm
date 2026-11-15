@@ -2,6 +2,7 @@ import { estimateTokens } from "@rcm/shared";
 import Database from "better-sqlite3";
 import type { RcmDatabase } from "./db.js";
 import { collectStateEvidence } from "./state-evidence.js";
+import { snapshotBeforeMigration } from "./db-snapshot.js";
 
 /** Disposable sidecar: it never changes the canonical DB's schema or facts. */
 export class StateSearchIndex {
@@ -15,7 +16,10 @@ export class StateSearchIndex {
     try {
       cache.pragma("journal_mode = WAL");
       const version = cache.pragma("user_version", { simple: true });
-      if (version !== 1) cache.exec("DROP TABLE IF EXISTS state_vectors; PRAGMA user_version=1");
+      if (version !== 1) {
+        if (cache.prepare("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").get()) snapshotBeforeMigration(cache, 1);
+        cache.exec("DROP TABLE IF EXISTS state_vectors; PRAGMA user_version=1");
+      }
       cache.exec("CREATE TABLE IF NOT EXISTS state_vectors(chat_id TEXT NOT NULL,id TEXT NOT NULL,fingerprint TEXT NOT NULL,model TEXT NOT NULL,vector TEXT NOT NULL,PRIMARY KEY(chat_id,id))");
       return run(cache);
     } finally { cache.close(); }
@@ -70,6 +74,19 @@ export class StateSearchIndex {
     }
     this.status.indexed += indexed;
     return indexed;
+  }
+  /** Completion proof for the existing eligible-document queue. Oversized states
+   * retain the index's existing FTS-only policy; invalid/missing vectors do not
+   * count as a completed eligible document. Never inspect or clear other chats.
+   */
+  assertComplete(chatId:string): void {
+    if (this.path === ':memory:') return;
+    const documents = collectStateEvidence(this.canonical,chatId).filter(item=>estimateTokens(item.text)<=4096);
+    this.use(cache=>{
+      const stored = new Map((cache.prepare('SELECT id,fingerprint,model FROM state_vectors WHERE chat_id=?').all(chatId) as
+        {id:string;fingerprint:string;model:string}[]).map(row=>[row.id,row]));
+      if (documents.some(item=>stored.get(item.id)?.fingerprint!==item.fingerprint || stored.get(item.id)?.model!==this.model)) throw new Error('STATE_EMBEDDINGS_INCOMPLETE');
+    });
   }
   search(chatId: string, query: number[]): Map<string, number> {
     if (this.path === ":memory:") return new Map();

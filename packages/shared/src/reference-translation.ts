@@ -36,11 +36,11 @@ export function validateTranslation(content: string, expected: TranslationPart[]
   if (["LENGTH", "MAX_TOKENS", "MAX_OUTPUT_TOKENS"].includes(String(finishReason ?? "").toUpperCase()) || isStructuredOutputTruncated(content)) throw new TranslationError("MODEL_OUTPUT_TRUNCATED", "");
   let parsed: any;
   try { parsed = JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
-  catch { throw new TranslationError("INVALID_RESPONSE", "번역 모델이 유효한 JSON을 반환하지 않았습니다."); }
-  if (!Array.isArray(parsed.items) || parsed.items.length !== expected.length) throw new TranslationError("INVALID_RESPONSE", "번역 응답의 항목 수가 맞지 않습니다.");
+  catch { throw new TranslationError("INVALID_RESPONSE", "번역 모델이 유효한 JSON을 반환하지 않았어요."); }
+  if (!Array.isArray(parsed.items) || parsed.items.length !== expected.length) throw new TranslationError("INVALID_RESPONSE", "번역 응답의 항목 수가 맞지 않아요.");
   return expected.map(part => {
     const matches = parsed.items.filter((item: any) => item.id === part.id && (item.partIndex === part.partIndex || (part.partCount === 1 && item.partIndex === undefined)));
-    if (matches.length !== 1 || typeof matches[0].ko !== "string" || !matches[0].ko.trim()) throw new TranslationError("INVALID_RESPONSE", "번역 응답에 누락되거나 중복된 구간이 있습니다.");
+    if (matches.length !== 1 || typeof matches[0].ko !== "string" || !matches[0].ko.trim()) throw new TranslationError("INVALID_RESPONSE", "번역 응답에 누락되거나 중복된 구간이 있어요.");
     return { id: part.id, partIndex: part.partIndex, ko: matches[0].ko };
   });
 }

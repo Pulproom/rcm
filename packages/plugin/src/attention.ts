@@ -1,3 +1,4 @@
+import { syncCurrentSourceLedger } from './context.js';
 import { cachedSourceReceipt } from './api-client.js';
 import { setupPickerNeeded } from "./setup-sources.js";
 import { currentLineageOperation, hasFreshChatStatus } from "./lineage-settings.js";
@@ -72,11 +73,24 @@ export function completedTimingSeconds(elapsedMs = 0): string {
 }
 
 export function shouldShowStatusWidget(state: RuntimeState, dashboardHidden = false): boolean {
+  if (state.upgradeBlocked && (!state.current || state.upgradeBlocked.chatId === state.current.chatId)) return true;
   if (state.pendingPrepare?.visible) return true;
   return state.settings.statusWidgetVisible !== false && !dashboardHidden && !!state.current && isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId);
 }
 
+function widgetUpgradeLock(state: RuntimeState) {
+  return state.upgradeBlocked && (!state.current || state.upgradeBlocked.chatId === state.current.chatId)
+    ? state.upgradeBlocked.lock : state.statusSummary?.upgrade?.lock;
+}
+
 export interface FloatingWidgetState { kind: string; label: string; detail: string; startedAt?: number; expiresAt?: number }
+
+export function otherChatMemoryWork(state: RuntimeState, worker = state.serverWorker) {
+  if (state.currentJob?.kind !== 'quiz' && state.currentJob?.chatId === state.current?.chatId) return undefined;
+  if (worker?.activeJob?.chatId === state.current?.chatId && worker?.activeJob) return undefined;
+  const job = worker?.activeJob ?? worker?.otherChatActiveJob;
+  return job?.chatId && job.chatId !== state.current?.chatId ? job : undefined;
+}
 
 export function manualRetryState(state: RuntimeState, pending = state.statusSummary?.progress?.manualRetry === true, running?: boolean): FloatingWidgetState | undefined {
   if (!pending) return undefined;
@@ -103,7 +117,7 @@ function completedTimingState(event: TimingEvent): FloatingWidgetState {
   return {
     kind: failed ? "error" : "completed",
     label: `${base} ${failed ? "실패" : "완료"} · ${completedTimingSeconds(event.elapsedMs)}`,
-    detail: failed ? "작업을 완료하지 못했습니다. 자세한 상태는 대시보드에서 확인해 주세요." : "요청한 기억 작업을 마쳤습니다.",
+    detail: failed ? "작업을 완료하지 못했어요. 자세한 상태는 대시보드에서 확인해 주세요." : "요청한 기억 작업을 마쳤어요.",
     expiresAt: (event.completedAt ?? 0) + TIMING_COMPLETION_VISIBLE_MS,
   };
 }
@@ -196,13 +210,13 @@ function stageProgressDetail(state: RuntimeState, stage: "ledger" | "relationshi
   const progress = liveBackfillProgress(state);
   if (!progress) return fallback;
   if (stage === "ledger" && (progress.ledgerTotal ?? 0) > 0) {
-    return `마지막 장부 대조 ${progress.ledgerProcessed ?? 0}/${progress.ledgerTotal} · 겹치거나 교체된 상태를 확인하고 있습니다.`;
+    return `마지막 장부 대조 ${progress.ledgerProcessed ?? 0}/${progress.ledgerTotal} · 겹치거나 교체된 상태를 확인하고 있어요.`;
   }
   if (stage === "relationship" && (progress.relationshipTotal ?? 0) > 0) {
-    return `관계 상태 ${progress.relationshipProcessed ?? 0}/${progress.relationshipTotal} · 인물 사이의 최신 상태를 반영하고 있습니다.`;
+    return `관계 상태 ${progress.relationshipProcessed ?? 0}/${progress.relationshipTotal} · 인물 사이의 최신 상태를 반영하고 있어요.`;
   }
   if (stage === "story" && (progress.storyTotal ?? 0) > 0) {
-    return `줄거리 ${progress.storyProcessed ?? 0}/${progress.storyTotal} · 완료된 기억을 장면과 이야기 흐름에 반영하고 있습니다.`;
+    return `줄거리 ${progress.storyProcessed ?? 0}/${progress.storyTotal} · 완료된 기억을 장면과 이야기 흐름에 반영하고 있어요.`;
   }
   return fallback;
 }
@@ -214,9 +228,12 @@ function activeStartedAt(state: RuntimeState): number | undefined {
 }
 
 export function widgetState(state: RuntimeState): FloatingWidgetState {
+  const upgrade = widgetUpgradeLock(state);
+  if (upgrade) return {kind:'upgrade',label:upgrade.phase === 1 ? `새 버전으로 다시 만드는 중 · ${upgrade.done}/${upgrade.total}` : '마무리하는 중 · 줄거리와 검색 정리',
+    detail:upgrade.phase === 1 ? '보내기를 잠시 막았어요. 기억을 새 버전으로 다시 만드는 중이에요. 다른 채팅은 그대로 쓸 수 있어요.' : '거의 끝났어요. 끝나면 다시 보내 주세요.'};
   if (state.pendingPrepare?.visible) return { kind: "prepare-choice", label: "기억 준비 중", detail: "기다리면 기억을 담아 보내요. 3분이 지나도 끝나지 않으면 보내지 않아요.", startedAt: state.pendingPrepare.startedAt };
   const summary = state.statusSummary ?? { queuedJobs: 0, failedJobs: 0, pendingReviews: 0, pendingEmbeddings: 0, failedEmbeddings: 0 };
-  if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) return { kind: "disabled", label: "꺼짐", detail: state.settings.characterEnabled[state.current.characterId] === false ? "이 캐릭터에서는 RCM을 쓰지 않아요." : "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않습니다." };
+  if (state.current && !isChatMemoryEnabled(state.settings, state.current.chatId, state.current.characterId)) return { kind: "disabled", label: "꺼짐", detail: state.settings.characterEnabled[state.current.characterId] === false ? "이 캐릭터에서는 RCM을 쓰지 않아요." : "현재 채팅에서는 새 기억 동기화·추출·도구 호출을 사용하지 않아요." };
   const lineageOperation = currentLineageOperation(state);
   if (lineageOperation?.kind === 'open') return lineageOperation.status === 'running'
     ? { kind: 'checking', label: '채팅 상태 확인 중', detail: '서버에서 현재 채팅을 확인하고 있어요.' }
@@ -243,7 +260,7 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
   } : {
     kind: "timing",
     label: "서버 업데이트 중",
-    detail: `RCM ${state.updateApplying.targetVersion}을 적용하고 다시 연결하고 있습니다.`,
+    detail: `RCM ${state.updateApplying.targetVersion}을 적용하고 다시 연결하고 있어요.`,
     startedAt: state.updateApplying.startedAt,
   };
   if (state.updateStatus?.restartRequired) return {
@@ -255,8 +272,8 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     kind: "review",
     label: "업데이트",
     detail: pluginUpdateNeeded(state.updateStatus)
-      ? `${state.updateStatus.latestVersion ?? state.updateStatus.latestServerVersion ?? "새 버전"} 서버와 플러그인 업데이트가 필요합니다. 대시보드에서 확인해 주세요.`
-      : `${state.updateStatus.latestVersion ?? state.updateStatus.latestServerVersion ?? "새 버전"} 서버 업데이트를 설치할 수 있습니다. 대시보드에서 확인해 주세요.`,
+      ? `${state.updateStatus.latestVersion ?? state.updateStatus.latestServerVersion ?? "새 버전"} 서버와 플러그인 업데이트가 필요해요. 대시보드에서 확인해 주세요.`
+      : `${state.updateStatus.latestVersion ?? state.updateStatus.latestServerVersion ?? "새 버전"} 서버 업데이트를 설치할 수 있어요. 대시보드에서 확인해 주세요.`,
   };
   if (pluginUpdateNeeded(state.updateStatus)) return {
     kind: "review",
@@ -279,33 +296,36 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
   if (activeServerTiming) return {
     kind: "timing",
     label: activeAuxiliaryLabel(state, activeServerTiming),
-    detail: "현재 채팅의 기억을 정리하고 있습니다.",
+    detail: "현재 채팅의 기억을 정리하고 있어요.",
     startedAt: activeServerTiming.startedAt,
   };
-  if (!state.activityReady || (state.current && (state.current.sourceMessageCount ?? 0) > 2 && !summary.lineage)) return { kind: "checking", label: "확인 중", detail: "현재 채팅의 대기열과 오류 상태를 확인하고 있습니다." };
+  if (!state.activityReady || (state.current && (state.current.sourceMessageCount ?? 0) > 2 && !summary.lineage)) return { kind: "checking", label: "확인 중", detail: "현재 채팅의 대기열과 오류 상태를 확인하고 있어요." };
   const sourceNotice = state.current && cachedSourceReceipt(state.settings, state.current.chatId)?.sourceNotice;
   if (sourceNotice) return { kind: 'checking', label: '원문 변경 확인 중', detail: sourceNotice };
   const lineage = hasFreshChatStatus(state) ? state.current?.hostIdentity && ['choice_required', 'ambiguous'].includes(summary.lineage?.status ?? '') ? { status: 'none' as const } : summary.lineage : undefined;
   if (summary.lineage && !lineage) return { kind: 'checking', label: '채팅 상태 확인 중', detail: '서버에서 현재 채팅을 확인하고 있어요.' };
-  if (lineage?.status === "choice_required" || lineage?.status === "ambiguous") return {
+  const probe = state.lineageProbe;
+  const probedChoice = probe?.status === "ready" && (!lineage || lineage.status === "none") ? probe.result : undefined;
+  if (lineage?.status === "choice_required" || lineage?.status === "ambiguous" || probedChoice?.status === "unique" || probedChoice?.status === "ambiguous") return {
     kind: "review",
     label: "기억 이어받기 선택",
-    detail: (lineage.ambiguousCandidates?.length ?? 0) > 1
+    detail: (lineage?.ambiguousCandidates?.length ?? probedChoice?.candidates.length ?? 0) > 1
       ? "메시지가 똑같은 채팅이 여러 개 있어요. 대시보드에서 원본을 골라 주세요."
       : "복사된 채팅이에요. 대시보드에서 기억을 이어받을지 골라 주세요.",
   };
+  if (probe?.status === "checking") return { kind: "checking", label: "채팅 상태 확인 중", detail: "복사되거나 분기된 기록을 확인하고 있어요." };
   const blockingFailures = summary.blockingFailedJobs ?? summary.failedJobs;
   const calibration = summary.initialCalibration;
   const setupCaptured = Boolean(state.current && state.lastResolvedSetup?.chatId === state.current.chatId);
   const historicalBackfillPending = summary.ingestionState === "historical_pending" || Number(summary.historicalBackfillMessages ?? 0) > 0;
-  if (setupPickerNeeded(calibration?.status, lineage)) return { kind: "review", label: "설정 재료를 골라 주세요", detail: "기억 홈에서 읽을 설정 재료를 골라 주세요. 채팅은 계속할 수 있어요." };
-  if (calibration?.status === "awaiting_confirmation") return { kind: "review", label: "초기 장부 확인 필요", detail: "분석된 인물과 초기 관계를 확인하면 과거 기억 생성을 이어서 시작합니다." };
+  if (setupPickerNeeded(calibration?.status, lineage, probe)) return { kind: "review", label: "설정 재료를 골라 주세요", detail: "기억 홈에서 읽을 설정 재료를 골라 주세요. 채팅은 계속할 수 있어요." };
+  if (calibration?.status === "awaiting_confirmation") return { kind: "review", label: "초기 장부 확인 필요", detail: "분석된 인물과 초기 관계를 확인하면 과거 기억 생성을 이어서 시작해요." };
   if (calibration?.status === "queued") {
     const startedAt = activeStartedAt(state);
     return {
       kind: "initial",
       label: "초기 장부 생성 중",
-      detail: startedAt ? "인물과 초기 관계를 설정 원문에서 정리하고 있습니다." : "초기 장부 작업이 순서를 기다리고 있습니다.",
+      detail: startedAt ? "인물과 초기 관계를 설정 원문에서 정리하고 있어요." : "초기 장부 작업이 순서를 기다리고 있어요.",
       startedAt,
     };
   }
@@ -314,63 +334,66 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     label: "과거 기억 생성 준비됨",
     detail: "기억 홈에서 ‘과거 대화로 기억 생성’을 눌러 주세요.",
   };
-  if (state.settings.workerPaused) return { kind: "paused", label: "일시정지", detail: "기억 처리가 재개될 때까지 대기합니다." };
+  if (state.settings.workerPaused) return { kind: "paused", label: "일시정지", detail: "기억 처리가 재개될 때까지 대기해요." };
   const episode = state.episodeActivity;
   if (episode?.status === "failed") return { kind: "error", label: "캡슐 오류", detail: episode.lastError ?? "에피소드 캡슐을 만들지 못했어요. 처리 상태를 다시 확인해 주세요." };
   const currentJob = state.currentJob?.kind !== "quiz" && state.currentJob?.chatId === state.current?.chatId ? state.currentJob : undefined;
-  if (episode?.status === "queued" || episode?.status === "processing" || currentJob?.phase === "capsule") return { kind: "capsule", label: "에피소드 정리 중", detail: `${episode?.turnCount ?? 0}턴, 약 ${Math.max(1, Math.round((episode?.sourceTokens ?? 0) / 100) / 10)}k 토큰을 정리하고 있습니다.` };
+  if (episode?.status === "queued" || episode?.status === "processing" || currentJob?.phase === "capsule") return { kind: "capsule", label: "에피소드 정리 중", detail: `${episode?.turnCount ?? 0}턴, 약 ${Math.max(1, Math.round((episode?.sourceTokens ?? 0) / 100) / 10)}k 토큰을 정리하고 있어요.` };
   if (episode?.status === "holding") return { kind: "holding", label: "기억 보류 중", detail: `완료 ${episode.turnCount}턴 · 약 ${Math.max(0, Math.round(episode.sourceTokens / 100) / 10)}k 토큰` };
   const serverActiveJob = state.serverWorker?.activeJob;
-  const serverJobIsCurrent = !serverActiveJob?.chatId || serverActiveJob.chatId === state.current?.chatId;
-  if (!currentJob && serverActiveJob && !serverJobIsCurrent) return {
-    kind: "running", label: "다른 채팅 기억 처리 중", detail: "서버는 모든 채팅의 보조 모델 작업을 한 번에 하나씩 처리합니다.", startedAt: serverActiveJob.startedAt,
+  const otherChatJob = otherChatMemoryWork(state);
+  if (otherChatJob) return {
+    kind: "running", label: "다른 채팅 기억 처리 중", detail: "서버는 모든 채팅의 보조 모델 작업을 한 번에 하나씩 처리해요.", startedAt: otherChatJob.startedAt,
   };
-  if (state.serverWorker?.phase === "storing") return { kind: "storing", label: "기억 반영 중", detail: progressDetail(state, "추출 결과를 검증하고 장기기억에 반영하고 있습니다."), startedAt: activeStartedAt(state) };
+  if (state.serverWorker?.phase === "storing") return { kind: "storing", label: "기억 반영 중", detail: progressDetail(state, "추출 결과를 검증하고 장기기억에 반영하고 있어요."), startedAt: activeStartedAt(state) };
   if (currentJob || (state.serverWorker?.activeCalls ?? 0) > 0) {
     const activeKind = serverActiveJob?.kind;
     const startedAt = activeStartedAt(state);
     const socialBackfill = currentJob?.phase === "social_backfill" || state.serverWorker?.phase === "social_backfill" || activeKind === "social_backfill";
-    if (socialBackfill) return { kind: "running", label: "지인 관계 확인 중", detail: "기존 원문에서 직접 확인되는 만남과 인지 관계만 정리하고 있습니다.", startedAt };
-    if (currentJob?.phase === "relationship_projection" || state.serverWorker?.phase === "relationship_projection" || activeKind === "relationship_projection") return { kind: "running", label: "관계 변화 정리 중", detail: stageProgressDetail(state, "relationship", "인물 사이의 최신 관계 상태를 반영하고 있습니다."), startedAt };
-    if (currentJob?.phase === "story_consolidation" || state.serverWorker?.phase === "story_consolidation" || activeKind === "story_consolidation") return { kind: "running", label: "스토리 흐름 정리 중", detail: stageProgressDetail(state, "story", "완료된 기억을 장면과 이야기 흐름에 반영하고 있습니다."), startedAt };
+    if (socialBackfill) return { kind: "running", label: "지인 관계 확인 중", detail: "기존 원문에서 직접 확인되는 만남과 인지 관계만 정리하고 있어요.", startedAt };
+    if (currentJob?.phase === "relationship_projection" || state.serverWorker?.phase === "relationship_projection" || activeKind === "relationship_projection") return { kind: "running", label: "관계 변화 정리 중", detail: stageProgressDetail(state, "relationship", "인물 사이의 최신 관계 상태를 반영하고 있어요."), startedAt };
+    if (currentJob?.phase === "story_consolidation" || state.serverWorker?.phase === "story_consolidation" || activeKind === "story_consolidation") return { kind: "running", label: "스토리 흐름 정리 중", detail: stageProgressDetail(state, "story", "완료된 기억을 장면과 이야기 흐름에 반영하고 있어요."), startedAt };
     const sourceRecovery = currentJob?.sourceRecovery === true || serverActiveJob?.sourceRecovery === true;
-    if (sourceRecovery) return { kind: "running", label: "원문 발췌 보완 중", detail: sourceRecoverySummary(currentJob?.sourceRecoveryMetadata ?? serverActiveJob?.sourceRecoveryMetadata) || "검색에 직접 관련된 과거 원문에서 빠진 장기 회상용 발췌가 있는지 확인하고 있습니다.", startedAt };
+    if (sourceRecovery) return { kind: "running", label: "원문 발췌 보완 중", detail: sourceRecoverySummary(currentJob?.sourceRecoveryMetadata ?? serverActiveJob?.sourceRecoveryMetadata) || "검색에 직접 관련된 과거 원문에서 빠진 장기 회상용 발췌가 있는지 확인하고 있어요.", startedAt };
     const auditing = currentJob?.phase === "post_extraction_audit" || state.serverWorker?.phase === "post_extraction_audit";
     const reconciling = currentJob?.phase === "state_reconciliation" || state.serverWorker?.phase === "state_reconciliation";
     const checkingLedger = currentJob?.phase === "ledger_consistency" || state.serverWorker?.phase === "ledger_consistency" || activeKind === "ledger_consistency";
     const sourceMessageCount = currentJob?.sourceMessageCount ?? serverActiveJob?.sourceMessageCount;
     const sourceTurnCount = currentJob?.sourceTurnCount ?? serverActiveJob?.sourceTurnCount;
     const extractionDetail = sourceTurnCount
-      ? `완결 ${sourceTurnCount}턴 · 원문 ${sourceMessageCount ?? 0}개를 정리하고 있습니다.`
-      : `원문 ${sourceMessageCount ?? "여러"}개를 정리하고 있습니다.`;
+      ? `완결 ${sourceTurnCount}턴 · 원문 ${sourceMessageCount ?? 0}개를 정리하고 있어요.`
+      : `원문 ${sourceMessageCount ?? "여러"}개를 정리하고 있어요.`;
     return {
       kind: "running",
       label: `${auditing ? "추출 결과 재검수 중" : reconciling ? "상태 장부 대조 중" : checkingLedger ? "최종 장부 대조 중" : "기억 추출 중"}${progressLabel(state)}`,
       detail: auditing
-        ? progressDetail(state, "원문과 1차 기억 초안을 다시 대조하고 있습니다.")
+        ? progressDetail(state, "원문과 1차 기억 초안을 다시 대조하고 있어요.")
         : reconciling
-          ? progressDetail(state, "기존 세계 사실·인물 인식·약속과 새 관측을 대조하고 있습니다.")
+          ? progressDetail(state, "기존 세계 사실·인물 인식·약속과 새 관측을 대조하고 있어요.")
           : checkingLedger
-            ? stageProgressDetail(state, "ledger", "백필 전체에서 겹치거나 교체된 상태가 남았는지 제한적으로 확인하고 있습니다.")
+            ? stageProgressDetail(state, "ledger", "백필 전체에서 겹치거나 교체된 상태가 남았는지 제한적으로 확인하고 있어요.")
             : progressDetail(state, extractionDetail),
       startedAt,
     };
   }
-  if (state.settings.workerAttention || blockingFailures > 0 || summary.failedEmbeddings > 0) return { kind: "error", label: "오류", detail: `실패 ${blockingFailures + summary.failedEmbeddings || 1}건, 확인이 필요합니다.` };
+  if (state.settings.workerAttention || blockingFailures > 0 || summary.failedEmbeddings > 0) return { kind: "error", label: "오류", detail: `실패 ${blockingFailures + summary.failedEmbeddings || 1}건, 확인이 필요해요.` };
   if (summary.progress?.retryAttempt) return {
     kind: "queued",
     label: `재시도 ${summary.progress.retryAttempt}/${summary.progress.retryMax ?? 3}`,
-    detail: "같은 기억 묶음을 다시 처리한 뒤 다음 묶음으로 넘어갑니다.",
+    detail: "같은 기억 묶음을 다시 처리한 뒤 다음 묶음으로 넘어가요.",
   };
-  if (summary.pendingEmbeddings > 0 && state.serverWorker?.embeddingConfigured !== false) return { kind: "indexing", label: `검색 인덱싱 ${summary.pendingEmbeddings}`, detail: "새 기억의 벡터 검색 인덱스를 만들고 있습니다." };
+  if (summary.pendingEmbeddings > 0 && state.serverWorker?.embeddingConfigured !== false) {
+    if ((summary.embeddingRetryAt ?? 0) > Date.now()) return { kind: "queued", label: "다시 시도 대기 중", detail: `${new Date(summary.embeddingRetryAt!).toLocaleTimeString("ko-KR")}에 검색 인덱싱을 다시 시도해요.` };
+    return { kind: "indexing", label: `검색 인덱싱 ${summary.pendingEmbeddings}`, detail: "새 기억의 벡터 검색 인덱스를 만들고 있어요." };
+  }
   if (summary.queuedJobs > 0) {
     const count = summary.queuedJobs;
-    return { kind: "queued", label: `대기 ${count}`, detail: "백그라운드 기억 작업이 순서를 기다립니다." };
+    return { kind: "queued", label: `대기 ${count}`, detail: "백그라운드 기억 작업이 순서를 기다려요." };
   }
-  if (summary.pendingReviews > 0) return { kind: "review", label: `상태 확인 ${summary.pendingReviews}`, detail: `확인할 기록 ${summary.pendingReviews}개가 기다리고 있습니다.` };
+  if (summary.pendingReviews > 0) return { kind: "review", label: `상태 확인 ${summary.pendingReviews}`, detail: `확인할 기록 ${summary.pendingReviews}개가 기다리고 있어요.` };
   if ((summary.advisoryFailedJobs ?? 0) > 0) return {
     kind: "review", label: `부가 정리 확인 ${summary.advisoryFailedJobs}`,
-    detail: "기억 추출은 계속 완료됐습니다. 관계·줄거리·최종 대조 실패는 처리 상태에서 확인할 수 있습니다.",
+    detail: "기억 추출은 계속 완료됐어요. 관계·줄거리·최종 대조 실패는 처리 상태에서 확인할 수 있어요.",
   };
   // Inheritance finished: a done notice (ok tone), not a warning.
   if (lineage?.status === "inherited" && !lineage.acknowledgedAt) return {
@@ -380,19 +403,12 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
       ? "분기한 지점까지의 기억을 이어받았어요."
       : "고른 원본 채팅의 기억을 이어받았어요.",
   };
-  if (state.perspectiveStatus?.unresolved && state.perspectiveStatus.omissionReason !== "no_memories") return {
-    kind: "review",
-    label: "관점 확인 필요",
-    detail: state.perspectiveStatus.omissionReason === "unresolved_perspective"
-      ? "등장인물 관점을 확정하지 못해 공유 기억만 안전하게 사용했습니다. Settings에서 자동 감지 결과를 확인하세요."
-      : "마지막으로 확인된 관점 또는 공유 기억만 사용하고 있습니다.",
-  };
   const quiz = state.currentJob?.kind === "quiz" ? state.currentJob : state.serverWorker?.quizGenerating;
   if (state.current && quiz?.chatId === state.current.chatId) return {
     kind: "quiz", label: "퀴즈 만드는 중", detail: "보조 모델이 새 퀴즈를 만들고 있어요.",
   };
   if (state.translationBackgroundRunning) return { kind: "quiz", label: "백그라운드 번역 중", detail: "보조 모델이 참고 번역을 만들고 있어요." };
-  return { kind: "idle", label: "정상", detail: "새 기억 작업을 기다리고 있습니다." };
+  return { kind: "idle", label: "정상", detail: "새 기억 작업을 기다리고 있어요." };
 }
 
 export const MODEL_SETUP_DETAIL = "보조 모델이 설정되지 않아 기억을 만들 수 없어요.";
@@ -409,7 +425,7 @@ function statusWidgetVisual(current: FloatingWidgetState, skin: ChipSkin) {
   const tone: keyof typeof STATUS_ICON_PATHS = current.kind === "disabled" ? "off"
     : current.kind === "model-setup" ? "wait"
     : current.kind === "error" || ["paused", "review", "queued", "holding", "checking", "setup", "connection"].includes(current.kind) ? "bad"
-      : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz", "prepare-choice"].includes(current.kind) ? "wait" : "ok";
+      : ["running", "initial", "capsule", "storing", "indexing", "timing", "quiz", "prepare-choice", "upgrade"].includes(current.kind) ? "wait" : "ok";
   const color = current.kind === "quiz" ? skin.ink3 : tone === "bad" ? skin.cut : tone === "wait" ? skin.wait : tone === "off" ? skin.ink3 : skin.ok;
   return { color, tone };
 }
@@ -452,6 +468,10 @@ export function renderStatusWidget(state: RuntimeState, options: {
   const activeRows = activeStatusTimingRows(state);
   const showDetail = !activeRows.some(event => event.label === current.detail);
   let body = showDetail ? `<div data-rcm-status-detail="true" style="color:${skin.ink2}">${escapeHtml(current.detail)}</div>` : "";
+  const upgrade = widgetUpgradeLock(state);
+  if (current.kind === 'upgrade' && upgrade) {
+    if (upgrade.phase === 1) body += `<div style="display:flex;align-items:center;gap:8px"><progress aria-label="다시 만들기 진행" max="${Math.max(1,upgrade.total)}" value="${upgrade.done}" style="flex:1;min-width:0;accent-color:${skin.accent}"></progress><span style="font-variant-numeric:tabular-nums">${upgrade.done}/${upgrade.total}</span></div><button type="button" data-rcm-upgrade-cancel="true" style="${compactButtonStyle};width:100%">취소하고 이전 기억으로 계속</button>`;
+  }
   const recovery = !state.currentJob && !state.serverWorker?.activeJob ? sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery) : "";
   if (recovery) body += `<div style="color:${skin.ink2}">${escapeHtml(recovery)}</div>`;
   body += modelResponseFailureDetail(state.statusSummary?.modelResponseDiagnostic, escapeHtml);
@@ -464,13 +484,14 @@ export function renderStatusWidget(state: RuntimeState, options: {
   if (timingRows) body += `<div${showDetail ? ` style="border-top:1px solid ${skin.rule};margin-top:8px;padding-top:4px"` : ""}><div style="font-size:11px;color:${skin.ink3}">진행 중인 작업</div>${timingRows}</div>`;
   const dashboardLabel = state.statusSummary?.initialCalibration?.status === "awaiting_confirmation" ? "초기 장부 확인" : "대시보드";
   const waitingSince = state.activeModelRequest?.chatId === state.current?.chatId ? state.activeModelRequest?.startedAt : undefined;
-  const quizStart = quizEntryButton(quizEnabled ? quizNext : undefined, skin, Boolean(waitingSince));
-  const quizEntry = quizStart || (quizEnabled && quizLoadFailed ? quizReloadRow(skin) : "");
-  const quizReady = quizEnabled && quizNext?.available && quizNext.question;
+  const showQuiz = quizEnabled && current.kind !== 'upgrade';
+  const quizStart = quizEntryButton(showQuiz ? quizNext : undefined, skin, Boolean(waitingSince));
+  const quizEntry = quizStart || (showQuiz && quizLoadFailed ? quizReloadRow(skin) : "");
+  const quizReady = showQuiz && quizNext?.available && quizNext.question;
   const dashboardTone = quizReady ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
   // While the user decides how to send, the decision is the only action; the dashboard can wait.
   if (current.kind !== "prepare-choice") body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
-  if (current.kind !== "prepare-choice" && quizEnabled && quizView) body = quizViewHtml(quizView, skin);
+  if (current.kind !== "prepare-choice" && showQuiz && quizView) body = quizViewHtml(quizView, skin);
   if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
   return `<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);max-height:calc(100dvh - 60px);overflow:auto;overscroll-behavior:contain;box-sizing:border-box">${body}</div>` : ""}`;
 }
@@ -700,7 +721,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       await syncVisibility();
       await keepInViewport();
       const { current } = currentVisual();
-      if (current.kind === "prepare-choice") expanded = true;
+      if (current.kind === "prepare-choice" || current.kind === 'upgrade' && state.upgradeBlocked) expanded = true;
       await applySkin();
       renderedStatusKey = `${statusVisualKey(current)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
       await widget.setAttribute("x-rcm-expanded", String(expanded));
@@ -730,6 +751,16 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const widgetActions = (): WidgetAction[] => {
       const pending = state.pendingPrepare;
       const actions: WidgetAction[] = [
+        {key:'upgrade-cancel',selector:'[data-rcm-upgrade-cancel="true"]',run:async () => {
+          const blocked = state.upgradeBlocked;
+          const lock = blocked?.lock ?? state.statusSummary?.upgrade?.lock;
+          const chatId = blocked?.chatId ?? state.current?.chatId;
+          if (!chatId || !lock || lock.phase !== 1) return;
+          await client.cancelUpgrade(chatId,lock.runId);
+          if (state.upgradeBlocked?.chatId === chatId) state.upgradeBlocked = undefined;
+          if (state.current?.chatId === chatId && state.statusSummary?.upgrade) state.statusSummary.upgrade.lock = null;
+          await render();
+        }},
         ...(pending?.visible ? (["omit", "block"] as const).map(choice => ({ key: `prepare-${choice}`, selector: `[data-rcm-prepare-${choice}="${pending.requestId}"]`, run: () => pending.choose(choice) })) : []),
         { key: "toggle", selector: '[data-rcm-toggle="true"]', run: toggleExpanded },
         { key: "open", selector: '[data-rcm-open="true"]', run: () => state.openDashboard?.() },
@@ -746,7 +777,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         } },
         { key: "quiz-reload", selector: '[data-rcm-quiz-reload="true"]', run: async () => { await quiz.refresh(); await render(); } },
         { key: "quiz-retry", selector: '[data-rcm-quiz-retry="true"]', run: async () => { await quiz.retryLast(); await render(); } },
-        { key: "resume", selector: '[data-rcm-resume="true"]', run: async () => { state.settings.workerPaused = false; delete state.settings.workerAttention; await saveSettings(state.settings); if (state.settings.extractionEngine === "server") state.serverWorker = await client.resumeServerWorker(state.workerId); else void import("./worker.js").then(({ drainWorker }) => drainWorker(state, client)); await render(); } },
+        { key: "resume", selector: '[data-rcm-resume="true"]', run: async () => { const chatId = state.current?.chatId; if (chatId) await syncCurrentSourceLedger(client,state,chatId); state.settings.workerPaused = false; delete state.settings.workerAttention; await saveSettings(state.settings); if (state.settings.extractionEngine === "server") state.serverWorker = await client.resumeServerWorker(state.workerId,chatId); else void import("./worker.js").then(({ drainWorker }) => drainWorker(state, client)); state.requestActivityRefresh?.(); await render(); } },
       ];
       return actions;
     };
@@ -764,7 +795,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       try {
         await action.run();
       } catch (error) {
-        actionError = String(error).replace(/^Error:\s*/, "");
+        actionError = error instanceof Error ? error.message : String(error);
         addLog(state.logs, "warn", `Episode action failed: [오류 원문 제외]`);
         await render();
       }
@@ -817,8 +848,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const next = currentVisual().current;
       const nextKey = `${statusVisualKey(next)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
       // An open quiz is not rebuilt by status polls; only a chat or skin change redraws it.
-      const quizHolds = next.kind !== "prepare-choice" && quizOn() && Boolean(quiz.view) && nextKey.split("")[2] === renderedStatusKey.split("")[2];
-      if (widgetChatId !== state.current?.chatId || (nextKey !== renderedStatusKey && !quizHolds)) {
+      const quizHolds = next.kind !== "prepare-choice" && next.kind !== 'upgrade' && quizOn() && Boolean(quiz.view) && nextKey.split("")[2] === renderedStatusKey.split("")[2];
+      const blockedUpgradeCollapsed = next.kind === 'upgrade' && state.upgradeBlocked && !expanded;
+      if (blockedUpgradeCollapsed || widgetChatId !== state.current?.chatId || (nextKey !== renderedStatusKey && !quizHolds)) {
         renderedStatusKey = nextKey;
         void render().then(scheduleElapsedTick, reportElapsedClockError);
       } else if (nextKey !== renderedStatusKey) {

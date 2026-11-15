@@ -19,7 +19,7 @@ export function validateSourceRecoveryPatch(patch: ExtractionAuditPatch, draft?:
 }
 
 /** References address the frozen audit draft, never an array already spliced by a patch. */
-export function applySourceAccessPatch(result: ExtractionDraftResult, patch: ExtractionAuditPatch): void {
+export function applySourceAccessPatch(result: ExtractionDraftResult, patch: ExtractionAuditPatch): string[] {
   const original = [...(result.sourcePassages ?? [])];
   const resolve = (ref: string) => {
     const index = /^source:(\d+)$/.exec(ref)?.[1];
@@ -27,13 +27,18 @@ export function applySourceAccessPatch(result: ExtractionDraftResult, patch: Ext
     if (!passage) throw new ModelContentValidationError(`Unknown audit itemRef: ${ref}`);
     return passage;
   };
+  const pending: string[] = [];
   const updated = new Set<string>();
   for (const item of patch.access.filter((item) => item.itemRef.startsWith("source:"))) {
     if (updated.has(item.itemRef)) throw new ModelContentValidationError(`Duplicate source access patch: ${item.itemRef}`);
     updated.add(item.itemRef);
-    resolve(item.itemRef).access = item.grants;
+    const passage = resolve(item.itemRef);
+    // An audit cannot turn a failed access decision into a narrator-only declaration.
+    if (!item.grants.length) pending.push(item.itemRef);
+    else passage.access = item.grants;
   }
-  const removed = new Set([...patch.discardItemRefs, ...patch.keepPendingItemRefs]
+  const removed = new Set([...patch.discardItemRefs, ...patch.keepPendingItemRefs, ...pending]
     .filter((ref) => ref.startsWith("source:")).map(resolve));
   if (removed.size) result.sourcePassages = original.filter((passage) => !removed.has(passage));
+  return pending;
 }

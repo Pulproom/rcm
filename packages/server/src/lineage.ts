@@ -1,8 +1,12 @@
+import { userChatSql } from './chat-work.js';
+import { readMemoryPreferenceFields, writeMemoryPreferenceFields } from './memory-bookmarks.js';
+import { assertChatUnlocked, chatUpgradeLock } from './upgrade-lock.js';
 import { isPositionalChat } from './source-snapshot.js';
-import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
+import { discardRegeneratedTextEdits, memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { beginLineageReceipt, hasLineageTargetData, removeUnchangedInheritedRows } from './lineage-provenance.js';
 import { advanceInheritedRevision } from './lineage-revisions.js';
-import { inheritSourceCoverageRetry } from './source-coverage.js';
+import { batchMaterialTables, createInheritedReviewJob, createInheritedSliceBatch, inheritedSliceRuns, unacceptedPendingBatches, finishReviewedBatches, coverageRetryFamilies, foldCoverageRetry, inheritSourceCoverageRetry, recordCoverageRetryFamily } from './source-coverage.js';
+import { sourceTurnMembership } from './turn-clock.js';
 import { readProgressCells, resetAutomaticProgressCell } from './pair-progress.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { readRemovedAliases, removedAliasesKey, inheritUserDeletions } from "./user-deletions.js";
@@ -24,9 +28,9 @@ import { deleteDerivedRows } from "./derived-state.js";
 import { materializeInitialRelationshipProjections } from "./initial-calibration.js";
 import { rebuildCharacterRecallTraces } from "./ingest.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
-import { EVERYONE_HOLDER, readDetailAccessEdits, writeDetailAccessEdits, syncDetailKnownBy, memoryDetailAccess } from "./item-access.js";
+import { PENDING_ACCESS_HOLDER, EVERYONE_HOLDER, readDetailAccessEdits, writeDetailAccessEdits, syncDetailKnownBy, memoryDetailAccess, rebuildPromiseContent } from "./item-access.js";
 import { isOrdinalFallbackMessageId, sourceFingerprint } from './source-fingerprint.js';
-import { lineageSources, matchLineageSources } from './lineage-matching.js';
+import { lineageSources, matchLineageSources, matchesCapturedYumiDisplay } from './lineage-matching.js';
 import { remapInheritedSources, lineageSceneEnd } from './lineage-sources.js';
 import { pruneTranslationCache, translationCacheKey } from './translation-cache.js';
 import { inheritQuizzes } from './quiz.js';
@@ -169,7 +173,7 @@ function eligibleLineageParent(db: RcmDatabase, chatId: string): boolean {
 function exactCandidates(db: RcmDatabase, request: TurnPrepareRequest, onlyChats?: Set<string>): Candidate[] {
   const items = (request.messageVisibility ?? []).filter((item) => item.contentHash && item.visibility !== "comment");
   if (!items.length) return [];
-  const chats = db.prepare("SELECT id,COALESCE(chat_title,id) title FROM chats WHERE character_id=? AND id<>? AND is_internal=0").all(request.characterId, request.chatId) as Array<{ id: string; title: string }>;
+  const chats = db.prepare(`SELECT id,COALESCE(chat_title,id) title FROM chats WHERE character_id=? AND id<>? AND ${userChatSql()}`).all(request.characterId, request.chatId) as Array<{ id: string; title: string }>;
   const candidates: Candidate[] = [];
   for (const chat of chats.filter(chat => !isPositionalChat({ chatId: chat.id, characterId: request.characterId }))) {
     if (!eligibleLineageParent(db,chat.id)) continue;
@@ -190,13 +194,27 @@ function exactCandidates(db: RcmDatabase, request: TurnPrepareRequest, onlyChats
 }
 
 function resolveCandidates(db: RcmDatabase, request: TurnPrepareRequest): CandidateResolution {
+  const resolution = discoverCandidates(db, request);
+  return { ...resolution, candidates: resolution.candidates.filter(candidate => {
+    const counts = inheritanceCounts(db, candidate.chatId, candidate.forkOrdinal);
+    // Transcript rows and their search vectors alone are not memories to offer.
+    return ['memories', 'relationshipEvents', 'assertions', 'beliefs', 'promises', 'reviews', 'conflicts']
+      .some(key => (counts[key] ?? 0) > 0)
+      || ['entities', 'pair_progress'].some(table =>
+        Boolean(db.prepare(`SELECT 1 FROM ${table} WHERE chat_id=? LIMIT 1`).get(candidate.chatId)))
+      || Boolean(db.prepare("SELECT 1 FROM extraction_batches WHERE chat_id=? AND status='pending_review' AND start_ordinal<=? LIMIT 1")
+        .get(candidate.chatId, candidate.forkOrdinal));
+  }) };
+}
+
+function discoverCandidates(db: RcmDatabase, request: TurnPrepareRequest): CandidateResolution {
   const hint = request.lineageHint && !isPositionalChat({ chatId: request.lineageHint.parentChatId, characterId: request.characterId }) ? request.lineageHint : undefined;
   if (hint) {
     // Look up marker owners using compact IDs/hashes before reading transcripts.
     // A copied marker retains its exact content even if its own ID was reissued.
     const marker = request.messageVisibility?.find(item => item.id === hint.markerMessageId);
     const owners = db.prepare(`SELECT DISTINCT c.id FROM chats c JOIN messages m ON m.chat_id=c.id
-      WHERE c.character_id=? AND c.id<>? AND c.is_internal=0 AND m.host_visibility='comment'
+      WHERE c.character_id=? AND c.id<>? AND ${userChatSql('c')} AND m.host_visibility='comment'
         AND m.lifecycle IN ('committed','pending','client_pruned') AND (m.message_id=? OR m.content_hash=?)`)
       .all(request.characterId,request.chatId,hint.markerMessageId ?? '',marker?.contentHash ?? '') as Array<{id:string}>;
     if (owners.length) {
@@ -215,7 +233,7 @@ function resolveCandidates(db: RcmDatabase, request: TurnPrepareRequest): Candid
       return {candidates,detection: candidates.some(candidate => matchLineageSources(lineageSources(db,candidate.chatId),request)
         .some(pair=>pair.parent.message_id !== pair.child.id)) ? 'source_sequence' : 'message_identity'};
     }
-    const parent = db.prepare('SELECT id,COALESCE(chat_title,id) title FROM chats WHERE id=? AND character_id=? AND is_internal=0')
+    const parent = db.prepare(`SELECT id,COALESCE(chat_title,id) title FROM chats WHERE id=? AND character_id=? AND ${userChatSql()}`)
       .get(hint.parentChatId,request.characterId) as {id:string;title:string}|undefined;
     if (parent && eligibleLineageParent(db,parent.id) && !wouldCreateCycle(db,request.chatId,parent.id)) {
       const rows = lineageSources(db,parent.id);
@@ -289,6 +307,8 @@ function cloneLineage(
   detection: "marker" | "message_identity" | "source_sequence" | "user" | "manual_cross_bot",
   options: CloneOptions = {},
 ): Counts {
+  assertChatUnlocked(db,request.chatId);
+  assertChatUnlocked(db,candidate.chatId);
   // Statements live only for this copy; repeated rows share compiled SQL.
   const statements = new Map<string, Statement<unknown[]>>();
   const prepare = (sql: string) => {
@@ -321,6 +341,7 @@ function cloneLineage(
   const beliefMap = new Map<string,string>();
   const atomRelationSourceBatches = new Map<string, string | null>();
   const promiseMap = new Map<string, string>();
+  const promiseEventMap = new Map<string, string>();
   const physicalMilestoneMap = new Map<string, string>();
   const relationshipEventMap = new Map<string, string>();
   const episodeMap = new Map<string, string>();
@@ -385,10 +406,15 @@ function cloneLineage(
     // Entity/alias inventories have no revision column. Applied batches carry
     // the source boundary, so a later introduction cannot enter an earlier fork.
     const entityHistory=new Map<string,{before:boolean;pastAliases:Set<string>;futureAliases:Set<string>}>();
-    for(const batch of prepare("SELECT end_ordinal,final_json FROM extraction_batches WHERE chat_id=? AND generation_id='active' AND status='applied' AND final_json IS NOT NULL").all(parent) as any[]) {
+    for(const batch of prepare("SELECT end_ordinal,final_json,source_message_ids_json FROM extraction_batches WHERE chat_id=? AND generation_id='active' AND status='applied' AND final_json IS NOT NULL").all(parent) as any[]) {
+      const sources=prepare(`SELECT message_id,ordinal,lifecycle FROM messages WHERE chat_id=?
+        AND message_id IN (SELECT value FROM json_each(?))`).all(parent,batch.source_message_ids_json) as Array<{message_id:string;ordinal:number;lifecycle:string}>;
       for(const entity of json<any>(batch.final_json,{}).entities ?? []) {
         const history=entityHistory.get(entity.key) ?? {before:false,pastAliases:new Set<string>(),futureAliases:new Set<string>()};
-        const before=batch.end_ordinal<=fork;
+        const evidenceIds=(entity.evidence ?? []).map((item:{messageId:string})=>item.messageId);
+        const evidence=sources.filter(source=>evidenceIds.length ? evidenceIds.includes(source.message_id) : true);
+        const surviving=evidence.filter(source=>['committed','client_pruned','pending','deleted'].includes(source.lifecycle));
+        const before=surviving.length>0 && (evidenceIds.length ? Math.max(...surviving.map(source=>source.ordinal)) : batch.end_ordinal)<=fork;
         history.before ||= before;
         for(const alias of [entity.name,...(entity.aliases ?? [])]) (before?history.pastAliases:history.futureAliases).add(alias);
         entityHistory.set(entity.key,history);
@@ -451,11 +477,12 @@ function cloneLineage(
     };
     for (const row of (prepare("SELECT * FROM memories WHERE chat_id=?").all(parent) as any[]).filter(eligibleMemory)) {
       const id = randomUUID(); memoryMap.set(row.id, id);
-      prepare(`INSERT INTO memories(id,chat_id,memory_key,type,title,content,participants_json,known_by_json,perspective,story_time,story_time_normalized,locations_json,landmark,landmark_kinds_json,evidence_json,salience,strength,recall_count,last_recalled_revision,pinned,active,capsule_parent_id,retention_class,atom_access_version,created_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-        id, child, row.memory_key, row.type, row.title, row.content, row.participants_json, row.known_by_json, row.perspective, row.story_time, row.story_time_normalized ?? normalizeStoryTime(row.story_time) ?? null, row.locations_json, row.landmark, row.landmark_kinds_json ?? "[]", row.evidence_json, row.salience, row.strength, row.recall_count, row.last_recalled_revision, row.pinned, row.active, null, row.retention_class, row.atom_access_version ?? 0, row.created_revision, now, now,
+      prepare(`INSERT INTO memories(id,chat_id,memory_key,type,title,content,participants_json,known_by_json,perspective,story_time,story_time_normalized,locations_json,landmark,landmark_kinds_json,evidence_json,salience,strength,recall_count,last_recalled_revision,pinned,active,capsule_parent_id,retention_class,atom_access_version,card_shape,created_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, child, row.memory_key, row.type, row.title, row.content, row.participants_json, row.known_by_json, row.perspective, row.story_time, row.story_time_normalized ?? normalizeStoryTime(row.story_time) ?? null, row.locations_json, row.landmark, row.landmark_kinds_json ?? "[]", row.evidence_json, row.salience, row.strength, row.recall_count, row.last_recalled_revision, row.pinned, row.active, null, row.retention_class, row.atom_access_version ?? 0, row.card_shape ?? 0, row.created_revision, now, now,
       );
       prepare("UPDATE memories SET user_managed=? WHERE id=?").run(row.user_managed,id);
       prepare('UPDATE memories SET always_inject=? WHERE id=?').run(row.always_inject ?? 0,id);
+      prepare('UPDATE memories SET replacement_memory_key=? WHERE id=?').run(row.replacement_memory_key ?? null,id);
       for (const dialogue of prepare("SELECT * FROM memory_dialogues WHERE memory_id=?").all(row.id) as any[]) {
         const sourceOrdinal = sourceOrdinals.get(dialogue.message_id)?.ordinal;
         if (sourceOrdinal === undefined || sourceOrdinal > fork) {
@@ -466,20 +493,21 @@ function cloneLineage(
           .map(evidence => ({...evidence,messageId:messageMap.get(evidence.messageId) ?? evidence.messageId}));
         const childMessageId = messageMap.get(dialogue.message_id) ?? dialogue.message_id;
         prepare("INSERT INTO memory_dialogues(id,chat_id,memory_id,speaker,text,message_id,evidence_json,kind,ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)").run(dialogueId, child, id, dialogue.speaker, dialogue.text, childMessageId, JSON.stringify(dialogueEvidence), dialogue.kind, dialogue.ordinal, now);
+        prepare("UPDATE memory_dialogues SET user_edited=?,user_hidden=? WHERE id=?").run(dialogue.user_edited,dialogue.user_hidden,dialogueId);
         mapItem("dialogue", dialogueId, dialogue.id);
       }
       for (const detail of prepare("SELECT * FROM memory_details WHERE chat_id=? AND memory_id=? AND (active=1 OR ?=1 AND (detail_key='recognition' OR detail_key LIKE 'recognition:%')) ORDER BY rowid").all(parent,row.id,row.user_managed) as any[]) {
         if (!eligibleMemory(detail)) continue;
         const detailId = randomUUID(); detailMap.set(detail.id, detailId);
         const seed = detail.seed_json ? JSON.parse(detail.seed_json) : null;
-        if (seed?.closureEvidence?.some((e:{messageId:string}) => {
+        if (seed?.status === 'fulfilled' && seed.closureEvidence?.some((e:{messageId:string}) => {
           const source=sourceOrdinals.get(e.messageId);
           return !source || source.ordinal > fork;
         })) { seed.status="open"; delete seed.closureEvidence; }
         if (seed?.closureEvidence) seed.closureEvidence=seed.closureEvidence.map((e:{messageId:string})=>({...e,messageId:messageMap.get(e.messageId)??e.messageId}));
         prepare(`INSERT INTO memory_details(id,chat_id,memory_id,detail_key,kind,text,participants_json,known_by_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal,source_end_ordinal,active,created_revision,created_at,updated_at,role,original_kind,seed_json)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(detailId, child, id, detail.detail_key, detail.kind, detail.text, detail.participants_json, detail.known_by_json, detail.locations_json, detail.epistemic, detail.salience, detail.retention_class, detail.evidence_json, detail.source_start_ordinal, detail.source_end_ordinal, detail.active, detail.created_revision, now, now, detail.role, detail.original_kind, seed ? JSON.stringify(seed) : null);
-        prepare("UPDATE memory_details SET user_edited=?,user_hidden=?,original_text=? WHERE id=?").run(detail.user_edited,detail.user_hidden,detail.original_text,detailId);
+        prepare("UPDATE memory_details SET user_edited=?,user_hidden=?,original_text=?,hidden_from_json=? WHERE id=?").run(detail.user_edited,detail.user_hidden,detail.original_text,detail.hidden_from_json,detailId);
         if (!detail.user_hidden) prepare("INSERT INTO memory_detail_fts(detail_id,chat_id,memory_id,text,participants,locations) VALUES(?,?,?,?,?,?)").run(detailId, child, id,
           augmentSearchText(detail.text, inheritedLanguage), augmentSearchText(detail.participants_json, inheritedLanguage), augmentSearchText(detail.locations_json, inheritedLanguage));
         mapItem("memory_detail", detailId, detail.id);
@@ -579,6 +607,12 @@ function cloneLineage(
       mapItem("embedding_block", id, block.id);
     }
 
+    const inheritStateLinks = (table: string, id: string, row: any) => {
+      if (row.linked_detail_ids_json == null) return;
+      const ids: string[] = JSON.parse(row.linked_detail_ids_json);
+      const linked = ids.every(source => detailMap.has(source)) ? ids.map(source => detailMap.get(source)!) : [];
+      prepare(`UPDATE ${table} SET linked_detail_ids_json=? WHERE id=?`).run(JSON.stringify(linked),id);
+    };
     for (const row of prepare(`SELECT * FROM assertions WHERE chat_id=? AND (
       COALESCE(valid_from_ordinal,?)<=? AND (valid_to_ordinal IS NULL OR valid_to_ordinal>=? OR user_edit_ordinal IS NOT NULL OR automatic_closure_evidence_json IS NOT NULL)
       OR ? AND (user_edit_ordinal IS NOT NULL OR auto_locked=1))`).all(parent, fork, fork, fork, Number(options.preserveUserCorrections)) as any[]) {
@@ -588,6 +622,7 @@ function cloneLineage(
       const id = randomUUID();
       assertionMap.set(row.id, id);
       prepare(`INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_to_revision,valid_from_ordinal,valid_to_ordinal,source_memory_id,evidence_json,retention_class,created_at,social_relation_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.subject, row.predicate, row.value, relation ? "condition" : row.state_kind, row.confidence, row.valid_from_revision, null, row.valid_from_ordinal, null, memoryMap.get(row.source_memory_id) ?? null, row.evidence_json, row.retention_class, now, inheritedRelation);
+      inheritStateLinks("assertions",id,row);
       mapItem("assertion", id, row.id); counts.assertions = (counts.assertions ?? 0) + 1;
       prepare("UPDATE assertions SET user_edit_ordinal=?,auto_locked=?,source_batch_id=? WHERE id=?").run(row.user_edit_ordinal,row.auto_locked,row.source_batch_id ? `lineage:${row.source_batch_id}` : null,id);
       const preserveEnd=options.preserveUserCorrections && row.user_edit_ordinal!=null
@@ -596,7 +631,8 @@ function cloneLineage(
     }
     for (const row of prepare(`SELECT * FROM beliefs WHERE chat_id=? AND (
       (active=1 OR valid_to_ordinal IS NOT NULL) AND COALESCE(valid_from_ordinal,?)<=? AND (valid_to_ordinal IS NULL OR valid_to_ordinal>=? OR user_edit_ordinal IS NOT NULL)
-      OR ? AND (user_edit_ordinal IS NOT NULL OR auto_locked=1))`).all(parent, fork, fork, fork, Number(options.preserveUserCorrections)) as any[]) {
+      OR deleted_through_ordinal IS NOT NULL
+      OR ? AND (user_edit_ordinal IS NOT NULL OR auto_locked=1 OR source LIKE 'user_deleted:%'))`).all(parent, fork, fork, fork, Number(options.preserveUserCorrections)) as any[]) {
       const id = randomUUID();
       prepare(`INSERT INTO beliefs(id,chat_id,holder,subject,predicate,value,polarity,confidence,source,evidence_json,active,retention_class,created_revision,valid_from_ordinal,valid_to_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`).run(id, child, row.holder, row.subject, row.predicate, row.value, row.polarity, row.confidence, memoryMap.get(row.source) ?? row.source, row.evidence_json, 1, row.retention_class, row.created_revision, row.valid_from_ordinal, now);
       beliefMap.set(row.id,id);
@@ -606,15 +642,22 @@ function cloneLineage(
         ? dropsAutomaticClosure(row) : row.valid_to_ordinal != null && row.valid_to_ordinal>=fork);
       prepare("UPDATE beliefs SET status=?,active=?,user_edit_ordinal=?,auto_locked=?,source_batch_id=?,superseded_by=?,valid_to_ordinal=? WHERE id=?")
         .run(restoreAtFork?previousStatus ?? 'active':row.status,restoreAtFork?1:row.active,row.user_edit_ordinal,row.auto_locked,row.source_batch_id ? `lineage:${row.source_batch_id}` : null,restoreAtFork?null:row.superseded_by,restoreAtFork?null:row.valid_to_ordinal,id);
+      inheritStateLinks("beliefs",id,row);
       mapItem("belief", id, row.id); counts.beliefs = (counts.beliefs ?? 0) + 1;
       if(!restoreAtFork) prepare("UPDATE beliefs SET automatic_closure_evidence_json=? WHERE id=?").run(row.automatic_closure_evidence_json,id);
+      // Retain a suffix row's deletion boundary without activating future belief evidence.
+      const boundaryOnly = row.deleted_through_ordinal != null && row.valid_from_ordinal > fork && (!options.preserveUserCorrections || row.user_edit_ordinal == null && row.auto_locked === 0);
+      prepare("UPDATE beliefs SET deleted_through_ordinal=? WHERE id=?").run(row.deleted_through_ordinal == null ? null : options.preserveUserCorrections ? row.deleted_through_ordinal : Math.min(row.deleted_through_ordinal, fork), id);
+      if (boundaryOnly) prepare(`UPDATE beliefs SET active=0,source='user_deleted:' || COALESCE(source,''),user_edit_ordinal=NULL,auto_locked=0,automatic_closure_evidence_json=NULL WHERE id=?`).run(id);
     }
     for (const row of prepare("SELECT * FROM beliefs WHERE chat_id=? AND active=0 AND source LIKE 'user_deleted:%' AND COALESCE(valid_to_ordinal,?)<=?").all(parent, fork, fork) as any[]) {
+      if (beliefMap.has(row.id)) continue;
       const id = randomUUID();
       prepare(`INSERT INTO beliefs(id,chat_id,holder,subject,predicate,value,polarity,confidence,source,evidence_json,active,retention_class,created_revision,valid_from_ordinal,valid_to_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         id, child, row.holder, row.subject, row.predicate, row.value, row.polarity, row.confidence,
         row.source, row.evidence_json, 0, row.retention_class, row.created_revision, row.valid_from_ordinal, row.valid_to_ordinal, now,
       );
+      inheritStateLinks("beliefs",id,row);
       mapItem("belief_tombstone", id, row.id);
       beliefMap.set(row.id,id);
       prepare("UPDATE beliefs SET status=?,user_edit_ordinal=?,auto_locked=?,source_batch_id=?,superseded_by=? WHERE id=?")
@@ -658,20 +701,26 @@ function cloneLineage(
       mapItem("relationship_baseline", id, row.id);
     }
     materializeInitialRelationshipProjections(db, child);
-    for (const row of prepare("SELECT * FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND COALESCE(source_start_ordinal,?)<=? ORDER BY created_at").all(parent, fork, fork) as any[]) {
+    for (const row of prepare(`SELECT * FROM physical_intimacy_milestones WHERE chat_id=? AND (active=1 OR deleted_by_user=1)
+      AND (COALESCE(source_start_ordinal,?)<=? OR deleted_through_ordinal IS NOT NULL OR ? AND deleted_by_user=1) ORDER BY created_at`)
+      .all(parent, fork, fork, Number(Boolean(options.preserveUserCorrections))) as any[]) {
       const id = randomUUID();
+      // Replay copies the suffix next. Preserve deletion intent now, without
+      // making a future automatic occurrence active in the prefix snapshot.
+      const boundaryOnly = row.deleted_through_ordinal != null && row.source_start_ordinal > fork && (!options.preserveUserCorrections || row.manual_override === 0);
       physicalMilestoneMap.set(row.id, id);
-      prepare(`INSERT INTO physical_intimacy_milestones(id,chat_id,participant_a,participant_b,milestone_key,act,custom_label,initiator,interaction_context,circumstance,evidence_json,source_memory_id,source_start_ordinal,auto_inject,manual_override,deleted_by_user,active,created_revision,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.participant_a, row.participant_b, row.milestone_key, row.act, row.custom_label, row.initiator, row.interaction_context, row.circumstance, row.evidence_json, memoryMap.get(row.source_memory_id) ?? null, row.source_start_ordinal, row.auto_inject ?? 1, row.manual_override ?? 0, row.deleted_by_user ?? 0, row.active, row.created_revision, row.created_at);
+      prepare(`INSERT INTO physical_intimacy_milestones(id,chat_id,participant_a,participant_b,milestone_key,act,custom_label,initiator,interaction_context,circumstance,evidence_json,source_memory_id,source_start_ordinal,auto_inject,manual_override,deleted_by_user,deleted_through_ordinal,active,created_revision,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.participant_a, row.participant_b, row.milestone_key, row.act, row.custom_label, row.initiator, row.interaction_context, row.circumstance, row.evidence_json, memoryMap.get(row.source_memory_id) ?? null, row.source_start_ordinal, row.auto_inject ?? 1, boundaryOnly ? 1 : row.manual_override ?? 0, boundaryOnly ? 1 : row.deleted_by_user ?? 0,
+        row.deleted_through_ordinal == null ? null : options.preserveUserCorrections ? row.deleted_through_ordinal : Math.min(row.deleted_through_ordinal, fork), boundaryOnly ? 0 : row.active, row.created_revision, row.created_at);
       mapItem("physical_intimacy_milestone", id, row.id);
-      prepare('UPDATE physical_intimacy_milestones SET source_quote=? WHERE id=?').run(row.source_quote,id);
+      prepare('UPDATE physical_intimacy_milestones SET source_quote=?,source_batch_id=? WHERE id=?').run(row.source_quote,row.source_batch_id ? `lineage:${row.source_batch_id}` : null,id);
     }
     for (const row of prepare("SELECT * FROM relationship_events WHERE chat_id=? AND active=1 AND (COALESCE(source_end_ordinal,?)<=? OR ? AND (user_edited=1 OR user_hidden=1)) ORDER BY created_at").all(parent, fork, fork,Number(options.preserveUserCorrections)) as any[]) {
       const id = randomUUID();
       relationshipEventMap.set(row.id, id);
       prepare(`INSERT INTO relationship_events(id,chat_id,from_entity,to_entity,changes_json,reason,evidence_json,source_memory_id,source_detail_id,source_job_id,source_start_ordinal,source_end_ordinal,active,created_revision,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.from_entity, row.to_entity, row.changes_json, row.reason, row.evidence_json, memoryMap.get(row.source_memory_id) ?? null, detailMap.get(row.source_detail_id) ?? null, `lineage:${row.source_job_id ?? row.id}`, row.source_start_ordinal, row.source_end_ordinal, row.active, row.created_revision, row.created_at);
-      prepare("UPDATE relationship_events SET user_edited=?,user_hidden=?,original_text=? WHERE id=?").run(row.user_edited,row.user_hidden,row.original_text,id);
+      prepare("UPDATE relationship_events SET user_edited=?,user_hidden=?,original_text=?,source_batch_id=? WHERE id=?").run(row.user_edited,row.user_hidden,row.original_text,row.source_batch_id ? `lineage:${row.source_batch_id}` : null,id);
       mapItem("relationship_event", id, row.id); counts.relationshipEvents = (counts.relationshipEvents ?? 0) + 1;
     }
     const reusableRelationshipPairs = new Set<string>();
@@ -691,26 +740,27 @@ function cloneLineage(
       const mappedCursor = { ...cursor, eventIds: cursor.eventIds.flatMap((id) => relationshipEventMap.has(id)?[relationshipEventMap.get(id)!]:[]) };
       const mappedBasis = basis.flatMap((id) => relationshipEventMap.has(id)?[relationshipEventMap.get(id)!]:[]);
       prepare(`INSERT INTO relationship_projections(chat_id,from_entity,to_entity,axes_json,summary,active_tensions_json,basis_event_ids_json,
-        overrides_json,event_cursor_json,projection_origin,stale,updated_revision,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)
+        overrides_json,event_cursor_json,projection_origin,level_definition_version,stale,updated_revision,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?)
         ON CONFLICT(chat_id,from_entity,to_entity) DO UPDATE SET axes_json=excluded.axes_json,summary=excluded.summary,
           active_tensions_json=excluded.active_tensions_json,basis_event_ids_json=excluded.basis_event_ids_json,
           overrides_json=excluded.overrides_json,event_cursor_json=excluded.event_cursor_json,projection_origin=excluded.projection_origin,
+          level_definition_version=excluded.level_definition_version,
           stale=0,updated_revision=excluded.updated_revision,updated_at=excluded.updated_at`)
         .run(child, projection.from_entity, projection.to_entity, reusable?projection.axes_json:JSON.stringify(baseline.axes ?? json(projection.axes_json,{})), reusable?projection.summary:baseline.summary ?? projection.summary, reusable?projection.active_tensions_json:JSON.stringify(baseline.activeTensions ?? []),
-          JSON.stringify(mappedBasis), projection.overrides_json, JSON.stringify(mappedCursor), projection.projection_origin,
+          JSON.stringify(mappedBasis), projection.overrides_json, JSON.stringify(mappedCursor), projection.projection_origin, projection.level_definition_version,
           projection.updated_revision, projection.updated_at);
       prepare("UPDATE relationship_projections SET user_edit_ordinal=?,auto_locked=? WHERE chat_id=? AND from_entity=? AND to_entity=?")
         .run(projection.user_edit_ordinal,projection.auto_locked,child,projection.from_entity,projection.to_entity);
       reusableRelationshipPairs.add(`${projection.from_entity}\0${projection.to_entity}`);
     }
-    const promiseEvents = prepare(`SELECT * FROM promise_events WHERE chat_id=? AND active=1 AND
+    const promiseEvents = prepare(`SELECT * FROM promise_events WHERE chat_id=? AND
       (source_ordinal<=? OR ? AND user_authored=1 AND promise_id IN (SELECT id FROM promises WHERE user_edit_ordinal IS NOT NULL OR auto_locked=1))
       ORDER BY created_revision,created_at,rowid`).all(parent, fork, Number(options.preserveUserCorrections ?? false)) as any[];
     const childTurn = (prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(child) as { completed_turn_count: number }).completed_turn_count;
     const inheritedRecency = (event: any) => event.ended_at_turn != null && event.ended_at_turn <= childTurn
       ? [event.ended_at_turn, event.recency_until_turn] : [null, null];
     const latestPromises = new Map<string, any>();
-    for (const event of promiseEvents) latestPromises.set(event.promise_key, event);
+    for (const event of promiseEvents) if (event.active === 1) latestPromises.set(event.promise_key, event);
     for (const event of latestPromises.values()) {
       const id = randomUUID();
       promiseMap.set(event.promise_id, id);
@@ -718,17 +768,21 @@ function cloneLineage(
       for (const source of promiseEvents.filter((item) => item.promise_key === event.promise_key)) {
         const eventId = randomUUID();
         prepare("INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_batch_id,source_ordinal,created_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(eventId, child, id, source.promise_key, source.promisor, source.promisee, source.content, source.status, source.scheduled_for ?? null, source.status_reason ?? null, memoryMap.get(source.source_memory_id) ?? null, source.source_batch_id ? `lineage:${source.source_batch_id}` : null, source.source_ordinal, source.created_revision, source.created_at);
+        inheritStateLinks("promise_events",eventId,source);
+        promiseEventMap.set(source.id,eventId);
         mapItem("promise_event", eventId, source.id);
-        prepare("UPDATE promise_events SET evidence_json=?,user_authored=?,ended_at_turn=?,recency_until_turn=? WHERE id=?").run(source.evidence_json,source.user_authored,...inheritedRecency(source),eventId);
+        prepare("UPDATE promise_events SET evidence_json=?,user_authored=?,active=?,event_kind=?,amendment_text=?,scheduled_for_delta=?,ended_at_turn=?,recency_until_turn=? WHERE id=?").run(source.evidence_json,source.user_authored,source.active,source.event_kind,source.amendment_text,source.scheduled_for_delta,...inheritedRecency(source),eventId);
       }
       mapItem("promise", id, event.promise_id); counts.promises = (counts.promises ?? 0) + 1;
       const original=prepare("SELECT user_edit_ordinal,auto_locked,pinned FROM promises WHERE id=? AND chat_id=?").get(event.promise_id,parent) as any;
       if(original) prepare("UPDATE promises SET user_edit_ordinal=?,auto_locked=?,pinned=?,ended_at_turn=?,recency_until_turn=? WHERE id=?").run(original.user_edit_ordinal,original.auto_locked,original.pinned,...inheritedRecency(event),id);
+      rebuildPromiseContent(db,child,id);
     }
 
+    const parentAccessEdits = readDetailAccessEdits(db,parent);
     const accessMaps = new Map<string, Map<string, string>>([
-      ["detail", detailMap], ["dialogue", dialogueMap], ["promise", promiseMap], ["physical_milestone", physicalMilestoneMap],
-      ["atom_relation", atomRelationMap], ["assertion", assertionMap],
+      ["memory", memoryMap], ["detail", detailMap], ["dialogue", dialogueMap], ["promise", promiseMap], ["promise_event", promiseEventMap], ["physical_milestone", physicalMilestoneMap],
+      ["atom_relation", atomRelationMap], ["assertion", assertionMap], ["belief", beliefMap],
     ]);
     const insertAccess = prepare(`INSERT INTO item_access(id,chat_id,item_kind,item_id,holder,basis,evidence_json,confidence,active,source_revision,created_at)
       VALUES(?,?,?,?,?,?,?,?,1,?,?)`);
@@ -737,8 +791,8 @@ function cloneLineage(
         const row = prepare("SELECT evidence_json FROM memory_dialogues WHERE id=?").get(itemId) as { evidence_json: string } | undefined;
         return row ? json<Array<{messageId:string}>>(row.evidence_json, []).map(item => item.messageId) : [];
       }
-      const table = itemKind === "detail" ? "memory_details" : itemKind === "physical_milestone" ? "physical_intimacy_milestones"
-        : itemKind === "atom_relation" ? "atom_relations" : itemKind === "assertion" ? "assertions" : null;
+      const table = itemKind === "memory" ? "memories" : itemKind === "detail" ? "memory_details" : itemKind === "physical_milestone" ? "physical_intimacy_milestones"
+        : itemKind === "atom_relation" ? "atom_relations" : itemKind === "assertion" ? "assertions" : itemKind === "belief" ? "beliefs" : itemKind === "promise_event" ? "promise_events" : null;
       if (table) {
         const row = prepare(`SELECT evidence_json FROM ${table} WHERE id=?`).get(itemId) as { evidence_json: string } | undefined;
         return json<Array<{ messageId?: string }>>(row?.evidence_json, []).map((item) => item.messageId).filter(Boolean) as string[];
@@ -753,10 +807,14 @@ function cloneLineage(
       let ambiguous = rows.some((access) => access.active !== 1);
       const safe: any[] = [];
       for (const access of rows.filter((entry) => entry.active === 1)) {
-        if (access.holder === "__narrator_archive__") { safe.push(access); continue; }
-        // Assertion grants with no source evidence are explicit user-authored
-        // access, so lineage preserves them with the manual assertion.
-        if (itemKind === "assertion") { safe.push(access); continue; }
+        if (access.holder === PENDING_ACCESS_HOLDER || access.holder === "__narrator_archive__") { safe.push(access); continue; }
+        // Ledger grants with no source evidence are explicit user-authored
+        // access, so lineage preserves them with the corrected record.
+        if (itemKind === "assertion" || itemKind === "belief") { safe.push(access); continue; }
+        // Explicit manual header choices have no transcript evidence to locate at a fork.
+        if (itemKind === "memory" && parentAccessEdits.has(parentId) && json<unknown[]>(access.evidence_json,[]).length === 0 && prepare(`SELECT 1 FROM memories
+          WHERE chat_id=? AND id=? AND user_managed=1 AND memory_key LIKE 'manual:%' AND json_array_length(evidence_json)=0`)
+          .get(parent,parentId)) { safe.push(access); continue; }
         if (itemKind === "promise" && options.preserveUserCorrections && prepare("SELECT 1 FROM promises WHERE id=? AND user_edit_ordinal IS NOT NULL").get(parentId)) { safe.push(access); continue; }
         if (itemKind === "detail" && options.preserveUserCorrections && prepare("SELECT 1 FROM memory_details WHERE id=? AND (user_edited=1 OR user_hidden=1)").get(parentId)) {safe.push(access);continue;}
         if (itemKind === "detail" && prepare(`SELECT 1 FROM memory_details d JOIN memories m ON m.id=d.memory_id
@@ -779,7 +837,7 @@ function cloneLineage(
         safe.push(access);
       }
       if (safe.length === 0) {
-        insertAccess.run(randomUUID(), child, itemKind, childId, "__narrator_archive__", "internal", "[]", 1, parentChat.revision, now);
+        insertAccess.run(randomUUID(), child, itemKind, childId, PENDING_ACCESS_HOLDER, "internal", "[]", 1, parentChat.revision, now);
       } else for (const access of safe) insertAccess.run(randomUUID(), child, itemKind, childId, access.holder, access.basis, access.evidence_json, access.confidence, access.source_revision, now);
       if (ambiguous) {
         for (const messageId of itemEvidenceIds(itemKind, parentId)) {
@@ -790,11 +848,12 @@ function cloneLineage(
       }
     }
     // A fork may exclude future grants: preserve only the user-selected scope safe at its boundary.
-    writeDetailAccessEdits(db, child, new Map([...readDetailAccessEdits(db, parent).keys()]
+    writeDetailAccessEdits(db, child, new Map([...parentAccessEdits.keys()]
       .flatMap(id => {
-        const childId = detailMap.get(id) ?? dialogueMap.get(id);
-        const access = childId ? memoryDetailAccess(db, child, childId, detailMap.has(id) ? "detail" : "dialogue") : undefined;
-        return childId && access ? [[childId, access.everyone ? [EVERYONE_HOLDER] : access.holders.map(holder => holder.name)] as const] : [];
+        const entry = [...accessMaps].find(([, map]) => map.has(id));
+        const childId = entry?.[1].get(id);
+        const access = childId ? memoryDetailAccess(db, child, childId, entry![0] as import("./item-access.js").ItemAccessKind) : undefined;
+        return childId && access && (access.everyone || access.narratorOnly || access.holders.length) ? [[childId, access.everyone ? [EVERYONE_HOLDER] : access.holders.map(holder => holder.name)] as const] : [];
       })));
     for (const id of detailMap.values()) syncDetailKnownBy(db, child, id);
     if (boundaryMessageIds.size) {
@@ -811,24 +870,80 @@ function cloneLineage(
       }
     }
 
+    const reviewJobs = new Map<string, string>();
+    const inheritBatchJob=(key:string,sources:string[]):string=>{
+      const previous=reviewJobs.get(key);
+      if (previous) return previous;
+      const id=createInheritedReviewJob(db,child,sources); reviewJobs.set(key,id);
+      return id;
+    };
     const batchMap = new Map<string, string>();
     const coveredSources = new Map<string, string>();
-    for (const row of prepare("SELECT * FROM extraction_batches WHERE chat_id=? AND generation_id='active' AND status='applied' AND end_ordinal<=? ORDER BY start_ordinal").all(parent, fork) as any[]) {
+    const unaccepted=unacceptedPendingBatches(db,parent);
+    const turns=sourceTurnMembership(db,parent);
+    const deferTurns=(ids:string[],recovery:boolean):void=>{
+      for (const turn of turns.filter(turn=>turn.some(source=>ids.includes(source.message_id)))) for (const source of turn) {
+        if (source.ordinal>fork || source.role==='user' && source.extraction_state==='skipped_policy') continue;
+        coveredSources.delete(source.message_id);
+        prepare("UPDATE messages SET extraction_state='pending' WHERE chat_id=? AND message_id=?").run(child,source.message_id);
+        if (recovery && turn.at(-1)!.ordinal<=fork) prepare('INSERT OR IGNORE INTO gap_recovery_messages(chat_id,message_id) VALUES(?,?)').run(child,source.message_id);
+        pendingReextractionIds.add(source.message_id);
+      }
+    };
+    const verdicts=new Map(turns.flatMap(turn=>turn.map(source=>[source.message_id,turn.at(-1)!.extraction_state] as const)));
+    for (const turn of turns) if (turn.at(-1)!.ordinal>fork) deferTurns(turn.map(source=>source.message_id),false);
+    const retryFamilies=coverageRetryFamilies(db,parent);
+    for (const retry of retryFamilies.keys()) {
+      const row=prepare('SELECT status,source_message_ids_json FROM extraction_batches WHERE id=?').get(retry) as {status:string;source_message_ids_json:string};
+      if (!['applied','superseded'].includes(row.status)) deferTurns(JSON.parse(row.source_message_ids_json),true);
+    }
+    for (const row of prepare("SELECT * FROM extraction_batches WHERE chat_id=? AND generation_id='active' AND status IN ('applied','pending_review') AND start_ordinal<=? ORDER BY start_ordinal").all(parent, fork) as any[]) {
       const ids = JSON.parse(row.source_message_ids_json) as string[];
+      if (row.end_ordinal>fork) {
+        if (row.status!=='applied') continue;
+        const slice=inheritedSliceRuns(db,child,ids).flat();
+        if (slice.length) batchMap.set(row.id,createInheritedSliceBatch(db,child,slice,row,now));
+        continue;
+      }
       const fingerprint = sourceFingerprint(db, child, ids);
       if (fingerprint.length !== ids.length) continue;
       const id = randomUUID(); batchMap.set(row.id, id);
-      for (const sourceId of ids) coveredSources.set(sourceId, row.kind === "episode" ? "encapsulated" : "done");
-      prepare(`INSERT INTO extraction_batches(id,chat_id,generation_id,kind,source_message_ids_json,source_fingerprint_json,start_ordinal,end_ordinal,status,final_json,created_at,updated_at)
-        VALUES(?,?,'active',?,?,?,?,?,'applied',?,?,?)`).run(id, child, row.kind, JSON.stringify(ids), JSON.stringify(fingerprint), fingerprint[0]!.ordinal, fingerprint.at(-1)!.ordinal,
-          row.final_json ? remapJson(row.final_json, new Map([...memoryMap, ...detailMap, ...dialogueMap])) : null, now, now);
+      if (unaccepted.has(row.id)) deferTurns(ids,false);
+      else for (const sourceId of ids) {
+        const verdict=verdicts.get(sourceId);
+        if (verdict==='done' || verdict==='encapsulated') coveredSources.set(sourceId,verdict);
+      }
+      prepare(`INSERT INTO extraction_batches(id,chat_id,job_id,generation_id,kind,source_message_ids_json,source_fingerprint_json,start_ordinal,end_ordinal,status,draft_json,final_json,producer_event_contract,producer_state_contract,created_at,updated_at)
+        VALUES(?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, child, row.status==='pending_review' && !unaccepted.has(row.id) ? inheritBatchJob(row.job_id ? `job:${row.job_id}` : `batch:${row.id}`,ids) : null, row.kind, JSON.stringify(ids), JSON.stringify(fingerprint), fingerprint[0]!.ordinal, fingerprint.at(-1)!.ordinal,row.status,row.draft_json,
+          row.final_json ? remapJson(row.final_json, new Map([...memoryMap, ...detailMap, ...dialogueMap])) : null, row.producer_event_contract, row.producer_state_contract, now, now);
+    }
+    // Inherit family state, never its queued work. Unfinished whole turns are
+    // explicit recovery/review in the child and cannot be resolved by membership.
+    for (const [retry,parentBatch] of retryFamilies) {
+      const inheritedParent=batchMap.get(parentBatch);
+      const row=prepare('SELECT * FROM extraction_batches WHERE id=?').get(retry) as any;
+      if (!row) continue;
+      const originalIds=JSON.parse(row.source_message_ids_json) as string[];
+      const unresolved=!['applied','superseded'].includes(row.status);
+      if (!inheritedParent && !unresolved) continue;
+      const ids=row.end_ordinal<=fork ? originalIds : turns.filter(turn=>turn.at(-1)!.ordinal<=fork && originalIds.includes(turn.at(-1)!.message_id))
+        .flatMap(turn=>turn.filter(source=>originalIds.includes(source.message_id)).map(source=>source.message_id));
+      if (!ids.length) continue;
+      const fingerprint=sourceFingerprint(db,child,ids);
+      if (fingerprint.length!==ids.length) continue;
+      const partial=ids.length!==originalIds.length;
+      const inheritedRetry=batchMap.get(retry) ?? randomUUID();
+      if (!batchMap.has(retry)) prepare(`INSERT INTO extraction_batches(id,chat_id,job_id,generation_id,kind,source_message_ids_json,source_fingerprint_json,start_ordinal,end_ordinal,status,draft_json,final_json,created_at,updated_at)
+        VALUES(?,?,?,'active',?,?,?,?,?,?,?,?,?,?)`).run(inheritedRetry,child,unresolved && row.final_json!==null && !partial ? inheritBatchJob(row.job_id ? `job:${row.job_id}` : `batch:${row.id}`,ids) : null,row.kind,JSON.stringify(ids),JSON.stringify(fingerprint),fingerprint[0]!.ordinal,fingerprint.at(-1)!.ordinal,unresolved?'pending_review':row.status,partial?null:row.draft_json,partial?null:row.final_json,now,now);
+      batchMap.set(retry,inheritedRetry);
+      if (inheritedParent) recordCoverageRetryFamily(db,child,inheritedRetry,inheritedParent);
+      if (!unresolved && inheritedParent) foldCoverageRetry(db,child,inheritedRetry,inheritedParent);
+      else deferTurns(ids,true);
     }
     for (const [originalBatch, inheritedBatch] of batchMap) {
-      for(const table of ['assertions','beliefs','social_knowledge_events']) prepare(`UPDATE ${table} SET source_batch_id=? WHERE chat_id=? AND source_batch_id=?`).run(inheritedBatch,child,`lineage:${originalBatch}`);
-      prepare("UPDATE source_passages SET source_batch_id=? WHERE chat_id=? AND source_batch_id=?").run(inheritedBatch, child, `lineage:${originalBatch}`);
-      prepare("UPDATE memory_recall_events SET source_batch_id=? WHERE chat_id=? AND source_batch_id=?").run(inheritedBatch, child, `lineage:${originalBatch}`);
-      prepare("UPDATE promises SET source_batch_id=? WHERE chat_id=? AND source_batch_id=?").run(inheritedBatch, child, `lineage:${originalBatch}`);
-      prepare("UPDATE promise_events SET source_batch_id=? WHERE chat_id=? AND source_batch_id=?").run(inheritedBatch, child, `lineage:${originalBatch}`);
+      for(const table of batchMaterialTables.filter(table=>table!=='memories' && table!=='atom_relations')) {
+        prepare(`UPDATE ${table} SET source_batch_id=? WHERE chat_id=? AND source_batch_id=?`).run(inheritedBatch,child,`lineage:${originalBatch}`);
+      }
     }
     const unmappedRelationEvidence = new Set<string>();
     for (const [originalRelationId, childRelationId] of atomRelationMap) {
@@ -864,7 +979,6 @@ function cloneLineage(
       mapItem("episode", id, row.id);
     }
     counts.episodes = episodeMap.size;
-    const reviewJobs = new Map<string, string>();
     const ledgerIds=new Map([...memoryMap,...detailMap,...dialogueMap,...assertionMap,...beliefMap,...promiseMap]);
     for(const [table,idMap] of [['assertions',assertionMap],['beliefs',beliefMap]] as const) for(const newId of idMap.values()) {
       const row=prepare(`SELECT automatic_closure_evidence_json FROM ${table} WHERE id=?`).get(newId) as {automatic_closure_evidence_json:string|null};
@@ -882,10 +996,10 @@ function cloneLineage(
       const sources = json<string[]>(row.source_message_ids_json, []);
       const valid = sources.every((id) => sourceOrdinals.get(id)?.ordinal! <= fork);
       if (!valid) continue;
-      let jobId = reviewJobs.get(row.job_id);
-      if (!jobId) {
-        jobId = randomUUID(); reviewJobs.set(row.job_id, jobId);
-        prepare("INSERT INTO jobs(id,chat_id,type,status,payload_json,attempts,created_at,updated_at) VALUES(?,?,'extract','superseded',?,0,?,?)").run(jobId, child, JSON.stringify({ sourceMessageIds: sources, inheritedReview: true }), now, now);
+      const jobId=inheritBatchJob(`job:${row.job_id}`,sources);
+      for (const source of prepare('SELECT id FROM extraction_batches WHERE chat_id=? AND job_id=?').all(parent,row.job_id) as Array<{id:string}>) {
+        const inheritedBatch=batchMap.get(source.id);
+        if (inheritedBatch) prepare('UPDATE extraction_batches SET job_id=? WHERE id=? AND chat_id=?').run(jobId,inheritedBatch,child);
       }
       const id = randomUUID();
       prepare(`INSERT INTO reconciliation_items(id,chat_id,job_id,item_ref,item_kind,incoming_json,candidates_json,model_decision_json,model_error,source_message_ids_json,status,resolution_json,created_revision,created_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,?,NULL)`).run(
@@ -1029,6 +1143,8 @@ function cloneLineage(
       for (const row of restored) pendingReextractionIds.delete(row.message_id);
     }
 
+    writeMemoryPreferenceFields(db,child,new Map([...readMemoryPreferenceFields(db,parent)]
+      .flatMap(([id,fields])=>memoryMap.has(id)?[[memoryMap.get(id)!,fields] as const]:[])));
     remapInheritedSources(db, child, messageMap, request);
     inheritSourceCoverageRetry(db,parent,child,messageMap,fork);
     inheritUserDeletions(db,parent,child,messageMap,batchMap,entityMap,ledgerIds,fork);
@@ -1038,6 +1154,7 @@ function cloneLineage(
     }
     rebuildCharacterRecallTraces(db, child);
     bindInheritedMemoryGroups(db, child);
+    finishReviewedBatches(db,child);
 
     syncManualCognition(db,child);
     for (const memoryId of memoryMap.values()) refreshMemoryFts(db, memoryId);
@@ -1157,18 +1274,27 @@ function buildManualPreview(
   const existing = derivedCounts(db, targetChatId);
   const requiresReplacement = Object.values(existing).some((count) => count > 0);
 
-  const sourceRows = db.prepare("SELECT message_id,ordinal,role,content_hash,lifecycle FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned','pending') ORDER BY ordinal").all(parentChatId) as any[];
+  const sourceRows = db.prepare("SELECT message_id,ordinal,role,content_hash,lifecycle,source_kind,source_record_id,display_content_hash FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned','pending') ORDER BY ordinal").all(parentChatId) as any[];
   const targetRows = targetInventory?.length
-    ? targetInventory.filter((row) => row.role && row.contentHash && row.visibility === "active").map((row) => ({ message_id: row.id, ordinal: row.ordinal, role: row.role, content_hash: row.contentHash }))
-    : db.prepare("SELECT message_id,ordinal,role,content_hash FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned','pending') ORDER BY ordinal").all(targetChatId) as any[];
+    ? targetInventory.filter((row) => row.role && row.contentHash && row.visibility === "active").map((row) => ({ ...row, message_id: row.id, content_hash: row.contentHash }))
+    : db.prepare("SELECT message_id,ordinal,role,content_hash,source_record_id AS sourceRecordId,display_content_hash AS displayContentHash FROM messages WHERE chat_id=? AND lifecycle IN ('committed','client_pruned','pending') ORDER BY ordinal").all(targetChatId) as any[];
   const sourceById = new Map(sourceRows.map((row) => [row.message_id, row]));
+  const matches = (source: any, target: any): boolean => source.role === target.role
+    && (source.content_hash === target.content_hash || matchesCapturedYumiDisplay(source, target)
+      // A missing Yumi record leaves the exact captured display as the target
+      // source. Require both record identity and unchanged display; a marker
+      // alone must not hide an actual edit to either representation.
+      || source.source_kind === 'yumi_model' && source.source_record_id
+        && source.source_record_id === target.sourceRecordId
+        && source.display_content_hash === target.displayContentHash
+        && target.content_hash === target.displayContentHash);
   const sameIdConflict = targetRows.some((row) => {
     const source = sourceById.get(row.message_id);
-    return source && (source.role !== row.role || source.content_hash !== row.content_hash);
+    return source && !matches(source, row);
   });
   if (sameIdConflict) throw new Error("A matching message ID has different content");
   const shared = targetRows.map((row) => ({ target: row, source: sourceById.get(row.message_id) }))
-    .filter((item): item is { target: any; source: any } => Boolean(item.source) && item.source.role === item.target.role && item.source.content_hash === item.target.content_hash);
+    .filter((item): item is { target: any; source: any } => Boolean(item.source) && matches(item.source, item.target));
   if (shared.length < 2) throw new Error("At least two exact message IDs are required; use an RCM ZIP backup when IDs are unavailable");
   if (shared.some((item, index) => index > 0 && item.source.ordinal <= shared[index - 1]!.source.ordinal)) throw new Error("Matching messages are not in the same order");
   const last = shared.at(-1)!.source;
@@ -1181,7 +1307,7 @@ function buildManualPreview(
   const fingerprint = createHash("sha256").update(JSON.stringify({
     parentChatId, targetChatId, parentUpdated: parent.updated_at, targetUpdated: target.updated_at,
     forkMessageId: last.message_id, forkOrdinal: last.ordinal, shared: shared.map((item) => [item.source.message_id, item.source.content_hash]),
-    counts, existing, targetQueuedJobs, targetInventory: targetRows.map((row) => [row.message_id, row.ordinal, row.role, row.content_hash]),
+    counts, existing, targetQueuedJobs, targetInventory: targetRows.map((row) => [row.message_id, row.ordinal, row.role, row.content_hash, row.sourceRecordId, row.displayContentHash]),
   })).digest("hex");
   return {
     fingerprint,
@@ -1235,6 +1361,8 @@ export function applyManualLineage(
   replaceDerived = false,
   targetDescriptor?: ManualLineagePreviewRequest["target"],
 ): ChatLineageStatus {
+  assertChatUnlocked(db,targetChatId);
+  assertChatUnlocked(db,parentChatId);
   return db.transaction(() => {
     const targetWasMissing = !db.prepare("SELECT 1 FROM chats WHERE id=?").get(targetChatId);
     const preview = buildManualPreview(db, targetChatId, parentChatId, targetInventory, targetDescriptor);
@@ -1277,6 +1405,8 @@ export function applyManualLineage(
 }
 
 export function applyProbedLineage(db: RcmDatabase, request: TurnPrepareRequest, parentChatId: string, fingerprint: string): ChatLineageStatus {
+  assertChatUnlocked(db,request.chatId);
+  assertChatUnlocked(db,parentChatId);
   return db.transaction(() => {
     const probe = probeChatLineage(db, request);
     if (probe.fingerprint !== fingerprint) throw new Error("LINEAGE_PROBE_STALE");
@@ -1306,12 +1436,21 @@ export function hasPendingLineageDiscovery(db: RcmDatabase, request: TurnPrepare
 }
 
 export function ensureChatLineage(db: RcmDatabase, request: TurnPrepareRequest, allowDiscovery = true, allowSourceChanges = true): ChatLineageStatus {
+  // Source sync may adjust an existing inherited ordinal offset, but cannot
+  // discover or choose a new parent while the chat's derived canon is locked.
+  if (chatUpgradeLock(db,request.chatId)) allowDiscovery=false;
   return db.transaction(() => resolveChatLineage(db, request, allowDiscovery, allowSourceChanges))();
 }
 
 function resolveChatLineage(db: RcmDatabase, request: TurnPrepareRequest, allowDiscovery: boolean, allowSourceChanges: boolean): ChatLineageStatus {
   const existing = getChatLineage(db, request.chatId);
   if (existing.status !== "none") {
+    if (existing.status === 'choice_required' && allowDiscovery) {
+      const resolution = resolveCandidates(db, request);
+      if (!resolution.candidates.length) db.prepare("DELETE FROM chat_lineage WHERE child_chat_id=? AND status='choice_required'").run(request.chatId);
+      else saveLineageChoices(db, request, resolution);
+      return getChatLineage(db, request.chatId);
+    }
     const row = lineageRow(db, request.chatId);
     if (existing.status === "inherited") {
       const storedOffset = Number(row?.ordinal_offset ?? 0);
@@ -1359,6 +1498,8 @@ function saveLineageChoices(db: RcmDatabase, request: TurnPrepareRequest, resolu
 }
 
 export function chooseChatLineage(db: RcmDatabase, chatId: string, parentChatId: string, request: TurnPrepareRequest, fingerprint: string): ChatLineageStatus {
+  assertChatUnlocked(db,chatId);
+  assertChatUnlocked(db,parentChatId);
   const current = getChatLineage(db, chatId);
   const candidate = current.ambiguousCandidates?.find((item) => item.chatId === parentChatId);
   if (!candidate) throw new Error("Lineage candidate not found");
@@ -1380,6 +1521,7 @@ export function chooseChatLineage(db: RcmDatabase, chatId: string, parentChatId:
 }
 
 export function declineChatLineage(db: RcmDatabase, chatId: string, fingerprint: string): ChatLineageStatus {
+  assertChatUnlocked(db,chatId);
   const current = getChatLineage(db, chatId);
   if (current.status !== "choice_required" && current.status !== "ambiguous") throw new Error("LINEAGE_CHOICE_NOT_PENDING");
   const expected = current.ambiguousCandidates?.[0]?.fingerprint;
@@ -1389,7 +1531,8 @@ export function declineChatLineage(db: RcmDatabase, chatId: string, fingerprint:
 }
 
 /** Build an internal, isolated replay target with confirmed state through the ordinal before the cut. */
-export function createRegenerationShadow(db: RcmDatabase, sourceChatId: string, shadowChatId: string, cutOrdinal: number): void {
+export function createRegenerationShadow(db: RcmDatabase, sourceChatId: string, shadowChatId: string, cutOrdinal: number, options: {preserveUserCorrections?: boolean} = {}): void {
+  if (!db.prepare("SELECT 1 FROM regeneration_runs WHERE chat_id=? AND shadow_chat_id=? AND mode='upgrade' AND phase=1 AND status='processing'").get(sourceChatId,shadowChatId)) assertChatUnlocked(db,sourceChatId);
   const source = db.prepare("SELECT * FROM chats WHERE id=?").get(sourceChatId) as any;
   if (!source) throw new Error("Source chat not found");
   const forkOrdinal = cutOrdinal - 1;
@@ -1412,7 +1555,13 @@ export function createRegenerationShadow(db: RcmDatabase, sourceChatId: string, 
     forceBackfill: false,
     deferExtraction: false,
   };
-  cloneLineage(db, request, {
+  if (options.preserveUserCorrections === false) {
+    // A whole-chat rebuild starts with source and configuration only. Even
+    // unbacked manual rows and setup corrections must not leak into extraction.
+    insertShell(db, request);
+    db.prepare('UPDATE chats SET static_hash=?,static_json=?,normalization_policy_json=?,revision=?,completed_turn_count=? WHERE id=?')
+      .run(source.static_hash,source.static_json,source.normalization_policy_json,source.revision,source.completed_turn_count,shadowChatId);
+  } else cloneLineage(db, request, {
     chatId: sourceChatId,
     title: source.chat_title ?? sourceChatId,
     forkMessageId: prefix?.at(-1)?.id ?? "",
@@ -1420,6 +1569,14 @@ export function createRegenerationShadow(db: RcmDatabase, sourceChatId: string, 
     firstSharedOrdinal: prefix?.[0]?.ordinal ?? 0,
     sharedMessages: prefix?.length ?? 0,
   }, "branch", "user", {preserveUserCorrections:true, skipQuizzes:true});
+  if (options.preserveUserCorrections !== false) {
+    const parents=discardRegeneratedTextEdits(db,shadowChatId,{startOrdinal:cutOrdinal,endOrdinal:Number.MAX_SAFE_INTEGER});
+    // Only protected suffix parents were copied across the cut. Once prose-only
+    // ownership is removed, their empty shells must not reserve a new identity.
+    db.prepare(`DELETE FROM memories WHERE chat_id=? AND id IN (SELECT value FROM json_each(?))
+      AND user_managed=0 AND NOT is_initial_calibration_memory(memory_key) AND NOT (${memoryHasLineCorrectionSql()})`)
+      .run(shadowChatId,JSON.stringify(parents));
+  }
   // A replay shadow must preserve the source setup inventory, including absence.
   if (!db.prepare("SELECT 1 FROM initial_calibrations WHERE chat_id=?").get(sourceChatId)) {
     db.prepare("DELETE FROM initial_calibrations WHERE chat_id=?").run(shadowChatId);
@@ -1433,6 +1590,7 @@ export function createRegenerationShadow(db: RcmDatabase, sourceChatId: string, 
 }
 
 export function revertChatLineage(db: RcmDatabase, chatId: string): void {
+  assertChatUnlocked(db,chatId);
   const row = lineageRow(db, chatId);
   if (!row || row.status !== "inherited") return;
   db.transaction(() => {
@@ -1444,6 +1602,7 @@ export function revertChatLineage(db: RcmDatabase, chatId: string): void {
 }
 
 export function acknowledgeChatLineage(db: RcmDatabase, chatId: string): ChatLineageStatus {
+  assertChatUnlocked(db,chatId);
   const result = db.prepare("UPDATE chat_lineage SET acknowledged_at=? WHERE child_chat_id=? AND status='inherited'").run(Date.now(), chatId);
   if (result.changes !== 1) throw new Error("Inherited lineage not found");
   return getChatLineage(db, chatId);

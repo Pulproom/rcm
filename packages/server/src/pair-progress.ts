@@ -1,3 +1,5 @@
+import { escapeMemoryText } from "@rcm/shared";
+import { assertChatUnlocked, chatUpgradeLock } from './upgrade-lock.js';
 import { randomUUID } from "node:crypto";
 import { estimateTokens, PAIR_PROGRESS_DEFAULTS, PairProgressPatchSchema,
   type PairProgress, type PairProgressItem, type PairProgressCell, type PairProgressResponse, type ExtractionDraftResult } from "@rcm/shared";
@@ -23,7 +25,7 @@ export function readProgressCells(db: RcmDatabase, chatId: string, row: Pick<Row
   const cells = JSON.parse(row.cells_json) as PairProgressCell[];
   const legacy = cells.filter(cell => cell.userNotYetBoundaryVersion !== 1
     && (cell.userNotYetAfterOrdinal !== undefined || cell.source === "user" && cell.state === "not_yet"));
-  if (legacy.length) {
+  if (legacy.length && !chatUpgradeLock(db,chatId)) {
     const boundary = lastExtractedProgressOrdinal(db, chatId);
     for (const cell of legacy) {
       cell.userNotYetAfterOrdinal = Math.min(cell.userNotYetAfterOrdinal ?? boundary, boundary);
@@ -135,6 +137,7 @@ function saveProgressItem(db: RcmDatabase, chatId: string, pair: Pair, item: Pai
 
 /** Freeze the starting state before a new scene is inserted; old chats remain unknown. */
 export function ensurePairProgress(db: RcmDatabase, chatId: string): PairProgress[] {
+  assertChatUnlocked(db,chatId);
   const pairs = listPairProgress(db, chatId);
   for (const pair of pairs) {
     for (const item of pair.items) if (item.cells.some(cell => !cell.createdAt)) saveProgressItem(db, chatId, pair, item);
@@ -148,6 +151,7 @@ type ProgressEdit = { kind: "cell"; itemId: string; side: string; state: "done" 
   | { kind: "remove" | "hide" | "restore"; itemId: string };
 
 export function editPairProgress(db: RcmDatabase, chatId: string, persona: string, character: string, action: ProgressEdit): PairProgress {
+  assertChatUnlocked(db,chatId);
   const pair = listPairProgress(db, chatId).find(candidate => candidate.persona === persona && candidate.character === character);
   if (!pair) throw new Error("Only the persona and a primary character can have progress.");
   const boundary = lastExtractedProgressOrdinal(db, chatId);
@@ -202,7 +206,8 @@ export function prepareProgress(db: RcmDatabase, chatId: string, draft?: Pick<Ex
   const cells = matched
     .flatMap(pair => pair.items.filter(item => !item.hidden).flatMap(item => item.cells
       .filter(isPendingProgress)
-      .map(cell => ({ persona: pair.persona, character: pair.character, itemId: item.id, label: item.label, mode: item.mode, side: cell.side }))));
+      .map(cell => ({ persona: pair.persona, character: pair.character, itemId: item.id, label: item.label, mode: item.mode, side: cell.side,
+        means: progressCellMeaning(pair, item, cell.side) }))));
   return { cells, progressSent: { count: cells.length, cells: cells.map(({itemId, side}) => ({itemId, side})),
     ...(!cells.length ? { reason: !pairs.length ? "no_pair" : !matched.length ? "no_pair_matched_participants" : "all_cells_done_locked_or_hidden" } : {}) } };
 }
@@ -259,8 +264,20 @@ export function resetProgress(db: RcmDatabase, chatId: string, source: "scene" |
   }
 }
 
-const xml = (value: string): string => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("\n", " ").replaceAll("\r", " ");
+const xml = (value: string): string => escapeMemoryText(value.replaceAll("\n", " ").replaceAll("\r", " "));
+
+/** Fixed product templates for typed owner cells, never interpretation of the label. */
+function progressCellMeaning(pair: Pair, item: PairProgressItem, side: string): string {
+  const persona = xml(pair.persona), character = xml(pair.character);
+  const owner = xml(side), other = xml(side === pair.persona ? pair.character : pair.persona);
+  const label = `"${xml(item.label)}"`;
+  if (item.mode === "mutual") return item.custom ? `${label}: ${persona} and ${character}, together`
+    : `${persona} and ${character} exchanged a way to contact each other`;
+  if (item.custom) return `${label}: ${other} → ${owner}`;
+  if (item.id === "knows_residence") return `${other} knows where ${owner} lives`;
+  if (item.id === "visited_home") return `${other} has been inside ${owner}'s home`;
+  return `${other} has met ${owner}'s family or friends`;
+}
 
 function itemPhrases(pair: PairProgress, item: PairProgressItem): string[] {
   const cells = item.cells.filter(cell => cell.state === "not_yet");
@@ -284,13 +301,14 @@ function itemPhrases(pair: PairProgress, item: PairProgressItem): string[] {
   });
 }
 
-export function renderPairProgress(pairs: PairProgress[], activeNames: string[] = [], budget = 120): string {
+export function renderPairProgress(pairs: PairProgress[], activeNames: string[] = [], { budget = 120, initialSetupOnly = false } = {}): string {
   const active = new Set(activeNames.map(normalizeEntityName));
   const lines: string[] = [];
-  const wrap = (parts: string[]) => `<not_yet>No record yet. Play these as firsts unless the user establishes otherwise: ${parts.join(". ")}.</not_yet>`;
+  const introduction = initialSetupOnly ? "No record yet" : "No record yet. Play these as firsts unless the user establishes otherwise";
+  const wrap = (parts: string[]) => `<not_yet>${introduction}: ${parts.join(". ")}.</not_yet>`;
   const ordered = [...pairs].sort((a, b) => Number(active.has(normalizeEntityName(b.character))) - Number(active.has(normalizeEntityName(a.character))));
   for (const pair of ordered) {
-    const prefix = `${xml(pair.persona)} &amp; ${xml(pair.character)} — `;
+    const prefix = `${xml(pair.persona)} & ${xml(pair.character)} — `;
     const phrases: string[] = [];
     for (const item of pair.items.filter(candidate => !candidate.hidden)) {
       for (const phrase of itemPhrases(pair, item)) {

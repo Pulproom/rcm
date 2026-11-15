@@ -1,3 +1,4 @@
+import { installToasts } from './toasts.js';
 import { cleanupSetupCaptures } from "./setup-sources.js";
 import { openDashboard } from "./dashboard.js";
 import { registerMaskToolBridge } from "./mask-bridge.js";
@@ -32,6 +33,8 @@ void (async () => {
   const open = () => void openDashboard(state, client);
   state.openDashboard = open;
   await registerDashboardSetting(state);
+  try { await installToasts(state); }
+  catch { addLog(state.logs,'warn','Major alert host could not be installed'); }
   await installStatusWidget(state, client);
   // Hydrate the active chat before the first activity poll. Without this,
   // the floating widget can claim the queue is healthy until another host
@@ -41,9 +44,14 @@ void (async () => {
   await updateWorkerMenuButton(state);
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void observeCurrentHostGeneration(state).then(() => drainWorker(state, client));
+    if (document.visibilityState !== "visible") return;
+    state.requestActivityRefresh?.();
+    void observeCurrentHostGeneration(state).then(() => drainWorker(state, client));
   });
-  window.addEventListener("online", () => void drainWorker(state, client));
+  window.addEventListener("online", () => {
+    state.requestActivityRefresh?.();
+    void drainWorker(state, client);
+  });
   state.serverHeartbeatTimer = window.setInterval(() => void heartbeatServerWorker(state, client), 15_000);
   addLog(state.logs, "info", "Risu Cognitive Memory initialized");
   if (isServerConfigured(state.settings)) {
