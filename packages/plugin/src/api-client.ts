@@ -26,6 +26,9 @@ function serverErrorDetail(error: unknown): string {
 }
 
 export interface PrepareClientTimings {
+  httpStatus?: number;
+  serverVersion?: string;
+  serverApiRevision?: number;
   setupMs?: number;
   serializeMs?: number;
   requestMs?: number;
@@ -314,7 +317,7 @@ export class ServerClient {
       }), deadline]);
       awaitingHost = false;
       if (controller.signal.aborted) throw controller.signal.reason ?? new Error("Request already ended");
-      if (timings) timings.responseStage = "received";
+      if (timings) { timings.responseStage = "received"; timings.httpStatus = response.status; }
       if (!response.ok) {
         const detail = (await response.text()).trim();
         let readable = "";
@@ -354,6 +357,10 @@ export class ServerClient {
   async prepare(body: TurnPrepareRequest, timeoutMs: number | null = TURN_PREPARE_TIMEOUT_MS, timings?: PrepareClientTimings, signal?: AbortSignal): Promise<TurnPrepareResponse> {
     const startedAt = performance.now();
     if (timings) {
+      const summary = serverSummaries.get(this.settings().serverUrl.replace(/\/$/, ""));
+      timings.serverVersion = summary?.serverVersion;
+      timings.serverApiRevision = summary?.serverApiRevision;
+      timings.httpStatus = undefined;
       timings.responseStage = "not_received";
       timings.bodyStage = "not_read";
       timings.jsonStage = "not_parsed";
@@ -370,11 +377,18 @@ export class ServerClient {
     if (timings) timings.schemaMs = performance.now() - schemaStartedAt;
     if (!parsed.success) {
       if (timings) timings.schemaStage = "failed";
-      throw new Error(`Invalid turn/prepare response schema: ${parsed.error.issues[0]?.message ?? "invalid response"}`);
+      const error = new Error("Invalid turn/prepare response schema");
+      throw Object.assign(error, { code: "VALIDATION_FAILED", schemaIssues: parsed.error.issues.slice(0, 5).map(issue => {
+        const value = issue.path.reduce<unknown>((value, key) =>
+          value !== null && typeof value === "object" ? (value as Record<PropertyKey, unknown>)[key] : undefined, response);
+        return { path: issue.path, expected: "expected" in issue ? issue.expected : undefined,
+          received: value === null ? "null" : Array.isArray(value) ? "array" : typeof value };
+      }) });
     }
     if (parsed.data.apiRevision !== RCM_API_REVISION) {
       if (timings) timings.schemaStage = "failed";
-      throw new Error(`RCM API 버전이 맞지 않아요: 플러그인 ${RCM_API_REVISION}, 서버 ${parsed.data.apiRevision}. 서버와 플러그인을 함께 업데이트해 주세요.`);
+      if (timings) timings.serverApiRevision = parsed.data.apiRevision;
+      throw Object.assign(new Error(`RCM API 버전이 맞지 않아요: 플러그인 ${RCM_API_REVISION}, 서버 ${parsed.data.apiRevision}. 서버와 플러그인을 함께 업데이트해 주세요.`), { code: "API_REVISION_MISMATCH" });
     }
     if (timings) timings.schemaStage = "parsed";
     return parsed.data;

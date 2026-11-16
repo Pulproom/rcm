@@ -482,14 +482,14 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
               method: "POST",
               body: JSON.stringify({ ...request, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
             }, 120_000);
-            addLog(state.logs, "info", `동일한 대화 원문 ${preview.commonMessages}개를 확인해 현재 채팅으로 기억을 가져왔습니다.`);
+            addLog(state.logs, "info", `동일한 대화 원문 ${preview.commonMessages}개를 확인해 현재 채팅으로 기억을 가져왔습니다.`, "MEMORY_LINKED");
             return result;
           } else {
             const result = await client.request<{lineage:ChatLineageStatus}>(`/v1/chats/${encodeURIComponent(current.chatId)}/memory-transplant`, {
               method: "POST",
               body: JSON.stringify({ sourceChatId, fingerprint: preview.fingerprint, replaceDerived: preview.requiresReplacement === true }),
             }, null);
-            addLog(state.logs, "info", "메시지 ID 연결이 없어 보관된 기억을 현재 채팅의 독립 기록으로 가져왔습니다.");
+            addLog(state.logs, "info", "메시지 ID 연결이 없어 보관된 기억을 현재 채팅의 독립 기록으로 가져왔습니다.", "MEMORY_TRANSPLANTED");
             return result;
           }
         },mode === 'lineage' ? sourceChatId : undefined);
@@ -499,7 +499,7 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
           ? "같은 대화 원문을 연결하고 기억을 가져왔어요. 확인된 원문은 다시 처리하지 않아요."
           : "보관된 기억을 독립 기록으로 가져왔어요. 현재 채팅 원문은 별도로 처리될 수 있어요.");
       } catch (error) {
-        addLog(state.logs, "error", `Memory transfer failed: ${String(error)}`);
+        addLog(state.logs, "error", `Memory transfer failed: ${String(error)}`, "MEMORY_TRANSFER_FAILED");
         if (currentLineageOperation(state)) render();
         else await alertDashboard(lineageFailureMessage(error));
       } finally {
@@ -559,7 +559,7 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
         ? result.awaitingCalibration
           ? "Initial setup analysis queued; confirm the setup ledger before transcript extraction starts"
           : `Ledger rebuild queued: ${Number(result.queuedJobs ?? 0)} job(s)`
-        : `Data operation completed: ${operation}`);
+        : `Data operation completed: ${operation}`, "MEMORY_REBUILD_REQUESTED");
       if (operation === "rebuild" && result.awaitingCalibration) openInitial();
       view.confirmation = undefined;
       return { forceApply: operation === "delete" };

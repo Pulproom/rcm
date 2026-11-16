@@ -34,7 +34,7 @@ export async function syncQuizEnabled(state: RuntimeState, client: Pick<ServerCl
     }
     if (state.quizSynced === syncMark) state.quizSynced = undefined;
     if (isServerConnectionFailure(error)) { noteServerConnectionFailure(state, state.settings, error); return; }
-    addLog(state.logs, "warn", `퀴즈 설정 동기화 실패: ${String(error)}`);
+    addLog(state.logs, "warn", `퀴즈 설정 동기화 실패: ${String(error)}`, "QUIZ_SETTINGS_SYNC_FAILED");
   }
 }
 
@@ -50,7 +50,7 @@ export async function syncQuizSettings(state: RuntimeState, client: Pick<ServerC
     } catch (error) {
       if (isServerConnectionFailure(error)) { noteServerConnectionFailure(state, state.settings, error); return; }
       if (isMissingServerRoute(error)) return;
-      addLog(state.logs, "warn", `퀴즈 설정 동기화 실패: ${String(error)}`);
+      addLog(state.logs, "warn", `퀴즈 설정 동기화 실패: ${String(error)}`, "QUIZ_SETTINGS_SYNC_FAILED");
     }
     return;
   }

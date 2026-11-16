@@ -1,5 +1,6 @@
 import { consumeIncidentFeed } from './toasts.js';
 import { supportFailure } from "./support-diagnostics.js";
+import { loadPrepareFailures, recordPrepareFailure } from "./prepare-diagnostics.js";
 import { captureSetupRequest, discardSetupCapture, observeSetupAttention, completeSetupAttentionTurn } from "./setup-sources.js";
 declare const __RCM_DISTRIBUTION__: boolean;
 import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
@@ -66,7 +67,7 @@ async function persistCache(state: RuntimeState): Promise<void> {
   try {
     await saveStoredJson(CACHE_KEY, state.cache);
   } catch (error) {
-    addLog(state.logs, "warn", `Injection inspector cache was not persisted: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Injection inspector cache was not persisted: [오류 원문 제외]`, "INJECTION_CACHE_SAVE_FAILED");
   }
 }
 
@@ -89,7 +90,7 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
     if (!injection.blocked && !injection.omitted && ["fresh", "reused"].includes(injection.prepareOutcome ?? "")) {
       void client.traceRetrieval({ id: crypto.randomUUID(), kind: "automatic_injection",
         chatId: injection.chatId, receiptOnly: true, prepareOutcome: injection.prepareOutcome, blocked: false, omitted: false,
-        manifest: { memoryIds: injection.manifest.memoryIds, atomKeys: injection.manifest.atomKeys, longtermMemoryIds: injection.manifest.longtermMemoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`));
+        manifest: { memoryIds: injection.manifest.memoryIds, atomKeys: injection.manifest.atomKeys, longtermMemoryIds: injection.manifest.longtermMemoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`, "DELIVERY_RECEIPT_FAILED"));
     }
     if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return;
   }
@@ -138,11 +139,11 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
   }).then(() => {
     const elapsedMs = performance.now() - deliveryStartedAt;
     injection.traceDelivery = { eventId, requestId, status: "succeeded", startedAt, elapsedMs };
-    addLog(state.logs, "info", `Retrieval trace delivered requestId=${requestId} eventId=${eventId} in ${elapsedMs}ms`);
+    addLog(state.logs, "info", `Retrieval trace delivered requestId=${requestId} eventId=${eventId} in ${elapsedMs}ms`, "RETRIEVAL_TRACE_DELIVERED");
   }, (error) => {
     const message = String(error).replace(/\s+/g, " ").slice(0, 240);
     injection.traceDelivery = { eventId, requestId, status: "failed", startedAt, elapsedMs: performance.now() - deliveryStartedAt, error: message };
-    addLog(state.logs, "warn", `Retrieval trace delivery failed requestId=${requestId} eventId=${eventId}: ${message}`);
+    addLog(state.logs, "warn", `Retrieval trace delivery failed requestId=${requestId} eventId=${eventId}: ${message}`, "RETRIEVAL_TRACE_FAILED");
   });
 }
 
@@ -283,7 +284,7 @@ function reuseExistingContext(state: RuntimeState, client: ServerClient, message
   state.cache[chatId] = { ...(state.cache[chatId] ?? { serverInstanceId: automatic?.response.serverInstanceId ?? state.settings.serverInstances[serverUrl], stableAnchors: "", lastPacket: injected.packet, lastRevision: 0, lastPreparedAt: Date.now() }), lastPacket: injected.packet, lastInjectionManifest: state.lastInjection.manifest, lastInjectionScenes: summarizeInjectedScenes(automatic?.response.selected), lastInjectionStateSnapshots: state.lastInjection.stateSnapshots, lastInjectedTokens: injected.injectedTokens, lastInjectionAt: state.lastInjection.at };
   void persistCache(state);
   traceAutomaticInjection(state, client, state.automaticTurnPacket?.latestMessageId ?? state.current?.snapshot?.at(-1)?.id);
-  addLog(state.logs, "info", `Reused ~${injected.injectedTokens} memory tokens from the prepared request`);
+  addLog(state.logs, "info", `Reused ~${injected.injectedTokens} memory tokens from the prepared request`, "PREPARED_MEMORY_REUSED");
   return injected.messages;
 }
 
@@ -294,7 +295,7 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
     const context = await readCurrentContext(state);
     if (state.unloaded) return;
     if (context.chatId !== chatId || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId)) {
-      addLog(state.logs, "info", `Post-response memory sync skipped for inactive chat ${chatId}`);
+      addLog(state.logs, "info", `Post-response memory sync skipped for inactive chat ${chatId}`, "OUTPUT_SYNC_SKIPPED");
       return;
     }
     state.current = context;
@@ -304,7 +305,7 @@ async function syncCommittedOutput(state: RuntimeState, client: ServerClient, ch
     const response = await client.prepare(makePrepareRequest(context, 0, { deferExtraction: false }), 5_000);
     if ((state.statusSummaryRevision ?? 0) === statusRevision) observeSetupAttention(state, chatId, response.initialCalibration?.status, response.lineage);
   } catch (error) {
-    addLog(state.logs, "warn", `Post-response memory sync deferred: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Post-response memory sync deferred: [오류 원문 제외]`, "OUTPUT_SYNC_DEFERRED");
   } finally {
     if (completed) completeSetupAttentionTurn(state, chatId, requestId);
     state.requestActivityRefresh?.();
@@ -339,6 +340,7 @@ export async function createRuntime(): Promise<{ state: RuntimeState; client: Se
     internalModelCalls: new Set(),
   };
   const client=new ServerClient(() => state.settings);
+  await loadPrepareFailures(state);
   client.onIncidentFeed=(feed,serverUrl,cursor)=>consumeIncidentFeed(state,feed,serverUrl,cursor);
   return { state, client };
 }
@@ -467,7 +469,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           }
           state.lastPromptValidation = { chatId: knownRetryChatId, status: "existing_context", at: Date.now() };
           state.activeModelRequest = { chatId: knownRetryChatId, requestId: generationId };
-          addLog(state.logs, "info", "Reused an empty prepared memory packet for the provider retry");
+          addLog(state.logs, "info", "Reused an empty prepared memory packet for the provider retry", "EMPTY_PACKET_REUSED");
           return messages;
         }
         // The idle discovery bundle exists only so Provider Manager can render
@@ -480,7 +482,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         if (!existing.hasMarker) {
           state.lastPromptValidation = { chatId: currentChatId, status: "marker_missing", at: Date.now() };
           state.activeModelRequest = undefined;
-          addLog(state.logs, "warn", "Blocked model request because the enabled chat has no [[RCM]] marker");
+          addLog(state.logs, "warn", "Blocked model request because the enabled chat has no [[RCM]] marker", "MEMORY_MARKER_MISSING");
           throw new MissingRcmMarkerError();
         }
         const memoryPreparationStartedAt = Date.now();
@@ -608,14 +610,14 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               if (catchUpPending) {
                 delete state.settings.chatCatchUpPending[context.chatId];
                 void saveSettings(state.settings).catch((error) =>
-                  addLog(state.logs, "warn", `Catch-up state persistence failed: [오류 원문 제외]`),
+                  addLog(state.logs, "warn", `Catch-up state persistence failed: [오류 원문 제외]`, "CATCH_UP_STATE_SAVE_FAILED"),
                 );
               }
               const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
               if (state.settings.serverInstances[serverUrl] !== response.serverInstanceId) {
                 state.settings.serverInstances[serverUrl] = response.serverInstanceId;
                 void saveSettings(state.settings).catch((error) =>
-                  addLog(state.logs, "warn", `Server identity persistence failed: [오류 원문 제외]`),
+                  addLog(state.logs, "warn", `Server identity persistence failed: [오류 원문 제외]`, "SERVER_IDENTITY_SAVE_FAILED"),
                 );
               }
               if (!response) throw new Error("Memory preparation returned no response");
@@ -735,11 +737,12 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
                 prepareOutcome = name === "AbortError" ? "timeout" : "error";
                 prepareError = String(error).replace(/\s+/g, " ").slice(0, 500);
+                recordPrepareFailure(state, error, prepareClientTimings, prepareElapsedMs);
                 const cached = state.cache[context.chatId];
                 const knownInstanceId = state.settings.serverInstances[state.settings.serverUrl.replace(/\/$/, "")];
                 packet = clampPacket(!context.memoryOnlyInjection && cached?.serverInstanceId && cached.serverInstanceId === knownInstanceId ? cached.stableAnchors : "", Math.min(1_500, effectiveAutoBudget));
                 fallback = true;
-                addLog(state.logs, "warn", `turn/prepare ${prepareOutcome} after ${prepareElapsedMs}ms; fallback ~${estimateTokens(packet)} tokens: [오류 원문 제외]`);
+                addLog(state.logs, "warn", `turn/prepare ${prepareOutcome} after ${prepareElapsedMs}ms; fallback ~${estimateTokens(packet)} tokens: [오류 원문 제외]`, "PREPARE_FALLBACK");
               }
             }
           }
@@ -823,6 +826,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           throw new MemoryInjectionBlockedError(`turn/prepare ${prepareOutcome}`);
         }
         if (blockedInjection) {
+          recordPrepareFailure(state, new Error("Memory injection failed"), prepareClientTimings, prepareElapsedMs, true);
           state.activeModelRequest = undefined;
           if (state.automaticTurnPacket?.chatId === context.chatId) state.automaticTurnPacket = undefined;
           throw new MemoryInjectionBlockedError(injected.omissionReason ?? response?.omissionReason ?? "memory omitted");
@@ -838,7 +842,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           "info",
           injected.omitted
             ? `Memory omitted: ${injected.omissionReason ?? response?.omissionReason ?? "injection_budget"}`
-            : `${reused ? "Reused" : "Injected"} ~${injected.injectedTokens} memory tokens; removed ~${injected.removedTokens} old chat tokens${prepareElapsedMs === undefined ? "" : `; prepare ${prepareOutcome} ${prepareElapsedMs}ms`}`,
+            : `${reused ? "Reused" : "Injected"} ~${injected.injectedTokens} memory tokens; removed ~${injected.removedTokens} old chat tokens${prepareElapsedMs === undefined ? "" : `; prepare ${prepareOutcome} ${prepareElapsedMs}ms`}`, injected.omitted ? "MEMORY_OMITTED" : "MEMORY_INJECTED",
         );
         scheduleWorker(state, client);
         return injected.messages;
@@ -859,6 +863,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         if (error instanceof MissingRcmMarkerError || error instanceof MemoryInjectionBlockedError) throw error;
         if (state.modelRequestEpoch === requestEpoch) state.activeModelRequest = undefined;
         addLog(state.logs, "error", `beforeRequest blocked: [오류 원문 제외]`, supportFailure("before_request", error));
+        recordPrepareFailure(state, error);
         throw new MemoryInjectionBlockedError(String(error).replace(/\s+/g, " ").slice(0, 240));
       }
       };
@@ -956,7 +961,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           // Chat listeners are awaited by Risu in sequence. Keep server work in
           // the background so RCM never delays rendering or later output hooks.
           void syncCommittedOutput(state, client, chatId, requestId);
-        })().catch(() => addLog(state.logs, "warn", "Committed-output observation could not be confirmed"));
+        })().catch(() => addLog(state.logs, "warn", "Committed-output observation could not be confirmed", "OUTPUT_OBSERVATION_FAILED"));
       }),
     ] : []),
   ]);

@@ -85,6 +85,7 @@ export interface CachedChatState {
 }
 
 export interface RuntimeLog {
+  event?: import("./support-diagnostics.js").SupportEvent;
   detail?: string;
   diagnostic?: import("./support-diagnostics.js").SupportDiagnostic;
   at: number;
@@ -146,6 +147,8 @@ export interface RuntimeState {
   quizSynced?: { chatId: string; enabled: boolean };
   cache: Record<string, CachedChatState>;
   logs: RuntimeLog[];
+  prepareFailures?: import("./prepare-diagnostics.js").PrepareFailure[];
+  prepareFailuresStorageError?: boolean;
   memoryToolRegistration?: {
     status: "unavailable" | "pending" | "registered" | "retrying" | "paused" | "disabled";
     at: number;

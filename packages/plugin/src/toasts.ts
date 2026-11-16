@@ -91,13 +91,14 @@ class ToastHost {
       if (!body) return;
       this.host = await root.createElement('div');
       await this.host.setAttribute('x-rcm-toasts','true');
-      // Only x- attributes may be set through SafeElement; roles live in sanitized HTML.
-      await this.host.setInnerHTML('<div class="rcm-toast" role="status" aria-live="polite" aria-atomic="true" x-rcm-toast-status></div><div class="rcm-toast" role="alert" aria-live="assertive" aria-atomic="true" x-rcm-toast-alert></div>');
+      // SafeElement permits explicit x- attributes, but sanitized HTML strips them.
+      // Roles survive sanitization and also identify the persistent live regions.
+      await this.host.setInnerHTML('<div class="rcm-toast" role="status" aria-live="polite" aria-atomic="true"></div><div class="rcm-toast" role="alert" aria-live="assertive" aria-atomic="true"></div>');
       await body.appendChild(this.host);
       this.style = await root.createElement('style');
       await this.host.appendChild(this.style);
-      this.status = await this.host.querySelector('[x-rcm-toast-status]') ?? undefined;
-      this.alert = await this.host.querySelector('[x-rcm-toast-alert]') ?? undefined;
+      this.status = await this.host.querySelector('[role="status"]') ?? undefined;
+      this.alert = await this.host.querySelector('[role="alert"]') ?? undefined;
       if (!this.style || !this.status || !this.alert) throw new Error('Toast live regions were removed by host HTML sanitization');
       let swipedAt=-Infinity;
       await this.host.addEventListener('click',() => { if (Date.now()-swipedAt>500) void this.dismiss(); });
@@ -234,11 +235,11 @@ export function consumeIncidentFeed(state: RuntimeState, feed: Partial<IncidentF
     state.settings.incidentCursor=cursor;
     state.settings.incidentServerUrl=serverUrl;
     try { await saveSettings(state.settings); }
-    catch (error) { state.settings.incidentCursor=previous; state.settings.incidentServerUrl=previousServer; addLog(state.logs,'warn','Incident cursor could not be saved'); return; }
+    catch (error) { state.settings.incidentCursor=previous; state.settings.incidentServerUrl=previousServer; addLog(state.logs,'warn','Incident cursor could not be saved', "INCIDENT_CURSOR_SAVE_FAILED"); return; }
     try {
       if (reset || previousServer!==serverUrl) await host?.reset();
       if (!reset) await showToasts(feed.incidents.filter(item=>previous===undefined || item.id>previous),{skin:state.settings,enabled:state.settings.majorAlerts !== false});
-    } catch { addLog(state.logs,'warn','Major alert could not be rendered'); }
+    } catch { addLog(state.logs,'warn','Major alert could not be rendered', "ALERT_RENDER_FAILED"); }
   });
   feeds.set(state,pending); return pending;
 }

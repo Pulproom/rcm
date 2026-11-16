@@ -299,8 +299,10 @@ export async function saveSettings(settings: PluginSettings): Promise<void> {
   }
 }
 
-export function addLog(logs: RuntimeLog[], level: RuntimeLog["level"], message: string, diagnostic?: RuntimeLog["diagnostic"], detail?: string): void {
+export function addLog(logs: RuntimeLog[], level: RuntimeLog["level"], message: string, diagnostic?: RuntimeLog["diagnostic"] | RuntimeLog["event"], detail?: string): void {
   const secrets = [...diagnosticSecrets];
-  logs.unshift({ at: Date.now(), level, message: sanitizeDiagnosticText(message, secrets, 1000), ...(diagnostic ? { diagnostic } : {}), ...(detail ? { detail: sanitizeDiagnosticText(detail, secrets) } : {}) });
+  logs.unshift({ at: Date.now(), level, message: sanitizeDiagnosticText(message, secrets, 1000),
+    ...(typeof diagnostic === "string" ? { event: diagnostic } : diagnostic ? { diagnostic } : {}),
+    ...(detail ? { detail: sanitizeDiagnosticText(detail, secrets) } : {}) });
   logs.splice(50);
 }

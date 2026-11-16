@@ -568,7 +568,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       connectionFailed: (error) => { noteServerConnectionFailure(state, state.settings, error); },
       enabled: quizOn,
       setSupported: (supported) => { state.quizSupported = supported; },
-      log: (message) => addLog(state.logs, "warn", message),
+      log: (message) => addLog(state.logs, "warn", message, "QUIZ_WIDGET_WARNING"),
     });
     let elapsedLabelElement: SafeRootElement | undefined;
     let elapsedRowElements: SafeRootElement[] = [];
@@ -598,7 +598,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const missingMarkers = !elapsedLabelElement || elapsedRowElements.length !== rowCount;
       if (missingMarkers && !elapsedMarkerErrorReported) {
         elapsedMarkerErrorReported = true;
-        addLog(state.logs, "warn", "Status widget clock markers were removed by host HTML sanitization");
+        addLog(state.logs, "warn", "Status widget clock markers were removed by host HTML sanitization", "WIDGET_CLOCK_SANITIZED");
       } else if (!missingMarkers) elapsedMarkerErrorReported = false;
     };
     const syncElapsedClocks = async (current: FloatingWidgetState): Promise<void> => {
@@ -665,7 +665,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const reportElapsedClockError = (error: unknown): void => {
       if (elapsedClockErrorReported) return;
       elapsedClockErrorReported = true;
-      addLog(state.logs, "warn", `Status widget clock update failed: [오류 원문 제외]`);
+      addLog(state.logs, "warn", `Status widget clock update failed: [오류 원문 제외]`, "WIDGET_CLOCK_FAILED");
     };
     const clearElapsedTick = (): void => {
       if (elapsedTimer === undefined) return;
@@ -796,7 +796,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         await action.run();
       } catch (error) {
         actionError = error instanceof Error ? error.message : String(error);
-        addLog(state.logs, "warn", `Episode action failed: [오류 원문 제외]`);
+        addLog(state.logs, "warn", `Episode action failed: [오류 원문 제외]`, "EPISODE_ACTION_FAILED");
         await render();
       }
     };
@@ -941,7 +941,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     }
     if (installedWidget) await installedWidget.remove().catch(() => undefined);
     if (installedWidgetStyle) await installedWidgetStyle.remove().catch(() => undefined);
-    addLog(state.logs, "warn", `Status widget unavailable: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Status widget unavailable: [오류 원문 제외]`, "STATUS_WIDGET_UNAVAILABLE");
     // Chat menu state remains the fallback in hosts without SafeRoot support.
   }
 }
@@ -950,7 +950,7 @@ export async function registerDashboardSetting(state: RuntimeState): Promise<voi
   try {
     await risuai.registerSetting("Risu Cognitive Memory", () => state.openDashboard?.(), MEMORY_ICON, "html", "risu-cognitive-memory-settings");
   } catch (error) {
-    addLog(state.logs, "warn", `Settings menu registration unavailable: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Settings menu registration unavailable: [오류 원문 제외]`, "SETTINGS_MENU_UNAVAILABLE");
   }
 }
 
@@ -970,6 +970,6 @@ export async function updateWorkerMenuButton(state: RuntimeState): Promise<void>
 export async function showWorkerPauseNotice(state: RuntimeState): Promise<void> {
   state.refreshStatusWidget?.();
   await updateWorkerMenuButton(state).catch((error) => {
-    addLog(state.logs, "warn", `Worker menu unavailable: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Worker menu unavailable: [오류 원문 제외]`, "WORKER_MENU_UNAVAILABLE");
   });
 }

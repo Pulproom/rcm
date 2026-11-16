@@ -67,7 +67,7 @@ function isProviderManagerEnvelope(
 export async function registerYumiToolBridge(state: RuntimeState, client: ServerClient): Promise<void> {
   if (typeof risuai.addPluginChannelListener !== "function" || typeof risuai.postPluginChannelMessage !== "function") {
     state.memoryToolRegistration = { status: "unavailable", at: Date.now(), failures: 0 };
-    addLog(state.logs, "warn", "Provider Manager 기억 도구 연결에 필요한 플러그인 통신 API가 없습니다.");
+    addLog(state.logs, "warn", "Provider Manager 기억 도구 연결에 필요한 플러그인 통신 API가 없습니다.", "PROVIDER_MANAGER_IPC_MISSING");
     state.syncMemoryToolRegistration = async (enabled) => {
       const planned = enabled ? currentTurnMemoryToolNames(state) : [];
       traceMemoryToolExposure(state, client, "yumi", planned, [], "not_connected");
@@ -195,7 +195,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
       try {
         await registerFunctions(memoryToolFunctions.map((tool) => tool.name as MemoryToolName), DISCOVERY_REGISTRATION_KEY);
         if (disposed || epoch !== registrationEpoch) return;
-        if (discoveryFailures) addLog(state.logs, "info", "Provider Manager 기억 도구 등록이 복구되었습니다.");
+        if (discoveryFailures) addLog(state.logs, "info", "Provider Manager 기억 도구 등록이 복구되었습니다.", "PROVIDER_MANAGER_RECOVERED");
         discoveryFailures = 0;
         setStatus("registered");
       } catch (error) {

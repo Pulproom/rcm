@@ -28,13 +28,13 @@ void (async () => {
   if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) try {
     await registerMaskToolBridge(state, client);
   } catch (error) {
-    addLog(state.logs, "warn", `Mask Local Tools bridge unavailable: ${String(error)}`);
+    addLog(state.logs, "warn", `Mask Local Tools bridge unavailable: ${String(error)}`, "MASK_BRIDGE_UNAVAILABLE");
   }
   const open = () => void openDashboard(state, client);
   state.openDashboard = open;
   await registerDashboardSetting(state);
   try { await installToasts(state); }
-  catch { addLog(state.logs,'warn','Major alert host could not be installed'); }
+  catch { addLog(state.logs,'warn','Major alert host could not be installed', "ALERT_HOST_UNAVAILABLE"); }
   await installStatusWidget(state, client);
   // Hydrate the active chat before the first activity poll. Without this,
   // the floating widget can claim the queue is healthy until another host
@@ -53,7 +53,7 @@ void (async () => {
     void drainWorker(state, client);
   });
   state.serverHeartbeatTimer = window.setInterval(() => void heartbeatServerWorker(state, client), 15_000);
-  addLog(state.logs, "info", "Risu Cognitive Memory initialized");
+  addLog(state.logs, "info", "Risu Cognitive Memory initialized", "PLUGIN_INITIALIZED");
   if (isServerConfigured(state.settings)) {
     if (state.settings.extractionEngine === "server" && state.settings.workerPaused && !state.settings.workerAttention) void client.pauseServerWorker();
     else void drainWorker(state, client);

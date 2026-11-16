@@ -21,7 +21,7 @@ async function translationCurrent(state: RuntimeState, chatIds: string[], curren
       const inventory = await clientFor(state).request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats");
       for (const chat of inventory.items) characters.set(chat.id, chat.characterId);
     } catch {
-      addLog(state.logs, "warn", "번역할 채팅의 캐릭터를 확인하지 못했어요.");
+      addLog(state.logs, "warn", "번역할 채팅의 캐릭터를 확인하지 못했어요.", "TRANSLATION_CONTEXT_MISSING");
       return () => false;
     }
   }
@@ -75,7 +75,7 @@ function translationFailure(state: RuntimeState, error: unknown, label = "Refere
   }
   const message = settingsFailureMessage(error, "translation");
   if ((failureBursts.get(state) ?? 0) <= Date.now()) {
-    addLog(state.logs, "warn", `${label}: ${sanitizeDiagnosticText(message, [state.settings.serverToken])}`);
+    addLog(state.logs, "warn", `${label}: ${sanitizeDiagnosticText(message, [state.settings.serverToken])}`, "TRANSLATION_WARNING");
   }
   failureBursts.set(state, Math.max(cooldownUntil, Date.now() + TRANSLATION_COOLDOWN_MS));
   return message;

@@ -91,7 +91,7 @@ export async function runLineageOperation(state: RuntimeState, chatId: string, k
       if (state.lineageOperation === operation) { state.lineageOperation = undefined; state.publishActivity?.(); }
       throw error;
     }
-    addLog(state.logs, "error", `Lineage operation failed: ${String(error)}`);
+    addLog(state.logs, "error", `Lineage operation failed: ${String(error)}`, "LINEAGE_OPERATION_FAILED");
     if (state.current?.chatId === chatId && state.settings.serverUrl === serverUrl && state.lineageOperation === operation) {
       state.statusStale = true;
       state.lineageOperation = { ...operation, status: "failed", error: kind === 'open' ? '채팅 상태를 확인하지 못했어요. 연결 후 다시 확인해 주세요.' : lineageFailureMessage(error) };
@@ -151,5 +151,5 @@ export async function inheritLineageSettings(state: RuntimeState, target: string
   copy(state.settings.narrationViewpoint, "");
   if (!changed) return;
   try { await saveSettings(state.settings); }
-  catch (error) { addLog(state.logs, "warn", `Lineage setting persistence failed: [오류 원문 제외]`); }
+  catch (error) { addLog(state.logs, "warn", `Lineage setting persistence failed: [오류 원문 제외]`, "LINEAGE_SETTINGS_SAVE_FAILED"); }
 }

@@ -1,5 +1,6 @@
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { MODEL_OUTPUT_TRUNCATED_MESSAGE } from "@rcm/shared";
+declare const __RCM_DISTRIBUTION__: boolean;
 import { CONNECTION_FAILURE_LABELS, connectionFailureReason, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, RISU_AUXILIARY_FAILURE_CODES, projectRisuAuxiliaryCallDiagnostic, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 // Typed metadata is allowlisted; log text is sanitized at insertion.
 const stages = ["settings_save", "voyage_save", "connection_test", "native_registration", "provider_manager_registration", "worker_queue", "worker_job", "auxiliary_call", "worker_heartbeat", "before_request", "dashboard_action"] as const;
@@ -22,7 +23,10 @@ export function shareDiagnostic(value: unknown): SupportDiagnostic | undefined {
   const d = value as SupportDiagnostic;
   const stage = pick(d.stage, stages) as SupportStage | undefined;
   if (!stage) return undefined;
-  return { stage, risuCall: projectRisuAuxiliaryCallDiagnostic(d.risuCall), code: pick(d.code, [...codes, "ABORTED_OR_TIMEOUT", "VALIDATION_FAILED"]) ?? "UNKNOWN_ERROR",
+  const call = projectRisuAuxiliaryCallDiagnostic(d.risuCall);
+  return { stage, risuCall: call ? { mode: call.mode, activeChatIdAvailable: call.activeChatIdAvailable,
+    hostResolutionAvailable: call.hostResolutionAvailable, authPresent: call.authPresent } : undefined,
+    code: pick(d.code, [...codes, "ABORTED_OR_TIMEOUT", "VALIDATION_FAILED"]) ?? "UNKNOWN_ERROR",
     httpStatus: integer(d.httpStatus, 100, 599), attempt: integer(d.attempt, 0, 1000), kind: pick(d.kind, kinds), target: pick(d.target, ["server", "risu", "mcp", "voyage"]), purpose: pick(d.purpose, [...purposes, ...purposes.map(p => `${p}_repair`)]) };
 }
 export function diagnosticReason(diagnostic?: SupportDiagnostic): string {
@@ -34,14 +38,122 @@ export function diagnosticReason(diagnostic?: SupportDiagnostic): string {
   return [diagnostic.target ? targets[diagnostic.target] : "", reason, diagnostic.risuCall ? JSON.stringify(projectRisuAuxiliaryCallDiagnostic(diagnostic.risuCall)) : ""].filter(Boolean).join(" · ");
 }
 export const supportTime = (value: unknown) => integer(value, 0, 8_640_000_000_000_000);
+
+/** Product-owned event codes only; never infer them from log prose. */
+const supportEventLabels = {
+  "UNCLASSIFIED_LOG": "이벤트 코드가 없는 기록 · 원문 제외",
+  "CHAT_SYNC_FAILED": "채팅 정보 동기화 실패",
+  "QUIZ_WIDGET_WARNING": "퀴즈 표시 중 경고",
+  "WIDGET_CLOCK_SANITIZED": "호스트가 상태 창 시간 표시를 제거함",
+  "WIDGET_CLOCK_FAILED": "상태 창 시간 갱신 실패",
+  "EPISODE_ACTION_FAILED": "에피소드 작업 실패",
+  "STATUS_WIDGET_UNAVAILABLE": "상태 창을 표시할 수 없음",
+  "SETTINGS_MENU_UNAVAILABLE": "설정 메뉴 등록 실패",
+  "WORKER_MENU_UNAVAILABLE": "작업 메뉴 갱신 실패",
+  "MEMORY_LINKED": "원문에 연결해 기억 가져오기 완료",
+  "MEMORY_TRANSPLANTED": "독립 기록으로 기억 이식 완료",
+  "MEMORY_TRANSFER_FAILED": "기억 가져오기 실패",
+  "MEMORY_REBUILD_REQUESTED": "기억 데이터 초기화 또는 재생성 요청 처리",
+  "JOBS_REQUEUED": "실패 작업 재시도 준비 완료",
+  "STATUS_WIDGET_RESTORE_FAILED": "대시보드 종료 후 상태 창 복원 실패",
+  "LINEAGE_PREVIEW_FAILED": "기억 연결 미리보기 실패",
+  "REGENERATION_PREPARATION_FAILED": "기억 재생성 준비 실패",
+  "TOOL_REGISTRATION_UPDATE_FAILED": "기억 도구 등록 갱신 실패",
+  "BACKUP_RESTORED": "기억 백업 복원 완료",
+  "EMBEDDING_KEY_SAVED": "임베딩 키 확인 및 저장 완료",
+  "CHAT_MODE_SAVED": "채팅 모드 로컬 저장 완료",
+  "CONNECTION_CHECK_SUCCEEDED": "연결 확인 성공",
+  "LINEAGE_MATCH_APPLIED": "원문 일치 확인 후 기억 연결 완료",
+  "RETRIEVAL_DIAGNOSTICS_CHANGED": "채팅 진단 기록 설정 변경",
+  "SETTINGS_SAVED": "설정 저장 확인 완료",
+  "EMBEDDING_KEY_REMOVED": "임베딩 키 삭제 완료",
+  "MODEL_KEY_REMOVED": "보조 모델 키 삭제 및 작업 일시정지",
+  "DUPLICATE_REVIEW_RESOLVED": "중복 검토 처리 완료",
+  "AUDIT_REQUEUED": "기억 검수 재시도 준비 완료",
+  "LEDGER_ENTRY_REMOVED": "장부 기록 종료 또는 삭제 완료",
+  "SOCIAL_BACKFILL_CHECKED": "지인 관계 정리 가능 여부 확인",
+  "SOCIAL_BACKFILL_REQUESTED": "지인 관계 정리 요청 처리",
+  "QUEUE_PAUSED": "사용자가 작업 일시정지",
+  "QUEUE_RESUMED": "사용자가 작업 재개",
+  "BACKFILL_ACKNOWLEDGED": "과거 대화 정리 결과 확인",
+  "JOBS_CANCELLED": "기억 작업 취소 처리",
+  "JOBS_ARCHIVED": "완료 작업 기록 정리",
+  "SOURCES_RESTORED": "취소된 원문 처리 재개 준비",
+  "STORY_DRAFT_BACKUP_FAILED": "줄거리 저장 후 재생성 초안 백업 실패",
+  ...(typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__
+    ? { MASK_BRIDGE_UNAVAILABLE: "Mask Local Tools 연결을 사용할 수 없음" } : {}),
+  "ALERT_HOST_UNAVAILABLE": "알림 표시 기능 설치 실패",
+  "PLUGIN_INITIALIZED": "RCM 초기화 완료",
+  "LINEAGE_OPERATION_FAILED": "채팅 기억 연결 작업 실패",
+  "LINEAGE_SETTINGS_SAVE_FAILED": "가져온 채팅 설정 저장 실패",
+  "QUIZ_SETTINGS_SYNC_FAILED": "퀴즈 설정 동기화 실패",
+  "INJECTION_CACHE_SAVE_FAILED": "전달 기억 확인용 캐시 저장 실패",
+  "DELIVERY_RECEIPT_FAILED": "기억 전달 결과 기록 실패",
+  "RETRIEVAL_TRACE_DELIVERED": "검색 진단 기록 전달 완료",
+  "RETRIEVAL_TRACE_FAILED": "검색 진단 기록 전달 실패",
+  "PREPARED_MEMORY_REUSED": "준비된 기억 재사용",
+  "OUTPUT_SYNC_SKIPPED": "다른 채팅으로 이동해 응답 동기화 생략",
+  "OUTPUT_SYNC_DEFERRED": "응답 저장 후 기억 동기화 보류",
+  "EMPTY_PACKET_REUSED": "재시도에 준비된 빈 기억 재사용",
+  "MEMORY_MARKER_MISSING": "RCM 표식이 없어 모델 요청 차단",
+  "CATCH_UP_STATE_SAVE_FAILED": "과거 대화 처리 상태 저장 실패",
+  "SERVER_IDENTITY_SAVE_FAILED": "서버 식별 정보 저장 실패",
+  "PREPARE_FALLBACK": "기억 준비가 완료되지 않아 대체 경로 처리",
+  "MEMORY_INJECTED": "메인 요청에 기억 주입 완료",
+  "MEMORY_OMITTED": "메인 요청에서 기억 주입 생략",
+  "OUTPUT_OBSERVATION_FAILED": "응답 저장 완료 확인 실패",
+  "SETUP_NOTICE_FAILED": "설정 재료 안내 표시 실패",
+  "SETUP_NOTICE_SAVE_FAILED": "설정 재료 안내 상태 저장 실패",
+  "SETUP_CAPTURE_CLEANUP_FAILED": "이전 설정 캡처 정리 실패",
+  "INCIDENT_CURSOR_SAVE_FAILED": "알림 확인 위치 저장 실패",
+  "ALERT_RENDER_FAILED": "알림 표시 실패",
+  "TRANSLATION_CONTEXT_MISSING": "번역할 채팅 정보 확인 실패",
+  "TRANSLATION_WARNING": "참고 번역 중 경고",
+  "AUTO_PAUSE_SAVE_FAILED": "자동 일시정지 상태 저장 실패",
+  "WORKER_RECOVERY_FAILED": "복구된 서버 작업 상태 확인 실패",
+  "MODEL_JSON_REPAIRED": "모델 응답 JSON 문법 자동 보완",
+  "MAIN_GENERATION_IDLE_TIMEOUT": "3분간 생성 변화가 없어 보조 작업 대기 해제",
+  "MODEL_CALL_RECORD_FAILED": "보조 모델 호출 결과 기록 실패",
+  "STATE_RESPONSE_INVALID": "상태 응답 검증 실패",
+  "STATE_RESPONSE_RECOVERED": "상태 응답 보완 처리",
+  "JOB_LEASE_RENEWAL_FAILED": "작업 처리 권한 갱신 실패",
+  "DIALOGUE_SOURCE_REPAIR_FAILED": "대사 원문 보완 미해결",
+  "SOURCE_REPAIR_FAILED": "원문 보완 미해결",
+  "RECOGNITION_REFERENCE_REVIEW": "일부 인지 참조를 검토 대상으로 보존",
+  "SOURCE_ACCESS_REPAIR_FAILED": "원문 접근 근거 보완 미해결",
+  "JOB_COMPLETED_WITH_WARNINGS": "보조 작업 완료 후 경고",
+  "JOB_COMPLETED": "보조 작업 완료",
+  "JOB_RETRY_SCHEDULED": "기억 작업 재시도 예정",
+  "RELATIONSHIP_PROJECTION_FAILED": "관계 요약 갱신 실패",
+  "STORY_CONSOLIDATION_FAILED": "줄거리 생성 실패",
+  "MEMORY_GROUPING_FAILED": "기억 묶기 후보 생성 실패",
+  "LEDGER_AUDIT_FAILED": "최종 장부 대조 실패",
+  "QUIZ_JOB_DEFERRED": "퀴즈 작업 보류",
+  "CHAT_WORK_DEFERRED": "해당 채팅 후속 기억 처리 보류",
+  "PROVIDER_MANAGER_IPC_MISSING": "Provider Manager 연결용 통신 API 없음",
+  "PROVIDER_MANAGER_RECOVERED": "Provider Manager 기억 도구 등록 복구"
+} as const;
+export type SupportEvent = keyof typeof supportEventLabels;
+export function shareLog(log: { at?: unknown; level?: unknown; event?: unknown; diagnostic?: unknown }) {
+  const event = typeof log.event === "string" && Object.hasOwn(supportEventLabels, log.event)
+    ? log.event as SupportEvent : "UNCLASSIFIED_LOG";
+  const diagnostic = shareDiagnostic(log.diagnostic);
+  return {
+    at: new Date(supportTime(log.at) ?? 0).toISOString(),
+    level: pick(log.level, ["info", "warn", "error"]) ?? "unknown",
+    event: diagnostic && event === "UNCLASSIFIED_LOG" ? undefined : event,
+    diagnostic,
+    reason: diagnostic ? diagnosticReason(diagnostic) : supportEventLabels[event],
+  };
+}
 export function supportJobs(jobs: any[] = []) {
   return jobs.filter(job => job.status === "failed" || job.last_error).slice(0, 20).map(job => {
     let payload: any = {};
     try { payload = JSON.parse(job.payload_json ?? "{}"); } catch { /* no raw payload in reports */ }
     const calls = Array.isArray(payload?.llmCallDiagnostics) ? payload.llmCallDiagnostics : [];
-    return { ...supportFailure("worker_job", job.last_error, { kind: job.type, attempt: job.attempts }), at: supportTime(job.updated_at),
+    return { ...shareDiagnostic(supportFailure("worker_job", job.last_error, { kind: job.type, attempt: job.attempts })), at: supportTime(job.updated_at),
       calls: calls.filter((call: any) => call?.outcome === "failed").slice(-10).map((call: any) => ({
-        at: supportTime(call.at), ...supportFailure("worker_job", { message: call.error, code: call.code, status: call.httpStatus, risuCall: call.risuCall }, { attempt: call.attempt, purpose: call.purpose }),
+        at: supportTime(call.at), ...shareDiagnostic(supportFailure("worker_job", { message: call.error, code: call.code, status: call.httpStatus, risuCall: call.risuCall }, { attempt: call.attempt, purpose: call.purpose })),
       })),
     };
   });

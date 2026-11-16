@@ -1,4 +1,5 @@
 import { copyText, MANUAL_COPY_MESSAGE } from "./clipboard.js";
+import { clearPrepareFailures, safePrepareFailure, prepareFailureLabel } from "./prepare-diagnostics.js";
 import { renderScreenBar } from "./dashboard/shell.js";
 import { ALBUM_FONT_CSS, ALBUM_FONT_LINKS } from "./album/themes/index.js";
 import { ALBUM_EDIT_CSS } from "./dashboard/album-edit-css.js";
@@ -42,7 +43,7 @@ import type { TranslationConnectionPublicConfig } from "@rcm/shared";
 import { backgroundTranslationEnabled, callTranslationBatch } from "./translation.js";
 import { sanitizeDiagnosticText } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_PROVIDER_OPTIONS } from "@rcm/shared";
-import { modelResponseFailureDetail, diagnosticReason, shareDiagnostic, supportFailure, supportJobs, supportTime } from "./support-diagnostics.js";
+import { modelResponseFailureDetail, diagnosticReason, shareDiagnostic, shareLog, supportFailure, supportJobs, supportTime } from "./support-diagnostics.js";
 import { providerCapability, updateProviderFields } from "./provider-settings.js";
 import { mcpSelectorSettings, readMcpSelectorSettings, updateMcpSelectorControls } from "./mcp-selector-settings.js";
 import { mcpRequestTimeoutMs, type McpSelectorPublicConfig } from "@rcm/shared";
@@ -945,7 +946,7 @@ export async function pauseWorkerForQueueMutation(
 
 async function requestFailedJobRetry(state: RuntimeState, client: ServerClient, chatId: string): Promise<number> {
   const result = await client.request<{ retried: number }>(`/v1/chats/${encodeURIComponent(chatId)}/jobs/retry-failed`, { method: "POST" });
-  addLog(state.logs, "info", `${result.retried} failed extraction job(s) returned to queued state`);
+  addLog(state.logs, "info", `${result.retried} failed extraction job(s) returned to queued state`, "JOBS_REQUEUED");
   if (result.retried > 0) void drainWorker(state, client);
   return result.retried;
 }
@@ -990,7 +991,7 @@ export async function closeDashboardContainer(
   try {
     await state.setStatusWidgetHidden?.(false);
   } catch (error) {
-    addLog(state.logs, "warn", `Status widget restore failed while closing dashboard: [오류 원문 제외]`);
+    addLog(state.logs, "warn", `Status widget restore failed while closing dashboard: [오류 원문 제외]`, "STATUS_WIDGET_RESTORE_FAILED");
   }
   await setToastDashboard();
   await hideContainer();
@@ -1095,7 +1096,7 @@ export async function probeDashboardLineage(state: RuntimeState, client: ServerC
       state.lineageProbe = { key, status: "ready", result, selectedParentId: result.candidates[0]?.chatId };
     } catch (error) {
       if (!current() || state.lineageProbe !== checking) return;
-      addLog(state.logs, "error", `Lineage preview failed: ${String(error)}`);
+      addLog(state.logs, "error", `Lineage preview failed: ${String(error)}`, "LINEAGE_PREVIEW_FAILED");
       state.lineageProbe = { key: scope, status: "failed", error: lineageFailureMessage(error) };
     } finally {
       clearTimeout(hostReadTimer);
@@ -3050,12 +3051,16 @@ const memoryToolRegistrationLabels = {
 };
 
 export function pluginDiagnosticSummary(state: RuntimeState, data: DashboardData): string {
-  // Metadata stays allowlisted; logs contain insertion-sanitized operational text.
-  // Raw model/host errors are excluded at their log call sites.
+  // Export only typed metadata and product-owned event codes, never log prose.
   const version = (value: unknown) => typeof value === "string" && /^\d+\.\d+\.\d+$/.test(value) ? value : "unknown";
   const registration = state.memoryToolRegistration;
+  const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   return JSON.stringify({
+    diagnosticVersion: 2, capturedAt: new Date().toISOString(),
     pluginVersion: RCM_PLUGIN_VERSION, serverVersion: version(data.health?.version), apiRevision: RCM_API_REVISION,
+    serverApiRevision: Number.isSafeInteger(data.health?.apiRevision) ? data.health?.apiRevision : undefined,
+    prepareFailures: (state.prepareFailures ?? []).flatMap(row => safePrepareFailure(row) ?? []),
+    failureHistoryStored: state.prepareFailuresStorageError !== true,
     serverConnected: data.health?.ok === true, memoryToolsEnabled: state.settings.memoryToolsEnabled,
     providerManager: {
       status: !state.settings.memoryToolsEnabled ? "disabled" : ["registered", "retrying", "unavailable", "disabled", "pending", "paused"].includes(registration?.status ?? "") ? registration!.status : "unknown",
@@ -3064,16 +3069,25 @@ export function pluginDiagnosticSummary(state: RuntimeState, data: DashboardData
     recentLogs: Object.fromEntries(["info", "warn", "error"].map(level => [level, state.logs.filter(log => log.level === level).length])),
     processingEngine: ["risu", "server"].includes(state.settings.extractionEngine) ? state.settings.extractionEngine : "unknown",
     workerPaused: state.settings.workerPaused === true,
+    activitySnapshot: {
+      activeChatAvailable: Boolean(state.current?.chatId), dashboardOpen: state.dashboardOpen === true,
+      mainGenerationTracked: Boolean(state.mainGeneration), preparingMemory: Boolean(state.pendingPrepare),
+      statusReady: state.activityReady === true, statusStale: state.statusStale === true,
+      connectionIssue: Boolean(state.serverConnectionIssue), statusError: Boolean(state.activityStatusError),
+      workerBusy: state.workerBusy === true, currentJob: Boolean(state.currentJob),
+      workerAttention: Boolean(state.settings.workerAttention), lineageOperation: Boolean(currentLineageOperation(state)),
+      episodeTracked: Boolean(state.episodeActivity), upgradeBlocked: Boolean(state.upgradeBlocked || state.statusSummary?.upgrade?.lock),
+      activeCalls: count(state.serverWorker?.activeCalls), queuedJobs: count(state.statusSummary?.queuedJobs),
+      pendingEmbeddings: count(state.statusSummary?.pendingEmbeddings),
+    },
     recentErrors: state.logs.flatMap(log => {
+      if (log.level !== "warn" && log.level !== "error") return [];
       const diagnostic = shareDiagnostic(log.diagnostic);
-      return diagnostic ? [{ at: supportTime(log.at), ...diagnostic }] : [];
+      const safe = shareLog(log);
+      return [{ at: supportTime(log.at), level: safe.level, ...(diagnostic ?? { event: safe.event, reason: safe.reason }) }];
     }).slice(0, 30),
     failedJobs: supportJobs(data.jobs),
-    logs: state.logs.map(log => ({ at: new Date(supportTime(log.at) ?? 0).toISOString(), level: log.level,
-      message: sanitizeDiagnosticText(log.message, [state.settings.serverToken], 1000),
-      diagnostic: shareDiagnostic(log.diagnostic), reason: diagnosticReason(shareDiagnostic(log.diagnostic)),
-      detail: log.detail ? sanitizeDiagnosticText(log.detail, [state.settings.serverToken]) : undefined,
-    })),
+    logs: state.logs.slice(0, 50).map(shareLog),
   }, null, 2);
 }
 
@@ -3324,6 +3338,8 @@ export function operations(state: RuntimeState, data: DashboardData): string {
   }
   const older = [...days].map(([label, items]) => `<section class="oprun"><h2 class="sec">${escapeHtml(label)}</h2><div class="jobs jobs--grouped">${items.map(entry => entry.html(entry === entries[0])).join("")}</div></section>`).join("");
   const jobs = `${visibleCurrent ? `<section><h2 class="sec">작업</h2><div class="jobs">${visibleCurrent}</div></section>` : ""}${older ? `<div data-preserve-scroll="operation-history" data-history-chat="${escapeHtml(data.chatId ?? state.current?.chatId ?? "")}">${older}</div>` : ""}`;
+  const failureRows = (state.prepareFailures ?? []).flatMap(row => safePrepareFailure(row) ?? []).map(failure =>
+    `<li class="entry"><span class="entry__k">기억 준비 실패</span><div class="entry__v">${escapeHtml(prepareFailureLabel(failure))}<small>${escapeHtml(formatTime(failure.at))}</small></div></li>`).join("");
   const logs = state.logs.map((log) => `<li class="entry"><span class="entry__k">${escapeHtml(log.level)}</span><div class="entry__v">${escapeHtml(log.message)}${log.level !== "info" && (log.diagnostic || log.detail) ? `<small class="diagnostic-reason">${escapeHtml([diagnosticReason(log.diagnostic), log.detail].filter(Boolean).join(" · "))}</small>` : ""}<small>${escapeHtml(formatTime(log.at))}</small></div></li>`).join("");
   const workerAction = state.settings.workerPaused
     ? btn("처리 재개", { kind: failedCount + failedEmbeddings ? "secondary" : "primary", action: "resume-worker" })
@@ -3389,7 +3405,7 @@ export function operations(state: RuntimeState, data: DashboardData): string {
     <div class="opstate">${statusList([{ tone: stateTone, text: operationTitle }])}<p class="sub">${escapeHtml(operationCopy)}</p>${modelMissing ? btn("모델 설정 열기", { kind: "quiet", action: "tab", data: { tab: "settings", settingsSection: "model" } }) : ""}${embeddingMissing ? `<p class="sub">${EMBEDDING_SETUP_DETAIL}</p>${btn("검색 임베딩 설정 열기", { kind: "quiet", action: "embedding-settings" })}` : ""}<span class="n">${activeJobCount ? `진행 ${activeJobCount}개` : completedCount ? `완료 기록 ${completedCount}개` : "대기열 비어 있음"}</span></div>
     ${jobs || empty(data.jobsError ? "작업 목록을 확인할 수 없어요" : "처리할 작업이 없어요", data.jobsError ? "서버 연결을 확인해 주세요." : "새 대화가 모이면 여기에 작업이 쌓여요.")}
     ${state.settings.translationProvider !== "google" ? `<section><h3 class="sec">참고 번역</h3><div class="opstate">${statusList([{ tone: state.translationStats?.lastError ? "bad" : "ok", text: `호출 ${state.translationStats?.calls ?? 0}회 · 번역 ${state.translationStats?.items ?? 0}개 · ${state.translationStats?.tokens === undefined ? "토큰 미제공" : `${state.translationStats.tokens.toLocaleString()}토큰`}` }])}<p class="sub">이 실행 세션 기준${state.translationStats?.lastError ? ` · 마지막 오류: ${escapeHtml(state.translationStats.lastError)}` : ""}</p></div></section>` : ""}
-    ${fold("고급 진단 · 이 기기의 플러그인 기록", `<section><h3 class="sec">현재 상태</h3><ul class="entries"><li class="entry"><span class="entry__k">도구 연결</span><div class="entry__v">Provider Manager · ${!state.settings.memoryToolsEnabled ? memoryToolRegistrationLabels.disabled : state.memoryToolRegistration ? memoryToolRegistrationLabels[state.memoryToolRegistration.status] : "등록 상태 확인 전"}</div></li></ul></section><section><div class="diagnostic-heading"><h3 class="sec">플러그인 기록</h3>${state.logs.length ? `<div class="diagnostic-actions"><button type="button" class="iconbtn hit" data-action="copy-plugin-diagnostics" aria-label="진단 정보 복사" title="버전·연결 상태·기록 전체를 복사해요. 키·주소·채팅 내용은 제외해요.">${icon("copy")}</button><button type="button" class="iconbtn hit" data-action="clear-plugin-logs" aria-label="기록 비우기">${icon("delete")}</button></div>` : ""}</div><ul class="entries">${logs || '<li class="entry"><div class="entry__v">런타임 로그가 없어요.</div></li>'}</ul></section>`, { role: "section", preserveKey: "operations-diagnostics" })}</div>`;
+    ${fold("고급 진단 · 이 기기의 플러그인 기록", `<section><h3 class="sec">현재 상태</h3><ul class="entries"><li class="entry"><span class="entry__k">도구 연결</span><div class="entry__v">Provider Manager · ${!state.settings.memoryToolsEnabled ? memoryToolRegistrationLabels.disabled : state.memoryToolRegistration ? memoryToolRegistrationLabels[state.memoryToolRegistration.status] : "등록 상태 확인 전"}</div></li></ul></section><section><div class="diagnostic-heading"><h3 class="sec">플러그인 기록</h3><div class="diagnostic-actions"><button type="button" class="iconbtn hit" data-action="copy-plugin-diagnostics" aria-label="진단 정보 복사" title="버전·실패 단계·오류 코드를 복사해요. 채팅과 기억 내용은 포함하지 않아요.">${icon("copy")}</button><button type="button" class="iconbtn hit" data-action="clear-plugin-logs" aria-label="기록 비우기">${icon("delete")}</button></div></div><p class="sub">최근 기억 준비 실패 20건은 새로고침 후에도 확인할 수 있어요. 진단 정보 복사를 눌러 제보해 주세요.</p>${state.prepareFailuresStorageError ? '<p class="sub">실패 기록을 기기에 보관하지 못했어요. 새로고침 전에 진단 정보를 복사해 주세요.</p>' : ""}<ul class="entries">${failureRows}</ul><ul class="entries">${logs || '<li class="entry"><div class="entry__v">런타임 로그가 없어요.</div></li>'}</ul></section>`, { role: "section", preserveKey: "operations-diagnostics" })}</div>`;
 }
 
 export function acknowledgeBackfillLocally(data: DashboardData, runId: string): boolean {
@@ -4309,7 +4325,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     chooseExtractionReviewOverride,
     renderSourceNavigationCompletion: () => renderSourceNavigationCompletion(root, complete => render(true, complete)),
     isDashboardOpen: () => dashboardOpen,
-    regenerationFailed: () => { addLog(state.logs, "error", "Regeneration preparation failed: [오류 원문 제외]"); },
+    regenerationFailed: () => { addLog(state.logs, "error", "Regeneration preparation failed: [오류 원문 제외]", "REGENERATION_PREPARATION_FAILED"); },
   });
 
   const timelineView = createTimelineView();
@@ -4592,7 +4608,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const registration = state.settings.memoryToolsEnabled
         ? state.restoreMemoryToolDiscoveryRegistration?.()
         : state.syncMemoryToolRegistration?.(false);
-      await registration?.catch((error) => addLog(state.logs, "warn", `Memory tool registration update failed: [오류 원문 제외]`));
+      await registration?.catch((error) => addLog(state.logs, "warn", `Memory tool registration update failed: [오류 원문 제외]`, "TOOL_REGISTRATION_UPDATE_FAILED"));
       state.automaticTurnPacket = undefined;
       if (!state.settings.memoryToolsEnabled) showActionSaveState({ kind: "success", message: "기억 도구를 중지했어요. 수동 설치한 외부 도구는 Provider 설정에서도 꺼 주세요." });
     }
@@ -4680,7 +4696,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       state.settings = mergeCompleteBackupSettings(state.settings, restored.pluginSettings);
       await saveSettings(state.settings);
     }
-    addLog(state.logs, "info", `Complete memory backup restored (${Number(restored.vectorsRestored ?? 0)} vectors)`);
+    addLog(state.logs, "info", `Complete memory backup restored (${Number(restored.vectorsRestored ?? 0)} vectors)`, "BACKUP_RESTORED");
     await alertDashboard("기억 복원이 완료됐어요. 현재 서버 주소와 토큰은 유지됐어요. 복원된 임베딩·보조 모델 키와 서버 설정을 적용하려면 RCM 서버를 재시작해 주세요.");
     await refresh();
   };
@@ -4694,7 +4710,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const result = await response.json() as any;
     invalidateRestoredChatState(state,targetChatId);
     await saveStoredJson(CACHE_KEY,state.cache);
-    addLog(state.logs, "info", `Memory transplanted without re-extraction (${Number(result.memories ?? 0)} memories)`);
+    addLog(state.logs, "info", `Memory transplanted without re-extraction (${Number(result.memories ?? 0)} memories)`, "MEMORY_TRANSPLANTED");
     await refresh();
   };
 
@@ -5352,7 +5368,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     try {
       await client.request("/v1/admin/voyage-key", { method: "PUT", body: JSON.stringify({ apiKey }) }, 15_000);
       voyageSaveState = { kind: "success", message: "서버 검증을 통과해 저장했어요. Vector 검색을 사용할 수 있어요." };
-      addLog(state.logs, "info", "Voyage API key validated and saved on the server");
+      addLog(state.logs, "info", "Voyage API key validated and saved on the server", "EMBEDDING_KEY_SAVED");
       await refresh();
       return true;
     } catch (error) {
@@ -5384,7 +5400,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       state.current.profile = profile;
       clearDeletedChatState(state, state.current.chatId, false);
       await saveSettings(state.settings);
-      addLog(state.logs, "info", "Chat mode saved locally; full backfill is required before server state can be updated");
+      addLog(state.logs, "info", "Chat mode saved locally; full backfill is required before server state can be updated", "CHAT_MODE_SAVED");
       render();
       showActionSaveState({ kind: "success", message: "프로필은 다음 실행부터 적용해요." });
       return true;
@@ -5590,7 +5606,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         } else await testSettingsConnection(state, new FormData(form), target.dataset.target ?? "", root.querySelector<HTMLInputElement>('[name="voyageApiKey"]')?.value ?? "");
         const elapsed = Date.now() - started;
         if (status.isConnected) { status.classList.remove("is-error"); status.innerHTML = `${icon("check")}<span>응답 ${(elapsed / 1000).toFixed(1)}초</span>`; }
-        addLog(state.logs, "info", `Connection check succeeded (${target.dataset.target})`);
+        addLog(state.logs, "info", `Connection check succeeded (${target.dataset.target})`, "CONNECTION_CHECK_SUCCEEDED");
       } catch (error) {
         if (status.isConnected) { status.classList.add("is-error"); status.innerHTML = `${icon("error")}<span>${escapeHtml(error instanceof Error ? error.message : "연결 확인 실패")}</span>${errorDetails(formatServerError(error))}`; }
         addLog(state.logs, "warn", `Connection check failed (${target.dataset.target})`, supportFailure("connection_test", error, { target: target.dataset.target }), (error as { detail?: string }).detail);
@@ -5607,8 +5623,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (action === "clear-plugin-logs") {
       state.logs.length = 0;
+      await clearPrepareFailures(state);
       render();
-      showActionSaveState({ kind: "success", message: "기록을 비웠어요." });
+      showActionSaveState(state.prepareFailuresStorageError
+        ? { kind: "error", message: "이전 실패 기록을 기기에서 지우지 못했어요. 다시 시도해 주세요." }
+        : { kind: "success", message: "기록을 비웠어요." });
       return;
     }
     if (action === "copy-error-details") {
@@ -5812,7 +5831,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           return client.request(`/v1/chats/${encodeURIComponent(chatId)}/lineage/apply`, { method: "POST", body: JSON.stringify({ ...lineageProbePayload(current), parentChatId, fingerprint }) }, 60_000);
         }, parentChatId);
         state.lineageProbe = undefined;
-        addLog(state.logs, "info", "Read-only lineage match applied without provider calls");
+        addLog(state.logs, "info", "Read-only lineage match applied without provider calls", "LINEAGE_MATCH_APPLIED");
         await refresh({ forceApply: true });
       } catch (error) {
         const failedProbe = state.lineageProbe;
@@ -6089,7 +6108,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       const chatId = target.dataset.chatId ?? "";
       try {
         const enabled = await setRetrievalDiagnostics(client, data, chatId, target.dataset.enabled !== "true");
-        addLog(state.logs, "info", `Retrieval diagnostics ${enabled ? "enabled" : "disabled"} for chat ${chatId}`);
+        addLog(state.logs, "info", `Retrieval diagnostics ${enabled ? "enabled" : "disabled"} for chat ${chatId}`, "RETRIEVAL_DIAGNOSTICS_CHANGED");
         render();
       } catch (error) { showActionSaveState({ kind: "error", message: errorMessage(error), errorReport: formatServerError(error) }); render(); }
       return;
@@ -6535,7 +6554,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         const voyageKey = voyageForm ? String(new FormData(voyageForm).get("voyageApiKey") ?? "").trim() : "";
         const voyageSaved = voyageKey ? await saveVoyageKey(voyageForm!) : true;
         if (!voyageSaved) throw new Error("일반 설정은 저장했지만 Voyage 키 검증에 실패했어요.");
-        addLog(state.logs, "info", "Settings persistence verified");
+        addLog(state.logs, "info", "Settings persistence verified", "SETTINGS_SAVED");
         if (!voyageKey) await refresh();
         settingsSaving = false;
         showActionSaveState({ kind: "success", message: "저장됨" });
@@ -6563,7 +6582,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (!await confirmDashboard("현재 RCM 서버에 저장된 Voyage API key를 제거할까요? 검색은 FTS로 계속돼요.", false, { confirm: "키 제거", danger: true })) return;
       try {
         await client.request("/v1/admin/voyage-key", { method: "DELETE" });
-        addLog(state.logs, "info", "Voyage API key removed from the server");
+        addLog(state.logs, "info", "Voyage API key removed from the server", "EMBEDDING_KEY_REMOVED");
         await refresh();
       } catch (error) { showActionSaveState({ kind: "error", message: errorMessage(error), errorReport: formatServerError(error) }); render(); }
       return;
@@ -6591,7 +6610,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         state.serverWorker = result.worker;
         state.settings.workerPaused = true;
         await saveSettings(state.settings);
-        addLog(state.logs, "info", "Server LLM API key removed; worker paused");
+        addLog(state.logs, "info", "Server LLM API key removed; worker paused", "MODEL_KEY_REMOVED");
         await refresh();
       } catch (error) { showActionSaveState({ kind: "error", message: errorMessage(error), errorReport: formatServerError(error) }); render(); }
       return;
@@ -6650,12 +6669,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (result.kind === "reconciliation") {
           await invalidateTranslationCache(state, { chatId: state.current.chatId, itemIdPrefix: `reconciliation:${result.reviewId}:` });
           formDirty = false;
-          addLog(state.logs, "info", `Duplicate review resolved: ${result.resolution}`);
+          addLog(state.logs, "info", `Duplicate review resolved: ${result.resolution}`, "DUPLICATE_REVIEW_RESOLVED");
         } else if (result.kind === "small") {
           formDirty = false;
           root.querySelector<HTMLTextAreaElement>("#small-review-form textarea")?.blur();
         } else if (result.kind === "audit") {
-          addLog(state.logs, "info", "Extraction audit queued again with its preserved source and first draft");
+          addLog(state.logs, "info", "Extraction audit queued again with its preserved source and first draft", "AUDIT_REQUEUED");
         }
       } else if (action?.startsWith('organization-') || action === 'related-source') {
         await organizationActions.handleAction(action, target, chat);
@@ -6699,7 +6718,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         nowView.selected = "";
         nowView.mobileDetail = false;
         if (pendingData) { data = pendingData; pendingData = undefined; newDataAvailable = false; }
-        addLog(state.logs, "info", `${kind} ${mode === "end" ? "ended" : "deleted"} in the ledger`);
+        addLog(state.logs, "info", `${kind} ${mode === "end" ? "ended" : "deleted"} in the ledger`, "LEDGER_ENTRY_REMOVED");
       } else if (action === "approve-backfill") {
         requireChatMemoryEnabled(state, state.current.chatId);
         const extractionReviewOverride = await chooseExtractionReviewOverride(
@@ -6792,7 +6811,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         requireChatMemoryEnabled(state, state.current.chatId);
         const preview = await client.request<{ sourceGroups: number; postExtractionReview: boolean; busy: boolean }>(`/v1/chats/${chat}/social-knowledge/backfill/preview`);
         if (preview.busy || preview.sourceGroups === 0) {
-          addLog(state.logs, "info", preview.busy ? "이미 지인 관계 백필이 진행 중입니다." : "처리할 원문이 없습니다.");
+          addLog(state.logs, "info", preview.busy ? "이미 지인 관계 백필이 진행 중입니다." : "처리할 원문이 없습니다.", "SOCIAL_BACKFILL_CHECKED");
           await refresh({ forceApply: true });
           return;
         }
@@ -6800,7 +6819,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         if (!await confirmDashboard(`지인 관계를 다시 찾을까요?\n원문 묶음 ${preview.sourceGroups}개 · 보조 호출 약 ${preview.sourceGroups}번${reviewNote}\n처리된 이야기 전체를 다시 읽어요.`)) return;
         await syncCurrentSourceLedger(client,state,decodeURIComponent(chat));
         const result = await client.request<{ queuedJobs: number }>(`/v1/chats/${chat}/social-knowledge/backfill`, { method: "POST" });
-        addLog(state.logs, "info", result.queuedJobs ? `지인 관계 백필 ${result.queuedJobs}개 묶음을 대기열에 추가했습니다.` : "이미 지인 관계 백필이 진행 중이거나 처리할 원문이 없습니다.");
+        addLog(state.logs, "info", result.queuedJobs ? `지인 관계 백필 ${result.queuedJobs}개 묶음을 대기열에 추가했습니다.` : "이미 지인 관계 백필이 진행 중이거나 처리할 원문이 없습니다.", "SOCIAL_BACKFILL_REQUESTED");
       } else if (action === "drain-worker") {
         await drainWorker(state, client);
       } else if (action === "pause-worker") {
@@ -6809,7 +6828,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await saveSettings(state.settings);
         addLog(state.logs, "info", state.settings.extractionEngine === "server"
           ? "Server queue paused; active HTTP requests were aborted"
-          : state.workerBusy ? "Queue pause requested; the current model call may finish" : "Queue paused");
+          : state.workerBusy ? "Queue pause requested; the current model call may finish" : "Queue paused", "QUEUE_PAUSED");
       } else if (action === "resume-worker") {
         await syncCurrentSourceLedger(client,state,decodeURIComponent(chat));
         state.settings.workerPaused = false;
@@ -6817,7 +6836,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await saveSettings(state.settings);
         await updateWorkerMenuButton(state);
         if (state.settings.extractionEngine === "server") state.serverWorker = await client.resumeServerWorker(state.workerId,decodeURIComponent(chat));
-        addLog(state.logs, "info", "Queue resumed by user");
+        addLog(state.logs, "info", "Queue resumed by user", "QUEUE_RESUMED");
         void drainWorker(state, client);
       } else if (action === "retry-failed") {
         if (retryBusy || !state.current) return;
@@ -6853,17 +6872,17 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           }
           throw error;
         }
-        addLog(state.logs, "info", "Backfill result acknowledged");
+        addLog(state.logs, "info", "Backfill result acknowledged", "BACKFILL_ACKNOWLEDGED");
       } else if (action === "delete-queue") {
         if (!await confirmDashboard(`${state.settings.workerPaused ? "" : "안전한 삭제를 위해 worker를 먼저 일시정지해요.\n\n"}현재 채팅의 queued/failed/만료된 작업을 삭제할까요? 원문은 보존되며 자동 재생성을 막기 위해 취소 상태로 표시돼요.`)) return;
         await pauseWorkerForQueueMutation(state, client);
         const result = await client.request<{ deletedJobs: number; cancelledMessages: number }>(`/v1/chats/${chat}/jobs`, { method: "DELETE" });
-        addLog(state.logs, "info", `${result.deletedJobs} extraction job(s) deleted; ${result.cancelledMessages} source message(s) cancelled`);
+        addLog(state.logs, "info", `${result.deletedJobs} extraction job(s) deleted; ${result.cancelledMessages} source message(s) cancelled`, "JOBS_CANCELLED");
         showActionSaveState({ kind: "success", message: `대기열 ${result.deletedJobs}건 삭제됨 · worker 일시정지` });
       } else if (action === "clear-completed-jobs") {
         if (!await confirmDashboard("완료·취소·교체된 작업 기록을 대기열 목록에서 정리할까요? 기억과 검토 기록은 그대로 보존돼요.")) return;
         const result = await client.request<{ archivedJobs: number }>(`/v1/chats/${chat}/jobs/completed`, { method: "DELETE" });
-        addLog(state.logs, "info", `${result.archivedJobs} completed job record(s) archived`);
+        addLog(state.logs, "info", `${result.archivedJobs} completed job record(s) archived`, "JOBS_ARCHIVED");
         showActionSaveState({ kind: "success", message: `완료 기록 ${result.archivedJobs}건 정리됨` });
       } else if (action === "restore-cancelled") {
         requireChatMemoryEnabled(state, state.current.chatId);
@@ -6871,7 +6890,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         await syncCurrentSourceLedger(client,state,decodeURIComponent(chat));
         await pauseWorkerForQueueMutation(state, client);
         const result = await client.request<{ restoredMessages: number }>(`/v1/chats/${chat}/jobs/requeue-cancelled`, { method: "POST" });
-        addLog(state.logs, "info", `${result.restoredMessages} cancelled source message(s) restored to pending`);
+        addLog(state.logs, "info", `${result.restoredMessages} cancelled source message(s) restored to pending`, "SOURCES_RESTORED");
         showActionSaveState({ kind: "success", message: `취소 원문 ${result.restoredMessages}개 복구됨 · worker 일시정지` });
       }
       actionError = currentDashboardActionError(actionError, activeTab, state.current?.chatId, action);
@@ -6961,7 +6980,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
         settingsSaving = true;
         updateTopbar();
         await persistSettingsForm(form);
-        addLog(state.logs, "info", "Settings persistence verified");
+        addLog(state.logs, "info", "Settings persistence verified", "SETTINGS_SAVED");
         await refresh();
         settingsSaving = false;
         showActionSaveState({ kind: "success", message: "저장됨" });
@@ -6988,7 +7007,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
           summary, groupId, startOrdinal: Number(overview.startOrdinal ?? 0), endOrdinal: Number(overview.endOrdinal ?? 0), savedAt: Date.now(),
         } };
         try { await saveSettings(state.settings); }
-        catch (error) { addLog(state.logs, "warn", `Story overview saved, but its rebuild draft backup failed: [오류 원문 제외]`); }
+        catch (error) { addLog(state.logs, "warn", `Story overview saved, but its rebuild draft backup failed: [오류 원문 제외]`, "STORY_DRAFT_BACKUP_FAILED"); }
         await invalidateTranslationCache(state, { serverInstanceId: data.health?.instanceId, chatId, itemId: storyTranslationKey(storyGroupKey(overview, "overview"), "summary") });
         translations.delete(storyTranslationKey(storyGroupKey(overview, "overview"), "summary"));
         storyView.editingOverview = false;

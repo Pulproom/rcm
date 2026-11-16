@@ -64,7 +64,7 @@ export async function flushBackgroundChatWrites(state: RuntimeState, client: Pic
       entry.deferred = false;
       try { if (!await executeBackgroundWrite(state, key, entry)) break; }
       catch (error) {
-        if (!(error instanceof ServerRequestError && error.status === 404)) addLog(state.logs, "warn", `Background chat synchronization failed: ${safeErrorText(String(error), [state.settings.serverToken])}`);
+        if (!(error instanceof ServerRequestError && error.status === 404)) addLog(state.logs, "warn", `Background chat synchronization failed: ${safeErrorText(String(error), [state.settings.serverToken])}`, "CHAT_SYNC_FAILED");
       }
     }
   }

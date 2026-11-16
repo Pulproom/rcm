@@ -76,7 +76,7 @@ export async function firstOpenSetupPicker(state: RuntimeState, chatId: string, 
   if (!eligible()) return;
   try {
     if (await claimSetupAttention(chatId, "opened", eligible)) return await loadSetupPicker(state, chatId);
-  } catch { addLog(state.logs, "warn", "설정 재료 안내를 열지 못했어요. 홈에서 다시 열 수 있어요."); }
+  } catch { addLog(state.logs, "warn", "설정 재료 안내를 열지 못했어요. 홈에서 다시 열 수 있어요.", "SETUP_NOTICE_FAILED"); }
 }
 
 /** Called only by the background committed-output sync, never awaited by a request hook. */
@@ -104,16 +104,16 @@ export function completeSetupAttentionTurn(state: RuntimeState, chatId: string, 
         if (await claimSetupAttention(chatId, "alerted", eligible)) {
           await risuai.alert!("RCM: 대시보드에서 설정 재료를 골라 주세요. 채팅은 계속할 수 있어요.");
         }
-      })().catch(() => addLog(state.logs, "warn", "설정 재료 안내를 표시하지 못했어요. 홈에서 확인할 수 있어요."));
+      })().catch(() => addLog(state.logs, "warn", "설정 재료 안내를 표시하지 못했어요. 홈에서 확인할 수 있어요.", "SETUP_NOTICE_FAILED"));
     }, 0);
-  }).catch(() => addLog(state.logs, "warn", "설정 재료 안내 상태를 저장하지 못했어요. 홈에서 확인할 수 있어요."));
+  }).catch(() => addLog(state.logs, "warn", "설정 재료 안내 상태를 저장하지 못했어요. 홈에서 확인할 수 있어요.", "SETUP_NOTICE_SAVE_FAILED"));
 }
 /** Delete unreleased persistent captures without reading their text or contacting a server. */
 export async function cleanupSetupCaptures(state: RuntimeState): Promise<void> {
   try {
     const storage = await risuai.getLocalPluginStorage();
     for (const key of await storage.keys()) if (key.startsWith("rcm:setup-capture:")) await storage.removeItem(key);
-  } catch { addLog(state.logs, "warn", "이전 설정 캡처를 지우지 못했어요. 기기 저장소를 확인해 주세요."); }
+  } catch { addLog(state.logs, "warn", "이전 설정 캡처를 지우지 못했어요. 기기 저장소를 확인해 주세요.", "SETUP_CAPTURE_CLEANUP_FAILED"); }
 }
 /** Raw main-request text is memory-only. No host reads, parsing, storage or network. */
 export function captureSetupRequest(state: RuntimeState, chatId: string, projection: ResolvedSetupProjection | undefined): void {
