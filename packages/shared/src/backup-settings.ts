@@ -7,7 +7,7 @@ const CurrentChatBackupSettingsSchema = z.object({
   characterEnabled: z.boolean().optional(),
   catchUpPending: z.boolean().optional(),
   profile: z.enum(["companion", "simulation"]).optional(),
-  narrationViewpoint: z.string().trim().min(1).max(160).optional(),
+  narrationViewpoint: z.string().trim().min(1).optional(),
   includeUserMessages: z.boolean().optional(),
   upcomingOccasions: z.boolean().optional(),
   pairProgress: z.boolean().optional(),

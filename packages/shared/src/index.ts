@@ -177,7 +177,7 @@ export const CanonicalizationPolicySchema = z.object({
 export const ChatLineageHintSchema = z.object({
   kind: z.literal("branch"),
   parentChatId: z.string().min(1),
-  parentChatTitle: z.string().max(240).optional(),
+  parentChatTitle: z.string().optional(),
   forkMessageId: z.string().min(1),
   markerMessageId: z.string().min(1).optional(),
   markerOrdinal: z.number().int().nonnegative().optional(),
@@ -227,9 +227,9 @@ export const ManualLineagePreviewRequestSchema = z.object({
   parentChatId: z.string().min(1),
   targetMessageInventory: z.array(MessageVisibilitySnapshotSchema).optional(),
   target: z.object({
-    chatTitle: z.string().max(240).optional(),
+    chatTitle: z.string().optional(),
     characterId: z.string().min(1),
-    characterName: z.string().min(1).max(240),
+    characterName: z.string().min(1),
     profile: RpProfileSchema,
     includeUserMessages: z.boolean().optional(),
     extractionGroupTurns: z.number().int().min(1).max(50).optional(),
@@ -261,7 +261,7 @@ export const ManualLineagePreviewSchema = z.object({
 export type ManualLineagePreview = z.infer<typeof ManualLineagePreviewSchema>;
 
 export const LineageProbeRequestSchema = z.object({
-  chatTitle: z.string().max(240).optional(),
+  chatTitle: z.string().optional(),
   characterId: z.string().min(1),
   profile: RpProfileSchema,
   messageVisibility: z.array(MessageVisibilitySnapshotSchema).min(1),
@@ -450,7 +450,7 @@ export type RetrievalTraceContext = z.infer<typeof RetrievalTraceContextSchema>;
 
 export const TurnPrepareRequestSchema = z.object({
   chatId: z.string().min(1),
-  chatTitle: z.string().max(240).optional(),
+  chatTitle: z.string().optional(),
   characterId: z.string().min(1),
   profile: RpProfileSchema,
   messages: z.array(ChatMessageSnapshotSchema),
@@ -469,12 +469,12 @@ export const TurnPrepareRequestSchema = z.object({
   backfillApproved: z.boolean().optional(),
   perspectives: z.array(z.string()).default([]),
   perspectiveMode: z.enum(["auto", "manual"]).optional(),
-  narrationViewpoint: z.string().trim().min(1).max(160).optional(),
+  narrationViewpoint: z.string().trim().min(1).optional(),
   identityHints: z.object({
-    userPersonaName: z.string().trim().max(160).optional(),
-    hostCharacterName: z.string().trim().max(160).optional(),
-    recentSpeakerNames: z.array(z.string().trim().min(1).max(160)).max(12).default([]),
-    cachedPerspectives: z.array(z.string().trim().min(1).max(160)).max(4).default([]),
+    userPersonaName: z.string().trim().optional(),
+    hostCharacterName: z.string().trim().optional(),
+    recentSpeakerNames: z.array(z.string().trim().min(1)).max(12).default([]),
+    cachedPerspectives: z.array(z.string().trim().min(1)).max(4).default([]),
   }).optional(),
   tokenBudget: z.number().int().min(0).max(MAX_MEMORY_BUDGET), // Zero is the source-only/open protocol.
   memoryBudgetPreset: MemoryBudgetPresetSchema.optional(),
@@ -570,7 +570,7 @@ export const MemoryContextItemSchema = z.object({
     label: z.string().trim().min(1).transform(value => clipDisplayText(value, 120)).optional(),
     pair: z.tuple([z.string().trim().min(1), z.string().trim().min(1)]).transform(value => value.map(name => clipDisplayText(name, 160)) as [string, string]).optional(),
     storyTime: z.string().trim().min(1).transform(value => clipDisplayText(value, 240)).optional(),
-    evidence: z.array(z.object({ messageId: z.string(), quote: z.string().optional() })).max(12).optional(),
+    evidence: z.array(z.object({ messageId: z.string(), quote: z.string().optional() })).optional(),
   })).default([]),
   knownBy: z.array(z.string()).default([]),
   knownByEveryone: z.boolean().optional(),
@@ -673,7 +673,7 @@ export const TurnPrepareResponseSchema = z.object({
   memoryToolsAvailable: z.boolean().optional(),
   memoryToolOpportunity: MemoryToolOpportunitySchema.optional(),
   sceneCharacters: z.array(z.string()).max(8).optional(),
-  narrationViewpoint: z.string().trim().min(1).max(160).optional(),
+  narrationViewpoint: z.string().trim().min(1).optional(),
   narrationDiagnostics: z.array(z.literal("viewpoint_unresolved")).optional(),
   perspectiveResolution: z.object({
     perspectives: z.array(z.string()),
