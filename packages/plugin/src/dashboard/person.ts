@@ -1,6 +1,6 @@
 import { lex } from "./lexicon.js";
 import { defaultPersonColor } from "./person-colors.js";
-import { EntityColorSchema, type EntityBirthday } from "@rcm/shared";
+import { classifyEntityType, EntityColorSchema, type EntityBirthday } from "@rcm/shared";
 import { birthdayLabel } from "./birthdays.js";
 import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
@@ -54,6 +54,7 @@ export type AcquaintanceRow = {
 };
 
 export type PersonDetail = {
+  type?: string;
   entityId?: string;
   color?: string | null;
   birthday?: EntityBirthday;
@@ -145,6 +146,7 @@ export function buildPersonDetail(data: DashboardData, name: string, personaEnti
     : null;
 
   return {
+    type: entity?.type,
     name: canonicalName,
     entityId: entity?.id,
     color: entity?.color ?? null,
@@ -337,6 +339,8 @@ const acquaintanceContacts = (person: string, selfNames: string[], items: Acquai
   return contacts.length ? `<ul class="acq-list">${contacts.join("")}</ul>` : "";
 };
 
+export const organizationMark = (type?: string): string => type !== undefined && classifyEntityType(type) === "organization" ? '<span class="kind-chip">단체</span>' : "";
+
 export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRenderOptions = {}): string {
   const renderOptions: RenderEssentials = {
     translations: options.translations ?? new Map<string, string>(),
@@ -375,7 +379,7 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
     const label = pairLabel(pair);
     return `<button type="button" class="person__mine" data-action="open-relationship" data-key="${escapeHtml(pair.key)}"><span class="person__mine-avs">${avatar(me)}${avatar(them)}</span><span class="person__mine-tx"><span class="person__mine-k">나와의 관계</span><span class="person__mine-t">${nameHtml(me)} &amp; ${nameHtml(them)}${label ? `<span class="person__mine-label">${label}</span>` : ""}</span></span><span class="person__mine-n">${detail.pairScenes[pair.key] ?? 0}장면</span>${icon("chevron")}</button>`;
   })() : "";
-  const header = `<div class="reader__bar"><button type="button" class="back hit" data-action="close-person">${icon("back")}<span>인물</span></button><div class="reader__acts">${personMenu}</div></div><header class="person__head"><h2 class="person__name">${face}${nameHtml(detail.name)}</h2>${aka}${role}</header>${mine}`;
+  const header = `<div class="reader__bar"><button type="button" class="back hit" data-action="close-person">${icon("back")}<span>인물</span></button><div class="reader__acts">${personMenu}</div></div><header class="person__head"><h2 class="person__name">${face}${nameHtml(detail.name)}${organizationMark(detail.type)}</h2>${aka}${role}</header>${mine}`;
 
   // 소속 as contact fields under the head (aliases already read under the name). Each is its own field, so it can be edited, ended or deleted where it is read.
   const affiliationFields = detail.affiliationRecords?.length

@@ -8,7 +8,7 @@ import { buildPhotoZip } from "../album/board-zip.js";
 import { albumUpdateAdditions, renderAlbumUpdateDialog, type AlbumUpdateState } from "./album-update.js";
 import { albumVersionWhen, renderAlbumVersionBar, renderAlbumVersionList, renderAlbumVersionsDialog, type AlbumVersionsState } from "./album-versions.js";
 import { createAlbumEditController, type AlbumImageHost } from "./album-edit.js";
-import { albumDateFormat, applyAlbumUpdate, recommendedAlbumQuotes, isNewAlbumMaterial, type AlbumDocument, type AlbumItem } from "@rcm/shared";
+import { albumDateFormat, applyAlbumUpdate, refreshAlbumTogether, recommendedAlbumQuotes, isNewAlbumMaterial, type AlbumDocument, type AlbumItem, type AlbumTogetherRecords } from "@rcm/shared";
 import { albumClient, type AlbumHtmlExport, type AlbumPhoto } from "../album/api.js";
 import { albumExportHasIntimacy, albumHtmlFilename, buildAlbumHtmlFile, estimateAlbumHtmlSizes, type AlbumHtmlQuality } from "../album/export-html.js";
 import { triggerBackupDownload } from "./data-actions.js";
@@ -19,6 +19,7 @@ export { buildAlbumJumpList, buildAlbumPhotoList, albumPhotoCaption, cycleAlbumP
 import { buildAlbumPhotoList, albumPhotoCaption, cycleAlbumPhoto, type AlbumViewPhoto } from "../album/view-data.js";
 type ViewApi = ReturnType<typeof albumClient>;
 const act = (name: string, text: string, cls = "", value = "", label = "") => `<button type="button" class="${cls}" data-album-action="${name}" data-value="${esc(value)}"${cls === "is-current" ? ' aria-current="true"' : ""}${label ? ` aria-label="${esc(label)}"` : ""}>${text}</button>`;
+const revisionConflict = (error: unknown) => (error as { status?: number; code?: string })?.status === 409 || (error as { code?: string })?.code === "ALBUM_REVISION_CONFLICT";
 
 export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks: {
   skin: () => "film" | "phone"; host?: AlbumImageHost; render: () => void; closed: () => void; confirm: (message: string) => Promise<boolean>; toast?: (message: string) => void;
@@ -33,6 +34,7 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
   let exportDone: AlbumHtmlExport | undefined, exportCopied: "" | "url" | "path" = "";
   let boardState: BoardDialogState = {};
   let updateState: AlbumUpdateState = { add: [], replace: [] }, updateRun = 0;
+  let togetherRecords: AlbumTogetherRecords | undefined, togetherSaving = false, togetherRun = 0;
   // A kept look on screen (past.doc) stands in for the album until the user returns or restores it.
   let past: AlbumVersionsState | undefined, pastRun = 0;
   const pastDocs = new Map<number, AlbumDocument>();
@@ -40,7 +42,25 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
   const view = () => root.querySelector<HTMLElement>(".album-view");
   const phone = () => (view()?.clientWidth ?? window.innerWidth) <= 640;
   const shellInert = (value: boolean) => root.querySelectorAll<HTMLElement>(":scope > .nav,:scope > .topbar").forEach(n => { n.inert = value; });
-  const clear = () => { past = undefined; pastRun++; pastDocs.clear(); updateRun++; updateState = { add: [], replace: [] }; exportRun++; exporting = false; exportEstimates = undefined; editor.clear(); shellInert(false); generation++; if (doc) api.closeAlbum(doc.id); doc = undefined; photoMeta = []; sections = []; photos = []; renderedHtml = ""; active = false; overlay = ""; urls.clear(); full.clear(); };
+  const clear = () => { past = undefined; pastRun++; pastDocs.clear(); togetherRun++; togetherRecords = undefined; togetherSaving = false; updateRun++; updateState = { add: [], replace: [] }; exportRun++; exporting = false; exportEstimates = undefined; editor.clear(); shellInert(false); generation++; if (doc) api.closeAlbum(doc.id); doc = undefined; photoMeta = []; sections = []; photos = []; renderedHtml = ""; active = false; overlay = ""; urls.clear(); full.clear(); };
+  const togetherBlocks = () => doc?.source.chatId && doc.source.sourceAvailable !== false ? doc.blocks.filter(b => b.kind === "together" && !b.hidden) ?? [] : [];
+  const togetherChip = () => {
+    const fresh = togetherRecords;
+    if (!fresh || past?.doc || !togetherBlocks().some(block => {
+      const stored = block.together;
+      return fresh.lastTurnAt !== undefined && (stored?.lastTurnAt === undefined || fresh.lastTurnAt > stored.lastTurnAt)
+        || fresh.quiz?.answered !== stored?.quiz?.answered;
+    })) return "";
+    return `<div class="av-together-chip" role="status" aria-busy="${togetherSaving}"><span>새 기록이 있어요</span><button type="button" class="av-export-save" data-album-action="album-together-refresh"${togetherSaving ? " disabled" : ""}>업데이트</button></div>`;
+  };
+  const paintTogether = () => { const slot = view()?.querySelector<HTMLElement>(".av-together-slot"); if (slot) slot.innerHTML = togetherChip(); };
+  const checkTogether = async () => {
+    const chatId = doc?.source.chatId, epoch = generation, run = ++togetherRun;
+    if (!chatId || !togetherBlocks().length) { togetherRecords = undefined; paintTogether(); return; }
+    try { const fresh = await api.together(chatId); if (epoch !== generation || run !== togetherRun) return; togetherRecords = fresh; }
+    catch { if (epoch !== generation || run !== togetherRun) return; togetherRecords = undefined; }
+    paintTogether();
+  };
   const currentLabel = () => sections[current]?.label ?? "표지";
   const toc = () => `<ol class="av-toc">${sections.map((s, i) => `<li>${act("album-jump", `<i>${s.number}</i><span>${esc(s.label)}</span>`, i === current ? "is-current" : "", s.id)}</li>`).join("")}</ol>`;
   const overlayHtml = () => {
@@ -110,9 +130,9 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     const id = doc.id, epoch = generation, run = ++updateRun;
     updateState = { add: [], replace: [], remove: [], quotePicks: {} }; showOverlay("update", trigger);
     try {
-      const { candidates, materials } = await api.update(id);
+      const { candidates, materials, together } = await api.update(id);
       if (epoch === generation && run === updateRun) {
-        updateState.candidates = candidates; updateState.materials = materials;
+        updateState.candidates = candidates; updateState.materials = materials; updateState.together = together;
         const additions = albumUpdateAdditions(doc, updateState); updateState.sourceAdditions = additions;
         updateState.add = additions.filter(c => c.blockKind === "story" && c.item.origin?.kind !== "dialogue" && isNewAlbumMaterial(doc!, c.item)).map(c => c.item.id);
         for (const candidate of additions) if (candidate.blockKind === "story") (updateState.quotePicks ??= {})[candidate.item.id] = recommendedAlbumQuotes(candidate.item.children ?? []).slice(0, 1).map(q => q.id);
@@ -165,7 +185,7 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     host!.querySelectorAll(".av-number").forEach(n => { n.textContent = sections[current]!.number; });
     host!.querySelectorAll<HTMLElement>('[data-album-action="album-jump"]').forEach(n => { const yes = n.dataset.value === sections[current]!.id; n.classList.toggle("is-current", yes); if (yes) n.setAttribute("aria-current", "location"); else n.removeAttribute("aria-current"); });
   };
-  const hydrate = () => { if (!active) return; if (editor.active) { editor.hydrate(); paintOverlay(); return; } spy(); paintOverlay(); };
+  const hydrate = () => { if (!active) return; if (editor.active) { editor.hydrate(); paintOverlay(); return; } spy(); paintOverlay(); paintTogether(); };
   const repaint = () => { renderedHtml = ""; hooks.render(); hydrate(); };
   const loadThumbs = async (id: string, target: AlbumDocument, epoch: number) => {
     const ids = new Set<string>();
@@ -228,16 +248,33 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
       if (epoch !== generation) return;
       photos = buildAlbumPhotoList(doc);
     } catch { if (epoch === generation) error = "앨범을 불러오지 못했어요."; }
-    finally { if (epoch === generation) { loading = false; repaint(); view()?.querySelector<HTMLElement>(".av-back")?.focus(); } }
+    finally { if (epoch === generation) { loading = false; repaint(); view()?.querySelector<HTMLElement>(".av-back")?.focus(); if (doc) void checkTogether(); } }
   };
   const editor = createAlbumEditController(root, api, {
     skin: hooks.skin, host: hooks.host, photoSrc: id => urls.get(id) ?? "", photoLoaded: (id, url) => urls.set(id, url),
     render: () => { renderedHtml = ""; hooks.render(); },
-    done: saved => { doc = saved; photos = buildAlbumPhotoList(saved); repaint(); },
+    done: saved => { doc = saved; photos = buildAlbumPhotoList(saved); repaint(); void checkTogether(); },
   });
   const handle = async (node: HTMLElement) => {
     if (!active || (editor.active && !node.dataset.albumAction?.startsWith("album-photo-"))) return;
     const action = node.dataset.albumAction, value = node.dataset.value ?? "";
+    if (action === "album-together-refresh" && doc && togetherRecords && !togetherSaving && !past?.doc && togetherBlocks().length) {
+      const id = doc.id, epoch = generation, next = refreshAlbumTogether(doc, togetherRecords);
+      togetherSaving = true; paintTogether();
+      try {
+        const saved = await api.save(id, next, doc.revision);
+        if (epoch !== generation) return;
+        const top = view()?.querySelector(".av-scroll")?.scrollTop ?? 0;
+        doc = { ...next, revision: saved.revision }; togetherRecords = undefined; repaint();
+        const scroll = view()?.querySelector(".av-scroll"); if (scroll) scroll.scrollTop = top;
+        view()?.querySelector<HTMLElement>(".av-toc-trigger")?.focus({ preventScroll: true });
+      } catch (error) {
+        if (epoch !== generation) return;
+        if (revisionConflict(error)) { await openAlbumView(id); hooks.toast?.("다른 기기에서 바뀌어서 앨범을 새로 불러왔어요"); return; }
+        hooks.toast?.("저장하지 못했어요. 다시 반영해 주세요.");
+      } finally { if (epoch === generation) { togetherSaving = false; paintTogether(); } }
+      return;
+    }
     if (action === "album-edit" && doc) { closeOverlay(); renderedHtml = ""; await editor.open(doc); return; }
     if (action === "album-back") { clear(); hooks.closed(); return; }
     if (action === "album-toc") showOverlay("toc", node);
@@ -256,7 +293,7 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
         await openAlbumView(id); hooks.toast?.(`${albumVersionWhen(row.createdAt)} 모습으로 되돌렸어요`);
       } catch (error) {
         if (epoch !== generation || past !== state) return;
-        if ((error as { status?: number; code?: string })?.status === 409 || (error as { code?: string })?.code === "ALBUM_REVISION_CONFLICT") {
+        if (revisionConflict(error)) {
           await openAlbumView(id); hooks.toast?.("다른 기기에서 바뀌어서 앨범을 새로 불러왔어요"); return;
         }
         state.restoring = false; state.error = "되돌리지 못했어요. 다시 시도해 주세요."; paintBar();
@@ -279,17 +316,19 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     if ((action === "album-update-keep" || action === "album-update-replace") && !updateState.saving && !updateState.conflict) { updateState.replace = updateState.replace.filter(id => id !== node.dataset.value); if (action === "album-update-replace") updateState.replace.push(node.dataset.value!); paintUpdateRows(); }
     if (action === "album-update-apply" && doc && updateState.candidates && !updateState.saving && !updateState.conflict) {
       const count = updateState.add.length + updateState.replace.length + (updateState.remove?.length ?? 0); if (!count) return;
-      const epoch = generation, next = applyAlbumUpdate(doc, updateState, { ...updateState.candidates, collectedAt: updateState.materials?.collectedAt ?? updateState.candidates.collectedAt, added: albumUpdateAdditions(doc, updateState) });
+      const epoch = generation;
+      let next = applyAlbumUpdate(doc, updateState, { ...updateState.candidates, collectedAt: updateState.materials?.collectedAt ?? updateState.candidates.collectedAt, added: albumUpdateAdditions(doc, updateState) });
+      if (updateState.together) next = refreshAlbumTogether(next, updateState.together);
       updateState.saving = true; updateState.error = ""; paintOverlay();
       try {
         updateState.saving = false; closeOverlay(); renderedHtml = "";
         await editor.open(doc);
         if (epoch !== generation) return;
-        if (await editor.applyUpdate(next)) hooks.toast?.(`${count}개를 반영했어요. 되돌리기로 취소할 수 있어요`);
+        if (await editor.applyUpdate(next)) { doc = editor.document!; void checkTogether(); hooks.toast?.(`${count}개를 반영했어요. 되돌리기로 취소할 수 있어요`); }
       } catch (error) {
         if (epoch !== generation) return;
         // Keep the document and choices intact, just like the editor's autosave conflict.
-        updateState.conflict = (error as { status?: number; code?: string })?.status === 409 || (error as { code?: string })?.code === "ALBUM_REVISION_CONFLICT";
+        updateState.conflict = revisionConflict(error);
         updateState.error = updateState.conflict ? "다른 기기에서 바뀌었어요" : "저장하지 못했어요. 다시 반영해 주세요.";
       } finally { if (epoch === generation) { updateState.saving = false; if (overlay === "update") paintOverlay(); } }
     }
@@ -436,6 +475,6 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     const shown = past?.doc ?? doc, row = past?.doc ? past.list?.[past.index] : undefined;
     const rendered = shown && !loading ? renderAlbum(shown, { mode: "view", photoSrc: id => urls.get(id) ?? "", storedPhotos: photoMeta }) : undefined;
     sections = rendered?.sections ?? [];
-    return renderedHtml = `<section class="album-view" data-skin="${hooks.skin()}"><div class="av-base${row ? " is-past" : ""}"${overlay ? " inert" : ""}>${renderScreenBar(`${row ? act("album-versions-close", icon("back") + "<span>지금 앨범</span>", "av-back") : act("album-back", icon("back") + "<span>추억</span>", "av-back")}<div class="av-title"><b>${esc(shown?.title ?? "앨범")}</b>${row ? `<span class="avh-chip">${albumVersionWhen(row.createdAt)}의 모습</span>` : `<small>${esc(albumDateFormat(doc?.periodLabel).header)}</small>`}</div>${act("album-toc", '목차 · <span class="av-current">' + esc(currentLabel()) + '</span>' + icon("chevron"), "av-toc-trigger")}${doc && !row ? act("album-edit", icon("edit") + "꾸미기", "av-edit") : ""}${doc && !row ? act("album-view-menu", icon("more"), "av-icon", "", "앨범 메뉴") : ""}`, "av-head")}<div class="av-scroll">${error ? `<p class="av-status" role="alert">${esc(error)}</p>` : ""}${loading ? '<p class="av-status" role="status">앨범 불러오는 중…</p>' : rendered ? `<style>${rendered.css}</style>${rendered.html}` : ""}</div>${row ? renderAlbumVersionBar(past!, overlay === "versions") : sections.length ? act("album-toc", `<i class="av-number">${sections[current]?.number ?? "01"}</i><span class="av-current">${esc(currentLabel())}</span>${icon("chevron")}`, "av-pill") : ""}</div><div class="av-overlay">${overlayHtml()}</div></section>`;
+    return renderedHtml = `<section class="album-view" data-skin="${hooks.skin()}"><div class="av-base${row ? " is-past" : ""}"${overlay ? " inert" : ""}>${renderScreenBar(`${row ? act("album-versions-close", icon("back") + "<span>지금 앨범</span>", "av-back") : act("album-back", icon("back") + "<span>추억</span>", "av-back")}<div class="av-title"><b>${esc(shown?.title ?? "앨범")}</b>${row ? `<span class="avh-chip">${albumVersionWhen(row.createdAt)}의 모습</span>` : `<small>${esc(albumDateFormat(doc?.periodLabel).header)}</small>`}</div>${act("album-toc", '목차 · <span class="av-current">' + esc(currentLabel()) + '</span>' + icon("chevron"), "av-toc-trigger")}${doc && !row ? act("album-edit", icon("edit") + "꾸미기", "av-edit") : ""}${doc && !row ? act("album-view-menu", icon("more"), "av-icon", "", "앨범 메뉴") : ""}`, "av-head")}<div class="av-scroll">${error ? `<p class="av-status" role="alert">${esc(error)}</p>` : ""}${loading ? '<p class="av-status" role="status">앨범 불러오는 중…</p>' : rendered ? `<style>${rendered.css}</style>${rendered.html}` : ""}</div><div class="av-together-slot">${row ? "" : togetherChip()}</div>${row ? renderAlbumVersionBar(past!, overlay === "versions") : sections.length ? act("album-toc", `<i class="av-number">${sections[current]?.number ?? "01"}</i><span class="av-current">${esc(currentLabel())}</span>${icon("chevron")}`, "av-pill") : ""}</div><div class="av-overlay">${overlayHtml()}</div></section>`;
   } };
 }

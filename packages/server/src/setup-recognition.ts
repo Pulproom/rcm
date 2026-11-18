@@ -3,7 +3,7 @@ import { availableMemoryKey } from './extraction-memory-keys.js';
 import { memoryHasLineCorrectionSql } from './memory-detail-edits.js';
 import { syncManualCognition } from "./social-knowledge.js";
 import { randomUUID } from "node:crypto";
-import { INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, type InitialCalibrationResult } from "@rcm/shared";
+import { CALIBRATION_PERSON_LINK_FIELDS, INITIAL_CALIBRATION_MEMORY_KEY_PREFIX, type InitialCalibrationResult } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { canAutomaticallyChangeSocialKnowledge } from "./social-knowledge.js";
@@ -19,7 +19,7 @@ export function storeSetupRecognition(db: RcmDatabase, chatId: string, fingerpri
   const timestamp = Date.now();
   const reserved=deletedMemoryKeys(db,chatId);
   for (const item of items) {
-    const holder = names.get(item.holderKey)?.name, subject = names.get(item.subjectKey)?.name;
+    const holder = names.get(item[CALIBRATION_PERSON_LINK_FIELDS.recognition.holder])?.name, subject = names.get(item[CALIBRATION_PERSON_LINK_FIELDS.recognition.subject])?.name;
     if (!holder || !subject || holder === subject) throw new Error("Invalid setup recognition pair");
     if (!canAutomaticallyChangeSocialKnowledge(db,chatId,holder,subject,[])) continue;
     // Replacement removes only untouched setup rows. A retained pair owns its

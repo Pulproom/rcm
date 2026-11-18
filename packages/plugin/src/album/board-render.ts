@@ -2,6 +2,7 @@ import { albumDefaultFit, albumFitCrop, albumImageRatio, albumDateFormat, albumD
 import type { AlbumPhoto } from "./api.js";
 import { escapeHtml as esc } from "../dashboard/film/ui.js";
 import { albumPhotoCaption, type AlbumViewPhoto } from "./view-data.js";
+import { togetherAsOf, togetherCardText, togetherStreakRows, visibleTogetherCards } from "./together.js";
 
 interface Line { text: string; speaker: string; date: string }
 interface Scene { title: string; summary: string; date: string; time: string; location: string; lines: Line[]; photos: BoardPhoto[] }
@@ -225,6 +226,15 @@ ${s.lines.map(l => `<div style="margin:12px 0 0;padding:10px 14px;background:${g
       hearts: items.map(i=>({ ...relation(i), summary: line(i).text })), bond: items.map(scene),
       nicknames: items.map(i=>({ ...relation(i), text: line(i).text })), note: items.map(i=>line(i).text).join("\n"), gallery: items.flatMap(i=>refs(i, "사진")) };
     switch(block.kind) {
+      case "together": {
+        if (!block.together) break;
+        const r = block.together, cards = visibleTogetherCards(block);
+        if (!cards.length) break;
+        const rows = cards.flatMap(card => card === "streak" ? togetherStreakRows(r) : [togetherCardText(r, card)]);
+        out += t.head(++n, esc(block.title || "함께한 시간"), "together") + `<div style="font-size:12px;color:${t.mut};">${esc(togetherAsOf(r))}</div>`
+          + table(rows.map(text => row(esc(text.label), esc(text.value), esc(text.note))).join(""));
+        break;
+      }
       case "intro": section("intro", table(`<tr>${[D.me, D.partner].map(name => `<td style="width:50%;padding:0 ${name === D.me ? "6px" : "0"} 0 ${name === D.me ? "0" : "6px"};border:0;vertical-align:top;">${
     slotTable({ refs: personRef(name === D.me ? doc.people.me.photoId : doc.people.partner.photoId, name), h: 130, margin: "0", cell: `background:${grad(t.plate, t.plate2)};border:0;`, cap: { style: `padding:8px 0 0;border:0;font-size:15px;font-weight:700;color:${t.ink};`, html: `${namesCaption(name)} <span style="font-size:12px;font-weight:400;color:${t.mut};">${personRef(name === D.me ? doc.people.me.photoId : doc.people.partner.photoId, name).length ? "· 사진 1장" : ""}</span>` } })}</td>`).join("")}</tr>`)); break;
       case "firsts": section("firsts", table(X.firsts.map(f => row(full(f.date), esc(f.title), [f.location, f.summary].filter(Boolean).map(esc).join(" · "))).join(""))); break;

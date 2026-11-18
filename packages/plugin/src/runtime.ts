@@ -5,12 +5,12 @@ import { captureSetupRequest, discardSetupCapture, observeSetupAttention, comple
 declare const __RCM_DISTRIBUTION__: boolean;
 import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
 import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
-import { ServerClient, UpgradeBlockedError, type UpgradeLock, type PrepareClientTimings } from "./api-client.js";
-import { injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readCurrentChatId, readCurrentChatScope, readCurrentContext, resolvedSetupProjection, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
+import { cachedSourceReceipt, ServerClient, UpgradeBlockedError, type UpgradeLock, type PrepareClientTimings } from "./api-client.js";
+import { assertHostSelection, confirmCurrentChatScope, injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readContextMetadata, readCurrentChatScope, readCurrentContext, readHostSelection, readMessageSourceInputs, resolvedSetupProjection, sameMessageSourceInputs, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
 import { CACHE_KEY, addLog, isChatMemoryEnabled, loadSettings, loadStoredJson, saveSettings, saveStoredJson } from "./settings.js";
-import type { CachedChatState, RuntimeState } from "./types.js";
+import type { AutomaticInjectionTimings, ChatScopeTiming, CachedChatState, RuntimeState } from "./types.js";
 import { beginMainGeneration, clearMainGeneration, endMainGeneration, isInternalModelRequest, scheduleWorker } from "./worker.js";
-import { inheritLineageSettings } from "./lineage-settings.js";
+import { stageLineageSettings } from "./lineage-settings.js";
 import { beginMemoryReferenceTurn, currentTurnMemoryToolNames, renderMemoryReferences } from "./mcp.js";
 import { isServerConfigured } from "./connection.js";
 import { observeProviderRequest } from "./provider-observation.js";
@@ -82,7 +82,7 @@ export class MissingRcmMarkerError extends Error {
   }
 }
 
-function traceAutomaticInjection(state: RuntimeState, client: ServerClient, latestMessageId: string | undefined): void {
+function traceAutomaticInjection(state: RuntimeState, client: ServerClient, latestMessageId: string | undefined, timingsReady?: Promise<void>): void {
   if (!state.lastInjection) return;
   const injection = state.lastInjection;
   // Receipt metadata drives cooldown even when private diagnostic prose is disabled.
@@ -103,7 +103,7 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
   const deliveryStartedAt = performance.now();
   injection.clientStages.diagnostic = "queued";
   injection.traceDelivery = { eventId, requestId, status: "queued", startedAt };
-  void client.traceRetrieval({
+  const event = {
     id: eventId,
     kind: "automatic_injection",
     chatId: injection.chatId,
@@ -123,6 +123,7 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
     prepareElapsedMs: injection.prepareElapsedMs,
     prepareTimeoutMs: injection.prepareTimeoutMs,
     prepareClientTimings: injection.prepareClientTimings,
+    injectionTimings: injection.injectionTimings,
     prepareOutcome: injection.prepareOutcome,
     prepareError: injection.prepareError,
     clientStages: injection.clientStages,
@@ -136,7 +137,8 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
     blockReason: injection.blockReason,
     manifest: injection.manifest,
     packet: injection.packet,
-  }).then(() => {
+  };
+  void (timingsReady ? client.traceRetrieval(event, timingsReady) : client.traceRetrieval(event)).then(() => {
     const elapsedMs = performance.now() - deliveryStartedAt;
     injection.traceDelivery = { eventId, requestId, status: "succeeded", startedAt, elapsedMs };
     addLog(state.logs, "info", `Retrieval trace delivered requestId=${requestId} eventId=${eventId} in ${elapsedMs}ms`, "RETRIEVAL_TRACE_DELIVERED");
@@ -249,17 +251,19 @@ function isPreparedContextRetry(state: RuntimeState, chatId: string, contexts: s
   return contexts[0]!.trim() === injection.packet.trim();
 }
 
-function reuseExistingContext(state: RuntimeState, client: ServerClient, messages: OpenAIChat[], chatId: string): OpenAIChat[] {
+function reuseExistingContext(state: RuntimeState, client: ServerClient, messages: OpenAIChat[], chatId: string, characterId: string): OpenAIChat[] {
   const injected = injectMemory(messages, "", 0, 0);
   const automatic = state.automaticTurnPacket;
   const previous = state.lastInjection;
   state.lastPromptValidation = { chatId, status: "existing_context", at: Date.now() };
   state.activeModelRequest = {
-    chatId, requestId: state.mainGeneration?.id, turnKey: automatic?.turnKey ?? previous?.turnKey,
+    chatId, characterId, requestId: state.mainGeneration?.id, turnKey: automatic?.turnKey ?? previous?.turnKey,
+    referenceTurnKey: automatic?.referenceTurnKey, promptSourceMessageIds: automatic?.promptSourceMessageIds,
+    mcpRequestTimeoutMs: automatic?.response.mcpRequestTimeoutMs,
     latestMessageId: automatic?.latestMessageId ?? state.current?.snapshot?.at(-1)?.id,
     startedAt: Date.now(), packet: injected.packet,
-    plannedTools: currentTurnMemoryToolNames(state, chatId),
   };
+  state.activeModelRequest.plannedTools = currentTurnMemoryToolNames(state, chatId);
   state.lastInjection = {
     turnKey: automatic?.turnKey ?? previous?.turnKey ?? "existing-context",
     chatId,
@@ -347,6 +351,8 @@ export async function createRuntime(): Promise<{ state: RuntimeState; client: Se
 
 export function installRequestHooks(state: RuntimeState, client: ServerClient): Promise<void[]> {
   const hasCommittedOutputListener = typeof risuai.addRisuChatListener === "function";
+  // A tail prepare cannot repair an off-tail edit without its message body.
+  const fullSourceNextPrepare = new Set<string>();
   return Promise.all([
     ...(typeof risuai.onUnload === "function" ? [risuai.onUnload(() => {
       state.unloaded = true;
@@ -389,15 +395,128 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         if (ownedTiming?.outcome === "running") finishTiming(state, ownedTiming, "failed");
       } };
       const execute = async () => {
+      const preflightStartedAt = performance.now();
+      const injectionTimings: AutomaticInjectionTimings = {
+        totalMs: 0, preflightMs: 0, sourceHeadMs: 0,
+        contextRead: { count: 0, totalMs: 0, hostChatReadMs: 0, descriptorComparisonMs: 0, loreDatabaseReadMs: 0, messageSourceResolutionMs: 0, visibilityMs: 0, messageCount: 0, sourceChars: 0, estimatedSourceTokens: 0 },
+        chatScopeChecks: { count: 0, totalMs: 0, hashingMs: 0, fullHostChatReads: 0, calls: [] },
+        assertCurrentRequest: { count: 0, totalMs: 0, hashingMs: 0 },
+        setupProjectionMs: 0, setupCaptureMs: 0, turnKeyHashMs: 0,
+        prepareRequestBuildMs: 0, prepareRequestMs: 0, postResponseChecksMs: 0, toolRegistrationMs: 0, packetApplyMs: 0,
+      };
+      const scopeTiming = (stage: ChatScopeTiming["stage"]): ChatScopeTiming => {
+        const timing = { stage, totalMs: 0, hostChatReadMs: 0, hashingMs: 0, fullHostChatReads: 0 };
+        injectionTimings.chatScopeChecks.calls.push(timing);
+        return timing;
+      };
+      const removeMemoryTools = async () => {
+        if (!state.syncMemoryToolRegistration) return;
+        const startedAt = performance.now();
+        try { await state.syncMemoryToolRegistration(false).catch(() => undefined); }
+        finally { injectionTimings.toolRegistrationMs += performance.now() - startedAt; }
+      };
+      const assertRequestOwner = () => {
+        if (controller.signal.aborted || state.modelRequestEpoch !== requestEpoch) throw new MemoryInjectionBlockedError("request cancelled or replaced");
+      };
+      const needsSourceHead = (chatId: string) => fullSourceNextPrepare.has(chatId) || state.automaticTurnPacket?.chatId === chatId
+        || state.cache[chatId] || state.statusSummary?.upgrade?.lock || state.upgradeBlocked?.chatId === chatId;
+      const readSourceHead = async (chatId: string) => {
+        const startedAt = performance.now();
+        const head = await new ServerClient(() => state.settings).request<{upgradeLock?:UpgradeLock; memoryEpoch?:string}>(`/v1/chats/${encodeURIComponent(chatId)}/source-head`, {signal:controller.signal});
+        injectionTimings.sourceHeadMs += performance.now() - startedAt;
+        assertRequestOwner();
+        return head;
+      };
       try {
-        const { chatId: currentChatId, characterId } = await readCurrentChatScope(state);
-        if (state.modelRequestEpoch !== requestEpoch || controller.signal.aborted) throw new MemoryInjectionBlockedError("request replaced during setup");
-        if (state.mainGeneration?.id === generationId) state.mainGeneration.chatId = currentChatId;
-        const assertCurrentRequest = async () => {
-          if (controller.signal.aborted || state.modelRequestEpoch !== requestEpoch) throw new MemoryInjectionBlockedError("request cancelled or replaced");
-          const liveChatId = await readCurrentChatId();
-          if (controller.signal.aborted || state.modelRequestEpoch !== requestEpoch || liveChatId !== currentChatId) {
-            throw new MemoryInjectionBlockedError("request belongs to another chat or generation");
+        const existing = inspectMemoryPrompt(messages);
+        // Release idle discovery before reading the loaded slot. Yumi can finish
+        // writing its source record while the host is handling unregistration.
+        const freshPrompt = existing.hasMarker && existing.contexts.length === 0;
+        const known = state.hostChatIdentity;
+        const preflightSelection = freshPrompt && (state.syncMemoryToolRegistration || known) ? await readHostSelection() : undefined;
+        assertRequestOwner();
+        if (freshPrompt) {
+          state.memoryToolOpportunity = undefined;
+          await removeMemoryTools();
+          assertRequestOwner();
+        }
+        const knownChatId = known && known.characterIndex === preflightSelection?.[0] && known.chatIndex === preflightSelection[1]
+          ? known.chatId : undefined;
+        const current = state.current;
+        const serverUrl = state.settings.serverUrl;
+        const configured = isServerConfigured(state.settings);
+        const currentCharacterId = current?.chatId === knownChatId ? current?.characterId : undefined;
+        const enabled = !knownChatId || !currentCharacterId || isChatMemoryEnabled(state.settings, knownChatId, currentCharacterId);
+        const preflightHead = knownChatId && currentCharacterId && configured && enabled && needsSourceHead(knownChatId)
+          ? await readSourceHead(knownChatId) : undefined;
+        let metadata: Awaited<ReturnType<typeof readContextMetadata>> | undefined;
+        if (freshPrompt && configured && enabled) {
+          const startedAt = performance.now();
+          metadata = await readContextMetadata();
+          injectionTimings.contextRead.loreDatabaseReadMs += performance.now() - startedAt;
+          assertRequestOwner();
+        }
+        // Pin the ledger receipt before copying its source. A concurrent sync
+        // can change the cached receipt while the host RPC is in flight.
+        const receiptChatId = knownChatId ?? current?.chatId;
+        const receipts = new Map([...(receiptChatId ? [receiptChatId] : []), ...fullSourceNextPrepare]
+          .map(chatId => [chatId, cachedSourceReceipt(state.settings, chatId)] as const));
+        const { chatId: currentChatId, characterId, hostSnapshot } = await readCurrentChatScope(undefined, scopeTiming("initial"));
+        assertRequestOwner();
+        if (serverUrl !== state.settings.serverUrl || (preflightHead && knownChatId !== currentChatId)) {
+          throw new MemoryInjectionBlockedError("source scope changed during preflight");
+        }
+        if (preflightSelection && (hostSnapshot.characterIndex !== preflightSelection[0] || hostSnapshot.chatIndex !== preflightSelection[1])) {
+          throw new MemoryInjectionBlockedError("host selection changed during preflight");
+        }
+        const generation = state.mainGeneration;
+        generation?.observe(currentChatId, hostSnapshot.chat);
+        let sourceInputs: ReturnType<typeof readMessageSourceInputs>;
+        let sourceHashes: NonNullable<RuntimeState["automaticTurnPacket"]>["sourceHashes"];
+        let tailStart = 0;
+        let expectedReferenceTurnKey: string;
+        let selectionChanged = false;
+        const assertDeliveryOwner = () => {
+          assertRequestOwner();
+          if (state.mcpTurnKey !== expectedReferenceTurnKey) throw new MemoryInjectionBlockedError("memory generation changed before apply");
+        };
+        const assertCurrentRequest = async (stage: Exclude<ChatScopeTiming["stage"], "initial">) => {
+          const startedAt = performance.now();
+          injectionTimings.assertCurrentRequest.count += 1;
+          const timing = scopeTiming(stage);
+          try {
+            assertRequestOwner();
+            if (stage === "before_apply") {
+              try {
+                const live = await confirmCurrentChatScope(hostSnapshot, timing);
+                assertDeliveryOwner();
+                if (selectionChanged || live.characterIndex !== hostSnapshot.characterIndex || live.chatIndex !== hostSnapshot.chatIndex
+                  || live.chatId !== currentChatId) throw new Error("HOST_SOURCE_CHANGED");
+                if (!sameMessageSourceInputs(sourceInputs, live.chat)) {
+                  if (tailStart && !sameMessageSourceInputs(sourceInputs, live.chat, tailStart)) fullSourceNextPrepare.add(currentChatId);
+                  throw new Error("HOST_SOURCE_CHANGED");
+                }
+                generation?.observe(currentChatId, live.chat, sourceHashes);
+              } catch (error) {
+                throw new MemoryInjectionBlockedError(`final chat confirmation failed: ${String(error)}`);
+              }
+            } else {
+              try { await assertHostSelection(hostSnapshot.characterIndex, hostSnapshot.chatIndex); }
+              catch (error) {
+                if ((stage !== "prepare_response" && stage !== "prepared_response")
+                  || !(error instanceof Error) || error.message !== "HOST_SELECTION_CHANGED") throw error;
+                // Route observed switches to the common delivery guard before
+                // consuming the response or registering its tools.
+                selectionChanged = true;
+              }
+            }
+            assertRequestOwner();
+          } finally {
+            const elapsedMs = performance.now() - startedAt;
+            timing.totalMs += elapsedMs;
+            injectionTimings.assertCurrentRequest.totalMs += elapsedMs;
+            injectionTimings.assertCurrentRequest.hashingMs += timing.hashingMs;
+            if (stage === "prepare_error" || stage === "before_apply") injectionTimings.postResponseChecksMs += elapsedMs;
           }
         };
         if (!isChatMemoryEnabled(state.settings, currentChatId, characterId)) {
@@ -405,21 +524,22 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           state.activeModelRequest = undefined;
           state.automaticTurnPacket = undefined;
           state.memoryToolOpportunity = undefined;
-          state.memoryReferenceSnapshot = undefined;
           await discardSetupCapture(state, currentChatId);
           beginMemoryReferenceTurn(state, crypto.randomUUID());
-          await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
+          if (!freshPrompt) await removeMemoryTools();
           return stripRcmPromptContent(messages);
         }
         if (!isServerConfigured(state.settings)) {
           state.activeModelRequest = undefined;
-          await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
+          if (!freshPrompt) await removeMemoryTools();
           throw new MemoryInjectionBlockedError("server URL or token is not configured");
         }
         // Cached provider retries also honour the live lock before reusing a packet.
-        if (state.automaticTurnPacket?.chatId === currentChatId || state.cache[currentChatId] || state.statusSummary?.upgrade?.lock || state.upgradeBlocked?.chatId === currentChatId) {
-          const head = await new ServerClient(() => state.settings).request<{upgradeLock?:UpgradeLock; memoryEpoch?:string}>(`/v1/chats/${encodeURIComponent(currentChatId)}/source-head`,{signal:controller.signal});
-          await assertCurrentRequest();
+        const repairSources = fullSourceNextPrepare.has(currentChatId);
+        // Without a known slot, a fresh request uses prepare itself to check
+        // the live lock. Retry-only prompts cannot send a source snapshot.
+        const head = preflightHead ?? (!freshPrompt && needsSourceHead(currentChatId) ? await readSourceHead(currentChatId) : undefined);
+        if (head) {
           if (head.upgradeLock) {
             state.upgradeBlocked = {chatId:currentChatId,lock:head.upgradeLock};
             state.refreshStatusWidget?.();
@@ -436,18 +556,29 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           }
         }
         if (state.upgradeBlocked?.chatId === currentChatId) state.upgradeBlocked = undefined;
-        const existing = inspectMemoryPrompt(messages);
-        const knownRetryChatId = state.automaticTurnPacket?.chatId;
+        const prepared = state.automaticTurnPacket;
+        const knownRetryChatId = prepared?.chatId;
+        const verifiedRetry = head && !repairSources && prepared?.chatId === currentChatId && prepared.referenceTurnKey === state.mcpTurnKey && prepared.sourceInputs
+          && sameMessageSourceInputs(prepared.sourceInputs, hostSnapshot.chat) ? prepared : undefined;
         if (knownRetryChatId === currentChatId) {
+          const projectionStartedAt = performance.now();
           const retrySetup = await resolvedSetupProjection(messages);
-          await assertCurrentRequest();
+          injectionTimings.setupProjectionMs += performance.now() - projectionStartedAt;
+          await assertCurrentRequest("retry_setup_projection");
+          const captureStartedAt = performance.now();
           captureSetupRequest(state, knownRetryChatId, retrySetup);
-          await assertCurrentRequest();
+          injectionTimings.setupCaptureMs += performance.now() - captureStartedAt;
         }
         if (existing.contexts.length > 0 && knownRetryChatId) {
-          if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)
+          if (verifiedRetry && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)
             && isPreparedContextRetry(state, knownRetryChatId, existing.contexts)) {
-            return reuseExistingContext(state, client, messages, knownRetryChatId);
+            sourceInputs = verifiedRetry.sourceInputs;
+            sourceHashes = verifiedRetry.sourceHashes;
+            expectedReferenceTurnKey = verifiedRetry.referenceTurnKey;
+            await assertCurrentRequest("before_apply");
+            assertDeliveryOwner();
+            if (state.memoryToolOpportunity?.referenceTurnKey === verifiedRetry.referenceTurnKey) state.memoryToolOpportunity.requestId = generationId;
+            return reuseExistingContext(state, client, messages, knownRetryChatId, characterId);
           }
           if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)) {
             throw new MemoryInjectionBlockedError("stale or unverified existing memory context");
@@ -467,17 +598,29 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           if (currentChatId !== knownRetryChatId) {
             throw new MemoryInjectionBlockedError("empty retry belongs to another chat");
           }
+          if (!verifiedRetry) throw new MemoryInjectionBlockedError("stale or unverified empty packet");
+          sourceInputs = verifiedRetry.sourceInputs;
+          sourceHashes = verifiedRetry.sourceHashes;
+          expectedReferenceTurnKey = verifiedRetry.referenceTurnKey;
+          await assertCurrentRequest("before_apply");
+          assertDeliveryOwner();
+          if (state.memoryToolOpportunity?.referenceTurnKey === verifiedRetry.referenceTurnKey) state.memoryToolOpportunity.requestId = generationId;
           state.lastPromptValidation = { chatId: knownRetryChatId, status: "existing_context", at: Date.now() };
-          state.activeModelRequest = { chatId: knownRetryChatId, requestId: generationId };
+          state.activeModelRequest = {
+            chatId: knownRetryChatId, characterId, requestId: generationId, turnKey: verifiedRetry.turnKey,
+            referenceTurnKey: verifiedRetry.referenceTurnKey, latestMessageId: verifiedRetry.latestMessageId,
+            promptSourceMessageIds: verifiedRetry.promptSourceMessageIds, mcpRequestTimeoutMs: verifiedRetry.response.mcpRequestTimeoutMs,
+          };
+          state.activeModelRequest.plannedTools = currentTurnMemoryToolNames(state, knownRetryChatId);
           addLog(state.logs, "info", "Reused an empty prepared memory packet for the provider retry", "EMPTY_PACKET_REUSED");
           return messages;
         }
         // The idle discovery bundle exists only so Provider Manager can render
         // and toggle RCM. Remove it before a fresh model request; prepare below
         // registers only the functions that have safe, unseen atoms this turn.
-        await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
+        if (!freshPrompt) await removeMemoryTools();
         if (existing.contexts.length > 0) {
-          throw new MemoryInjectionBlockedError("existing memory context has no matching prepared turn");
+          throw new MemoryInjectionBlockedError("stale or unverified existing memory context");
         }
         if (!existing.hasMarker) {
           state.lastPromptValidation = { chatId: currentChatId, status: "marker_missing", at: Date.now() };
@@ -486,49 +629,57 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           throw new MissingRcmMarkerError();
         }
         const memoryPreparationStartedAt = Date.now();
-        let context = await readCurrentContext(state);
-        await assertCurrentRequest();
-        if (context.chatId !== currentChatId) throw new MemoryInjectionBlockedError("chat changed while reading context");
-        state.current = context;
+        const memoryPreparationStartedAtPerformance = performance.now();
+        injectionTimings.preflightMs = memoryPreparationStartedAtPerformance - preflightStartedAt;
+        const catchUpPending = state.settings.chatCatchUpPending[currentChatId] === true;
+        sourceInputs = verifiedRetry?.sourceInputs ?? readMessageSourceInputs(hostSnapshot.chat);
+        let context = await readCurrentContext(state, {
+          timings: injectionTimings.contextRead, hostSnapshot, sourceInputs,
+          sourceReceipt: receipts.get(currentChatId), metadata,
+          snapshotMode: catchUpPending || repairSources ? "full" : "auto",
+        });
+        assertRequestOwner();
+        sourceHashes = context.messageVisibility;
+        tailStart = context.snapshotScope === "tail" ? context.snapshot[0]?.ordinal ?? 0 : 0;
         void syncQuizEnabled(state, client).catch(() => undefined);
         state.lastPromptValidation = { chatId: context.chatId, status: "marker_present", at: Date.now() };
-        const catchUpPending = state.settings.chatCatchUpPending[context.chatId] === true;
-        if (catchUpPending && context.snapshotScope !== "full") {
-          context = await readCurrentContext(state, { snapshotMode: "full" });
-        }
         const selectedMemoryBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
         const totalMemoryBudget = selectedMemoryBudget;
+        const turnKeyStartedAt = performance.now();
         const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}\0${context.upcomingOccasions ?? true}\0${context.pairProgress ?? false}`);
+        injectionTimings.turnKeyHashMs = performance.now() - turnKeyStartedAt;
         const referenceTurnKey = crypto.randomUUID();
-        state.memoryReferenceSnapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
-        const referenceTurnChanged = state.mcpTurnKey !== referenceTurnKey;
+        expectedReferenceTurnKey = referenceTurnKey;
+        assertRequestOwner();
         beginMemoryReferenceTurn(state, referenceTurnKey);
-        if (referenceTurnChanged) state.memoryToolExposureKeys = {};
-        if (state.memoryToolOpportunity?.referenceTurnKey !== referenceTurnKey) {
-          state.memoryToolOpportunity = undefined;
-          await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
-        }
+        state.memoryToolExposureKeys = {};
         const autoBudget = totalMemoryBudget;
         let effectiveAutoBudget: number = autoBudget;
         const sourceProtectionTurns = context.sourceProtectionTurns ?? state.settings.sourceProtectionTurns;
         const needsSetupCapture = state.lastResolvedSetup?.chatId !== context.chatId
           || state.lastPrepare?.initialCalibration?.status === "awaiting_setup";
-        const injectionTiming = autoBudget > 0 || catchUpPending || needsSetupCapture
+        const injectionTiming = autoBudget > 0 || catchUpPending || needsSetupCapture || repairSources
           ? startTiming(state, { chatId: context.chatId, kind: "automatic_injection", label: "전체 기억 준비", startedAt: memoryPreparationStartedAt })
           : undefined;
         ownedTiming = injectionTiming;
         let injectionTimingOutcome: "succeeded" | "failed" | "reused" = "failed";
         let choice: ReturnType<typeof prepareChoice> | undefined;
         let sentWithoutMemory = false;
+        let completeInjectionTiming!: () => void;
+        const injectionTimingReady = new Promise<void>(resolve => { completeInjectionTiming = resolve; });
         try {
         // Also refresh in-memory sources on zero-budget and cached-packet turns.
         if (knownRetryChatId !== currentChatId) {
+          const projectionStartedAt = performance.now();
           const resolvedSetup = await resolvedSetupProjection(messages);
-          await assertCurrentRequest();
+          injectionTimings.setupProjectionMs += performance.now() - projectionStartedAt;
+          await assertCurrentRequest("before_prepare");
+          const captureStartedAt = performance.now();
           captureSetupRequest(state, context.chatId, resolvedSetup);
-          await assertCurrentRequest();
-        }
+          injectionTimings.setupCaptureMs += performance.now() - captureStartedAt;
+        } else await assertCurrentRequest("before_prepare");
         let response: TurnPrepareResponse | undefined;
+        let lineageSettings: ReturnType<typeof stageLineageSettings> | undefined;
         let packet = "";
         let reused = false;
         let fallback = false;
@@ -549,32 +700,24 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             memoryToolRegistration = "failed";
           }
           memoryToolRegistrationMs = performance.now() - startedAt;
+          injectionTimings.toolRegistrationMs += memoryToolRegistrationMs;
         };
         let prepareOutcome: NonNullable<RuntimeState["lastInjection"]>["prepareOutcome"] = "skipped";
         let prepareError: string | undefined;
-        if (autoBudget > 0 || catchUpPending || needsSetupCapture) {
-          const reusable = !state.settings.memoryToolsEnabled && !catchUpPending && !needsSetupCapture && state.automaticTurnPacket?.turnKey === turnKey
-            && state.automaticTurnPacket.chatId === context.chatId
-            && state.automaticTurnPacket.narrationViewpoint === context.narrationViewpoint
-            && state.automaticTurnPacket.requestedBudget === autoBudget
-            && JSON.stringify(state.automaticTurnPacket.promptSourceMessageIds) === JSON.stringify(protectedPromptSourceMessageIds(messages, sourceProtectionTurns));
+        const promptSourceMessageIds = protectedPromptSourceMessageIds(messages, sourceProtectionTurns);
+        if (autoBudget > 0 || catchUpPending || needsSetupCapture || repairSources) {
+          const reusable = !state.settings.memoryToolsEnabled && !catchUpPending && !needsSetupCapture && !repairSources && verifiedRetry?.turnKey === turnKey
+            && verifiedRetry.narrationViewpoint === context.narrationViewpoint
+            && verifiedRetry.requestedBudget === autoBudget
+            && verifiedRetry.promptSourceMessageIds.length === promptSourceMessageIds.length
+            && verifiedRetry.promptSourceMessageIds.every((id, index) => id === promptSourceMessageIds[index]);
           if (reusable) {
             reused = true;
             prepareOutcome = "reused";
             prepareElapsedMs = 0;
-            response = state.automaticTurnPacket!.response;
+            response = verifiedRetry.response;
             prepareRequestId = response.retrievalTrace?.requestId;
             packet = response.packet;
-            state.lastPromptSourceMessageIds = state.automaticTurnPacket!.promptSourceMessageIds;
-            state.lastPrepare = response;
-            state.memoryToolAvailability ??= {};
-            state.memoryToolAvailability[context.chatId] = response.memoryToolsAvailable === true;
-            state.memoryToolOpportunity = response.memoryToolOpportunity
-              ? { chatId: context.chatId, turnKey, referenceTurnKey, value: response.memoryToolOpportunity }
-              : undefined;
-            await syncMemoryTools();
-            state.activeMemoryLanguages ??= {};
-            state.activeMemoryLanguages[context.chatId] = response.memoryLanguage;
           } else {
             const prepareStartedAt = Date.now();
             const setupStartedAt = performance.now();
@@ -582,8 +725,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             prepareRequestId = crypto.randomUUID();
             prepareTimeoutMs = PREPARE_CHOICE_BLOCK_MS;
             try {
-              const promptSourceMessageIds = protectedPromptSourceMessageIds(messages, sourceProtectionTurns);
-              state.lastPromptSourceMessageIds = promptSourceMessageIds;
+              const buildStartedAt = performance.now();
               const prepareRequest = makePrepareRequest(context, autoBudget, {
                 deferExtraction: false,
                 promptSourceMessageIds,
@@ -598,44 +740,39 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 },
                 memoryBudgetPreset: selectedMemoryBudget,
               });
+              injectionTimings.prepareRequestBuildMs += performance.now() - buildStartedAt;
               prepareClientTimings.setupMs = performance.now() - setupStartedAt;
               choice = prepareChoice(state, generationId, context.chatId, requestEpoch, controller.signal);
-              response = await choice.run(prepareRequest, prepareClientTimings, client);
-              await assertCurrentRequest();
+              const requestStartedAt = performance.now();
+              try { response = await choice.run(prepareRequest, prepareClientTimings, client); }
+              finally { injectionTimings.prepareRequestMs += performance.now() - requestStartedAt; }
+              const responseChecksStartedAt = performance.now();
+              await assertCurrentRequest("prepare_response");
+              if (selectionChanged) await assertCurrentRequest("before_apply");
               choice.check();
               if (state.mcpTurnKey !== referenceTurnKey) throw new MemoryInjectionBlockedError("memory generation changed during prepare");
+              injectionTimings.postResponseChecksMs += performance.now() - responseChecksStartedAt;
               prepareElapsedMs = Date.now() - prepareStartedAt;
               prepareOutcome = "fresh";
               state.retrievalTraceEnabled = response.retrievalTrace?.enabled === true;
-              if (catchUpPending) {
-                delete state.settings.chatCatchUpPending[context.chatId];
-                void saveSettings(state.settings).catch((error) =>
-                  addLog(state.logs, "warn", `Catch-up state persistence failed: [오류 원문 제외]`, "CATCH_UP_STATE_SAVE_FAILED"),
-                );
-              }
-              const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
-              if (state.settings.serverInstances[serverUrl] !== response.serverInstanceId) {
-                state.settings.serverInstances[serverUrl] = response.serverInstanceId;
-                void saveSettings(state.settings).catch((error) =>
-                  addLog(state.logs, "warn", `Server identity persistence failed: [오류 원문 제외]`, "SERVER_IDENTITY_SAVE_FAILED"),
-                );
-              }
               if (!response) throw new Error("Memory preparation returned no response");
               const parentId = response.lineage?.status === "inherited" ? response.lineage.parentChatId : undefined;
               if (parentId) {
-                await inheritLineageSettings(state, context, parentId, response.memoryLanguage);
-                const inheritedBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
-                context.profile = state.settings.profiles[context.chatId] ?? state.settings.defaultProfile;
-                context.includeUserMessages = state.settings.includeUserMessages[context.chatId] ?? true;
-                context.upcomingOccasions = state.settings.upcomingOccasions[context.chatId] ?? true;
-                context.pairProgress = state.settings.pairProgress[context.chatId] ?? false;
-                context.memoryOnlyInjection = state.settings.memoryOnlyInjection[context.chatId] ?? false;
-                context.extractionGroupTurns = Math.min(50, Math.max(1, Math.round(state.settings.extractionGroupTurns[context.chatId] ?? 6)));
-                context.memoryLanguage = state.settings.memoryLanguages[context.chatId] ?? response.memoryLanguage;
-                context.narrationViewpoint = state.settings.narrationViewpoint[context.chatId] || undefined;
-                state.current = context;
-                void syncQuizEnabled(state, client).catch(() => undefined);
-                const inheritedEnabled = isChatMemoryEnabled(state.settings, context.chatId, context.characterId);
+                lineageSettings = stageLineageSettings(state, context.chatId, parentId, response.memoryLanguage);
+                const { settings } = lineageSettings;
+                const inheritedBudget = settings.memoryBudgets[context.chatId] ?? settings.defaultMemoryBudget;
+                context = {
+                  ...context,
+                  profile: settings.profiles[context.chatId] ?? settings.defaultProfile,
+                  includeUserMessages: settings.includeUserMessages[context.chatId] ?? true,
+                  upcomingOccasions: settings.upcomingOccasions[context.chatId] ?? true,
+                  pairProgress: settings.pairProgress[context.chatId] ?? false,
+                  memoryOnlyInjection: settings.memoryOnlyInjection[context.chatId] ?? false,
+                  extractionGroupTurns: Math.min(50, Math.max(1, Math.round(settings.extractionGroupTurns[context.chatId] ?? 6))),
+                  memoryLanguage: settings.memoryLanguages[context.chatId] ?? response.memoryLanguage,
+                  narrationViewpoint: settings.narrationViewpoint[context.chatId] || undefined,
+                };
+                const inheritedEnabled = isChatMemoryEnabled(settings, context.chatId, context.characterId);
                 const requestChanged = prepareRequest.profile !== context.profile
                   || prepareRequest.includeUserMessages !== context.includeUserMessages
                   || prepareRequest.upcomingOccasions !== context.upcomingOccasions
@@ -662,11 +799,12 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                   effectiveAutoBudget = inheritedBudget;
                   prepareRequestId = crypto.randomUUID();
                   const retryStartedAt = Date.now();
-                  response = await choice.run(makePrepareRequest(context, inheritedBudget, {
+                  const retryBuildStartedAt = performance.now();
+                  const retryRequest = makePrepareRequest(context, inheritedBudget, {
                     deferExtraction: false,
                     promptSourceMessageIds,
                     memoryReferenceMode: state.settings.memoryToolsEnabled ? "short" : "none",
-                memoryGeneration: referenceTurnKey,
+                    memoryGeneration: referenceTurnKey,
                     traceContext: {
                       requestId: prepareRequestId,
                       turnKey,
@@ -674,51 +812,33 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                       attempt: 2,
                     },
                     memoryBudgetPreset: inheritedBudget,
-                  }), prepareClientTimings, client) as TurnPrepareResponse;
+                  });
+                  injectionTimings.prepareRequestBuildMs += performance.now() - retryBuildStartedAt;
+                  await assertCurrentRequest("before_prepare");
+                  const retryRequestStartedAt = performance.now();
+                  try { response = await choice.run(retryRequest, prepareClientTimings, client) as TurnPrepareResponse; }
+                  finally { injectionTimings.prepareRequestMs += performance.now() - retryRequestStartedAt; }
                   prepareElapsedMs = (prepareElapsedMs ?? 0) + Date.now() - retryStartedAt;
                 }
               }
-              await assertCurrentRequest();
-              choice.check();
+              // Keep the inherited response checkpoint, including after a
+              // second prepare with the staged parent settings.
+              if (parentId) {
+                const inheritedChecksStartedAt = performance.now();
+                await assertCurrentRequest("prepared_response");
+                if (selectionChanged) await assertCurrentRequest("before_apply");
+                choice.check();
+                injectionTimings.postResponseChecksMs += performance.now() - inheritedChecksStartedAt;
+              }
               choice.dispose();
               packet = renderMemoryReferences(state, response.packet, response.selected, state.settings.memoryToolsEnabled, new Set(response.memoryToolOpportunity?.followCandidates.map((item) => item.memoryId) ?? []));
-              state.lastPrepare = response;
-              state.memoryToolAvailability ??= {};
-              state.memoryToolAvailability[context.chatId] = response.memoryToolsAvailable === true;
-              state.memoryToolOpportunity = response.memoryToolOpportunity
-                ? { chatId: context.chatId, turnKey, referenceTurnKey, value: response.memoryToolOpportunity }
-                : undefined;
-              await syncMemoryTools();
-              state.activeMemoryLanguages ??= {};
-              state.activeMemoryLanguages[context.chatId] = response.memoryLanguage;
-              state.automaticTurnPacket = {
-                turnKey,
-                chatId: context.chatId,
-                narrationViewpoint: context.narrationViewpoint,
-                memoryOnlyInjection: context.memoryOnlyInjection ?? false,
-                upcomingOccasions: context.upcomingOccasions ?? true,
-                pairProgress: context.pairProgress ?? false,
-                requestedBudget: effectiveAutoBudget,
-                promptSourceMessageIds,
-                latestMessageId: context.snapshot.at(-1)?.id,
-                response: { ...response, packet },
-              };
-              state.cache[context.chatId] = {
-                serverInstanceId: response.serverInstanceId,
-                memoryEpoch: response.memoryEpoch,
-                stableAnchors: response.stableAnchors,
-                lastPacket: packet,
-                lastRevision: response.chatRevision,
-                lastPreparedAt: Date.now(),
-              };
-              void persistCache(state);
             } catch (error) {
-              await assertCurrentRequest();
+              if (error instanceof MemoryInjectionBlockedError) throw error;
+              await assertCurrentRequest("prepare_error");
               if (error instanceof UpgradeBlockedError) {
                 state.upgradeBlocked = {chatId:context.chatId,lock:error.lock};
                 throw error;
               }
-              if (error instanceof MemoryInjectionBlockedError) throw error;
               prepareElapsedMs = Date.now() - prepareStartedAt;
               if (error instanceof PrepareChoiceError && error.choice === "omit") {
                 sentWithoutMemory = true;
@@ -732,7 +852,8 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
                 state.memoryToolAvailability[context.chatId] = false;
                 state.memoryToolExposureKeys = {};
                 beginMemoryReferenceTurn(state, crypto.randomUUID());
-                await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
+                expectedReferenceTurnKey = state.mcpTurnKey;
+                await removeMemoryTools();
               } else {
                 const name = error && typeof error === "object" && "name" in error ? String(error.name) : "";
                 prepareOutcome = name === "AbortError" ? "timeout" : "error";
@@ -747,7 +868,17 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             }
           }
         }
-        await assertCurrentRequest();
+        if (response && !fallback) {
+          state.memoryToolOpportunity = response.memoryToolOpportunity
+            ? { chatId: context.chatId, turnKey, referenceTurnKey, requestId: generationId, value: response.memoryToolOpportunity }
+            : undefined;
+          await syncMemoryTools();
+        }
+        await assertCurrentRequest("before_apply");
+        // Recheck synchronous ownership in this continuation before publishing
+        // anything. A newer request can cancel while the host RPC settles.
+        assertDeliveryOwner();
+        const preparedPacket = packet;
         const evidenceAvailable = hasMemoryEvidence(packet);
         // Shared-history guidance is standing context, including the first story turn.
         if (evidenceAvailable || packet.includes("<not_yet>")) packet = withMemoryGuidance(packet);
@@ -755,6 +886,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         const packetStartedAt = performance.now();
         const injected = injectMemory(messages, packet, effectiveAutoBudget, Math.floor(effectiveAutoBudget * 115 / 100));
         packetApplyMs = performance.now() - packetStartedAt;
+        injectionTimings.packetApplyMs = packetApplyMs;
         const manifest = injected.omitted
           ? emptyInjectionManifest("empty")
           : fallback
@@ -765,6 +897,38 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         const blockedPrepare = prepareOutcome === "timeout" || prepareOutcome === "error";
         const blockedInjection = !sentWithoutMemory && injected.omitted && !isIntentionalEmptyPrepare(response);
         const blocked = blockedPrepare || blockedInjection;
+        if (response && !blocked) {
+          if (lineageSettings) {
+            state.current = context;
+            void lineageSettings.commit();
+            void syncQuizEnabled(state, client).catch(() => undefined);
+          }
+          if (repairSources && !response.sourceChangeHeld) fullSourceNextPrepare.delete(context.chatId);
+          const serverUrl = state.settings.serverUrl.replace(/\/$/, "");
+          if (catchUpPending || state.settings.serverInstances[serverUrl] !== response.serverInstanceId) {
+            delete state.settings.chatCatchUpPending[context.chatId];
+            state.settings.serverInstances[serverUrl] = response.serverInstanceId;
+            void saveSettings(state.settings).catch(() =>
+              addLog(state.logs, "warn", "Prepare settings persistence failed: [오류 원문 제외]",
+                catchUpPending ? "CATCH_UP_STATE_SAVE_FAILED" : "SERVER_IDENTITY_SAVE_FAILED"));
+          }
+          state.lastPrepare = response;
+          state.lastPromptSourceMessageIds = promptSourceMessageIds;
+          state.memoryToolAvailability ??= {};
+          state.memoryToolAvailability[context.chatId] = response.memoryToolsAvailable === true;
+          state.activeMemoryLanguages ??= {};
+          state.activeMemoryLanguages[context.chatId] = response.memoryLanguage;
+          state.automaticTurnPacket = {
+            turnKey, chatId: context.chatId, referenceTurnKey, sourceInputs, sourceHashes,
+            narrationViewpoint: context.narrationViewpoint,
+            memoryOnlyInjection: context.memoryOnlyInjection ?? false,
+            upcomingOccasions: context.upcomingOccasions ?? true,
+            pairProgress: context.pairProgress ?? false,
+            requestedBudget: effectiveAutoBudget, promptSourceMessageIds,
+            latestMessageId: context.snapshot.at(-1)?.id,
+            response: { ...response, packet: preparedPacket },
+          };
+        }
         state.lastInjection = {
           turnKey,
           chatId: context.chatId,
@@ -778,6 +942,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           prepareRequestId,
           prepareTimeoutMs,
           prepareClientTimings,
+          injectionTimings: prepareOutcome === "fresh" ? injectionTimings : undefined,
           packetApplyMs,
           memoryToolRegistrationMs,
           memoryToolRegistration,
@@ -806,7 +971,8 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         if (!blocked && !sentWithoutMemory) {
           state.cache[context.chatId] = {
             ...(state.cache[context.chatId] ?? { stableAnchors: response?.stableAnchors ?? "", lastPacket: packet, lastRevision: response?.chatRevision ?? 0, lastPreparedAt: Date.now() }),
-            ...(response?.serverInstanceId ? { serverInstanceId: response.serverInstanceId } : {}),
+            ...(response ? { serverInstanceId: response.serverInstanceId, memoryEpoch: response.memoryEpoch,
+              stableAnchors: response.stableAnchors, lastRevision: response.chatRevision, lastPreparedAt: Date.now() } : {}),
             lastPacket: injected.packet,
             lastInjectionManifest: manifest,
             lastInjectionScenes: summarizeInjectedScenes(response?.selected),
@@ -816,7 +982,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           };
           void persistCache(state);
         }
-        traceAutomaticInjection(state, client, context.snapshot.at(-1)?.id);
+        traceAutomaticInjection(state, client, context.snapshot.at(-1)?.id, state.lastInjection.injectionTimings ? injectionTimingReady : undefined);
         if (blockedPrepare) {
           // Stable anchors remain in the trace/cache, but cannot prove that
           // this turn's relevant memory was prepared. Never spend the paid
@@ -832,10 +998,11 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           throw new MemoryInjectionBlockedError(injected.omissionReason ?? response?.omissionReason ?? "memory omitted");
         }
         state.activeModelRequest = {
-          chatId: context.chatId, requestId: generationId, turnKey, latestMessageId: context.snapshot.at(-1)?.id,
+          chatId: context.chatId, characterId: context.characterId, requestId: generationId, turnKey, referenceTurnKey,
+          latestMessageId: context.snapshot.at(-1)?.id, promptSourceMessageIds, mcpRequestTimeoutMs: response?.mcpRequestTimeoutMs,
           startedAt: Date.now(), packet: injected.packet,
-          plannedTools: sentWithoutMemory ? [] : currentTurnMemoryToolNames(state, context.chatId),
         };
+        state.activeModelRequest.plannedTools = sentWithoutMemory ? [] : currentTurnMemoryToolNames(state, context.chatId);
         observeSetupAttention(state, context.chatId, response?.initialCalibration?.status, response?.lineage);
         addLog(
           state.logs,
@@ -848,15 +1015,29 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         return injected.messages;
         } finally {
           choice?.dispose();
+          injectionTimings.totalMs = performance.now() - memoryPreparationStartedAtPerformance;
           if (injectionTiming?.outcome === "running") finishTiming(state, injectionTiming, injectionTimingOutcome);
+          injectionTimings.floatingElapsedMs = injectionTiming?.elapsedMs;
+          const scopes = injectionTimings.chatScopeChecks;
+          scopes.count = scopes.calls.length;
+          for (const call of scopes.calls) {
+            scopes.totalMs += call.totalMs;
+            scopes.hashingMs += call.hashingMs;
+            scopes.fullHostChatReads += call.fullHostChatReads;
+          }
+          // Finalize numbers before diagnostic JSON serialization. The receipt,
+          // preparation/check/application order and widget boundary stay intact.
+          completeInjectionTiming();
         }
       } catch (error) {
         endMainGeneration(state, generationId);
-        if (error instanceof UpgradeBlockedError) {
+        if (state.mainRequest === request && !state.unloaded) {
           state.activeModelRequest = undefined;
           state.automaticTurnPacket = undefined;
           state.memoryToolOpportunity = undefined;
-          await state.syncMemoryToolRegistration?.(false).catch(() => undefined);
+          await removeMemoryTools();
+        }
+        if (error instanceof UpgradeBlockedError) {
           state.refreshStatusWidget?.();
           throw new MemoryInjectionBlockedError('CHAT_UPGRADING');
         }
@@ -867,12 +1048,13 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         throw new MemoryInjectionBlockedError(String(error).replace(/\s+/g, " ").slice(0, 240));
       }
       };
-      try { const result = await Promise.race([execute(), cancelled]); request.preparing = false; return result; }
+      try { return await Promise.race([execute(), cancelled]); }
       catch (error) { endMainGeneration(state, generationId); throw error; }
+      finally { request.preparing = false; }
     }),
     risuai.addRisuReplacer("afterRequest", async (content, type) => {
       if (state.unloaded) return content;
-      if (type === "model") {
+      if (type === "model" && !state.mainRequest?.preparing) {
         // Provider Manager marks a standard unregister as missing. Restore the
         // full discovery definition only after the request has finished; the
         // next beforeRequest will narrow it again before model tool selection.
@@ -880,7 +1062,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
       }
       // This hook has no originating request ID. Never close whichever window
       // happens to be current; reconcile a captured, keyed host observation.
-      if (type === "model" && state.mainGeneration) void observeCurrentHostGeneration(state);
+      if (type === "model" && state.mainGeneration && !state.mainRequest?.preparing) void observeCurrentHostGeneration(state);
       if (type === "model" && typeof content === "string" && content.trim().length > 0) {
         const activeRequest = state.activeModelRequest;
         const requestEndedAt = Date.now();

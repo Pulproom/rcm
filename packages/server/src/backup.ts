@@ -1,3 +1,5 @@
+import { cleanupUnsupportedEntities } from "./entity-cleanup.js";
+import { migrateLegacyProcessingRecords, repairProcessingOwnership, resetProcessingRetention } from './processing-records.js';
 import { assertUserChat, userChatSql } from './chat-work.js';
 import { assertChatUnlocked } from './upgrade-lock.js';
 import { repairSourceCoverage } from './source-coverage.js';
@@ -37,7 +39,7 @@ const insertionOrder = [
   "source_passages", "memories", "memory_details", "memory_dialogues", "evidence_spans", "memory_traces", "memory_recall_events", "memory_activation_state", "memory_edges", "item_access", "assertions", "beliefs",
   "story_spine_nodes", "story_spine_support", "story_spine_sources",
   "pair_progress", "relationship_baselines", "relationship_events", "relationship_projections", "relationship_projection_queue", "physical_intimacy_milestones", "social_knowledge_events", "entity_scene_presence", "entity_prominence", "promises", "promise_events", "conflicts", "jobs", "extraction_audits", "reconciliation_items", "recall_logs", "embedding_blocks", "initial_calibrations", "chat_lineage", "chat_lineage_items", "extraction_batches", "atom_relations",
-  "embedding_items", "embedding_failures", "translation_cache", "incidents",
+  "embedding_items", "embedding_failures", "translation_cache", "incidents", "processing_jobs", "processing_attempts", "processing_calls",
 ] as const;
 
 type Row = Record<string, string | number | null>;
@@ -57,7 +59,7 @@ type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
   version: 31 | 32 | 33 | 34 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | typeof DATABASE_SCHEMA_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -94,6 +96,7 @@ export interface MemoryTransplantPreview {
 }
 
 const excludedBackupTable = (name: string): boolean => name.startsWith("sqlite_") || name === "schema_migrations"
+  || name === "state_corpus_revisions"
   || name.startsWith("source_fts") || name.startsWith("memory_fts") || name.startsWith("memory_detail_fts") || name.startsWith("embedding_vectors_v4_chat");
 const checksum = (value: Uint8Array): string => createHash("sha256").update(value).digest("hex");
 
@@ -223,9 +226,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 35 && [60, 62, 63, 64, 65, 66, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 34 && [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 35 && [60, 62, 63, 64, 65, 66, 67, 68, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 34 && [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or 56, or backup 34 / schema 57, 58, 59, 60, 61, 62, 63, 64, 65, 66 or ${DATABASE_SCHEMA_VERSION}, or backup 35 / schema 60, 62, 63, 64, 65, 66 or ${DATABASE_SCHEMA_VERSION})`);
+    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or 56, or backup 34 / schema 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68 or ${DATABASE_SCHEMA_VERSION}, or backup 35 / schema 60, 62, 63, 64, 65, 66, 67, 68 or ${DATABASE_SCHEMA_VERSION})`);
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -240,6 +243,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
     if (Object.keys(privateData).some(key=>key !== "chatSettings")) throw new Error("Chat backup must not contain global settings or keys");
     privateData.chatSettings=ChatBackupSettingsSchema.parse(privateData.chatSettings ?? {});
   }
+  // Unreleased persistent runtime metadata may have been exported by a rolled
+  // back build. Its checksum was verified above; never validate or restore rows.
+  delete manifest.tables.state_corpus_revisions;
   const tables=archiveTables(files, manifest);
   const retained=new Set((tables.chats ?? []).map(row=>row.id));
   manifest.chats=manifest.chats.filter(chat=>retained.has(chat.id));
@@ -334,12 +340,13 @@ function stripInternalArchiveRows(tables:Record<string,Row[]>): void {
 }
 
 function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): void {
-  const current = persistentTables(db).filter(table => (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state") && (manifest.schemaVersion >= 57 || table !== "pair_progress") && (manifest.version >= 35 || !albumTables.has(table)) && (manifest.schemaVersion >= 59 || table !== 'gap_recovery_messages') && (table !== 'incidents' || Boolean(manifest.tables.incidents)));
+  const current = persistentTables(db).filter(table => (manifest.schemaVersion >= 68 || !['processing_jobs','processing_attempts','processing_calls'].includes(table)) && (manifest.version !== 31 || table !== "memory_references") && (manifest.schemaVersion >= 54 || table !== "chat_work_state") && (manifest.schemaVersion >= 57 || table !== "pair_progress") && (manifest.version >= 35 || !albumTables.has(table)) && (manifest.schemaVersion >= 59 || table !== 'gap_recovery_messages') && (table !== 'incidents' || Boolean(manifest.tables.incidents)));
   if (current.length !== Object.keys(manifest.tables).length || current.some((table) => !manifest.tables[table])) throw new BackupValidationError(`Backup database contract does not match schema ${manifest.schemaVersion}`);
   for (const table of current) {
     const archived = manifest.tables[table];
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
-      .filter(column => !(manifest.schemaVersion < 67 && table === 'albums' && column === 'summary_json')
+      .filter(column => !(manifest.schemaVersion < 69 && table === 'processing_calls' && ['repair_reason','completed_items'].includes(column))
+        && !(manifest.schemaVersion < 67 && table === 'albums' && column === 'summary_json')
         && !(manifest.schemaVersion < 65 && table === 'relationship_projections' && column === 'level_definition_version')
         && !(manifest.schemaVersion < 64 && table === 'extraction_batches' && ['producer_event_contract','producer_state_contract'].includes(column))
         && !(['physical_intimacy_milestones','beliefs'].includes(table) && column === 'deleted_through_ordinal' && Array.isArray(archived) && !archived.includes(column))
@@ -505,6 +512,10 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array, pho
       migrateTranslationKeys(db);
       if (parsed.manifest.schemaVersion < 62) { backfillLegacyParticipantAccess(db); }
       db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)").run(DATABASE_SCHEMA_VERSION, Date.now());
+      if(parsed.manifest.schemaVersion<68)migrateLegacyProcessingRecords(db);
+      if(parsed.manifest.schemaVersion<69)repairProcessingOwnership(db);
+      resetProcessingRetention(db);
+      cleanupUnsupportedEntities(db);
       rebuildSearch(db);
       if ((db.pragma("foreign_key_check") as unknown[]).length) throw new BackupValidationError("Backup failed foreign key validation");
       stage?.install(db);
@@ -574,6 +585,10 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array, photoSt
       migrateTranslationKeys(db);
       if (parsed.manifest.schemaVersion < 62) { backfillLegacyParticipantAccess(db, chatId); }
       db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)").run(DATABASE_SCHEMA_VERSION, Date.now());
+      if(parsed.manifest.schemaVersion<68)migrateLegacyProcessingRecords(db,chatId);
+      if(parsed.manifest.schemaVersion<69)repairProcessingOwnership(db);
+      resetProcessingRetention(db);
+      cleanupUnsupportedEntities(db, chatId);
       rebuildSearch(db);
       stage?.install(db);
     })();
@@ -752,6 +767,7 @@ export function transplantCompleteArchive(db: RcmDatabase, archive: Uint8Array, 
     bindInheritedMemoryGroups(db, targetChatId);
     db.prepare("UPDATE messages SET extraction_state='pending' WHERE chat_id=? AND source_kind<>'archive' AND lifecycle='committed'").run(targetChatId);
     vectorsRestored = restoreVectors(db, parsed.files, vectorIds);
+    cleanupUnsupportedEntities(db, targetChatId);
     rebuildSearch(db);
     pruneTranslationCache(db);
   })();

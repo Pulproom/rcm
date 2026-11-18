@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { MemoryContextItem } from "@rcm/shared";
 
-export type MemoryAtomKind = "state" | "summary" | "detail" | "dialogue" | "source" | "physical_occurrence" | "physical_detail" | "relationship_landmark";
+export type MemoryAtomKind = "state" | "summary" | "detail" | "dialogue" | "source" | "names" | "physical_occurrence" | "physical_detail" | "relationship_landmark";
 
 export function memoryAtomKey(kind: MemoryAtomKind, id: string, content: string): string {
   const digest = createHash("sha256").update(`${kind}\0${id}\0${content}`).digest("hex").slice(0, 32);

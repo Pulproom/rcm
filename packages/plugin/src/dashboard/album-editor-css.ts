@@ -34,6 +34,11 @@ export const ALBUM_VIEW_CSS = `
 .av-scroll{overflow:auto;min-height:0;min-width:0;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--rule-2) transparent}
 .album-view .av-pill{display:none}
 .av-status{padding:20px}
+.av-together-slot{position:absolute;z-index:3;top:72px;left:50%;transform:translateX(-50%);max-width:calc(100% - 32px)}
+.av-together-chip{display:flex;align-items:center;gap:12px;padding:6px 6px 6px 16px;border:1px solid var(--rule-2);border-radius:14px;background:var(--screen-2);box-shadow:0 20px 44px -18px #0009;white-space:nowrap}
+.av-together-chip span{font-size:13px;color:var(--ink-2)}
+.album-view .av-together-chip button{min-height:44px;padding:0 16px;border-radius:8px;font-size:13px;font-weight:600}
+.album-view .av-together-chip button:disabled{opacity:.36;cursor:progress}
 .av-pop{position:absolute;right:16px;top:56px;width:292px;max-width:calc(100% - 24px);max-height:calc(100% - 72px);overflow:auto;z-index:30;padding:8px;background:var(--screen-2,#16171a);border:1px solid var(--rule-2,#333);border-radius:6px;box-shadow:0 24px 50px -18px #0008}
 .av-pop--toc{right:66px}
 .av-pop--menu{width:236px}

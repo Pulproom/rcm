@@ -94,7 +94,7 @@ export async function finalizeExtractPage(options: FinalizeExtractPageOptions) {
     const prepared = grounded ? prepareStateExtraction(db, job.chatId, job.sourceMessageIds, draft, job.auxiliaryBudget?.maxInputTokens ?? 80_000, job.memoryAddition, job.id)
       : { required: false, candidateSetHash: "", systemPrompt: "", userPrompt: "" };
     const accessPlan = store.canRepair(job.id) && !audit?.patch?.keepPendingItemRefs.length
-      ? planSourceAccessRepair(draft, job.sourceUnits ?? [], job.auditSourceMessages ?? []) : undefined;
+      ? planSourceAccessRepair(draft, job.sourceUnits ?? [], job.auditSourceMessages ?? [],job.modelIdentityEntities) : undefined;
     if ("progressSent" in prepared) recordProgressSent(db, job.id, prepared.progressSent);
     if (prepared.required) {
       options.onStage?.("state_reconciliation");

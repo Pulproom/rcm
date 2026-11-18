@@ -112,7 +112,7 @@ export function createAttentionController(view: AttentionViewState, root: HTMLEl
       if (action === "resolve-small-review" || action === "resolve-small-review-bulk") {
         const visibleIds = new Set([...root.querySelectorAll<HTMLElement>("[data-attention-row]")].filter(row => !row.hidden).map(row => row.dataset.id));
         const items = action === "resolve-small-review-bulk"
-          ? data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending" && (target.dataset.resolution !== "keep_as_written" || item.kind === "dialogue" || item.kind === "passage") && visibleIds.has(`small:${audit.id}:${item.id}`)).map((item: any) => ({auditId: audit.id, candidateId: item.id})))
+          ? data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending" && (target.dataset.resolution !== "keep_as_written" || (item.kind === "dialogue" || item.kind === "passage") && item.canKeepAsWritten) && visibleIds.has(`small:${audit.id}:${item.id}`)).map((item: any) => ({auditId: audit.id, candidateId: item.id})))
           : [{auditId: target.dataset.auditId, candidateId: target.dataset.id}];
         if (!items.length) return;
         if (target.dataset.sourceSelection === 'true') {

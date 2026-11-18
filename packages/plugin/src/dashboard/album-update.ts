@@ -7,6 +7,7 @@ import { ALBUM_FIELD_LABELS } from "./album-labels.js";
 export interface AlbumUpdateState {
   candidates?: AlbumUpdateCandidates;
   materials?: AlbumMaterials;
+  together?: AlbumMaterials["together"];
   sourceAdditions?: Candidate[];
   all?: boolean;
   add: string[];

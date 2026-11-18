@@ -176,13 +176,6 @@ export const PHONE_SKIN_CSS = `
 .fold > summary .n { font-size: var(--t-body); color: var(--ink-3); margin-left: auto; }
 .fold > summary .chev { margin-left: 0; color: var(--ink-3); }
 .fold > summary > span:first-child:not(.chev) { flex: 1; }
-.fold.job > summary > .job__state:first-child, .fold.job-group > summary > .job__state:first-child { flex: none; width: 18px; }
-.fold.job > summary, .fold.job-group > summary { gap: 8px; padding: 10px 16px; }
-.jobs > :is(.job, .job-group) { margin: 0 0 12px; border-radius: 12px; background: var(--screen); overflow: hidden; }
-.fold.job > .fold__body, .fold.job-group > .fold__body { padding: 0 16px 12px; background: var(--screen); }
-.job-group > .fold__body > :is(.job, .job-group) { margin-top: 0; }
-.job-group > .fold__body > :is(.job, .job-group) > summary { padding-inline: 0; border-radius: 0; background-image: linear-gradient(var(--sep), var(--sep)); background-size: 100% .5px; background-position: center top; background-repeat: no-repeat; }
-.job-group .job__time { white-space: normal; text-align: right; }
 .nr__pin { display: inline-flex; align-items: center; gap: 3px; color: var(--ink-2); }
 .nr__pin svg { width: 12px; height: 12px; }
 /* promise edit: when did the status change happen */
@@ -325,6 +318,7 @@ export const PHONE_SKIN_CSS = `
 .person__name .name, .person__name .name.is-cjk { font: inherit; letter-spacing: inherit; }
 .person__head { text-align: center; }
 .person__aka { margin: 2px 0 0; font-size: var(--t-ui); color: var(--ink-2); overflow-wrap: anywhere; }
+.kind-chip { padding: 1px 7px; border-radius: 6px; background: var(--fill); font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
 .person__role { display: inline-block; margin: 8px 0 0; padding: 2px 9px; border-radius: 9px; background: var(--fill); font-size: var(--t-cap); font-weight: 600; color: var(--ink-2); }
 /* 나와의 관계: the one shortcut under the head, to this person's sheet with the persona */
 .person__mine { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 60px; margin-top: 16px; padding: 10px 16px 10px 14px; border: 0; border-radius: 14px; background: var(--screen); color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -1154,35 +1148,34 @@ label.check:has(> input[type="checkbox"]) { display: flex; flex-direction: row-r
 /* the sheet's closing folds (세부 정보 · 스킨십 기록 · 부르는 이름) read as one short list of disclosure lines */
 .pairsheet > details.fold--section { margin-top: 24px; }
 .pairsheet > .psec > details.fold--section:only-child { margin-top: 0; }
-/* 처리 상태: the backfill summary is one inset card — progress, then label · value cells, then its action */
-.operations .progress { margin: 0 0 8px; padding: 0; }
-.operations .progress > h3.sec { margin: 8px 4px 7px; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
-.progress__card { overflow: hidden; padding: 12px 16px 0; border-radius: 12px; background: var(--screen); }
-.progress__card > .meter { margin: 0; font-size: var(--t-meta); color: var(--ink-3); }
-.progress__card > .meter > span:first-child { display: none; }
-.progress__card > .sub { margin: 6px 0 10px; font-size: var(--t-meta); color: var(--ink-3); }
-.progress__card > .phases { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0; margin: 0 -16px; padding: 0; }
-.operations .opstate .status li { font-weight: 400; }
-.progress__card > .phases > :is(dt, dd) { margin: 0; padding: 11px 0; border-top: .5px solid var(--sep); font-size: var(--t-ui); font-weight: 400; line-height: 1.35; }
-.progress__card > .phases > dt { margin-left: 16px; color: var(--ink); }
-.progress__card > .phases > dd { padding-right: 16px; color: var(--ink-3); text-align: right; font-variant-numeric: tabular-nums; }
-.progress__card > .phases > dd.is-done { color: var(--ok); }
-.progress__card > .phases > dd.is-warn { color: var(--cut); }
-.progress__card > .phases > dd.is-run { color: var(--accent-text); }
-.progress__card > .decide { display: flex; justify-content: flex-end; gap: 8px; margin: 0 -16px; padding: 10px 16px; border-top: .5px solid var(--sep); }
-.progress__card > .decide > .btn { flex: none; justify-content: center; }
-/* completed runs: each run is a labelled grouped card of kind rows */
-.oprun > h2.sec { margin: 24px 4px 7px; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
-.oprun > h2.sec .n { margin-left: 4px; color: inherit; font-weight: 400; }
-.jobs--grouped { overflow: hidden; border-radius: 12px; background: var(--screen); }
-.jobs--grouped > :is(.job, .job-group) { margin: 0; border-radius: 0; }
-.jobs--grouped > :is(.job, .job-group) + :is(.job, .job-group) > summary { background-image: linear-gradient(var(--sep), var(--sep)); background-size: calc(100% - 16px) .5px; background-position: right top; background-repeat: no-repeat; }
-.jobs--grouped :is(.job, .job-group) > summary { display: flex; align-items: center; }
-.jobs--grouped :is(.job, .job-group) > summary > .job__title { flex: 1; }
-.jobs--grouped .job-tech__body > .job > summary { padding-inline: 0; }
-/* job rows read as list text, not headings */
-.operations :is(.job__name, .step__main b) { font-weight: 400; }
-.operations .job__name { font-size: var(--t-ui); color: var(--ink); }
+/* Processing uses inset cells, quiet labels and the shared bounded call tables. */
+.ph-scope { width: 100%; border-radius: 9px; background: var(--fill); }
+.ph-scope button { border-radius: 7px; font-size: var(--t-ui); color: var(--ink); }
+.ph-scope button[aria-pressed="true"] { background: var(--screen); color: var(--ink); }
+.ph-scope button[aria-pressed="true"]:hover { color: var(--ink); }
+.ph-totals { margin-top: 10px; padding: 12px 16px; gap: 4px; border: 0; border-radius: 12px; background: var(--screen); }
+.ph-totals b { font-size: var(--t-head); font-weight: 700; }
+.ph-totals p { margin-top: 4px; }
+.ph-day > .sec { margin: 24px 16px 7px; font-size: var(--t-meta); font-weight: 400; }
+.ph-card { border: 0; border-radius: 12px; background: var(--screen); margin-bottom: 10px; padding: 0 16px; }
+.ph-card-head { padding-top: 12px; }
+.ph-title h3 { font-size: var(--t-ui); font-weight: 600; }
+.ph-model > span { background: var(--fill); border-radius: 6px; }
+.ph-model > .ph-site { background: var(--tungsten-dim); }
+.ph-table tbody :is(th,td) { border-top: .5px solid var(--sep); }
+.ph-table th, .ph-table td { padding-top: 7px; padding-bottom: 7px; }
+.ph-table tbody th { font-size: var(--t-meta); }
+.ph-batch { border-color: var(--sep); border-top-width: .5px; }
+.ph-batch > summary { font-size: var(--t-ui); }
+.ph-tag { background: var(--fill); border-radius: 5px; }
+.ph-chat { color: var(--accent-text); background: var(--tungsten-dim); border-radius: 5px; }
+.ph-subhead { font-weight: 400; }
+.ph-all { padding-block: 4px; }
+.ph-all .ph-table > tbody > tr:first-child > :is(th,td) { border-top: 0; }
+.ph-all .ph-unit-button { font-size: var(--t-ui); }
+.ph-bar { background: var(--fill); }
+:is(.ph-run-action, .ph-tech-copy) .btn { min-height: 44px; padding-left: 0; }
+.ph-card .fold.fold--section > summary { padding-inline: 0; }
 /* 데이터: chats grouped under their bot, each chat one cell */
 .chats > .chats__bot { margin: 22px 4px 7px; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); }
 .chats > .chats__bot:first-child { margin-top: 8px; }

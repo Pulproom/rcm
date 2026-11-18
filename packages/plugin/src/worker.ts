@@ -19,7 +19,7 @@ import { prepareAuxiliaryText, rescueDialogueEvidence, resolveDirectDialogueEvid
 import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch } from "@rcm/shared";
 import { EpisodeCapsuleResultSchema, EpisodeDraftResultSchema, buildAuxiliaryRepairMessages, buildExtractionAuditMessages, extractionAuditDraftForJob, ExtractionAuditPatchSchema, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, RelationshipProjectionResultSchema, StorySpineConsolidationResultSchema, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, estimateTokens, groupEpisodeDrafts, normalizeEpisodeCapsuleInput, normalizeEpisodeDraftInput, normalizeExtractionDraftInput, normalizeStructuredModelOptionals, parseStructuredModelJson, structuredValidationDiagnostic, validateStorySpineConsolidation, type EpisodeDraftResult, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type ReconciliationSubmission } from "@rcm/shared";
-import type { ServerClient } from "./api-client.js";
+import type { ServerClient, HeartbeatObservation, HeartbeatWait } from "./api-client.js";
 import { addLog, saveSettings } from "./settings.js";
 import type { RuntimeState } from "./types.js";
 import { showWorkerPauseNotice, updateWorkerMenuButton } from "./attention.js";
@@ -241,7 +241,8 @@ const modelPromptRelaxation = new WeakMap<RuntimeState, boolean>();
 const modelJobBudgets = new WeakMap<RuntimeState, NonNullable<LeasedJob["auxiliaryBudget"]>>();
 const modelShapeContexts = new WeakMap<RuntimeState,{contract:string;diagnostics:AuxiliaryShapeDiagnostic[]}>();
 const modelDraftRecorders = new WeakMap<RuntimeState, (output: string, storyValidationReason?: string) => Promise<unknown>>();
-const modelCallRecorders = new WeakMap<RuntimeState, (purpose: WorkerJsonPurpose, outcome: "started" | "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => Promise<void>>();
+const modelCallRecorders = new WeakMap<RuntimeState, (purpose: WorkerJsonPurpose, outcome: "checking" | "started" | "succeeded" | "failed", error?: unknown, usage?: Record<string, number>, repairReason?: string,at?:number) => Promise<void>>();
+const modelCallIdentities = new WeakMap<RuntimeState, { model?: string; provider?: string }>();
 
 function parseWorkerJson(state: RuntimeState, text: string, purpose: WorkerJsonPurpose, normalStop = false, onFix?: (fixes: string[]) => void): unknown {
   const parsed = parseStructuredModelJson(text, { normalStop });
@@ -266,14 +267,14 @@ export function isInternalModelRequest(state: RuntimeState, messages: OpenAIChat
     && state.internalModelCalls?.has(attribute.slice(INTERNAL_CALL_ATTRIBUTE.length))));
 }
 
-export async function runRisuModel(state: RuntimeState, options: Parameters<typeof risuai.runLLMModel>[0], job?: RuntimeState["currentJob"]): Promise<any> {
+export async function runRisuModel(state: RuntimeState, options: Parameters<typeof risuai.runLLMModel>[0], job?: RuntimeState["currentJob"], callTimeoutMs?: number, onDispatch?:(at:number)=>void): Promise<any> {
   if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
   const id = crypto.randomUUID();
   const calls = state.internalModelCalls ??= new Set();
   calls.add(id);
   const controller = new AbortController();
   let resolution: unknown;
-  const timeoutMs = modelJobBudgets.get(state)?.llmTimeoutMs ?? RISU_AUXILIARY_TIMEOUT_MS;
+  const timeoutMs = callTimeoutMs ?? modelJobBudgets.get(state)?.llmTimeoutMs ?? RISU_AUXILIARY_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -285,7 +286,11 @@ export async function runRisuModel(state: RuntimeState, options: Parameters<type
     const messages = options.messages.map((message, index) => index ? message
       : { ...message, attr: [...(message.attr ?? []), `${INTERNAL_CALL_ATTRIBUTE}${id}`] });
     const call = async () => {
-      const response = await risuai.runLLMModel({ ...options, messages });
+      const startedAt=Date.now();
+      let pending:ReturnType<typeof risuai.runLLMModel>;
+      try{pending=risuai.runLLMModel({ ...options, messages });}
+      finally{onDispatch?.(startedAt);}
+      const response=await pending!;
       resolution = response;
       assertProviderOutputAllowed(response?.finish_reason ?? response?.finishReason ?? response?.choices?.[0]?.finish_reason ?? response?.promptFeedback?.blockReason ?? response?.candidates?.[0]?.finishReason,
         response?.refusal ?? response?.choices?.[0]?.message?.refusal);
@@ -298,7 +303,7 @@ export async function runRisuModel(state: RuntimeState, options: Parameters<type
     return await Promise.race([call(), deadline]);
   } catch (error) {
     const failure = risuAuxiliaryError(error);
-    Object.assign(failure, { auxiliaryMetadata: risuResponseMetadata(resolution) });
+    Object.assign(failure, { auxiliaryMetadata: risuResponseMetadata(resolution),auxiliaryCallEndedAt:Date.now() });
     failure.risuCall = await auxiliaryCallDiagnostic(state, options, job, resolution ?? error);
     addLog(state.logs, "error", "Risu auxiliary call failed", supportFailure("auxiliary_call", failure, { target: "risu", attempt: job?.attempt }));
     throw failure;
@@ -328,6 +333,7 @@ export function beginMainGeneration(state: RuntimeState, client: ServerClient): 
   state.mainGeneration = { id, expiresAt: Date.now() + MAIN_GENERATION_TIMEOUT_MS, resume: () => scheduleWorker(state, client),
     observe: (chatId, chat, hashes) => observeMainGeneration(state, id, chatId, chat, hashes) };
   armMainGeneration(state, id);
+  state.requestActivityRefresh?.();
   return id;
 }
 
@@ -345,7 +351,13 @@ function armMainGeneration(state: RuntimeState, id: string): void {
 function observeMainGeneration(state: RuntimeState, id: string, chatId: string | undefined, chat: any, hashes?: Array<{ id: string; displayContentHash?: string }>): void {
   const generation = state.mainGeneration;
   if (!generation || generation.id !== id) return;
-  if (!chatId || (generation.chatId && generation.chatId !== chatId)) { endMainGeneration(state, id, "invalidated"); return; }
+  if (!chatId || (generation.chatId && generation.chatId !== chatId)) {
+    // A confirmed reply still belongs to its original chat while the user views another.
+    const active = state.activeModelRequest;
+    if (chatId && active?.requestId === id && active.referenceTurnKey !== undefined && active.referenceTurnKey === state.mcpTurnKey) return;
+    endMainGeneration(state, id, "invalidated");
+    return;
+  }
   generation.chatId = chatId;
   const messages = (Array.isArray(chat?.message) ? chat.message : []).map((message: any, ordinal: number) => ({
     id: String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`),
@@ -356,6 +368,7 @@ function observeMainGeneration(state: RuntimeState, id: string, chatId: string |
   }));
   const latest = messages.at(-1);
   const sources = generation.sources;
+  const sourceHashes = new Map(hashes?.map(message => [message.id, message.displayContentHash]));
   const preparing = state.mainRequest?.id === id && state.mainRequest.preparing;
   // The first snapshot belongs to request start, not to this request's output.
   // An already-running old stream cannot become a new stream merely by observation.
@@ -365,7 +378,6 @@ function observeMainGeneration(state: RuntimeState, id: string, chatId: string |
   }
   if (sources) {
     const current = new Map<string, typeof latest>(messages.map((message: any) => [message.id, message]));
-    const sourceHashes = new Map(hashes?.map(message => [message.id, message.displayContentHash]));
     for (const [sourceId, source] of sources) {
       const message = current.get(sourceId);
       if (!message) { endMainGeneration(state, id, "invalidated"); return; }
@@ -379,7 +391,7 @@ function observeMainGeneration(state: RuntimeState, id: string, chatId: string |
     if (messages.some((message: any) => (preparing || message.role !== "assistant") && !sources.has(message.id))) { endMainGeneration(state, id, "invalidated"); return; }
   } else {
     generation.sources = new Map(messages.map((message: any) => [message.id, { role: message.role, generationId: message.generationId, visibility: message.visibility,
-      hash: hashes?.find(source => source.id === message.id)?.displayContentHash }]));
+      hash: sourceHashes.get(message.id) }]));
   }
   if ((generation.streamingSeen && chat.isStreaming === false) || (generation.outputId && chat.isStreaming === false)) {
     endMainGeneration(state, id); return;
@@ -410,11 +422,14 @@ async function waitForMainGeneration(state: RuntimeState): Promise<void> {
   while (mainGenerationOpen(state)) await new Promise<void>(resolve => (state.mainGenerationWaiters ??= new Set()).add(resolve));
 }
 
-async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose, onNormalStop?: (normalStop: boolean) => void): Promise<string> {
+async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJsonPurpose, onNormalStop?: (normalStop: boolean) => void, repairReason?:string): Promise<string> {
   let metadata = risuResponseMetadata(undefined);
   let dispatched = false;
+  let startedReport:Promise<void>|undefined;
   const reportOutcome = async (outcome: "succeeded" | "failed", error?: unknown, usage?: Record<string, number>) => {
-    try { await modelCallRecorders.get(state)?.(purpose, outcome, error, usage); }
+    if(!dispatched)return;
+    const at=(error as any)?.auxiliaryCallEndedAt??Date.now();
+    try { await startedReport;await modelCallRecorders.get(state)?.(purpose, outcome, error, usage, repairReason,at); }
     catch (reportError) { if (isChatUpgrading(reportError)) throw reportError; addLog(state.logs, "warn", `Could not record auxiliary model ${outcome} (${purpose}): [오류 원문 제외]`, "MODEL_CALL_RECORD_FAILED"); }
   };
   const timing = state.currentJob?.kind !== "quiz" && state.currentJob
@@ -430,17 +445,24 @@ async function runModel(state: RuntimeState, messages: any[], purpose: WorkerJso
       if (purpose === "extraction_repair") throw auxiliaryRepairTooLargeError();
       throw new Error(`AUXILIARY_INPUT_TOO_LARGE: ${auxiliaryInputBudgetMessage(budget.maxInputTokens)}`);
     }
-    await modelCallRecorders.get(state)?.(purpose, "started");
+    modelCallIdentities.delete(state);
+    await modelCallRecorders.get(state)?.(purpose, "checking");
     // Main beforeRequest may arrive during progress reporting. Check again at
     // the dispatch boundary; the main path never waits for this worker.
     while (mainGenerationOpen(state)) await waitForMainGeneration(state);
     if (state.unloaded) throw new Error("PLUGIN_UNLOADED");
-    dispatched = true;
     const response = await runRisuModel(state, {
       messages: preparedMessages,
       ...risuModelSlot(state.settings.auxiliaryMode, state.settings.staticModel),
-    }, state.currentJob);
+    }, state.currentJob,undefined,at=>{
+      dispatched=true;
+      startedReport=modelCallRecorders.get(state)?.(purpose,"started",undefined,undefined,repairReason,at)
+        .catch(error=>{if(isChatUpgrading(error))throw error;addLog(state.logs,"warn","Could not record auxiliary model start","MODEL_CALL_RECORD_FAILED");});
+      // Attach immediately while the host request is in flight.
+      void startedReport?.catch(()=>{});
+    });
     metadata = risuResponseMetadata(response);
+    modelCallIdentities.set(state, { model: metadata.model === 'host_unknown' ? undefined : metadata.model, provider: metadata.provider === 'host_unknown' ? undefined : metadata.provider });
     const output = await responseText(response);
     const staged = onNormalStop ? sanitizeStateResponseForStaging(output) : output;
     if (staged !== undefined) await modelDraftRecorders.get(state)?.(staged);
@@ -508,7 +530,7 @@ async function extract(state: RuntimeState, job: LeasedJob, onRepair?: () => voi
     onRepair?.();
     const fieldRepair = job.sourceUnits ? planExtractionFieldRepair(raw, resolved, firstError, job.sourceUnits) : undefined;
     if (fieldRepair) {
-      const response = await runModel(state, fieldRepair.messages, "extraction_repair");
+      const response = await runModel(state, fieldRepair.messages, "extraction_repair",undefined,"fields");
       if (isUnchangedStructuredRepair(first, response)) return validateRepair(response);
       const result = await validateStructuredRepairOrRegenerate({
         original: first, repaired: response, purpose: "extraction",
@@ -681,6 +703,7 @@ async function runEpisode(state: RuntimeState, job: LeasedJob): Promise<unknown>
 async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unknown, onRepair?: () => void): Promise<ExtractionAuditSubmission> {
   const draft = extractionAuditDraftForJob(job, result);
   const messages = buildExtractionAuditMessages({
+    modelIdentityEntities:job.modelIdentityEntities,
     memoryLanguage: job.memoryLanguage,
     sourceMessages: job.auditSourceMessages ?? [],
     draft,
@@ -880,11 +903,11 @@ export function scheduleWorker(state: RuntimeState, client: ServerClient): void 
   state.idleTimer = window.setTimeout(() => void drainWorker(state, client), 15_000);
 }
 
-export async function heartbeatServerWorker(state: RuntimeState, client: ServerClient): Promise<void> {
+export async function heartbeatServerWorker(state: RuntimeState, client: ServerClient, wait?: HeartbeatWait): Promise<HeartbeatObservation | undefined> {
   if (state.unloaded || isServerApiIncompatible(state) || !isServerConfigured(state.settings)) return;
   try {
     const serverUrl=state.settings.serverUrl;
-    if (state.settings.workerPaused || state.settings.extractionEngine !== 'server') {
+    if (state.settings.workerPaused) {
       const cursor=state.settings.incidentServerUrl===serverUrl ? state.settings.incidentCursor : undefined;
       const feed=await client.request<IncidentFeed>(`/v1/update/status?${incidentCursorQuery(state.settings)}`);
       if (state.unloaded || state.settings.serverUrl!==serverUrl) return;
@@ -892,8 +915,10 @@ export async function heartbeatServerWorker(state: RuntimeState, client: ServerC
       noteHeartbeatResult(state,false);
       return;
     }
-    const worker=await client.heartbeat(state.workerId, state.current?.chatId);
-    if (state.unloaded || state.settings.serverUrl!==serverUrl) return;
+    const chatId = state.current?.chatId, token = state.settings.serverToken;
+    const result=await (wait ? client.heartbeat(state.workerId, chatId, wait) : client.heartbeat(state.workerId, chatId));
+    if (state.unloaded || state.settings.serverUrl!==serverUrl || state.settings.serverToken!==token || state.current?.chatId!==chatId || wait?.signal.aborted) return;
+    const { chatStatus, idleWatch, ...worker } = result;
     state.serverWorker=worker;
     noteHeartbeatResult(state,false);
     if (!isServerApiIncompatible(state)) {
@@ -901,10 +926,16 @@ export async function heartbeatServerWorker(state: RuntimeState, client: ServerC
       state.activityStatusError = undefined;
     }
     state.publishActivity?.();
+    if (state.settings.extractionEngine === 'risu') {
+      if ((worker.globalQueuedJobs ?? worker.queuedJobs) && !state.workerBusy && !mainGenerationOpen(state)) void drainWorker(state, client);
+      return result;
+    }
     if (state.serverWorker.state === "faulted") {
       await pauseWithAttention(state, state.serverWorker.lastError ?? "Server extraction worker faulted");
     }
+    return result;
   } catch (error) {
+    if (wait?.signal.aborted) return;
     noteServerConnectionFailure(state, state.settings, error);
     state.publishActivity?.();
     noteHeartbeatResult(state,true);
@@ -954,21 +985,26 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       if (job.auxiliaryBudget) modelJobBudgets.set(state, job.auxiliaryBudget);
       validatedPartRecorders.set(state, async (purpose, part, result) => client.validatedAuxiliaryPart?.(job.id, state.workerId, purpose, part, result));
       modelDraftRecorders.set(state, async (output, storyValidationReason) => client.stageDraft?.(job.id, state.workerId, output, storyValidationReason));
-      modelCallRecorders.set(state, async (purpose, outcome, error, usage) => {
+      modelCallRecorders.set(state, async (purpose, outcome, error, usage, repairReason,at) => {
         if (revokedByUpgrade) throw revokedByUpgrade;
-        if (outcome === "started") {
+        const phase = state.currentJob?.phase;
+        const stage = phase === "post_extraction_audit" || phase === "state_reconciliation" || phase === "ledger_consistency"
+          || phase === "relationship_projection" || phase === "story_consolidation" || phase === "storing" ? phase : firstStage;
+        if(outcome==="checking"){
           ({ repairBudgetUsed, stateRepairBudgetUsed } = consumeAuxiliaryRepair(purpose, { repairBudgetUsed, stateRepairBudgetUsed }));
+          await client.progress(job.id,state.workerId,stage);
+          return;
+        }
+        if (outcome === "started") {
           llmCallStats.total += 1;
           llmCallStats.byPurpose[purpose] = (llmCallStats.byPurpose[purpose] ?? 0) + 1;
           if (purpose.endsWith("_repair")) {
             llmCallStats.repairs += 1;
           }
         }
-        const phase = state.currentJob?.phase;
-        const stage = phase === "post_extraction_audit" || phase === "state_reconciliation" || phase === "ledger_consistency"
-          || phase === "relationship_projection" || phase === "story_consolidation" || phase === "storing" ? phase : firstStage;
         const diagnostic = outcome === "failed" ? supportFailure("auxiliary_call", error) : undefined;
-        await client.progress(job.id, state.workerId, stage, 0, llmCallStats, { purpose, attempt: job.attempt, outcome, at: Date.now(),
+        await client.progress(job.id, state.workerId, stage, 0, llmCallStats, { purpose, attempt: job.attempt, outcome, at: at??Date.now(),repairReason:repairReason??(purpose.endsWith("_repair")?purpose==="state_field_repair"?"fields":"format":undefined),
+          risuCall: { ...risuModelSlot(state.settings.auxiliaryMode,state.settings.staticModel), hostResolutionAvailable: true, ...modelCallIdentities.get(state) },
           ...(diagnostic ? { code: diagnostic.code, httpStatus: diagnostic.httpStatus, risuCall: diagnostic.risuCall } : {}),
           ...(outcome === "failed" ? { error: String(error ?? "Model call failed") } : {}), ...(usage && Object.keys(usage).length ? { usage } : {}) });
       });
@@ -976,7 +1012,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
       state.publishActivity?.();
       try {
         if (job.kind !== "initial_calibration" && job.kind !== "social_backfill" && job.kind !== "episode" && job.kind !== "quiz") await client.progress(job.id, state.workerId, firstStage).catch(ignoreProgressFailure);
-        const checkpointInput=JSON.stringify([modelSettingsFingerprint,job.promptContract,job.profile,job.memoryLanguage,job.prompt,job.systemPrompt,job.userPrompt,job.sourceUnits,job.sourceMessageIds,job.memoryAddition,job.postExtractionReview,job.relaxAuxiliaryCensorship,job.sourceRecovery,job.sourceRecoveryContext]);
+        const checkpointInput=JSON.stringify([modelSettingsFingerprint,job.modelIdentityEntities,job.promptContract,job.profile,job.memoryLanguage,job.prompt,job.systemPrompt,job.userPrompt,job.sourceUnits,job.sourceMessageIds,job.memoryAddition,job.postExtractionReview,job.relaxAuxiliaryCensorship,job.sourceRecovery,job.sourceRecoveryContext]);
         const extractionHash=await sha256(checkpointInput);
         const cachedExtraction=job.risuStageCheckpoints?.extraction;
         let result = job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : cachedExtraction?.inputHash===extractionHash ? extractionDraftSchema(job.promptContract).parse(cachedExtraction.result) : await extract(state, job);
@@ -991,7 +1027,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           const messages = issues.length && (job.smallReviewRetry || !optionalSourceSelectorsOnly(issues)) ? sourceRepairMessages(result, issues, job.sourceUnits) : null;
           if (messages) {
             try {
-              const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
+              const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair",undefined,"source"), "extraction_repair");
               result = rescueDialogueEvidence(applySourceRepairs(result, repaired, issues, job.sourceUnits), job.auditSourceMessages ?? [], job.sourceUnits);
             } catch (error) { addLog(state.logs, "warn", `대사 원문 보완 미해결: [오류 원문 제외]`, "DIALOGUE_SOURCE_REPAIR_FAILED"); }
           }
@@ -1020,7 +1056,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
               const remainingIssues = inspectSourceReferences(result, job.auditSourceMessages ?? []).filter(issue => issue.reason !== "access_unverified");
               const messages = sourceRepairMessages(result, remainingIssues, job.sourceUnits);
               if (messages) {
-                const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair"), "extraction_repair");
+                const repaired = parseWorkerJson(state, await runModel(state, messages, "extraction_repair",undefined,"source"), "extraction_repair");
                 result = rescueDialogueEvidence(applySourceRepairs(result, repaired, remainingIssues, job.sourceUnits), job.auditSourceMessages ?? [], job.sourceUnits);
               }
             } catch (error) { addLog(state.logs, "warn", `원문 보완 미해결: [오류 원문 제외]`, "SOURCE_REPAIR_FAILED"); }
@@ -1030,7 +1066,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
           const accessPlan = job.kind === "extract" && !job.memoryOnly && !job.sourceRecovery && !repairBudgetUsed && job.sourceUnits
             && !audit?.patch?.keepPendingItemRefs.length
             && (!audit?.patch || prepared.groundingDraft)
-            ? planSourceAccessRepair(accessDraft as ExtractionDraftResult, job.sourceUnits, job.auditSourceMessages ?? []) : undefined;
+            ? planSourceAccessRepair(accessDraft as ExtractionDraftResult, job.sourceUnits, job.auditSourceMessages ?? [],job.modelIdentityEntities) : undefined;
           const applyAccess = (response: unknown) => {
             result = applySourceAccessRepair(accessDraft as ExtractionDraftResult, accessPlan!, response);
             if (audit?.patch) audit = { ...audit, patch: ExtractionAuditPatchSchema.parse({ keepPendingItemRefs: audit.patch.keepPendingItemRefs }) };
@@ -1049,7 +1085,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
             }
           } else if (accessPlan) {
             try {
-              const response = await runModel(state, [{ role: "system", content: accessPlan.systemPrompt }, { role: "user", content: accessPlan.userPrompt }], "extraction_repair");
+              const response = await runModel(state, [{ role: "system", content: accessPlan.systemPrompt }, { role: "user", content: accessPlan.userPrompt }], "extraction_repair",undefined,"access");
               applyAccess(parseWorkerJson(state, response, "extraction_repair"));
             } catch (error) { addLog(state.logs, "warn", `원문 접근 근거 보완 미해결: [오류 원문 제외]`, "SOURCE_ACCESS_REPAIR_FAILED"); }
           }
@@ -1118,6 +1154,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
     if (isChatUpgrading(error)) return;
     noteServerConnectionFailure(state, state.settings, error);
     addLog(state.logs, "warn", `Worker queue connection failed without pausing processing: [오류 원문 제외]`, supportFailure("worker_queue", error));
+    scheduleWorker(state, client);
   } finally {
     state.workerBusy = false;
     state.currentJob = undefined;

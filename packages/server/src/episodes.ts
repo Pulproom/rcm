@@ -51,7 +51,7 @@ export function completedEpisodeTurns(messages: EpisodeMessage[]): EpisodeTurn[]
 
 function activeMessages(db: RcmDatabase, chatId: string): EpisodeMessage[] {
   return db.prepare(`
-    SELECT message_id,role,ordinal,CASE WHEN memory_excluded=0 THEN content ELSE '' END AS content,memory_excluded FROM messages
+    SELECT message_id,role,ordinal,CASE WHEN memory_excluded<>0 THEN '' WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,memory_excluded FROM messages
     WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL
     ORDER BY ordinal
   `).all(chatId) as EpisodeMessage[];

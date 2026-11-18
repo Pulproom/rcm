@@ -14,6 +14,7 @@ import { readPersonaName, readViewPreferences } from "./view-preferences.js";
 import { lookupTranslations, translationCacheKey } from "./translation-cache.js";
 import { userChatSql } from "./chat-work.js";
 import type { AlbumChatSummary } from "@rcm/shared";
+import { albumStoryPeriod, collectAlbumTogether } from "./album-together.js";
 
 export type { AlbumMaterialItem, AlbumMaterials } from "@rcm/shared";
 
@@ -42,14 +43,13 @@ export function listAlbumChats(db: RcmDatabase): AlbumChatSummary[] {
     let characterName = chat.character_id;
     try { const name = JSON.parse(chat.static_json ?? "{}").characterName; if (typeof name === "string" && name.trim()) characterName = name.trim(); } catch { /* Same stored-ID fallback as materials. */ }
     const personaName = readPersonaName(db, chat.id) ?? "";
-    const dated = orderStoryMemories(rows).filter(row => row.story_time_normalized || row.story_time);
     return [{ chat: { id: chat.id, title: chat.chat_title ?? "", characterId: chat.character_id, characterName, personaName },
       people: { me: { name: personaName }, partner: { name: characterName } }, counts: { scenes: rows.length },
-      period: dated.length ? { from: dated[0]!.story_time_normalized ?? dated[0]!.story_time!, to: dated.at(-1)!.story_time_normalized ?? dated.at(-1)!.story_time! } : {} }];
+      period: albumStoryPeriod(rows) }];
   });
 }
 
-export function collectAlbumMaterials(db: RcmDatabase, chatId: string, options: { preferTranslation: true; pair?: AlbumPair }): AlbumMaterials {
+export function collectAlbumMaterials(db: RcmDatabase, chatId: string, options: { preferTranslation: true; pair?: AlbumPair; timeZone?: string }): AlbumMaterials {
   return db.transaction(() => {
     const collectedAt = Date.now();
     const chat = db.prepare("SELECT id,chat_title,character_id,static_json,memory_language FROM chats WHERE id=?").get(chatId) as {
@@ -296,8 +296,8 @@ export function collectAlbumMaterials(db: RcmDatabase, chatId: string, options: 
       for (const entry of items) { entry.origin!.fingerprint = albumFieldsFingerprint(entry.fields); if (entry.children) finalize(entry.children); }
     };
     Object.values(blocks).forEach(finalize);
-    const dated = rows.filter(row => row.story_time_normalized || row.story_time);
+    const period = albumStoryPeriod(rows);
     return { collectedAt, pairs: candidates, hiddenPairCount, defaultPair, chat: { id: chatId, title: chat.chat_title ?? "", characterName, characterId: chat.character_id, personaName }, people, counts,
-      period: dated.length ? { from: dated[0]!.story_time_normalized ?? dated[0]!.story_time!, to: dated.at(-1)!.story_time_normalized ?? dated.at(-1)!.story_time! } : {}, blocks, bond };
+      period, blocks, bond, ...(options.timeZone ? { together: collectAlbumTogether(db, chatId, { timeZone: options.timeZone, now: collectedAt, storyPeriod: period }) } : {}) };
   })();
 }

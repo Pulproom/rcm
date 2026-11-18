@@ -3,7 +3,8 @@ import { chatUpgradeLock, assertChatUnlocked, upgradeLockSql } from './upgrade-l
 import { assertSourceSnapshotAccepted, isSourceSnapshotHeld } from './source-snapshot.js';
 import { jobQueueClassSql, UPGRADE_AGING_MS } from './jobs.js';
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
-import { StateSearchIndex } from "./state-search-index.js";
+import { StateSearchIndex, stateEvidenceReader } from "./state-search-index.js";
+import type { StateEvidence } from "./state-evidence.js";
 import { recognitionDetailSql, searchableMemoryParentSql } from "./memory-group-search.js";
 import { loadItemAccess, resolveItemAccess } from "./item-access.js";
 import { createHash } from "node:crypto";
@@ -98,6 +99,7 @@ export interface SemanticStoryHit {
 export interface SemanticSourceHit { chunkId: string; messageIds: string[]; score: number; viewIndex?: number }
 
 export interface SemanticSearchResult {
+  timings?: EmbeddingSearchTimings;
   stateScores?: Map<string, number>;
   searchUnavailable?: boolean;
   atomHits?: Map<string, SemanticMemoryHit[]>;
@@ -107,6 +109,15 @@ export interface SemanticSearchResult {
   viewScores?: Array<Map<string, number>>;
   storyScores?: Map<string, number>;
   storyHits?: Map<string, SemanticStoryHit>;
+}
+
+export interface EmbeddingSearchTimings {
+  queryVectorMs: number;
+  /** 1 only when every requested query was served by the existing query cache. */
+  queryVectorCacheHit: number;
+  queryVectorRequests: number;
+  stateSearchMs: number;
+  vectorSearchMs: number;
 }
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -194,6 +205,18 @@ export class EmbeddingService {
 
   get ready(): boolean {
     return this.options.enabled && this.options.vectorEnabled && Boolean(this.options.apiKey);
+  }
+
+  /** Only the in-memory fields used by heartbeat status; no queue/failure scans. */
+  get idleWaitToken(): string {
+    return JSON.stringify([this.options.enabled && Boolean(this.options.apiKey),
+      this.#indexRetryAfter > Date.now() ? this.#indexRetryAfter : undefined, this.retryDue]);
+  }
+
+  /** A due automatic retry, including its drain; an old failure timestamp alone is not work. */
+  get retryDue(): boolean {
+    return this.ready && this.#indexRetryAfter > 0 && this.#indexRetryAfter <= Date.now()
+      && (this.#indexResumeTimer !== undefined || this.#indexDrainQueued);
   }
 
   failedWork(chatId: string): { count: number; lastError?: string } {
@@ -319,9 +342,9 @@ export class EmbeddingService {
     }
   }
 
-  async #request(inputs: string[][], inputType: "document" | "query"): Promise<number[][][]> {
+  async #request(inputs: string[][], inputType: "document" | "query", signal?: AbortSignal): Promise<number[][][]> {
     const timeoutMs = Math.max(inputType === "query" ? QUERY_TIMEOUT_MS : INDEX_TIMEOUT_MS, this.#timeoutMs);
-    const result = await this.#requestWithKey(inputs, inputType, timeoutMs, this.options.apiKey, undefined, inputType === "document" ? this.#indexSignal : undefined);
+    const result = await this.#requestWithKey(inputs, inputType, timeoutMs, this.options.apiKey, undefined, inputType === "document" ? this.#indexSignal : signal);
     if (inputType === "query") this.#queryError = "";
     return result;
   }
@@ -844,47 +867,72 @@ export class EmbeddingService {
     this.db.prepare("DELETE FROM embedding_blocks WHERE chat_id=?").run(chatId);
   }
 
-  async #queryVectors(queries: string[], chatId: string): Promise<Array<number[] | null>> {
-    const result: Array<number[] | null> = Array(queries.length).fill(null);
-    const missingByKey = new Map<string, { query: string; indexes: number[] }>();
-    const timestamp = Date.now();
-    queries.forEach((query, index) => {
-      const key = sha256(`${this.model}\0${chatId}\0${query}`);
-      const cached = this.#queryCache.get(key);
-      if (cached && cached.expiresAt > timestamp) result[index] = cached.vector;
-      else {
-        const pending = missingByKey.get(key);
-        if (pending) pending.indexes.push(index);
-        else missingByKey.set(key, { query, indexes: [index] });
-      }
-    });
-    const missing = [...missingByKey.entries()].map(([key, value]) => ({ key, ...value }));
-    if (missing.length === 0 || Date.now() < this.#queryRetryAfter) return result;
+  async #queryVectors(queries: string[], chatId: string, timings?: EmbeddingSearchTimings, signal?: AbortSignal): Promise<Array<number[] | null>> {
+    const started = performance.now();
     try {
-      const vectors = await this.#request(missing.map((item) => [item.query.slice(0, 32_000)]), "query");
-      missing.forEach((item, localIndex) => {
-        const vector = vectors[localIndex]?.[0] ?? null;
-        item.indexes.forEach((index) => { result[index] = vector; });
-        if (vector) this.#queryCache.set(item.key, { vector, expiresAt: Date.now() + QUERY_CACHE_TTL });
+      const result: Array<number[] | null> = Array(queries.length).fill(null);
+      const missingByKey = new Map<string, { query: string; indexes: number[] }>();
+      const timestamp = Date.now();
+      queries.forEach((query, index) => {
+        const key = sha256(`${this.model}\0${chatId}\0${query}`);
+        const cached = this.#queryCache.get(key);
+        if (cached && cached.expiresAt > timestamp) result[index] = cached.vector;
+        else {
+          const pending = missingByKey.get(key);
+          if (pending) pending.indexes.push(index);
+          else missingByKey.set(key, { query, indexes: [index] });
+        }
       });
-      while (this.#queryCache.size > MAX_QUERY_CACHE) this.#queryCache.delete(this.#queryCache.keys().next().value!);
-      return result;
-    } catch (error) {
-      this.#recordFailure(error, "query");
-      return result;
+      const missing = [...missingByKey.entries()].map(([key, value]) => ({ key, ...value }));
+      if (timings) timings.queryVectorCacheHit = missing.length === 0 ? 1 : 0;
+      if (missing.length === 0 || Date.now() < this.#queryRetryAfter || signal?.aborted) return result;
+      try {
+        if (timings) timings.queryVectorRequests++;
+        const vectors = await this.#request(missing.map((item) => [item.query.slice(0, 32_000)]), "query", signal);
+        missing.forEach((item, localIndex) => {
+          const vector = vectors[localIndex]?.[0] ?? null;
+          item.indexes.forEach((index) => { result[index] = vector; });
+          if (vector) this.#queryCache.set(item.key, { vector, expiresAt: Date.now() + QUERY_CACHE_TTL });
+        });
+        while (this.#queryCache.size > MAX_QUERY_CACHE) this.#queryCache.delete(this.#queryCache.keys().next().value!);
+        return result;
+      } catch (error) {
+        if (!signal?.aborted) this.#recordFailure(error, "query");
+        return result;
+      }
+    } finally {
+      // Measure inside the operation: an already resolved cache hit must not
+      // acquire the CPU time before its caller's next microtask.
+      if (timings) timings.queryVectorMs = performance.now() - started;
     }
   }
 
-  #searchVector(vector: number[], chatId: string, total: number, limit: number, lookup: TranscriptLookup): SemanticSearchResult {
+  #searchVector(vector: number[], chatId: string, total: number, limit: number, lookup: TranscriptLookup, stateScores: Map<string, number>, targetMemoryId?: string): SemanticSearchResult {
     try {
-      const stateScores = this.stateIndex.search(chatId, vector);
-      const searchUnavailable = !this.stateIndex.status.available || this.stateIndex.status.indexed < this.stateIndex.status.canonical;
-      if (total === 0) return { stateScores, searchUnavailable, scores: new Map(), hits: new Map() };
+      const searchUnavailable = !targetMemoryId && (!this.stateIndex.status.available || stateScores.size < this.stateIndex.status.canonical);
+      if (!targetMemoryId && total === 0) return { stateScores, searchUnavailable, scores: new Map(), hits: new Map() };
       const k = Math.min(total, Math.max(80, limit * 8));
-      const rawRows = this.db.prepare(`
+      const rawRows = (targetMemoryId ? this.db.prepare(`
+        WITH sources(id) AS (
+          SELECT s.value ->> '$.messageId' FROM memories m, json_each(m.evidence_json) s WHERE m.chat_id=@chat AND m.id=@memory
+          UNION SELECT s.value ->> '$.messageId' FROM visible_memory_details d, json_each(d.evidence_json) s WHERE d.chat_id=@chat AND d.memory_id=@memory AND d.active=1
+          UNION SELECT s.value ->> '$.messageId' FROM memory_dialogues d, json_each(d.evidence_json) s WHERE d.chat_id=@chat AND d.memory_id=@memory AND d.user_hidden=0
+        )
+        SELECT e.rowid,vec_distance_l2(v.embedding,@vector) AS distance FROM embedding_items e
+        JOIN embedding_vectors_v4_chat v ON v.rowid=e.rowid AND v.chat_id=@chat
+        WHERE e.chat_id=@chat AND e.model=@model AND e.dimension=@dimension AND (
+          (e.kind='memory' AND e.source_id=@memory)
+          OR (e.kind='memory_detail' AND e.source_id IN (
+            SELECT id FROM visible_memory_details WHERE chat_id=@chat AND memory_id=@memory AND active=1
+          ))
+          OR (e.kind='transcript_chunk' AND EXISTS (
+            SELECT 1 FROM json_each(e.source_json,'$.messageIds') s WHERE s.value IN (SELECT id FROM sources)
+          ))
+        )
+      `).all({chat:chatId,memory:targetMemoryId,model:this.model,dimension:this.dimension,vector:JSON.stringify(vector)}) : this.db.prepare(`
         SELECT rowid,distance FROM embedding_vectors_v4_chat
         WHERE embedding MATCH ? AND k=? AND chat_id=? ORDER BY distance
-      `).all(JSON.stringify(vector), k, chatId) as Array<{ rowid: number | bigint; distance: number }>;
+      `).all(JSON.stringify(vector), k, chatId)) as Array<{ rowid: number | bigint; distance: number }>;
       const rows = rawRows.map((row) => ({ rowid: Number(row.rowid), distance: row.distance }));
       if (rows.length === 0) return { stateScores, searchUnavailable, scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() };
       const distances = new Map(rows.map((row) => [row.rowid, row.distance]));
@@ -953,18 +1001,19 @@ export class EmbeddingService {
         const { messageIds, excluded, memoryIds } = lookup.chunks.get(item.rowid)!;
         if (excluded) continue;
         sourceHits.push({ chunkId: item.item_id, messageIds, score });
-        for (const memoryId of memoryIds) record(memoryId, score * 0.9, "transcript_chunk", item.source_id);
+        // Focused expansion only uses chunk scores after exact range checks.
+        if (!targetMemoryId) for (const memoryId of memoryIds) record(memoryId, score * 0.9, "transcript_chunk", item.source_id);
       }
       const limited = new Map([...scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit));
       const limitedStory = new Map([...storyScores.entries()].sort((a, b) => b[1] - a[1]).slice(0, Math.min(24, limit)));
       return { stateScores, searchUnavailable, atomHits, sourceHits, scores: limited, hits: new Map([...hits].filter(([memoryId]) => limited.has(memoryId))), storyScores: limitedStory, storyHits: new Map([...storyHits].filter(([nodeId]) => limitedStory.has(nodeId))) };
     } catch (error) {
       this.#recordFailure(error, "query");
-      return { scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() };
+      return { ...(targetMemoryId ? {searchUnavailable:true} : {}), scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() };
     }
   }
 
-  async searchManyDetailed(signals: SearchQuerySignal[], chatId: string, limit = 80): Promise<SemanticSearchResult> {
+  async searchManyDetailed(signals: SearchQuerySignal[], chatId: string, limit = 80, options: { stateEvidence?: () => StateEvidence[] } = {}): Promise<SemanticSearchResult> {
     if (!this.ready || signals.length === 0) return { scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() };
     const sourceIds = [...new Set(signals.flatMap(signal => signal.sourceMessageIds ?? []))];
     const allowed = new Set(querySourceRows(this.db, chatId, sourceIds).map(row => row.id));
@@ -977,12 +1026,43 @@ export class EmbeddingService {
     const searchable = signals.map((signal, index) => ({ signal, index }))
       .filter(({ signal }) => signal.kind !== "continuation" && signal.weight > 0);
     if (searchable.length === 0) return { scores: new Map(), hits: new Map(), viewScores: signals.map(() => new Map()), storyScores: new Map(), storyHits: new Map() };
-    const searchedVectors = await this.#queryVectors(searchable.map(({ signal }) => signal.text), chatId);
+    const timings: EmbeddingSearchTimings = { queryVectorMs: 0, queryVectorCacheHit: 0, queryVectorRequests: 0, stateSearchMs: 0, vectorSearchMs: 0 };
+    const queryVectors = this.#queryVectors(searchable.map(({ signal }) => signal.text), chatId, timings);
+    // Synchronous preparation may fail before the join. Observe immediately;
+    // awaiting the original promise below still propagates query failures.
+    void queryVectors.catch(() => {});
+    let readState: (() => StateEvidence[]) | undefined;
+    let statePreparationError: { error: unknown } | undefined;
+    let stateStarted = performance.now();
+    // Start the provider before collecting state; the same request-local reader
+    // rechecks canonical writes after the asynchronous boundary.
+    try {
+      readState = options.stateEvidence ?? stateEvidenceReader(this.db, chatId);
+      readState();
+    } catch (error) {
+      statePreparationError = { error };
+    }
+    timings.stateSearchMs += performance.now() - stateStarted;
+    const searchedVectors = await queryVectors;
+    stateStarted = performance.now();
+    const presentVectors = searchedVectors.filter((vector): vector is number[] => vector !== null);
+    // Keep collection failures inside the same state-only degradation boundary
+    // as cache failures. Prepare separately enforces its own required collection.
+    const stateResults = this.stateIndex.searchMany(chatId, presentVectors, () => {
+      if (statePreparationError) throw statePreparationError.error;
+      return readState!();
+    });
+    timings.stateSearchMs += performance.now() - stateStarted;
+    let stateIndex = 0;
     const vectors = new Map(searchable.map((entry, index) => [entry.index, searchedVectors[index]]));
     const sourceLookup: TranscriptLookup = { messages: new Map(), chunks: new Map() };
     const results = new Map(searchable.flatMap(({ index }) => {
       const vector = vectors.get(index);
-      return vector ? [[index, this.#searchVector(vector, chatId, total, limit, sourceLookup)] as const] : [];
+      if (!vector) return [];
+      const started = performance.now();
+      const result = this.#searchVector(vector, chatId, total, limit, sourceLookup, stateResults[stateIndex++]!);
+      timings.vectorSearchMs += performance.now() - started;
+      return [[index, result] as const];
     }));
     const separation = (result: SemanticSearchResult): number => {
       const window = [...result.scores.values()].slice(0, 24);
@@ -1065,7 +1145,7 @@ export class EmbeddingService {
     for (const nodeId of new Set([...storyPeak.keys(), ...storyConsensus.keys()])) storyFused.set(nodeId, (storyPeak.get(nodeId) ?? 0) * 0.72 + ((storyConsensus.get(nodeId) ?? 0) / totalWeight) * 0.28);
     const storyBest = Math.max(0, ...storyFused.values());
     const storyScores = new Map([...storyFused.entries()].map(([nodeId, score]) => [nodeId, storyBest > 0 ? score / storyBest : 0] as const).sort((a, b) => b[1] - a[1]).slice(0, 24));
-    return { stateScores, atomHits, sourceHits, scores, hits: new Map([...hits].filter(([memoryId]) => scores.has(memoryId))), viewScores, storyScores, storyHits: new Map([...storyHits].filter(([nodeId]) => storyScores.has(nodeId))) };
+    return { timings, stateScores, atomHits, sourceHits, scores, hits: new Map([...hits].filter(([memoryId]) => scores.has(memoryId))), viewScores, storyScores, storyHits: new Map([...storyHits].filter(([nodeId]) => storyScores.has(nodeId))) };
   }
 
   async searchMany(signals: SearchQuerySignal[], chatId: string, limit = 80): Promise<Map<string, number>> {
@@ -1080,12 +1160,18 @@ export class EmbeddingService {
     return this.searchManyDetailed([{ kind: "focus", text: query, weight: 1 }], chatId, limit);
   }
 
-  async searchBatchDetailed(queries: string[], chatId: string, limit = 80): Promise<SemanticSearchResult[]> {
+  async searchBatchDetailed(queries: string[], chatId: string, limit = 80, options: {
+    stateEvidence?: () => StateEvidence[]; targetMemoryId?: string; signal?: AbortSignal;
+  } = {}): Promise<SemanticSearchResult[]> {
     if (!this.ready || queries.length === 0) return queries.map(() => ({ searchUnavailable: true, scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() }));
-    this.#discardStaleBlocks(chatId);
-    const total = (this.db.prepare("SELECT count(*) AS count FROM embedding_items WHERE chat_id=?").get(chatId) as { count: number }).count;
-    const vectors = await this.#queryVectors(queries, chatId);
+    if (!options.targetMemoryId) this.#discardStaleBlocks(chatId);
+    const total = options.targetMemoryId ? 0 : (this.db.prepare("SELECT count(*) AS count FROM embedding_items WHERE chat_id=?").get(chatId) as { count: number }).count;
+    const vectors = await this.#queryVectors(queries, chatId, undefined, options.signal);
+    const states = options.targetMemoryId ? [] : this.stateIndex.searchMany(chatId, vectors.filter((vector): vector is number[] => vector !== null), options.stateEvidence);
+    let stateIndex = 0;
     const sourceLookup: TranscriptLookup = { messages: new Map(), chunks: new Map() };
-    return queries.map((_query, index) => vectors[index] ? this.#searchVector(vectors[index]!, chatId, total, limit, sourceLookup) : { searchUnavailable: true, scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() });
+    return queries.map((_query, index) => vectors[index] && !options.signal?.aborted
+      ? this.#searchVector(vectors[index]!, chatId, total, limit, sourceLookup, states[stateIndex++] ?? new Map(), options.targetMemoryId)
+      : { searchUnavailable: true, scores: new Map(), hits: new Map(), storyScores: new Map(), storyHits: new Map() });
   }
 }

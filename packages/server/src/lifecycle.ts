@@ -23,6 +23,8 @@ import { writePersonaHint } from "./view-preferences.js";
 
 const DAY = 86_400_000;
 const archiveEligibleVisibility = (visibility: string): boolean => visibility === "active" || visibility === "all_before";
+export const completedTurnEligibleMessage = (row: { host_visibility: string; lifecycle: MessageLifecycle }): boolean =>
+  archiveEligibleVisibility(row.host_visibility) && (row.lifecycle === "committed" || row.lifecycle === "client_pruned");
 
 interface StoredMessage {
   message_id: string;
@@ -458,11 +460,17 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
       // image-only edits. The current raw text/revision is still saved below.
       // Never carry this exemption across role/source changes or deleted text.
       const policy = request.canonicalizationPolicy ?? defaultCanonicalizationPolicy();
-      const imageOnlyChange = previous?.content != null && previous.content_hash !== hash && previous.role === message.role
-        && previous.source_kind === sourceKind
-        && isImageOnlySourceChange(canonicalizeSourceText(previous.content, policy), canonicalizeSourceText(content, policy));
+      const comparable = previous?.content != null && previous.content_hash !== hash && previous.role === message.role
+        && previous.source_kind === sourceKind;
+      const previousCanonical = comparable ? canonicalizeSourceText(previous!.content!, policy) : "";
+      const nextCanonical = comparable ? canonicalizeSourceText(content, policy) : "";
+      const imageOnlyChange = comparable && isImageOnlySourceChange(previousCanonical, nextCanonical);
+      // A host rewrite that only changes whitespace between the same source
+      // (e.g. a translation module re-laying out preserved blocks) keeps the
+      // stored canonical text, its hash and every evidence offset.
+      const whitespaceOnlyChange = comparable && previousCanonical.replace(/\s+/g, " ") === nextCanonical.replace(/\s+/g, " ");
       const reuseCanonical = Boolean(previous && previous.canonical_content !== null
-        && (previous.content_hash === hash || imageOnlyChange));
+        && (previous.content_hash === hash || imageOnlyChange || whitespaceOnlyChange));
       const canonicalContent = reuseCanonical
         ? previous!.canonical_content!
         : canonicalizeSourceText(content, policy);
@@ -636,7 +644,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
     let waitingUsers: string[] = [];
     const assignTurn = db.prepare("UPDATE messages SET completed_turn_seq=? WHERE chat_id=? AND message_id=? AND completed_turn_seq IS NULL");
     for (const row of turnRows) {
-      if (!archiveEligibleVisibility(row.host_visibility) || !["committed", "client_pruned"].includes(row.lifecycle)) continue;
+      if (!completedTurnEligibleMessage(row)) continue;
       if (row.completed_turn_seq !== null) {
         if (row.role === "assistant") {
           // Repair an unassigned user from an earlier sync without advancing time.

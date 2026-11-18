@@ -118,7 +118,7 @@ function quizGenerationEligible(db: RcmDatabase, chatId: string): boolean {
 function quizContentRows(db: RcmDatabase, chatId: string, scenes = quizSceneRows(db, chatId), includeSources = false): QuizSceneRow[] {
   if (!includeSources && scenes.length >= QUIZ_MIN_MEMORIES && !db.prepare("SELECT 1 FROM quiz_items WHERE chat_id=? AND memory_id LIKE 'source-chunk:%' AND retired_at IS NULL LIMIT 1").get(chatId)) return scenes;
   const { cutoff } = sourceProgress(db, chatId);
-  const rows = db.prepare(`SELECT message_id,role,ordinal,content,updated_at,memory_excluded FROM messages WHERE chat_id=?
+  const rows = db.prepare(`SELECT message_id,role,ordinal,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,updated_at,memory_excluded FROM messages WHERE chat_id=?
     AND ordinal>? AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before') ORDER BY ordinal`)
     .all(chatId, quizSourceBoundary(db, chatId)) as Array<{message_id:string;role:string;ordinal:number;content:string|null;updated_at:number;memory_excluded:number}>;
   const chunks: QuizSceneRow[] = [];

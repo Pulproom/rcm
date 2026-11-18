@@ -1,3 +1,6 @@
+import { jobLastServedKey } from "./jobs.js";
+import { countBlockingExtractionAudits } from "./evidence-review.js";
+import { countPendingSmallReviews } from "./small-review.js";
 import { markSourceDeleted } from "./albums.js";
 import { assertUserChat, userChatSql } from './chat-work.js';
 import { assertChatUnlocked, upgradeLockSql } from './upgrade-lock.js';
@@ -7,11 +10,10 @@ import { clearAuxiliaryInputs } from './auxiliary-input-cache.js';
 import type { RcmDatabase } from "./db.js";
 import type { EmbeddingService } from "./embedding.js";
 import { deleteDerivedRows, renewMemoryEpoch } from "./derived-state.js";
-import { rewindAutomaticSuccessorsToCorrections } from "./user-corrections.js";
 import { materializeInitialRelationshipProjections } from "./initial-calibration.js";
 import { memoryBookmarksKey, memoryPreferencesKey } from "./memory-bookmarks.js";
 import { readPersonaName, viewPreferencesKey, writePersonaHint } from "./view-preferences.js";
-import { removedAliasesKey } from "./user-deletions.js";
+import { removedAliasesKey, userDeletionsKey, ledgerEditOriginsKey } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 import { chatPacketBudgetKey } from "./story-spine.js";
 import { narrationViewpointKey } from "./perspectives.js";
@@ -132,7 +134,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       assertions: row.assertions,
       beliefs: row.beliefs,
       promises: row.promises,
-      pendingReviews: row.pending_reviews,
+      pendingReviews: row.pending_reviews + countBlockingExtractionAudits(db, row.id) + countPendingSmallReviews(db, row.id),
       pendingConflicts: row.pending_conflicts,
       embeddings: row.embeddings,
       jobs: row.jobs,
@@ -178,9 +180,14 @@ export function reprocessChat(
   embeddings.removeChat(chatId);
   const timestamp = Date.now();
   return db.transaction(() => {
-    rewindAutomaticSuccessorsToCorrections(db,chatId);
-    deleteDerivedRows(db, chatId, { preserveInitialCalibration: true, preserveUserCorrections: true });
-    materializeInitialRelationshipProjections(db, chatId);
+    deleteDerivedRows(db, chatId, { preserveUserCorrections: false });
+    clearAuxiliaryInputs(db, chatId);
+    db.prepare("DELETE FROM memory_activation_state WHERE chat_id=?").run(chatId);
+    for (const key of [memoryBookmarksKey(chatId), memoryPreferencesKey(chatId), userDeletionsKey(chatId),
+      removedAliasesKey(chatId), ledgerEditOriginsKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId),
+      `source_coverage_retry:${chatId}`, `source_coverage_family:${chatId}`, `source_coverage_folded:${chatId}`]) {
+      db.prepare("DELETE FROM server_meta WHERE key=?").run(key);
+    }
     db.prepare("DELETE FROM chat_lineage_items WHERE child_chat_id=? AND item_kind<>'message'").run(chatId);
     const changed = db.prepare(`
       UPDATE messages SET extraction_state='pending',updated_at=?
@@ -227,7 +234,7 @@ export function deleteChats(db: RcmDatabase, embeddings: EmbeddingService, chatI
       clearAuxiliaryInputs(db,chatId);
       db.prepare("DELETE FROM server_meta WHERE key IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(`retrieval_trace_chat:${chatId}`, memoryBookmarksKey(chatId), memoryPreferencesKey(chatId), viewPreferencesKey(chatId), `user_deletions:${chatId}`, `persona_hint:${chatId}`, `ledger_edit_origins:${chatId}`, removedAliasesKey(chatId), detailAccessEditsKey(chatId), dialogueAccessIdentityKey(chatId), `quiz_history_boundary:${chatId}`, `source_coverage_retry:${chatId}`, `source_coverage_family:${chatId}`, `source_coverage_folded:${chatId}`, lineageRevisionKey(chatId));
     }
-    for (const chatId of unique) db.prepare("DELETE FROM server_meta WHERE key IN (?,?)").run(chatPacketBudgetKey(chatId),narrationViewpointKey(chatId));
+    for (const chatId of unique) db.prepare("DELETE FROM server_meta WHERE key IN (?,?,?)").run(chatPacketBudgetKey(chatId),narrationViewpointKey(chatId),jobLastServedKey(chatId));
     return db.prepare(`DELETE FROM chats WHERE id IN (${placeholders})`).run(...unique).changes;
   })();
 }

@@ -1,6 +1,6 @@
-import type { TurnPrepareRequest } from "@rcm/shared";
+import { isMainCharacterEntity, isPersonEntityType, type TurnPrepareRequest } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { buildEntityIdentityResolver, normalizeEntityName } from "./entities.js";
+import { buildEntityIdentityResolver, modelEntityContext, normalizeEntityName } from "./entities.js";
 
 interface Candidate {
   name: string;
@@ -16,12 +16,14 @@ function parseNames(value: string | null | undefined): string[] {
 
 function candidateLedger(db: RcmDatabase, chatId: string): Map<string, Candidate> {
   const candidates = new Map<string, Candidate>();
-  const nonPeople = new Set((db.prepare("SELECT name FROM entities WHERE chat_id=? AND type<>'character'").all(chatId) as Array<{name:string}>).map(row => normalizeEntityName(row.name)));
+  const {entities,allowsName} = modelEntityContext(db, chatId);
+  const nonPeople = new Set(entities.filter(entity => !isPersonEntityType(entity.type)).map(entity => normalizeEntityName(entity.name)));
   const resolve = buildEntityIdentityResolver(db, chatId);
   const add = (name: unknown): Candidate | undefined => {
     if (typeof name !== "string" || !name.trim()) return undefined;
     const identity = resolve(name);
     if (identity.ambiguous) return undefined;
+    if (!allowsName(name) || !allowsName(identity.canonical)) return undefined;
     const normalized = normalizeEntityName(identity.canonical);
     if (!normalized || ["narrator", "omniscient", "omniscient narrator", "__narrator_archive__", "__everyone__", "__author__", "__automatic_delivery__"].includes(normalized) || nonPeople.has(normalized)) return undefined;
     const current = candidates.get(normalized) ?? { name: identity.canonical.trim(), aliases: new Set<string>() };
@@ -29,14 +31,12 @@ function candidateLedger(db: RcmDatabase, chatId: string): Map<string, Candidate
     candidates.set(normalized, current);
     return current;
   };
-  const entities = db.prepare("SELECT id,entity_key,name FROM entities WHERE chat_id=? AND type='character'").all(chatId) as Array<{ id: string; entity_key: string; name: string }>;
-  const aliases = db.prepare("SELECT alias FROM aliases WHERE entity_id=?");
-  for (const entity of entities) {
+  for (const entity of entities.filter(entity => isPersonEntityType(entity.type))) {
     const candidate = add(entity.name);
     if (!candidate) continue;
-    candidate.aliases.add(normalizeEntityName(entity.entity_key));
+    candidate.aliases.add(normalizeEntityName(entity.key));
     candidate.aliases.add(normalizeEntityName(entity.name));
-    for (const row of aliases.all(entity.id) as Array<{ alias: string }>) candidate.aliases.add(normalizeEntityName(row.alias));
+    for (const alias of entity.aliases) candidate.aliases.add(normalizeEntityName(alias));
   }
   for (const row of db.prepare(`SELECT DISTINCT json_extract(a.value,'$.holder') holder FROM source_passages p
     JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash,
@@ -90,7 +90,7 @@ export function resolveSceneCharacters(db: RcmDatabase, request: TurnPrepareRequ
   const latest = db.prepare(`SELECT participants_json FROM memories m WHERE chat_id=? AND active=1
     AND (capsule_parent_id IS NULL OR capsule_parent_id IN (SELECT memory_id FROM episodes WHERE resolution='group' AND status='capsuled'))
     ORDER BY COALESCE((SELECT MAX(msg.ordinal) FROM json_each(m.evidence_json) ev
-      JOIN messages msg ON msg.chat_id=m.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')),m.created_revision) DESC,m.id LIMIT 2`)
+      CROSS JOIN messages msg ON msg.chat_id=m.chat_id AND msg.message_id=json_extract(ev.value,'$.messageId')),m.created_revision) DESC,m.id LIMIT 2`)
     .all(request.chatId) as Array<{ participants_json: string }>;
   return unique([
     canonical(candidates, request.identityHints?.userPersonaName),
@@ -107,8 +107,8 @@ export function resolveNarrationViewpoint(db: RcmDatabase, chatId: string, value
   if (!value) return undefined;
   const resolved = buildEntityIdentityResolver(db, chatId)(value);
   if (resolved.ambiguous) return undefined;
-  return (db.prepare("SELECT name FROM entities WHERE chat_id=? AND type='character' AND name=? COLLATE NOCASE")
-    .get(chatId, resolved.canonical) as {name:string} | undefined)?.name;
+  return modelEntityContext(db, chatId).entities.find(entity => isMainCharacterEntity(entity)
+    && normalizeEntityName(entity.name) === normalizeEntityName(resolved.canonical))?.name;
 }
 
 export const narrationViewpointKey = (chatId: string): string => `narration_viewpoint:${chatId}`;

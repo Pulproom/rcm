@@ -12,6 +12,7 @@ export interface RetrievalTraceConfig {
 }
 
 export const RETRIEVAL_TRACE_CHAT_PREFIX = "retrieval_trace_chat:";
+const TRACE_COMPACTION_BYTES = 16 * 1024 * 1024;
 
 export interface RetrievalTraceEvent {
   schema?: "rcm.retrieval-trace.v20";
@@ -35,6 +36,12 @@ export interface RetrievalTraceEvent {
   [key: string]: unknown;
 }
 
+/** Delivery retries retain identity; different chats and event kinds do not. */
+export function retrievalTraceEventKey(event: { chatId?: string; kind?: string; id?: string }): string | undefined {
+  return typeof event.chatId === "string" && typeof event.kind === "string" && typeof event.id === "string"
+    ? JSON.stringify([event.chatId, event.kind, event.id]) : undefined;
+}
+
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex").slice(0, 16);
 
 function boundedText(value: unknown, max = 120_000): string | undefined {
@@ -53,6 +60,8 @@ export class RetrievalTraceWriter {
   readonly dashboardAvailable: boolean;
   private queue: Promise<void> = Promise.resolve();
   private writes = 0;
+  private compactAboveBytes = TRACE_COMPACTION_BYTES;
+  private retainedEvents?: Map<string, number>;
 
   constructor(private readonly db: RcmDatabase, private readonly config: RetrievalTraceConfig) {
     this.enabled = config.mode !== "off";
@@ -133,10 +142,37 @@ export class RetrievalTraceWriter {
   }
 
   private async write(line: string): Promise<void> {
+    // Check inside the serialized write queue, including concurrent retries.
+    // Seed from retained disk events so a server restart does not admit a retry.
+    if (!this.retainedEvents) {
+      const content = await readFile(this.config.path, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      });
+      this.retainedEvents = this.retainedEventKeys(content.split(/\r?\n/u).filter(Boolean));
+    }
+    const cutoff = Date.now() - this.config.maxAgeDays * 86_400_000;
+    for (const [key, at] of this.retainedEvents) if (at < cutoff) this.retainedEvents.delete(key);
+    const event = JSON.parse(line) as RetrievalTraceEvent;
+    const key = retrievalTraceEventKey(event);
+    if (key !== undefined && this.retainedEvents.has(key)) return;
     await mkdir(dirname(this.config.path), { recursive: true });
     await appendFile(this.config.path, `${line}\n`, "utf8");
+    if (key !== undefined) this.retainedEvents.set(key, event.at ?? Date.now());
+    while (this.retainedEvents.size > this.config.maxEvents) this.retainedEvents.delete(this.retainedEvents.keys().next().value!);
     this.writes += 1;
-    if (this.writes % 20 === 0 || (await stat(this.config.path)).size > 16 * 1024 * 1024) await this.compact();
+    if (this.writes % 20 === 0 || (await stat(this.config.path)).size > this.compactAboveBytes) await this.compact();
+  }
+
+  private retainedEventKeys(lines: string[]): Map<string, number> {
+    const cutoff = Date.now() - this.config.maxAgeDays * 86_400_000;
+    return new Map(lines.slice(-this.config.maxEvents).flatMap(line => {
+      try {
+        const event = JSON.parse(line) as RetrievalTraceEvent;
+        const key = retrievalTraceEventKey(event);
+        return key !== undefined && (event.at ?? 0) >= cutoff ? [[key, event.at!] as const] : [];
+      } catch { return []; }
+    }));
   }
 
   private async compact(): Promise<void> {
@@ -149,7 +185,13 @@ export class RetrievalTraceWriter {
       } catch { return []; }
     }).slice(-this.config.maxEvents);
     const temporary = `${this.config.path}.tmp`;
-    await writeFile(temporary, lines.length ? `${lines.join("\n")}\n` : "", "utf8");
+    const retained = lines.length ? `${lines.join("\n")}\n` : "";
+    await writeFile(temporary, retained, "utf8");
     await rename(temporary, this.config.path);
+    this.retainedEvents = this.retainedEventKeys(lines);
+    const retainedBytes = Buffer.byteLength(retained);
+    // A valid retained window can itself exceed the size trigger. Allow room
+    // for new events before another size-triggered rewrite. Keep the periodic cap.
+    this.compactAboveBytes = retainedBytes > TRACE_COMPACTION_BYTES ? retainedBytes + TRACE_COMPACTION_BYTES : TRACE_COMPACTION_BYTES;
   }
 }

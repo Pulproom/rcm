@@ -2,6 +2,7 @@ import { ALBUM_DRAFT_ORDER, AlbumDocumentSchema, AlbumItemSchema, defaultBlockEn
 import { albumDateOnly, preferredAlbumLine, shortestAlbumLines } from "./album-presentation.js";
 export { albumDateOnly } from "./album-presentation.js";
 import type { AlbumBond } from "./album-bond.js";
+import { albumTogetherItems, availableTogetherCards, type AlbumTogetherRecords } from "./album-together.js";
 import { albumPairKey, type AlbumPair, type AlbumPairCandidate } from "./album-pair.js";
 import { compareParsedStoryTimes, parseStoryTime } from "./story-time.js";
 
@@ -17,6 +18,7 @@ export interface AlbumMaterials {
   period: { from?: string; to?: string };
   blocks: Record<AlbumBlockKind, AlbumMaterialItem[]>;
   bond?: AlbumBond;
+  together?: AlbumTogetherRecords;
 }
 /** Chat picker data excludes scene bodies, dialogues and relationship histories. */
 export type AlbumChatSummary = Pick<AlbumMaterials, "chat" | "people" | "period"> & { counts: Pick<AlbumMaterials["counts"], "scenes"> };
@@ -78,6 +80,8 @@ export function buildAlbumDraft(materials: AlbumMaterials, options: { id: string
   const enabled = ALBUM_DRAFT_ORDER.filter(kind => kind === "cover" || (choices.blocks ? choices.blocks.includes(kind) : defaultBlockEnabled(kind)));
   const interludes = enabled.includes("quotes");
   const blocks = enabled.filter(kind => kind !== "quotes").flatMap(kind => {
+    if (kind === "together") return materials.together && availableTogetherCards(materials.together).length
+      ? [{ id: "together", kind, together: materials.together, items: albumTogetherItems(materials.together) }] : [];
     if (kind === "story" && interludes) {
       const groups = [];
       const used = new Set<string>();

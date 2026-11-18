@@ -2,7 +2,7 @@ import { renderScreenBar } from "./shell.js";
 import { albumConfirm } from "./album-confirm.js";
 import { createAlbumPhotoTools } from "./album-photo-tools.js";
 import { createAlbumLinePicker } from "./album-line-picker.js";
-import { ALBUM_DRAFT_ORDER, ALBUM_THEMES, ALBUM_TINTS, unusedAlbumMaterials, placeAlbumPhotos, albumScenes, type Candidate, type AlbumBlockKind, type AlbumMaterials, type AlbumDocument, type AlbumItem, type AlbumTheme } from "@rcm/shared";
+import { ALBUM_DRAFT_ORDER, ALBUM_THEMES, ALBUM_TINTS, ALBUM_TOGETHER_CARDS, ALBUM_TOGETHER_DEFAULT_ON, albumTogetherItems, availableTogetherCards, unusedAlbumMaterials, placeAlbumPhotos, albumScenes, type Candidate, type AlbumBlockKind, type AlbumMaterials, type AlbumDocument, type AlbumItem, type AlbumTheme, type AlbumTogetherRecords, type AlbumTogetherCardId } from "@rcm/shared";
 import type { albumClient } from "../album/api.js";
 import { albumItems, createAlbumEditSession, duplicateBlock, editField, insertAlbumMemories, insertBlock, moveBlock, removeBlock, setStyle, toggleBlockHidden } from "../album/edit.js";
 import { albumRisuPortraitRole, bindAlbumPersonImages, readAlbumProfileImages, type AlbumProfileImage, type PersonImageHost } from "../album/person-images.js";
@@ -13,6 +13,7 @@ import { renderAlbumMiniCover } from "./album-shelf.js";
 import { ALBUM_TINT_LABELS } from "./album-wizard.js";
 import { escapeHtml as esc, icon } from "./film/ui.js";
 import { ALBUM_EDIT_CONTENT_CSS } from "./album-edit-css.js";
+import { TOGETHER_LABELS, togetherAsOf, togetherCardText, togetherHour, togetherNumber, visibleTogetherCards } from "../album/together.js";
 
 type Api = ReturnType<typeof albumClient>;
 export type AlbumImageHost = PersonImageHost & Pick<RisuPluginApi, "readInlay">;
@@ -30,7 +31,7 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
   photoLoaded: (id: string, url: string) => void; render: () => void; done: (doc: AlbumDocument) => void;
 }) {
   let session: ReturnType<typeof createAlbumEditSession> | undefined, original: AlbumDocument | undefined;
-  let selected = "", panel = true, overlay: "" | "block" | "add" | "text" | "panel" | "picker" | "more" | "person" = "";
+  let selected = "", panel = true, overlay: "" | "block" | "add" | "text" | "panel" | "picker" | "more" | "cards" | "person" = "";
   let personTarget: "me" | "partner" = "me", anchorRect: DOMRect | undefined;
   let personImages: AlbumProfileImage[] = [], personBotName = "", personMissingBot = false, personLoading = false, personSelection = "", personRun = 0;
   const clearPersonImages = () => { personRun++; personImages.forEach(i => URL.revokeObjectURL(i.url)); personImages = []; };
@@ -41,6 +42,7 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
   let fieldObserver: IntersectionObserver | undefined;
   const decorated = new WeakSet<HTMLElement>();
   let materials: AlbumMaterials | undefined;
+  let lastTogether: AlbumTogetherRecords | undefined, togetherLoading = false, togetherError = "";
   let unusedCache: { document: AlbumDocument; materials: AlbumMaterials; value: ReturnType<typeof unusedAlbumMaterials> } | undefined;
   const newNicknames = new Set<string>();
   const host = () => root.querySelector<HTMLElement>(".album-edit");
@@ -79,7 +81,7 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
     const s = [...host()!.querySelectorAll<HTMLElement>("[data-album-block]")].find(s => s.dataset.albumBlock === selected);
     s?.scrollIntoView({ block: "nearest" }); s?.focus({ preventScroll: true }); positionTools();
   };
-  const focusSheet = () => [...host()?.querySelectorAll<HTMLElement>(".ae-overlay input:not([hidden]),.ae-overlay textarea,.ae-overlay button:not(:disabled)") ?? []].find(n => n.getClientRects().length)?.focus({ preventScroll: true });
+  const focusSheet = () => [...host()?.querySelectorAll<HTMLElement>(".ae-overlay input:not([hidden]):not(:disabled),.ae-overlay textarea,.ae-overlay button:not(:disabled)") ?? []].find(n => n.getClientRects().length)?.focus({ preventScroll: true });
   const repaint = () => {
     const top = host()?.querySelector(".ae-scroll")?.scrollTop ?? 0, panelTop = host()?.querySelector(".ae-panel")?.scrollTop ?? 0;
     html = ""; personDispose?.(); hooks.render(); hydrate();
@@ -122,7 +124,7 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
     const previous = overlay;
     overlay = ""; paintChrome();
     const replacement = fieldTarget && [...host()?.querySelectorAll<HTMLElement>("[data-album-field]") ?? []].find(n => n.getClientRects().length && JSON.stringify(target(n)) === JSON.stringify(fieldTarget));
-    (returnFocus?.isConnected ? returnFocus : previous === "more" ? host()?.querySelector<HTMLElement>('[data-edit-action="more"]') : replacement ?? host()?.querySelector<HTMLElement>('[data-edit-action="panel"]'))?.focus({ preventScroll: true });
+    (returnFocus?.isConnected ? returnFocus : previous === "more" || previous === "cards" ? host()?.querySelector<HTMLElement>(`[data-edit-action="${previous}"]`) : replacement ?? host()?.querySelector<HTMLElement>('[data-edit-action="panel"]'))?.focus({ preventScroll: true });
   };
   const showSheet = (kind: typeof overlay, trigger?: HTMLElement) => { returnFocus = trigger ?? document.activeElement as HTMLElement; anchorRect = returnFocus?.getBoundingClientRect?.(); overlay = kind; paintChrome(); focusSheet(); };
   const personOptions = (t: FieldTarget) => {
@@ -158,11 +160,14 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
     const block = doc().blocks.find(b => b.id === selected); if (!block) return "";
     const at = doc().blocks.indexOf(block);
     const count = moreItems().length;
-    const more = block.kind === "quotes" ? button("replace-lines", "대사 바꾸기", 'class="ae-more" aria-haspopup="dialog"') : count ? button("more", `더 넣기 <i>${count}</i>`, 'class="ae-more" aria-haspopup="dialog"') : "";
+    const more = block.kind === "together" ? button("cards", `카드 고르기 <i>${visibleTogetherCards(block).length}/${block.together ? availableTogetherCards(block.together).length : 0}</i>`, 'class="ae-more" aria-haspopup="dialog"')
+      : block.kind === "quotes" ? button("replace-lines", "대사 바꾸기", 'class="ae-more" aria-haspopup="dialog"') : count ? button("more", `더 넣기 <i>${count}</i>`, 'class="ae-more" aria-haspopup="dialog"') : "";
     const moves = button("move", icon("up") + (mobile ? "위로" : ""), `data-delta="-1" aria-label="위로" ${at === 0 ? "disabled" : ""}`) + button("move", icon("down") + (mobile ? "아래로" : ""), `data-delta="1" aria-label="아래로" ${at === doc().blocks.length - 1 ? "disabled" : ""}`);
     return `${mobile ? `<div class="ae-pair">${moves}</div><div class="ae-action-group">${button("add", icon("add") + "아래에 블록 추가")}` : `${button("grip", grip, 'aria-label="블록 이동 버튼으로 이동" title="위로·아래로 버튼으로 이동" class="ae-toolbar-grip"')}<b>${esc(name(selected))}</b>${moves}<span class="ae-tool-sep" aria-hidden="true"></span>${more}${more ? '<span class="ae-tool-sep" aria-hidden="true"></span>' : ""}`}${button("hide", icon("eye") + (block.hidden ? "보이기" : "숨기기"))}${button("duplicate", icon("copy") + "복제")}${button("delete", icon("delete") + "지우기", 'class="ae-danger"')}${mobile ? `</div>${more ? `<div class="ae-sheet-more">${more}</div>` : ""}` : ""}${mobile && fieldTarget?.blockId === selected && edited(fieldTarget) ? button("restore", "원래대로") : ""}`;
   };
-  const addChoices = () => ([['text', '글'], ['photo', '사진'], ['gallery', '사진 묶음'], ['quotes', '대사'], ['divider', '구분선']] as const).map(([kind, label]) => button("insert", label, `data-kind="${kind}"`)).join("");
+  const addChoices = () => ([['text', '글'], ['photo', '사진'], ['gallery', '사진 묶음'], ['quotes', '대사'], ['divider', '구분선']] as const).map(([kind, label]) => button("insert", label, `data-kind="${kind}"`)).join("")
+    + button("insert-together", togetherLoading ? "불러오는 중…" : "함께한 시간", togetherLoading ? "disabled" : "")
+    + (togetherError ? `<p class="ae-sub" role="status">${esc(togetherError)}</p>` : "");
   const memoryChoices = () => {
     const remaining = unused();
     const kinds = ALBUM_DRAFT_ORDER.filter(kind => remaining?.[kind].length && !doc().blocks.some(b => b.kind === kind));
@@ -181,6 +186,19 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
   const sheetHtml = () => {
     if (!overlay || (!phone() && overlay === "panel")) return "";
     let body = "", title = "";
+    if (overlay === "cards") {
+      const block = doc().blocks.find(b => b.id === selected), records = block?.together;
+      const available = new Set(records ? availableTogetherCards(records) : []);
+      const rows = ALBUM_TOGETHER_CARDS.map(card => {
+        const enabled = available.has(card), checked = block?.items.some(i => i.id === card && !i.hidden);
+        const text = records && enabled ? togetherCardText(records, card) : undefined;
+        const summary = !text ? card === "quiz" ? "아직 푼 문제가 없어요" : "시각 기록이 없어요"
+          : card === "first" ? `${text.value} · ${text.note}` : card === "two-times" ? `이야기 속 ${togetherNumber(records!.storyDays!)}일 · 현실 ${records!.realSpan}`
+          : card === "hours" ? `주로 ${togetherHour(records!.peakHour!)}쯤` : text.value;
+        return `${card === "first" || card === "days" ? `<li class="ae-more-group">${ALBUM_TOGETHER_DEFAULT_ON.has(card) ? "기본" : "더 보기"}</li>` : ""}<li${enabled ? "" : ' class="off"'}><label><input type="checkbox" data-edit-action="toggle-card" data-card="${card}"${checked && enabled ? " checked" : ""}${enabled ? "" : " disabled"}><span>${TOGETHER_LABELS[card]}</span><small>${esc(summary)}</small></label></li>`;
+      }).join("");
+      return `<div class="ae-scrim${phone() ? "" : " ae-cards-scrim"}" data-edit-action="close-sheet"></div><section class="ae-more-sheet ae-cards${phone() ? " ae-sheet" : ""}" role="dialog" aria-modal="true" aria-label="보일 카드"><header><b>보일 카드</b><small>${records ? esc(togetherAsOf(records)) : ""}</small></header><ul>${rows}</ul></section>`;
+    }
     if (overlay === "more") {
       title = `아직 안 넣은 ${name(selected)}`;
       let group = "";
@@ -221,11 +239,11 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
   const positionTools = () => {
     const h = host(), tools = h?.querySelector<HTMLElement>(".ae-tools"), section = [...h?.querySelectorAll<HTMLElement>("[data-album-block]") ?? []].find(n => n.dataset.albumBlock === selected);
     if (!h || !tools) return;
-    tools.hidden = !section || phone() || Boolean(overlay && overlay !== "more");
+    tools.hidden = !section || phone() || Boolean(overlay && overlay !== "more" && overlay !== "cards");
     if (section) {
       const r = section.getBoundingClientRect(), hr = h.getBoundingClientRect(), scroll = h.querySelector<HTMLElement>(".ae-scroll")!.getBoundingClientRect();
       tools.hidden ||= r.bottom < scroll.top + 44 || r.top > scroll.bottom;
-      const top = r.top + (section.closest(".rd-ledger") || section.matches(".alb-block--story") ? -44 : 18);
+      const top = r.top + (section.closest(".rd-ledger") || section.matches(".alb-block--story,.alb-block--together") ? -44 : 18);
       tools.hidden ||= top < scroll.top;
       tools.style.top = `${top - hr.top}px`;
       tools.style.maxWidth = `${Math.max(0, scroll.width - 24)}px`;
@@ -272,7 +290,9 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
     const more = host()?.querySelector<HTMLElement>(".ae-more-sheet");
     if (more && !phone() && anchorRect) {
       const h = host()!.getBoundingClientRect(), r = anchorRect;
-      more.style.left = `${Math.max(12, Math.min(h.width - more.offsetWidth - 12, r.left - h.left))}px`;
+      const tools = host()?.querySelector<HTMLElement>(".ae-tools")?.getBoundingClientRect();
+      const left = overlay === "cards" && tools ? tools.left + tools.width / 2 - more.offsetWidth * .3 : r.left;
+      more.style.left = `${Math.max(12, Math.min(h.width - more.offsetWidth - 12, left - h.left))}px`;
       more.style.top = `${Math.max(60, Math.min(h.height - more.offsetHeight - 12, r.bottom - h.top + 8))}px`;
     }
     const add = host()?.querySelector<HTMLElement>(".ae-add-pop");
@@ -359,13 +379,15 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
 
     paintChrome(); updateStatus(); photos.hydrate(); lines.hydrate(); photoTools.hydrate();
   }
-  const clear = () => { fieldObserver?.disconnect(); clearPersonImages(); finishDrag(false); memoryPicks.clear(); newNicknames.clear(); lines.close(); photoTools.close(); photos.dispose(); materials = undefined; unusedCache = undefined; original = undefined; epoch++; session?.dispose(); session = undefined; personDispose?.(); resize.disconnect(); observed = null; html = ""; overlay = ""; };
+  const clear = () => { fieldObserver?.disconnect(); clearPersonImages(); finishDrag(false); memoryPicks.clear(); newNicknames.clear(); lines.close(); photoTools.close(); photos.dispose(); materials = undefined; lastTogether = undefined; togetherLoading = false; togetherError = ""; unusedCache = undefined; original = undefined; epoch++; session?.dispose(); session = undefined; personDispose?.(); resize.disconnect(); observed = null; html = ""; overlay = ""; };
   const open = async (initial: AlbumDocument) => {
     clear(); const generation = epoch; original = structuredClone(initial); selected = "";
+    lastTogether = initial.blocks.find(b => b.kind === "together")?.together;
     session = createAlbumEditSession(initial, api.save, updateStatus); repaint(); photoTools.open();
     if (initial.source.chatId && initial.source.sourceAvailable) {
       try {
         const loaded = await api.materials(initial.source.chatId, { me: initial.people.me.name, partner: initial.people.partner.name }); if (epoch !== generation || !original) return; materials = loaded;
+        lastTogether = loaded.together ?? lastTogether;
         const sources = albumItems(Object.values(materials.blocks).flat());
         original.blocks.forEach(b => albumItems(b.items).forEach(i => {
           const source = sources.find(s => i.origin ? s.origin?.kind === i.origin.kind && s.origin?.sourceId === i.origin.sourceId : s.id === i.id);
@@ -404,6 +426,30 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
     if (a === "block-menu") { showSheet("block", n); return; }
     if (a === "close-sheet") { closeSheet(); return; }
     if (a === "more") { memoryPicks.clear(); showSheet("more", n); return; }
+    if (a === "cards") { if (doc().blocks.find(b => b.id === selected)?.kind === "together") showSheet("cards", n); return; }
+    if (a === "toggle-card") {
+      const block = doc().blocks.find(b => b.id === selected), card = n.dataset.card as AlbumTogetherCardId;
+      if (!block?.together || !availableTogetherCards(block.together).includes(card)) return;
+      apply({ ...doc(), blocks: doc().blocks.map(b => b.id === selected ? { ...b, items: b.items.map(i => i.id === card ? { ...i, hidden: !i.hidden } : i) } : b) });
+      host()?.querySelector<HTMLInputElement>(`.ae-cards input[data-card="${card}"]`)?.focus({ preventScroll: true });
+      return;
+    }
+    if (a === "insert-together") {
+      if (togetherLoading) return;
+      const generation = epoch;
+      togetherLoading = true; togetherError = ""; repaintPanels();
+      try {
+        const records = lastTogether ?? (doc().source.sourceAvailable && doc().source.chatId ? await api.together(doc().source.chatId!) : undefined);
+        if (generation !== epoch || !session) return;
+        lastTogether = records;
+        if (!records || !availableTogetherCards(records).length) { togetherError = "아직 담을 기록이 없어요."; return; }
+        const next = insertBlock(doc(), selected, "together"), block = next.blocks[next.blocks.findIndex(b => b.id === selected) + 1]!;
+        block.together = structuredClone(records); block.items = albumTogetherItems(records); selected = block.id;
+        overlay = ""; apply(next); scrollToSelected();
+      } catch { if (generation === epoch) togetherError = "기록을 불러오지 못했어요. 다시 눌러 주세요."; }
+      finally { if (generation === epoch) { togetherLoading = false; repaintPanels(); } }
+      return;
+    }
     if (a === "insert-memories") { if (memoryPicks.size) insertMemories(moreItems(), [...memoryPicks]); return; }
     if (a === "insert-memory-block") {
       const kind = n.dataset.kind as AlbumBlockKind, candidates = unused()?.[kind];
@@ -525,7 +571,7 @@ export function createAlbumEditController(root: HTMLElement, api: Api, hooks: {
     if (e.key === "Enter" && !e.isComposing && n.isContentEditable && ["title", "date", "caption", "speaker", "subtitle", "periodLabel", "people.me.name", "people.partner.name"].includes(n.dataset.albumField ?? "")) { e.preventDefault(); n.blur(); return; }
     if ((e.key === "Enter" || e.key === " ") && !n.isContentEditable && n.matches("[data-album-field],[data-album-block]")) { e.preventDefault(); n.click(); if (!phone() && !n.hasAttribute("data-album-field")) host()?.querySelector<HTMLElement>(".ae-tools button")?.focus(); }
     if (e.key === "Tab" && overlay) {
-      const nodes = [...host()!.querySelectorAll<HTMLElement>(".ae-overlay button:not(:disabled),.ae-overlay textarea,.ae-overlay input:not([hidden])")].filter(n => n.getClientRects().length);
+      const nodes = [...host()!.querySelectorAll<HTMLElement>(".ae-overlay button:not(:disabled),.ae-overlay textarea,.ae-overlay input:not([hidden]):not(:disabled)")].filter(n => n.getClientRects().length);
       if (e.shiftKey && document.activeElement === nodes[0]) { e.preventDefault(); nodes.at(-1)?.focus(); }
       if (!e.shiftKey && document.activeElement === nodes.at(-1)) { e.preventDefault(); nodes[0]?.focus(); }
     }

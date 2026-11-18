@@ -1,10 +1,11 @@
+import { isPersonEntityType } from "@rcm/shared";
 import { escapeMemoryText } from "@rcm/shared";
 import { assertChatUnlocked, chatUpgradeLock } from './upgrade-lock.js';
 import { randomUUID } from "node:crypto";
 import { estimateTokens, PAIR_PROGRESS_DEFAULTS, PairProgressPatchSchema,
   type PairProgress, type PairProgressItem, type PairProgressCell, type PairProgressResponse, type ExtractionDraftResult } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { listEntities, normalizeEntityName } from "./entities.js";
+import { listEntities, modelEntityContext, normalizeEntityName } from "./entities.js";
 import { readPersonaName } from "./view-preferences.js";
 
 type Pair = Pick<PairProgress, "persona" | "character">;
@@ -69,7 +70,7 @@ function resolveProgressPairs(db: RcmDatabase, chatId: string, hint?: string): {
     .some(value => normalizeEntityName(value) === normalizeEntityName(name)));
   if (matches.length !== 1) return { pairs: [], unavailableReason: matches.length ? "persona_ambiguous" : "persona_missing" };
   const pairs = entities.filter(entity => entity.id !== matches[0]!.id && entity.setupProminence === "primary"
-    && ["character", "person"].includes(entity.type)).map(entity => ({ persona: matches[0]!.name, character: entity.name }));
+    && isPersonEntityType(entity.type)).map(entity => ({ persona: matches[0]!.name, character: entity.name }));
   return { pairs, unavailableReason: "not_primary_character" };
 }
 
@@ -201,7 +202,8 @@ export type ProgressDrop = { itemId: string; side: string; reason: string };
 
 export function prepareProgress(db: RcmDatabase, chatId: string, draft?: Pick<ExtractionDraftResult, "memories">) {
   // Only typed scene participation selects pairs; no prose meaning or keyword rules.
-  const pairs = listPairProgress(db, chatId);
+  const {allowsName}=modelEntityContext(db,chatId);
+  const pairs = listPairProgress(db, chatId).filter(pair=>allowsName(pair.persona)&&allowsName(pair.character));
   const matched = pairs.filter(pair => !draft || draft.memories.some(memory => includesProgressPair(memory.participants, pair)));
   const cells = matched
     .flatMap(pair => pair.items.filter(item => !item.hidden).flatMap(item => item.cells

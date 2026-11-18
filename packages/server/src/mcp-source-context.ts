@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { segmentSentences, estimateTokens, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange, type MemoryContextItem } from "@rcm/shared";
+import { segmentSentences, estimateTokens, mcpSourcePresentation, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange, type MemoryContextItem } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import type { SemanticSearchResult, SemanticSourceHit } from "./embedding.js";
 import { memoryAtomKey, memoryDetailAtomKey, memoryDialogueAtomKey } from "./memory-atoms.js";
 import { evidenceRanker } from "./mcp-evidence.js";
 import { presentationOnlySourcePassage } from "./source-evidence.js";
-import { ContextWindows } from "./source-context-window.js";
+import { ContextWindows, type Citation } from "./source-context-window.js";
 import { collectStateEvidence, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
 
 type Source = { message_id:string;canonical_content:string;canonical_hash:string;ordinal:number;role:string };
@@ -13,6 +13,27 @@ type Located = { source:Source;start:number;end:number;score:number;memoryId?:st
 type SourcePassage = { text:string;start:number;end:number;contiguous:boolean };
 export interface McpProvidedSourceDiagnostic { sources:number;windows:number;candidates:number }
 const hash=(text:string)=>createHash("sha256").update(text).digest("hex");
+
+/** Attach display-only coordinates after selection, without changing admission
+ * order or serializing transcript metadata into the public evidence schema. */
+export function prepareMcpSourcePresentation(db:RcmDatabase,chatId:string,answers:McpQuestionAnswer[]):void {
+  const sources=new Map<string,Source>();
+  const windows=new ContextWindows(sources);
+  const read=db.prepare("SELECT message_id,canonical_content,canonical_hash,ordinal,role FROM messages WHERE chat_id=? AND message_id=?");
+  for(const evidence of answers.flatMap(answer=>[...(answer.alreadyProvidedEvidence??[]),...answer.evidence])){
+    const range=evidence.sourceRange??evidence[mcpSourcePresentation]?.range;
+    if(evidence.kind!=="quote"||!range)continue;
+    const id=range.messageId;
+    if(!sources.has(id)){
+      const row=read.get(chatId,id) as Source|undefined;
+      if(row)sources.set(id,row);
+    }
+    const source=sources.get(id);if(!source)continue;
+    const blocks=windows.blocks(source);
+    evidence[mcpSourcePresentation]={ordinal:source.ordinal,range,hasVisibleTextBetween:(start,end)=>end>start&&blocks.some(block=>
+      block.start<end&&block.end>start&&Boolean(source.canonical_content.slice(Math.max(start,block.start),Math.min(end,block.end)).trim()))};
+  }
+}
 
 function sentenceRanges(text:string,offset=0):Array<{start:number;end:number}>{
   return segmentSentences(text).flatMap(segment=>{
@@ -77,7 +98,7 @@ function substantiallySameRange(left:McpSourceRange,right:McpSourceRange):boolea
   return shorter>0&&overlap/shorter>=.8;
 }
 
-function citationMetadata(db:RcmDatabase,chatId:string,source:Source,sourceRange:McpSourceRange):McpSourceMetadata[] {
+function citationMetadata(db:RcmDatabase,chatId:string,source:Source):McpSourceMetadata[] {
   const rows=db.prepare(`SELECT locations_json,evidence_json FROM visible_memory_details
     WHERE chat_id=? AND active=1 AND EXISTS(
       SELECT 1 FROM json_each(evidence_json) WHERE json_extract(value,'$.messageId')=?)`)
@@ -94,7 +115,6 @@ function citationMetadata(db:RcmDatabase,chatId:string,source:Source,sourceRange
       const start=source.canonical_content.indexOf(citation.quote);
       if(start<0||source.canonical_content.indexOf(citation.quote,start+1)>=0)continue;
       const range={messageId:source.message_id,start,end:start+citation.quote.length};
-      if(!rangesOverlap(range,sourceRange))continue;
       annotations.set(`${range.messageId}:${range.start}:${range.end}:${locations[0]}`,{sourceRange:range,location:locations[0].trim()});
     }
   }
@@ -124,7 +144,7 @@ function locateSourceHit(db:RcmDatabase,chatId:string,hit:SemanticSourceHit,sour
 /** Adds direct transcript and atom-bound source candidates. It does not decide
  * which candidate answers the question; the MCP evidence reranker does that. */
 export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQuestionAnswer[],items:MemoryContextItem[],
-  semantic:SemanticSearchResult[],tokenBudget:number,query:string,promptSourceMessageIds:string[]=[],bounded=false,providedSourceMessageIds:string[]=[],selectorCoverage=false,sourceMemoryIds:string[]=[],stateEvidence?:StateEvidence[]):{anchors:number;unmapped:number;windows:number;sourceCandidates:number;coherenceRemoved:number} {
+  semantic:SemanticSearchResult[],tokenBudget:number,query:string,promptSourceMessageIds:string[]=[],bounded=false,providedSourceMessageIds:string[]=[],selectorCoverage=false,sourceMemoryIds:string[]=[],stateEvidence?:StateEvidence[],queryRelevantAtomKeys:ReadonlySet<string>=new Set()) {
   const promptSources=new Set(promptSourceMessageIds);
   const read=db.prepare(`SELECT message_id,canonical_content,canonical_hash,ordinal,role FROM messages WHERE chat_id=? AND message_id=?
     AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`);
@@ -140,23 +160,43 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
     return cache.get(id);
   };
   let anchors=0,unmapped=0,windows=0,sourceCandidates=0,coherenceRemoved=0;
+  let metadataMs=0,metadataReads=0;
+  const metadataByMessage=new Map<string,McpSourceMetadata[]>();
+  const sourceMetadata=(row:Source,range:McpSourceRange)=>{
+    const started=performance.now();
+    let metadata=metadataByMessage.get(row.message_id);
+    if(!metadata){
+      metadata=citationMetadata(db,chatId,row);
+      metadataByMessage.set(row.message_id,metadata);
+      metadataReads++;
+    }
+    const annotations=metadata.filter(entry=>rangesOverlap(entry.sourceRange,range));
+    metadataMs+=performance.now()-started;
+    return annotations;
+  };
+  let semanticRanked=false;
   const evidencePositionCache=new Map<string,Located[]>();
-  const positionsForEvidence=(item:MemoryContextItem,evidence:McpQuestionAnswer["evidence"][number]):Located[]=>{
-    const cacheKey=`${item.id}\0${evidence.atomKey}`;
+  const positionsForAtom=(item:MemoryContextItem,atomKey:string):Located[]=>{
+    const cacheKey=`${item.id}\0${atomKey}`;
     const cached=evidencePositionCache.get(cacheKey);if(cached)return cached;
     const positions:Located[]=[];
-    const detail=item.details.find(candidate=>memoryDetailAtomKey(candidate)===evidence.atomKey);
+    const detail=item.details.find(candidate=>memoryDetailAtomKey(candidate)===atomKey);
     if(detail){
       const row=db.prepare("SELECT evidence_json FROM visible_memory_details WHERE chat_id=? AND id=? AND active=1").get(chatId,detail.id) as {evidence_json:string}|undefined;
-      for(const citation of JSON.parse(row?.evidence_json??"[]") as Array<{messageId?:string;quote?:string}>){
+      for(const citation of JSON.parse(row?.evidence_json??"[]") as Citation[]){
         if(!citation.messageId||!citation.quote||promptSources.has(citation.messageId))continue;
-        const current=source(citation.messageId);const start=current?.canonical_content.indexOf(citation.quote)??-1;
-        if(current&&start>=0&&current.canonical_content.indexOf(citation.quote,start+1)<0)
-          positions.push({source:current,start,end:start+citation.quote.length,score:1,memoryId:item.id});
+        const current=source(citation.messageId);
+        const start=citation.startOffset??current?.canonical_content.indexOf(citation.quote)??-1;
+        const end=citation.endOffset??start+citation.quote.length;
+        if(current&&(!citation.canonicalHash||current.canonical_hash===citation.canonicalHash)
+          &&Number.isInteger(start)&&Number.isInteger(end)&&start>=0&&end<=current.canonical_content.length
+          &&current.canonical_content.slice(start,end)===citation.quote
+          &&(citation.startOffset!==undefined||current.canonical_content.indexOf(citation.quote,start+1)<0))
+          positions.push({source:current,start,end,score:1,memoryId:item.id});
         else unmapped++;
       }
     }
-    const dialogue=item.keyDialogues.find(candidate=>memoryDialogueAtomKey(item.id,candidate)===evidence.atomKey);
+    const dialogue=item.keyDialogues.find(candidate=>memoryDialogueAtomKey(item.id,candidate)===atomKey);
     if(dialogue)for(const citation of dialogue.evidence){
       if(promptSources.has(citation.messageId))continue;
       const current=source(citation.messageId);
@@ -181,17 +221,19 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
   // Restore separate canonical windows throughout that message; proximity does
   // not grant the parent's date, place or character knowledge to those windows.
   const sceneSources: McpQuestionAnswer["evidence"] = [];
+  const sceneSourceIds = new Set<string>();
   for (const memoryId of bounded ? [] : sourceMemoryIds) {
     if (!items.some(item => item.id === memoryId)) continue;
     const parent = db.prepare("SELECT evidence_json FROM memories WHERE chat_id=? AND id=? AND active=1")
       .get(chatId, memoryId) as { evidence_json: string } | undefined;
     if (!parent) continue;
-    const visited = new Set<string>();
     for (const citation of JSON.parse(parent.evidence_json) as Array<{messageId?:string;quote?:string}>) {
-      if (!citation.messageId || visited.has(citation.messageId) || promptSources.has(citation.messageId)) continue;
+      if (!citation.messageId || sceneSourceIds.has(citation.messageId) || promptSources.has(citation.messageId)) continue;
       const current = source(citation.messageId);
       if (!current || (citation.quote && !current.canonical_content.includes(citation.quote))) continue;
-      visited.add(citation.messageId);
+      // Later parents would generate the same windows, all already considered
+      // by the global overlap check in this first parent's order.
+      sceneSourceIds.add(citation.messageId);
       for (const block of contextWindows.blocks(current)) {
         const window = contextWindows.around({ messageId: citation.messageId, canonicalHash: current.canonical_hash,
           quote: block.text, startOffset: block.start, endOffset: block.end }, 512);
@@ -205,10 +247,141 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
     }
   }
 
+  let boundedWindows=0;
   answers.forEach((answer,index)=>{
+    if(bounded){
+      const windowCeiling=Math.min(512,ceiling);
+      type Window = {source:Source;start:number;end:number;text:string;item:MemoryContextItem};
+      const anchored:Window[]=[],additional:Window[]=[];
+      const relevantPositions:Located[]=[];
+      const semanticPositions:Located[]=[];
+      for(const item of items){
+        const evidenceForItem=answer.evidence.filter(entry=>entry.memoryId===item.id);
+        if(!evidenceForItem.length&&!fullHits.length)continue;
+        const row=db.prepare("SELECT evidence_json FROM memories WHERE chat_id=? AND id=? AND active=1").get(chatId,item.id) as {evidence_json:string}|undefined;
+        const memoryPositions:Located[]=[];
+        for(const citation of JSON.parse(row?.evidence_json??"[]") as Array<{messageId?:string;quote?:string}>){
+          if(!citation.messageId||!citation.quote||promptSources.has(citation.messageId))continue;
+          const current=source(citation.messageId),start=current?.canonical_content.indexOf(citation.quote)??-1;
+          if(current&&start>=0&&current.canonical_content.indexOf(citation.quote,start+1)<0)
+            memoryPositions.push({source:current,start,end:start+citation.quote.length,score:1,memoryId:item.id});
+          else unmapped++;
+        }
+        const bounds=(positions:Located[],messageId:string)=>{
+          const own=positions.filter(p=>p.source.message_id===messageId);
+          return own.length?[Math.min(...own.map(p=>p.start)),Math.max(...own.map(p=>p.end))] as const:undefined;
+        };
+        const restore=(position:Located,limit=bounds(memoryPositions,position.source.message_id)):Window[]=>{
+          const window=contextWindows.around({messageId:position.source.message_id,canonicalHash:position.source.canonical_hash,
+            startOffset:position.start,endOffset:position.end,quote:position.source.canonical_content.slice(position.start,position.end)},windowCeiling,limit);
+          return window?[{source:position.source,start:window.provenance.start,end:window.provenance.end,text:window.text,item}]:[];
+        };
+        // Expand adds depth even around already-delivered atoms. Every verified
+        // position gets a window before ranking; citations do not spend slots.
+        const detailScores=new Map(semantic[0]?.atomHits?.get(item.id)?.filter(hit=>hit.kind==="memory_detail"&&hit.score>=.35)
+          .map(hit=>[hit.sourceId,Math.min(1,hit.score/1.05)]));
+        const detailKeys=new Map(item.details.map(detail=>[memoryDetailAtomKey(detail),detail.id]));
+        for(const evidence of evidenceForItem){
+          const positions=positionsForAtom(item,evidence.atomKey);anchors+=positions.length;
+          if(queryRelevantAtomKeys.has(evidence.atomKey))relevantPositions.push(...positions);
+          const score=detailScores.get(detailKeys.get(evidence.atomKey)??"");
+          if(score!==undefined)semanticPositions.push(...positions.map(position=>({...position,score,memoryId:item.id})));
+          anchored.push(...positions.flatMap(position=>restore(position)));
+        }
+        for(const position of evidenceForItem.length?memoryPositions:[]){
+          if(anchored.some(w=>w.source.message_id===position.source.message_id&&w.start<=position.start&&w.end>=position.end))continue;
+          additional.push(...restore(position));
+        }
+        // Authorized child citations establish source extent even when their
+        // atoms did not match the query or enter the answer shortlist.
+        const atomPositions=fullHits.length ? [...detailKeys.keys(),...item.keyDialogues.map(dialogue=>memoryDialogueAtomKey(item.id,dialogue))]
+          .flatMap(key=>positionsForAtom(item,key)) : [];
+        const scopedSources=new Set([...memoryPositions,...atomPositions].map(position=>position.source.message_id));
+        const chunks=fullHits.filter(hit=>hit.messageIds.some(id=>scopedSources.has(id))).flatMap(hit=>materialize(hit).flatMap(position=>{
+          const id=position.source.message_id;
+          if(promptSources.has(id)||position.score<=.35)return [];
+          const parent=bounds(memoryPositions,id);
+          const limits=parent ? [parent,...atomPositions.filter(atom=>atom.source.message_id===id&&(atom.start<parent[0]||atom.end>parent[1]))
+            .map(atom=>[atom.start,atom.end] as const)] : [bounds(atomPositions,id)];
+          return limits.flatMap(limit=>{
+            if(!limit)return [];
+            const start=Math.max(position.start,limit[0]),end=Math.min(position.end,limit[1]);
+            return start<end?[{...position,start,end,limit,memoryId:item.id}]:[];
+          });
+        }));
+        semanticPositions.push(...chunks);
+        for(const chunk of chunks.slice(0,24))for(const block of contextWindows.blocks(chunk.source)){
+          const start=Math.max(block.start,chunk.start),end=Math.min(block.end,chunk.end);
+          if(start>=end||[...anchored,...additional].some(window=>window.source.message_id===chunk.source.message_id&&window.start<=start&&window.end>=end))continue;
+          additional.push(...restore({...chunk,start,end},chunk.limit));
+        }
+      }
+      const groundedFocusMemories=new Set(relevantPositions.map(position=>position.memoryId));
+      const rankWindows=(entries:Window[])=>{
+        const merged:Window[]=[];
+        for(const entry of entries.sort((a,b)=>a.source.ordinal-b.source.ordinal||a.start-b.start)){
+          const prior=merged.at(-1);
+          if(prior&&prior.source.message_id===entry.source.message_id&&entry.start<prior.end){
+            if(entry.end<=prior.end)continue;
+            const text=prior.source.canonical_content.slice(prior.start,entry.end);
+            if(estimateTokens(text)<=windowCeiling){prior.end=entry.end;prior.text=text;}
+            else {
+              // Unexpected endpoints keep the original candidate; final exact
+              // overlap suppression can still trim it without failing the call.
+              if(!contextWindows.blocks(entry.source).some(block=>block.end===prior.end)){
+                merged.push({...entry});continue;
+              }
+              const suffix=entry.source.canonical_content.slice(prior.end,entry.end),leading=suffix.search(/\S/u);
+              if(leading>=0)merged.push({...entry,start:prior.end+leading,text:suffix.slice(leading)});
+            }
+          }else merged.push({...entry});
+        }
+        const rank=answer.question.trim()?evidenceRanker(answer.question,merged.map(w=>w.text)):undefined;
+        const ranked=merged.map(window=>{
+          const localized=semanticPositions.reduce((best,position)=>{
+            if(position.memoryId!==window.item.id||position.source.message_id!==window.source.message_id)return best;
+            const overlap=Math.min(position.end,window.end)-Math.max(position.start,window.start);
+            if(overlap<=0)return best;
+            const coverage=overlap/Math.min(position.end-position.start,window.end-window.start);
+            return Math.max(best,coverage*Math.max(0,(position.score-.35)/.65));
+          },0);
+          return {window,localized,score:Math.max(rank?.(window.text)??0,localized)};
+        })
+          .sort((a,b)=>b.score-a.score||a.window.source.ordinal-b.window.source.ordinal||a.window.start-b.window.start);
+        const floor=(ranked[0]?.score??0)*.5;
+        const localizedPeaks=new Map<string,number>();
+        for(const {window,localized} of ranked)if(localized>0)
+          localizedPeaks.set(window.item.id,Math.max(localizedPeaks.get(window.item.id)??0,localized));
+        semanticRanked ||= localizedPeaks.size>0;
+        const keepsWindow=({window,score,localized}:(typeof ranked)[number]):boolean=>{
+          const grounded=groundedFocusMemories.has(window.item.id);
+          const semanticPeak=localizedPeaks.get(window.item.id);
+          if(!rank||!grounded&&!semanticPeak||score>=floor)return true;
+          // A lexical-only window must not set the cutoff for paraphrased
+          // evidence when no lexical atom verified the focus.
+          if(!grounded&&semanticPeak&&localized>=semanticPeak*.5)return true;
+          return relevantPositions.some(position=>position.memoryId===window.item.id&&rangesOverlap(
+            {messageId:window.source.message_id,start:window.start,end:window.end},
+            {messageId:position.source.message_id,start:position.start,end:position.end}));
+        };
+        // Only narrow a memory with verified detail/dialogue focus anchors.
+        // A positional semantic hit can also ground narrowing. Scene-only
+        // matches retain the existing unscreened source context.
+        return ranked.filter(keepsWindow).map(({window})=>window);
+      };
+      for(const window of rankWindows([...anchored,...additional])){
+        if(boundedWindows>=10)break;
+        const sourceRange={messageId:window.source.message_id,start:window.start,end:window.end};
+        answer.evidence.push({atomKey:memoryAtomKey("source",hash(window.source.message_id+window.source.canonical_hash+window.text),window.text),
+          bundleKey:`expand-source:${window.item.id}:${sourceRange.messageId}:${sourceRange.start}`,memoryId:window.item.id,kind:"quote",text:window.text,
+          knownBy:[],basis:"archive context",context:window.item.title,sourceRange,
+          sourceMetadata:sourceMetadata(window.source,sourceRange)});
+        windows++;boundedWindows++;
+      }
+      return;
+    }
     answer.evidence.push(...sceneSources.filter(candidate => !answer.evidence.some(e => e.atomKey === candidate.atomKey)));
     windows += sceneSources.length;
-    let boundedWindows=0;
     const view=semantic[answers.length>1?index+1:0]??semantic[0];
     const focusHits=[...(view?.sourceHits??[])].filter(hit=>hit.score>=.35).sort((a,b)=>b.score-a.score);
     const fullPosition=new Map(fullHits.map((hit,rank)=>[hit.chunkId,rank]));
@@ -224,7 +397,7 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
     });
     const texts=passages.map(passage=>passage?.text??"");
     const focusRank=evidenceRanker(answer.question,texts);
-    const fullRank=evidenceRanker(query,texts);
+    const fullRank=query===answer.question ? focusRank : evidenceRanker(query,texts);
     const ranked=located.map((candidate,candidateIndex)=>{
       const text=texts[candidateIndex]!;
       const focusIndex=focusPosition.get(candidate.hit.chunkId);
@@ -245,7 +418,7 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
       // A display window may include adjacent paragraphs. Bind the source to
       // an atom only when the semantic hit itself overlaps that atom's exact
       // evidence, never because nearby text entered the display window.
-      const bound=Boolean(relatedItem&&relatedEvidence&&positionsForEvidence(relatedItem,relatedEvidence)
+      const bound=Boolean(relatedItem&&relatedEvidence&&positionsForAtom(relatedItem,relatedEvidence.atomKey)
         .some(anchor=>rangesOverlap({messageId:anchor.source.message_id,start:anchor.start,end:anchor.end},hitRange)));
       const key=bound?relatedEvidence!.bundleKey??relatedEvidence!.atomKey:`source:${position.source.message_id}:${position.start}`;
       // Different source hit ranges retain their own opportunity even when
@@ -253,7 +426,7 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
       answer.evidence.push({atomKey:memoryAtomKey("source",hash(position.source.message_id+position.source.canonical_hash+candidate.text),candidate.text),
         bundleKey:key,memoryId:bound?relatedItem?.id:undefined,kind:"quote",text:candidate.text,knownBy:[],basis:"archive context",
         context:bound?relatedItem?.title:undefined,sourceRange,
-        sourceMetadata:sourceRange?citationMetadata(db,chatId,position.source,sourceRange):undefined});
+        sourceMetadata:sourceRange?sourceMetadata(position.source,sourceRange):undefined});
       windows++;
     }
 
@@ -261,30 +434,20 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
       if(evidence.kind==="quote"&&evidence.basis==="archive context")continue;
       const item=items.find(candidate=>candidate.id===evidence.memoryId);
       if(!item)continue;
-      const positions=positionsForEvidence(item,evidence);
+      const positions=positionsForAtom(item,evidence.atomKey);
       anchors+=positions.length;
-      const positionRank=bounded?evidenceRanker(answer.question,positions.map(position=>position.source.canonical_content.slice(position.start,position.end))):undefined;
-      const selectedPositions=bounded?[...positions].sort((left,right)=>positionRank!(right.source.canonical_content.slice(right.start,right.end))-positionRank!(left.source.canonical_content.slice(left.start,left.end))).slice(0,2):positions;
-      for(const position of selectedPositions){
-      if(bounded&&boundedWindows>=10)break;
-      if(bounded&&answer.evidence.some(old=>old.kind==="quote"&&old.sourceRange?.messageId===position.source.message_id
-        &&old.sourceRange.start<=position.start&&old.sourceRange.end>=position.end))continue;
+      for(const position of positions){
       // Restore whole paragraphs around the verified anchor. Neighboring prose
       // is archive context, never an extension of the atom's character access.
-      const window=bounded?contextWindows.around({messageId:position.source.message_id,
-        canonicalHash:position.source.canonical_hash,startOffset:position.start,endOffset:position.end,
-        quote:position.source.canonical_content.slice(position.start,position.end)},Math.min(512,ceiling)):undefined;
-      const passage=bounded?(window?{text:window.text,start:window.provenance.start,end:window.provenance.end,contiguous:true}:undefined)
-        :paragraphsAround(position.source,position.start,position.end,ceiling,true);const text=passage?.text;
+      const passage=paragraphsAround(position.source,position.start,position.end,ceiling,true);const text=passage?.text;
       if(!passage||!text||text===evidence.text||answer.evidence.some(old=>old.text.includes(text)))continue;
       const key=evidence.bundleKey??evidence.atomKey;evidence.bundleKey=key;
       const sourceRange=passage.contiguous?{messageId:position.source.message_id,start:passage.start,end:passage.end}:undefined;
       answer.evidence.push({atomKey:memoryAtomKey("source",hash(position.source.message_id+position.source.canonical_hash+text),text),bundleKey:key,
         memoryId:item.id,kind:"quote",text,knownBy:[],basis:"archive context",
         context:item.title,sourceRange,
-        sourceMetadata:sourceRange?citationMetadata(db,chatId,position.source,sourceRange):undefined});
+        sourceMetadata:sourceRange?sourceMetadata(position.source,sourceRange):undefined});
       windows++;
-      if(bounded)boundedWindows++;
       }
     }
   });
@@ -332,7 +495,7 @@ export function appendMcpSourceContext(db:RcmDatabase,chatId:string,answers:McpQ
       windows++;
     }
   }
-  return {anchors,unmapped,windows,sourceCandidates,coherenceRemoved};
+  return {anchors,unmapped,windows,sourceCandidates,coherenceRemoved,semanticRanked,metadataMs,metadataReads};
 }
 
 /** Adds exact canonical windows from messages that the main model can already

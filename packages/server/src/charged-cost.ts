@@ -1,4 +1,5 @@
-import { escapeMemoryText as escape } from "@rcm/shared";
+import { isMainCharacterEntity, escapeMemoryText as escape } from "@rcm/shared";
+import { modelEntityContext } from "./entities.js";
 import type { RcmDatabase } from "./db.js";
 import { estimateTokens, narrationLine, viewpointUnknownTag, NARRATION_NAME_MAX_CHARACTERS, povSlots, projectMemoryScene, renderMemoryScene, type CardRenderOptions, type MemoryScene } from "@rcm/shared";
 import { buildEmissionPlan, emittedMemoryItems, type EmissionPlan } from "./emission-plan.js";
@@ -15,7 +16,7 @@ export function packetPricing(names: readonly string[]): PacketPricing {
 }
 
 export function chatPacketPricing(db: RcmDatabase, chatId: string): PacketPricing {
-  return packetPricing((db.prepare("SELECT name FROM entities WHERE chat_id=? AND type='character'").all(chatId) as Array<{name:string}>).map(row => row.name));
+  return packetPricing(modelEntityContext(db, chatId).entities.filter(isMainCharacterEntity).map(entity => entity.name));
 }
 
 // Standalone callers without a chat retain a safe bound; request paths pass their own pricing.

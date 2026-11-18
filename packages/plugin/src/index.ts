@@ -4,11 +4,11 @@ import { openDashboard } from "./dashboard.js";
 import { registerMaskToolBridge } from "./mask-bridge.js";
 import { createRuntime, installInitializationRequestGate, installRequestHooks } from "./runtime.js";
 import { addLog } from "./settings.js";
-import { drainWorker, heartbeatServerWorker } from "./worker.js";
+import { drainWorker } from "./worker.js";
 import { registerMemoryToolAdapters } from "./tool-adapters.js";
 import { installStatusWidget, updateWorkerMenuButton, registerDashboardSetting } from "./attention.js";
 import { installActivityCoordinator } from "./activity.js";
-import { observeCurrentHostGeneration, readOptionalDashboardContext } from "./context.js";
+import { readOptionalDashboardContext } from "./context.js";
 import { isServerConfigured } from "./connection.js";
 declare const __RCM_DISTRIBUTION__: boolean;
 
@@ -43,16 +43,6 @@ void (async () => {
   installActivityCoordinator(state, client);
   await updateWorkerMenuButton(state);
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible") return;
-    state.requestActivityRefresh?.();
-    void observeCurrentHostGeneration(state).then(() => drainWorker(state, client));
-  });
-  window.addEventListener("online", () => {
-    state.requestActivityRefresh?.();
-    void drainWorker(state, client);
-  });
-  state.serverHeartbeatTimer = window.setInterval(() => void heartbeatServerWorker(state, client), 15_000);
   addLog(state.logs, "info", "Risu Cognitive Memory initialized", "PLUGIN_INITIALIZED");
   if (isServerConfigured(state.settings)) {
     if (state.settings.extractionEngine === "server" && state.settings.workerPaused && !state.settings.workerAttention) void client.pauseServerWorker();

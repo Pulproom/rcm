@@ -1,14 +1,15 @@
 import { z } from "zod";
+import { AlbumTogetherRecordsSchema } from "./album-together.js";
 import { AlbumBondSchema } from "./album-bond.js";
 
 export const ALBUM_DOCUMENT_VERSION = 1;
-export const ALBUM_BLOCK_KINDS = ["cover", "intro", "firsts", "story", "quotes", "promises", "bond", "hearts", "progress", "nicknames", "gallery", "intimacy", "text", "photo", "divider"] as const;
+export const ALBUM_BLOCK_KINDS = ["cover", "intro", "firsts", "story", "quotes", "promises", "bond", "hearts", "progress", "nicknames", "gallery", "intimacy", "text", "photo", "divider", "together"] as const;
 export const ALBUM_THEMES = ["book", "program", "lp", "film"] as const;
 export type AlbumBlockKind = typeof ALBUM_BLOCK_KINDS[number];
 export type AlbumTheme = typeof ALBUM_THEMES[number];
 
 /** Default reading order of a new draft: letters, story, then supporting records. */
-export const ALBUM_DRAFT_ORDER: readonly AlbumBlockKind[] = ["cover", "intro", "hearts", "story", "quotes", "promises", "gallery", "nicknames", "firsts", "bond", "progress", "intimacy", "text", "photo", "divider"];
+export const ALBUM_DRAFT_ORDER: readonly AlbumBlockKind[] = ["cover", "intro", "together", "hearts", "story", "quotes", "promises", "gallery", "nicknames", "firsts", "bond", "progress", "intimacy", "text", "photo", "divider"];
 
 export function defaultBlockEnabled(kind: AlbumBlockKind): boolean {
   return kind !== "intimacy" && kind !== "text" && kind !== "photo" && kind !== "divider";
@@ -16,10 +17,10 @@ export function defaultBlockEnabled(kind: AlbumBlockKind): boolean {
 
 /** Implemented layouts only, default first. Stored layout strings remain untouched. */
 export const ALBUM_THEME_LAYOUTS: Record<AlbumTheme, Record<AlbumBlockKind, readonly string[]>> = {
-  book: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"] },
-  program: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"] },
-  lp: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"] },
-  film: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"] },
+  book: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"], together: ["ledger"] },
+  program: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"], together: ["ledger"] },
+  lp: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"], together: ["ledger"] },
+  film: { cover: ["title"], intro: ["people"], firsts: ["table"], story: ["records"], quotes: ["quote"], promises: ["list"], bond: ["flow"], hearts: ["letter"], progress: ["checklist"], nicknames: ["labels"], gallery: ["grid"], intimacy: ["list"], text: ["paragraph"], photo: ["group"], divider: ["decoration"], together: ["ledger"] },
 };
 
 export const ALBUM_TINTS: Record<AlbumTheme, readonly string[]> = {
@@ -77,6 +78,7 @@ export const AlbumBlockSchema = z.object({
   title: text.optional(),
   items: z.array(AlbumItemSchema).default([]),
   bond: AlbumBondSchema.optional(),
+  together: AlbumTogetherRecordsSchema.optional().catch(undefined),
   photoColumns: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional().catch(undefined),
   photoShape: AlbumPhotoShapeSchema.optional().catch(undefined),
 });

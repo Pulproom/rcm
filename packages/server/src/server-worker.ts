@@ -82,6 +82,17 @@ export class ServerExtractionWorker {
     return this.#status(chatId);
   }
 
+  /** In-memory inputs to status, excluding the intentionally ignored control lease.
+   * Queue, attribution and held-chat changes are covered by the DB change token. */
+  idleWaitToken(chatId?: string): string {
+    return JSON.stringify([
+      this.store.config.engine, this.store.config.engine === 'server' ? this.store.modelReady : undefined,
+      this.#manualPaused, this.#faulted, this.#lastError, this.#lastCompletedAt,
+      [...this.#active].map(([id, active]) => [id, active.phase]),
+      chatId ? this.#auxiliaryCalls.get(chatId) : undefined,
+    ]);
+  }
+
   #status(chatId?: string): ServerWorkerStatus {
     const engine = this.store.config.engine;
     const controlled = this.#controlLeaseUntil > Date.now();

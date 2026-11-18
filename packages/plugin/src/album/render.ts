@@ -1,6 +1,8 @@
 import { ALBUM_THEMES, albumDay, albumDayDots, albumPeriod, albumPeriodDots, albumPromiseDay, albumDateFormat, albumLine, albumLyricLines, albumParticle, albumPromiseStatus, albumStatusLabel, parseStoryTime, resolveAlbumTint, albumCoverQuote, sortAlbumItemsByDate, sortAlbumFirsts, type AlbumBlock, type AlbumBlockKind, type AlbumDocument, type AlbumItem, albumGalleryLayout, albumDefaultFit, albumImageRatio, albumPhotoRatio, albumPhotoGroupLayout, type AlbumPhotoFit, type AlbumPhotoShape, type AlbumImageSize, type AlbumTheme } from "@rcm/shared";
 import { escapeHtml as esc, icon } from "../dashboard/film/ui.js";
 import { albumThemeCss, albumThemeVoice } from "./themes/index.js";
+import { togetherAsOf, togetherCardText, togetherDay, togetherHour, togetherLocal, togetherNumber, togetherStreakRows, visibleTogetherCards } from "./together.js";
+import type { AlbumTogetherRecords } from "@rcm/shared";
 
 export interface AlbumSection { id: string; blockId: string; label: string; number: string }
 export interface AlbumRenderOptions {
@@ -334,8 +336,64 @@ function readingPeople(c: Context): string {
   });
   return `<div class="rd-people">${cards.join("")}</div>`;
 }
+function readingTogetherDays(r: AlbumTogetherRecords): string {
+  const DAY = 86_400_000, stamp = (date: string) => Date.parse(`${date}T00:00:00Z`);
+  const today = togetherLocal(r, r.asOf).date, end = stamp(today), cutoff = new Date(end); cutoff.setUTCFullYear(cutoff.getUTCFullYear() - 1);
+  const first = r.firstAt === undefined ? r.days?.[0]?.[0] ?? today : togetherLocal(r, r.firstAt).date;
+  // Draw at least 39 weeks so a young chat keeps the calendar's cell size; days before the first chat stay empty.
+  const MIN_WEEKS = 39;
+  const start = Math.max(stamp(first), cutoff.getTime()), shown = Math.min(start, end - (MIN_WEEKS * 7 - 1) * DAY);
+  const monday = shown - ((new Date(shown).getUTCDay() + 6) % 7) * DAY;
+  const weeks = Math.max(1, Math.ceil((end - monday + DAY) / (7 * DAY))), days = new Map(r.days);
+  const values = (r.days ?? []).filter(([date, count]) => stamp(date) >= start && stamp(date) <= end && count > 0).map(([, n]) => n).sort((a, b) => a - b);
+  const quartiles = [.25, .5, .75].map(p => values[Math.max(0, Math.ceil(values.length * p) - 1)] ?? 0);
+  const labels: { column: number; label: string }[] = [], cells: string[] = [];
+  let month = "";
+  for (let i = 0; i < weeks * 7; i++) {
+    const time = monday + i * DAY, date = new Date(time).toISOString().slice(0, 10), count = days.get(date) ?? 0;
+    if (time < shown || time > end) { cells.push('<i class="z"></i>'); continue; }
+    if (date.slice(0, 7) !== month) {
+      month = date.slice(0, 7);
+      const column = Math.floor(i / 7) + 1, label = `<span style="grid-column:${column}">${Number(date.slice(5, 7))}월</span>`;
+      // A month that starts within two columns of the next label would overlap it; keep the later month.
+      if (labels.length && column - labels.at(-1)!.column < 3) labels.pop();
+      labels.push({ column, label });
+    }
+    const level = count ? 1 + quartiles.filter(q => count > q).length : 0;
+    cells.push(`<i class="l${level}${r.topDay?.date === date ? " top" : ""}" title="${esc(togetherDay(date, true))} · ${togetherNumber(count)}번"></i>`);
+  }
+  const startMonth = Number(new Date(shown).getUTCMonth()) + 1, endMonth = Number(today.slice(5, 7));
+  const top = r.topDay ? ` 가장 많이 만난 날은 ${Number(r.topDay.date.slice(5, 7))}월 ${Number(r.topDay.date.slice(8))}일, ${togetherNumber(r.topDay.turns)}번.` : "";
+  return `<div class="rd-days" style="--weeks:${weeks}" role="img" aria-label="${esc(`${startMonth}월부터 ${endMonth}월까지 날마다 만난 양.${top}`)}"><div class="rd-together-months">${labels.map(l => l.label).join("")}</div><div class="rd-together-cells">${cells.join("")}</div></div>${r.topDay ? `<p class="rd-note">가장 많이 만난 날 <b>${esc(togetherDay(r.topDay.date))}</b> · ${togetherNumber(r.topDay.turns)}번</p>` : ""}`;
+}
+function readingTogether(block: AlbumBlock, c: Context): string {
+  const r = block.together;
+  if (!r) return "";
+  const cards = visibleTogetherCards(block);
+  const row = (label: string, value: string) => `<div><dt>${esc(label)}</dt>${readingSkin(c).sides ? `<div class="rd-record-list"><dd>${value}</dd></div>` : `<dd>${value}</dd>`}</div>`;
+  const main: string[] = [], optional: string[] = [];
+  for (const card of cards) {
+    const text = togetherCardText(r, card);
+    if (["first", "stories", "words", "two-times"].includes(card)) {
+      main.push(row(text.label, card === "two-times" ? `<span class="rd-two">${esc(text.value)}</span>` : `<b>${esc(text.value)}</b>${text.note ? `<small>${esc(text.note)}</small>` : ""}`));
+      continue;
+    }
+    let body = "";
+    if (card === "days") body = readingTogetherDays(r);
+    if (card === "hours") {
+      const max = Math.max(1, ...(r.hours ?? []));
+      body = `<div class="rd-hours" role="img" aria-label="${esc(`시간대별로 만난 양. ${togetherHour(r.peakHour!)}대가 가장 많음.`)}"><div class="rd-together-bars">${(r.hours ?? []).map((n, hour) => `<i style="--h:${n / max}"${hour === r.peakHour ? ' class="pk"' : ""}></i>`).join("")}</div><div class="rd-together-ticks"><span>자정</span><span>오전 6시</span><span>정오</span><span>오후 6시</span></div></div><p class="rd-note">주로 <b>${esc(togetherHour(r.peakHour!))}</b>쯤 만났어요</p>`;
+    }
+    if (card === "streak") body = `<dl class="rd-ledger rd-together-ledger">${togetherStreakRows(r).map(text =>
+      row(text.label, `<b>${esc(text.lead)}</b>${esc(text.value.slice(text.lead.length))}<small>${esc(text.note)}</small>`)).join("")}</dl>`;
+    if (card === "quiz") body = `<p class="rd-quiz"><b>${togetherNumber(r.quiz!.answered)}문제</b> 중 ${togetherNumber(r.quiz!.correct)}개 맞힘</p><p class="rd-note">${esc(text.note)}</p>`;
+    optional.push(`<div class="rd-together-opt"><h3 class="rd-together-h3">${esc(text.label)}</h3>${body}</div>`);
+  }
+  return `${main.length ? `<dl class="rd-ledger rd-together-ledger">${main.join("")}</dl>` : ""}${optional.length ? `<div class="rd-together-optional">${optional.join("")}</div>` : ""}`;
+}
 function readingSection(id: string, title: string, body: string, block: AlbumBlock, c: Context): string {
-  const heading = block.kind !== "quotes" && (title || c.options.mode === "edit") ? field("h2", "title", title, c, "rd-h2") : "";
+  const titleHtml = block.kind !== "quotes" && (title || c.options.mode === "edit") ? field("h2", "title", title, c, "rd-h2") : "";
+  const heading = block.kind === "together" && block.together ? `<div class="rd-together-head">${titleHtml}<span class="rd-asof">${esc(togetherAsOf(block.together))}</span></div>` : titleHtml;
   const gallery = albumGalleryLayout(block);
   const photos = ["photo", "gallery"].includes(block.kind) ? ` data-photo-columns="${block.kind === "gallery" ? gallery.columns : block.photoColumns ?? 2}" data-photo-shape="${block.kind === "gallery" ? gallery.shape : block.photoShape ?? "auto"}" style="--album-photo-columns:${block.kind === "gallery" ? gallery.columns : block.photoColumns ?? 2}"` : "";
   return `<section${photos} class="rd-sec${readingSkin(c).paper ? " rd-col" : ""} alb-block alb-block--${block.kind}${block.hidden ? " alb-block--hidden" : ""}"${c.options.mode === "edit" ? editAttr("block", block.id, c) : ` id="${id}" tabindex="-1"`}>${readingSkin(c).paper ? '<div class="rd-dbl"></div>' : ""}<div class="rd-row"><div class="rd-text">${heading}${body}</div></div></section>`;
@@ -388,7 +446,8 @@ function renderReading(doc: AlbumDocument, c: Context): { html: string; sections
     if (block.kind === "divider") { parts.push(alignAfter(`<div class="alb-block alb-block--divider"${editAttr("block", block.id, c)}><hr class="rd-divider"></div>`)); continue; }
     const title = readingTitle(block, c);
     let body = "";
-    if (block.kind === "quotes") body = readingQuotes(items, shown, sub);
+    if (block.kind === "together") { body = readingTogether(block, sub); if (!body && !edit) continue; }
+    else if (block.kind === "quotes") body = readingQuotes(items, shown, sub);
     else if (block.kind === "promises") body = items.length ? readingPromises(items, sub) : "";
     else if (block.kind === "hearts") body = items.length ? readingHearts(items, sub) : "";
     else if (block.kind === "intro") body = readingPeople(sub);

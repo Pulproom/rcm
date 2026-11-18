@@ -5,19 +5,33 @@ import { memoryDetailAtomKey, memoryDialogueAtomKey, memorySummaryAtomKey } from
 
 /** Retrieval ranking only: term rarity is measured in the accessible corpus.
  * No natural-language label is interpreted as an answer type or truth claim. */
-export function evidenceRanker(query: string, corpus: string[]): (text: string) => number {
-  const documents = corpus.map(text => new Set(normalizeSearchTokens(text)));
-  const weights = new Map([...new Set(normalizeSearchTokens(query))].map(token => {
+const FOCUSED_MATCH_FLOOR = .12;
+
+export function evidenceRanker(query: string, corpus: string[], exactMatchFloor = 0): (text: string) => number {
+  if (!corpus.length) return () => 0;
+  const tokensFor = (text: string) => new Set(normalizeSearchTokens(text, undefined, Infinity));
+  const corpusTokens = new Map<string, Set<string>>();
+  const documents = corpus.map(text => {
+    const tokens = corpusTokens.get(text) ?? tokensFor(text);
+    corpusTokens.set(text, tokens);
+    return tokens;
+  });
+  const weights = [...tokensFor(query)].map(token => {
     const frequency = documents.filter(document => document.has(token)).length;
-    return [token, Math.log(1 + documents.length / Math.max(1, frequency))] as const;
-  }));
-  const total = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
+    return [token, Math.log1p((documents.length - frequency + .5) / (frequency + .5))] as const;
+  });
+  // Normalize weighted coverage without rescaling a query made entirely of
+  // nearly ubiquitous terms into a high-confidence match.
+  const weightSum = weights.reduce((sum, [, weight]) => sum + weight, 0);
+  const total = Math.max(weights.length, weightSum);
   const scores = new Map<string, number>();
   return text => {
     const cached = scores.get(text);
     if (cached !== undefined) return cached;
-    const tokens = new Set(normalizeSearchTokens(text));
-    const score = total ? [...weights].reduce((sum, [token, weight]) => sum + (tokens.has(token) ? weight : 0), 0) / total : 0;
+    const tokens = corpusTokens.get(text) ?? tokensFor(text);
+    const matched = weights.reduce((sum, [token, weight]) => sum + (tokens.has(token) ? weight : 0), 0);
+    const exact = weightSum > 0 && matched === weightSum;
+    const score = Math.max(total ? matched / total : 0, exact ? exactMatchFloor : 0);
     scores.set(text, score);
     return score;
   };
@@ -31,15 +45,15 @@ export interface McpRecordSelection {
   sourceMemoryIds: string[];
   /** Query-grounded atoms that remain useful if final budget removes them. */
   eligibleAtomKeysByMemory: Map<string, Set<string>>;
+  /** Focus matches before core/factual context and archive siblings are added. */
+  queryRelevantAtomKeys: Set<string>;
 }
 
-type AtomCandidate = { evidence: McpEvidence; memoryId: string; detailId?: string; score: number; directScore: number; core: boolean; supplied: boolean };
+type AtomCandidate = { evidence: McpEvidence; memoryId: string; detailId?: string; score: number; directScore: number; lexicalScore?: number; core: boolean; supplied: boolean };
 
-/** A focused ref expansion has no semantic or generative call. Keep only the
- * strongest atom-local lexical matches plus factual/core context when needed.
- * An absent focus returns no atom instead of silently dumping the whole
- * referenced record. */
-function focusedSeedCandidates(candidates: AtomCandidate[]): AtomCandidate[] {
+/** Shortlist the strongest direct lexical or stored-vector matches for a
+ * focused ref, with factual or core context where needed. */
+function focusedSeedCandidates(candidates: AtomCandidate[], queryRelevant?: Set<string>): AtomCandidate[] {
   const ranked = candidates.filter(candidate => candidate.directScore > 0)
     .sort((left, right) => right.directScore - left.directScore || right.score - left.score);
   const peak = ranked[0]?.directScore ?? 0;
@@ -47,7 +61,7 @@ function focusedSeedCandidates(candidates: AtomCandidate[]): AtomCandidate[] {
   // This rejects stopword-only overlap without a language-specific stopword
   // list. A wrong ref should report no local match instead of exposing the
   // memory's unrelated core and source transcript.
-  if (peak < .12) return [];
+  if (peak < FOCUSED_MATCH_FLOOR) return [];
   const selected = ranked.filter(candidate => candidate.directScore >= peak * .4).slice(0, 6);
   // A short line often repeats only one distinctive term from the surrounding
   // fact. Once a real local match exists, keep up to two such dialogue atoms
@@ -56,6 +70,7 @@ function focusedSeedCandidates(candidates: AtomCandidate[]): AtomCandidate[] {
     && candidate.directScore >= peak * .2 && !selected.includes(candidate)).slice(0, 2)) {
     if (selected.length < 6) selected.push(dialogue);
   }
+  for (const candidate of selected) queryRelevant?.add(candidate.evidence.atomKey);
   const context = candidates.filter(candidate => candidate.core)
     .sort((left, right) => right.directScore - left.directScore || right.score - left.score)[0];
   if (context && !selected.includes(context)) return [context, ...selected.slice(0, 5)];
@@ -77,7 +92,7 @@ export function memoryDetailEvidence(item: MemoryContextItem, detail: MemoryCont
   const atomKey=memoryDetailAtomKey(detail);
   return {atomKey,bundleKey:`anchor:${atomKey}`,memoryId:item.id,kind:"fact",text:detail.text,time:item.storyTime,
     location:detail.locations.join(", "),knownBy:detail.knownBy,knownByEveryone:detail.knownByEveryone,
-    knownByLabels:detail.knownByLabels,basis:detail.epistemic,context:item.title};
+    knownByLabels:detail.knownByLabels,hiddenFrom:detail.hiddenFrom,basis:detail.epistemic,context:item.title};
 }
 
 /** Selects answer evidence per requested question. Parent summaries may locate a
@@ -86,9 +101,14 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
   supplied: Set<string>, seed?: string, options: { searchEnvelopes?: Map<string,string>; referenceMemoryId?: string; archiveView?: boolean } = {}): McpRecordSelection {
   const sceneText = (item: MemoryContextItem) => [options.searchEnvelopes?.get(item.id), item.title, item.content,
     ...item.details.map(detail => detail.text), ...item.keyDialogues.map(dialogue => dialogue.text)].filter(Boolean).join(" ");
-  const corpus = items.flatMap(item => [sceneText(item), ...item.details.map(detail => detail.text), ...item.keyDialogues.map(dialogue => dialogue.text)]);
+  const corpus = items.flatMap(item => {
+    const atoms = [...item.details.map(detail => detail.text), ...item.keyDialogues.map(dialogue => dialogue.text)];
+    // A roll-up of the only atom supplies no independent frequency evidence.
+    return items.length === 1 && atoms.length === 1 ? atoms : [sceneText(item), ...atoms];
+  });
   const questions = facets.length ? facets : [query];
   const eligibleAtomKeysByMemory = new Map<string, Set<string>>();
+  const queryRelevantAtomKeys = new Set<string>();
   const markEligible = (memoryId: string, atomKey: string) => {
     const keys = eligibleAtomKeysByMemory.get(memoryId) ?? new Set<string>();
     keys.add(atomKey); eligibleAtomKeysByMemory.set(memoryId, keys);
@@ -96,11 +116,14 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
   const selectedDetails = new Set<string>();
   const selectedMemories = new Set<string>();
   const sourceMemories = new Set<string>();
-  const fullRank = evidenceRanker(query, corpus);
+  // A supplied reference already identifies the record. A complete lexical
+  // match can qualify inside it even when every matching term is common.
+  const exactMatchFloor = seed ? FOCUSED_MATCH_FLOOR : 0;
+  const fullRank = evidenceRanker(query, corpus, exactMatchFloor);
   const fullView = semantic[0];
 
   const answers = questions.map((question, questionIndex): McpQuestionAnswer => {
-    const focusRank = facets.length ? evidenceRanker(question, corpus) : fullRank;
+    const focusRank = facets.length ? evidenceRanker(question, corpus, exactMatchFloor) : fullRank;
     const view = facets.length ? semantic[questionIndex + 1] ?? semantic[0] : semantic[0];
     const candidates: AtomCandidate[] = [];
     const scenes: Array<{ id: string; score: number }> = [];
@@ -123,7 +146,8 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
       // timeline record). An atom-scoped parent's summary never grants access.
       if (emitsMemoryPlot(item)) {
         const atomKey = memorySummaryAtomKey(item)!;
-        candidates.push({memoryId:item.id,supplied:supplied.has(atomKey),score:Math.max(sceneLexical,sceneSemantic),directScore:sceneLexical,core:true,
+        candidates.push({memoryId:item.id,supplied:supplied.has(atomKey),score:Math.max(sceneLexical,sceneSemantic),
+          directScore:target && sceneSemantic >= .35 ? Math.max(sceneLexical,sceneSemantic) : sceneLexical,lexicalScore:sceneLexical,core:true,
           evidence:memoryPlotEvidence(item)});
       }
       const directDetails = new Map((view?.atomHits?.get(item.id) ?? [])
@@ -135,7 +159,7 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
         const fullLexical = facets.length ? focusLexical : fullRank(atomText);
         const directSemantic = directDetails.get(detail.id) ?? 0;
         if (!target && focusLexical < .12 && fullLexical < .16 && directSemantic < .35) continue;
-        candidates.push({ memoryId:item.id, detailId:detail.id, supplied:supplied.has(atomKey), directScore:focusLexical + directSemantic, core:isAuthorCard(item) ? planMemoryCard(item).minimumUnitIds.includes(detail.id) : detail.role === "core",
+        candidates.push({ memoryId:item.id, detailId:detail.id, supplied:supplied.has(atomKey), directScore:focusLexical + directSemantic, lexicalScore:focusLexical, core:isAuthorCard(item) ? planMemoryCard(item).minimumUnitIds.includes(detail.id) : detail.role === "core",
           score: focusLexical * .72 + fullLexical * .28 + directSemantic * .32
             + Math.max(sceneLexical, sceneSemantic) * .08 + Math.max(fullSceneLexical, fullSceneSemantic) * .03,
           evidence:memoryDetailEvidence(item,detail) });
@@ -170,7 +194,11 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
     for (const memoryId of memoryIds) {
       const ranked = candidates.filter(candidate => candidate.memoryId === memoryId);
       const focused = Boolean(seed && query.trim());
-      const focusedCandidates = focused ? focusedSeedCandidates(ranked) : ranked;
+      const semanticFocus = focused && (view?.hits.has(memoryId) ?? false);
+      const focusedCandidates = focused ? focusedSeedCandidates(ranked, semanticFocus ? undefined : queryRelevantAtomKeys) : ranked;
+      // The legacy citation exception protects lexical atom hits. Semantic
+      // citations are already scored by their exact overlap with each window.
+      if (semanticFocus) focusedSeedCandidates(ranked.map(candidate => ({...candidate,directScore:candidate.lexicalScore ?? candidate.directScore})), queryRelevantAtomKeys);
       chosen.push(...focusedCandidates);
       if (focused && (!options.archiveView || !focusedCandidates.length)) continue;
       const item = items.find(item => item.id === memoryId)!;
@@ -198,5 +226,5 @@ export function rankMcpRecords(items: MemoryContextItem[], query: string, facets
     return {question,evidence:chosen.map(candidate=>candidate.evidence),alreadyPresent:chosen.some(candidate=>candidate.supplied),
       relatedRecords:true,searchUnavailable:view?.searchUnavailable};
   });
-  return {answers,detailIds:[...selectedDetails],memoryIds:[...selectedMemories],sourceMemoryIds:[...sourceMemories],eligibleAtomKeysByMemory};
+  return {answers,detailIds:[...selectedDetails],memoryIds:[...selectedMemories],sourceMemoryIds:[...sourceMemories],eligibleAtomKeysByMemory,queryRelevantAtomKeys};
 }

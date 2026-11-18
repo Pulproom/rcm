@@ -1,4 +1,4 @@
-import type { AlbumDocument, AlbumMaterials, AlbumSummary, AlbumUpdateCandidates, AlbumPair, AlbumChatSummary, AlbumTransferPage } from "@rcm/shared";
+import type { AlbumDocument, AlbumMaterials, AlbumSummary, AlbumUpdateCandidates, AlbumPair, AlbumChatSummary, AlbumTransferPage, AlbumTogetherRecords } from "@rcm/shared";
 import type { ServerClient } from "../api-client.js";
 
 // API100 wire shapes. Keep the browser client independent of server/Node imports.
@@ -45,6 +45,7 @@ export function albumClient(client: Pick<ServerClient, "request" | "raw" | "url"
   type CachedPhoto = { albumId: string; photoId: string; size: AlbumPhotoSize; controller: AbortController; promise: Promise<string>; url?: string };
   const cache = new Map<string, CachedPhoto>();
   const path = (id: string) => `/v1/albums/${encodeURIComponent(id)}`;
+  const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
   const photoPath = (id: string, photoId: string) => `${path(id)}/photos/${encodeURIComponent(photoId)}`;
   const invalidate = (albumId: string, photoId?: string, size?: AlbumPhotoSize): void => {
     for (const [key, entry] of cache) if (entry.albumId === albumId && (photoId === undefined || entry.photoId === photoId) && (size === undefined || entry.size === size)) {
@@ -88,9 +89,10 @@ export function albumClient(client: Pick<ServerClient, "request" | "raw" | "url"
     remove: async (id: string) => {
       const result = await client.request<{ ok: true }>(path(id), { method: "DELETE" }); closeAlbum(id); return result;
     },
-    materials: (chatId: string, pair?: AlbumPair) => readTransfer<AlbumMaterials>(`/v1/chats/${encodeURIComponent(chatId)}/album-materials?${new URLSearchParams({ paged: "1", ...(pair ?? {}) })}`),
+    materials: (chatId: string, pair?: AlbumPair) => readTransfer<AlbumMaterials>(`/v1/chats/${encodeURIComponent(chatId)}/album-materials?${new URLSearchParams({ paged: "1", tz: timeZone(), ...(pair ?? {}) })}`),
+    together: (chatId: string): Promise<AlbumTogetherRecords> => client.request(`/v1/chats/${encodeURIComponent(chatId)}/album-together?${new URLSearchParams({ tz: timeZone() })}`),
     candidates: (id: string) => client.request<AlbumUpdateCandidates>(`${path(id)}/update-candidates`),
-    update: (id: string) => readTransfer<{ candidates: AlbumUpdateCandidates; materials?: AlbumMaterials }>(`${path(id)}/update-materials`),
+    update: (id: string) => readTransfer<{ candidates: AlbumUpdateCandidates; materials?: AlbumMaterials; together?: AlbumTogetherRecords }>(`${path(id)}/update-materials?${new URLSearchParams({ tz: timeZone() })}`),
     uploadPhoto: (id: string, bytes: Uint8Array, meta: AlbumPhotoMeta) => {
       const { mime, ...fields } = meta;
       const header = JSON.stringify(fields).replace(/[\u007f-\uffff]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);

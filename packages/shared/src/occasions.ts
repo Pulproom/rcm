@@ -9,6 +9,8 @@ export type OccasionMemory = {
 export type Anniversary = {
   hideKey: string; memoryId: string; index: number; kind: string; label: string; storyTime: string | null;
   place: string | null; alwaysInject: boolean; userDefined: boolean;
+  /** The stored label text itself, without the dashboard's Korean fallback, for model-facing text. */
+  customLabel?: string;
 };
 const normalizeName = (value: unknown): string => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
 const ordinalOf = (item: any): number | null => {
@@ -67,6 +69,7 @@ export function buildAnniversaries(data: { memories?: OccasionMemory[] }, pair: 
       index,
       kind: landmark.kind,
       label: landmarkLabel(landmark),
+      customLabel: (landmark.userDefined || ["anniversary_basis", "other"].includes(landmark.kind)) && landmark.label ? landmark.label : undefined,
       storyTime: String(landmark.storyTime ?? "").trim() || memoryStoryTime(memory),
       place: Array.isArray(memory?.locations) ? String(memory.locations[0] ?? "").trim() || null : null,
       alwaysInject: landmarkAlwaysInjected(landmark),
@@ -109,7 +112,7 @@ export function buildAnniversaries(data: { memories?: OccasionMemory[] }, pair: 
       && candidate.pair.map(normalizeName).sort().join("|") === item.pair.map(normalizeName).sort().join("|")
       && sameLandmarkDate(candidate, item));
     if (!basis || !sameLandmarkDate(item, basis)) return item;
-    return { ...item, hideKey: basis.hideKey, index: basis.index, label: basis.label, alwaysInject: basis.alwaysInject, userDefined: true };
+    return { ...item, hideKey: basis.hideKey, index: basis.index, label: basis.label, customLabel: basis.customLabel, alwaysInject: basis.alwaysInject, userDefined: true };
   });
   // Choose user authority before applying hidden keys; hiding must not revive automatic bases.
   const authoritative = merged.filter(item => !["first_met", "romantic_relationship_established", "marriage"].includes(item.kind)
@@ -184,7 +187,23 @@ export type Occasion = {
   key: string; kind: "birthday" | "anniversary"; label: string; date: string; remaining: number;
   month: number; day: number; memoryId?: string; person?: string; pair?: [string, string];
   years?: number; days?: number;
+  /** Typed source for the model-facing English label; `label` stays the dashboard's Korean text. */
+  landmarkKind?: string; customLabel?: string;
 };
+
+const PACKET_EVENTS: Record<string, string> = {
+  first_met: "their first meeting", confession: "the confession", romantic_relationship_established: "becoming a couple",
+  engagement: "their engagement", marriage: "their wedding", anniversary_basis: "their special day",
+};
+/** English label for the main-model packet, built from typed fields; user-written labels stay verbatim. */
+export function occasionPacketLabel(item: Occasion): string {
+  if (item.kind === "birthday") return `${item.person}'s birthday`;
+  const event = PACKET_EVENTS[item.landmarkKind ?? ""] ?? String(item.landmarkKind ?? "").replaceAll("_", " ");
+  const who = item.pair ? `${item.pair.join(" & ")}: ` : "";
+  const years = item.years ? `${item.years} year${item.years === 1 ? "" : "s"}` : "";
+  if (item.customLabel) return `${who}${item.customLabel}${years ? `; ${years}` : item.days ? `; day ${item.days}` : ""}`;
+  return `${who}${years ? `${years} since ${event}` : item.days ? `${item.days} days since ${event}` : `anniversary of ${event}`}`;
+}
 export type OccasionBirthday = { key?: string; name: string; birthday: EntityBirthday };
 export const occasionOffsetLabel = (remaining: number): string => remaining === 0 ? "오늘" : remaining < 0 ? `${-remaining}일 전` : `D-${remaining}`;
 
@@ -248,7 +267,7 @@ export function calculateOccasions(input: {
       if (isBasisKind && item.hideKey !== basis?.hideKey) continue;
       const date = calendarDate(item.storyTime);
       if (!date) continue;
-      const base = { key: item.hideKey, kind: "anniversary" as const, memoryId: item.memoryId, pair, label: item.label };
+      const base = { key: item.hideKey, kind: "anniversary" as const, memoryId: item.memoryId, pair, label: item.label, landmarkKind: item.kind, customLabel: item.customLabel };
       yearly(date.month!, date.day!, date.year, (day, years) => {
         const label = item.userDefined || !isBasisKind || !years ? item.label
           : item.kind === "marriage" ? `결혼 ${years}주년` : item.kind === "first_met" ? `만난 지 ${years}년` : `연애 ${years}주년`;

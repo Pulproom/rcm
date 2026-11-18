@@ -1,3 +1,4 @@
+import { mapEntityPersonFields } from "./entity-person-fields.js";
 import { createEntityIdentityResolver, normalizeEntityName } from './entity-identity.js';
 import { expandItemEvidenceWritingFormat } from './state-writing-format.js';
 import { resolveModelSourceReferences, type SourceUnit } from './source-references.js';
@@ -33,15 +34,7 @@ export function expandEventWritingFormat(input: unknown, canonicalExisting: (nam
     return resolved;
   };
   // Access identity is established before the optional seed subset check.
-  const canonicalAccess = (item: unknown): void => {
-    if (Array.isArray(item)) { item.forEach(canonicalAccess); return; }
-    if (!record(item)) return;
-    if (Array.isArray(item.access)) for (const grant of item.access.filter(record)) {
-      if (typeof grant.holder === 'string') grant.holder = canonical(grant.holder);
-    }
-    Object.values(item).forEach(canonicalAccess);
-  };
-  canonicalAccess(result);
+  mapEntityPersonFields(result,canonical);
   if (contract === 'e1e' || contract === 'e1f') {
     if (result.momentsToReturn !== undefined && !Array.isArray(result.momentsToReturn)) diagnostic('momentsToReturn: invalid list ignored');
     const memories = Array.isArray(result.memories) ? result.memories.filter(record) : [];

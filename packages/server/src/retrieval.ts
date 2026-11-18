@@ -1,3 +1,4 @@
+import { isSupportedEntityType } from "./entity-cleanup.js";
 import { assertChatUnlocked } from './upgrade-lock.js';
 import { escapeMemoryText, escapeMemoryAttribute as escapeXml } from "@rcm/shared";
 import { backfillLegacyParticipantAccess } from "./access-migration.js";
@@ -10,8 +11,9 @@ import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { StateOutcomeCapture } from "./state-outcomes.js";
 import { accessibleStorySeed } from "./story-seeds.js";
 import { loadPlotKnowers, validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, publicKnowledgeScope } from "./item-access.js";
-import { knownByLabels } from "./item-access.js";
-import { collectStateEvidence, selectStateEvidence, stateMcpEvidence } from "./state-evidence.js";
+import { loadKnownByLabels } from "./item-access.js";
+import { selectStateEvidence, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
+import { stateEvidenceReader } from "./state-search-index.js";
 import { renderStateLine, sharedStateBudget } from "./automatic-state.js";
 import { parseSocialRelation, socialRelationKnowledge } from "./social-relations.js";
 import { emitsMemoryPlot, includesPerson, isAuthorCard, isException, scopeOf, scopeRelation, standaloneScopeText, formatTagNames, type KnowledgeScope, projectMemoryScene, renderMemoryScene } from "@rcm/shared";
@@ -45,7 +47,7 @@ import {
 } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
-import { listEntities, normalizeEntityName, type EntityItem } from "./entities.js";
+import { modelEntityContext, normalizeEntityName, type EntityItem } from "./entities.js";
 import { listSocialKnowledge } from "./social-knowledge.js";
 import { listRelationshipProjections } from "./relationship-projections.js";
 import type { SemanticMemoryHit } from "./embedding.js";
@@ -375,6 +377,34 @@ function safeExcerpt(value: string, maxLength: number): string {
   return `${clipped.slice(0, word >= Math.floor(maxLength * 0.55) ? word : maxLength).trimEnd()}…`;
 }
 
+/** Typographic ordering key for card lines: where a detail's first exact quote
+ * sits inside its stored source message. It locates verbatim text only and never
+ * judges meaning; a missing or unmatched quote leaves the position unknown. */
+function detailSourceOffsets(db: RcmDatabase, chatId: string, rows: Array<Record<string, any>>): Map<string, number> {
+  const firstEvidence = new Map<string, { messageId: string; quote?: string; startOffset?: number }>();
+  for (const row of rows) {
+    try {
+      const evidence = JSON.parse(String(row.evidence_json ?? "[]"));
+      const first = Array.isArray(evidence) ? evidence.find(entry => entry && typeof entry.messageId === "string") : undefined;
+      if (first) firstEvidence.set(String(row.id), first);
+    } catch { /* Tolerate legacy evidence; the line keeps its message order. */ }
+  }
+  const ids = [...new Set([...firstEvidence.values()].filter(entry => typeof entry.startOffset !== "number" && entry.quote).map(entry => entry.messageId))];
+  const texts = new Map<string, Array<string | null>>();
+  for (let index = 0; index < ids.length; index += 500) {
+    const chunk = ids.slice(index, index + 500);
+    for (const message of db.prepare(`SELECT message_id,canonical_content,content FROM messages WHERE chat_id=? AND message_id IN (${chunk.map(() => "?").join(",")})`)
+      .all(chatId, ...chunk) as Array<{ message_id: string; canonical_content: string | null; content: string | null }>) texts.set(message.message_id, [message.canonical_content, message.content]);
+  }
+  const offsets = new Map<string, number>();
+  for (const [id, entry] of firstEvidence) {
+    if (typeof entry.startOffset === "number") { offsets.set(id, entry.startOffset); continue; }
+    const found = (texts.get(entry.messageId) ?? []).map(text => entry.quote && text ? text.indexOf(entry.quote) : -1).find(position => position >= 0);
+    if (found !== undefined) offsets.set(id, found);
+  }
+  return offsets;
+}
+
 const parseList = (value: string): string[] => {
   try {
     const parsed = JSON.parse(value);
@@ -403,80 +433,112 @@ const parseLandmarkKinds = (value: string): MemoryContextItem["landmarkKinds"] =
   } catch { return []; }
 };
 
-const overlapScore = (query: Set<string>, text: string): number => {
-  if (query.size === 0) return 0;
-  const tokens = new Set<string>();
-  const words = text.match(/\S+/gu) ?? [];
-  for (let offset = 0; offset < words.length; offset += 32) {
-    normalizeSearchTokens(words.slice(offset, offset + 32).join(" ")).forEach((token) => tokens.add(token));
+/** Request-local memoization. Keep the normalizer's language and the two
+ * historic document chunk sizes distinct so scoring remains byte-identical. */
+function createRetrievalTextScoring() {
+  const normalized = new Map<MemoryLanguage | undefined,Map<string,{sequence:string[];set:Set<string>}>>();
+  const overlapDocuments = new Map<string,Set<string>>();
+  const documents = new Map<MemoryLanguage,Map<string,Set<string>>>();
+  const normalizedTokens = (text:string,language?:MemoryLanguage) => {
+    let entries=normalized.get(language);
+    if (!entries) {entries=new Map();normalized.set(language,entries);}
+    let tokens=entries.get(text);
+    if (!tokens) {
+      const sequence=normalizeSearchTokens(text,language);
+      tokens={sequence,set:new Set(sequence)};entries.set(text,tokens);
+    }
+    return tokens;
+  };
+  const normalize: typeof normalizeSearchTokens = (text,language) => normalizedTokens(text,language).sequence;
+  const tokenSet = (text:string) => normalizedTokens(text).set;
+  const documentTokens = (text:string,language:MemoryLanguage) => {
+    let entries=documents.get(language);
+    if (!entries) {entries=new Map();documents.set(language,entries);}
+    let tokens=entries.get(text);
+    if (!tokens) {tokens=documentSearchTokens(text,language);entries.set(text,tokens);}
+    return tokens;
+  };
+  const overlapScore = (query: Set<string>, text: string): number => {
+    if (query.size === 0) return 0;
+    let tokens = overlapDocuments.get(text);
+    if (!tokens) {
+      tokens = new Set<string>();
+      const words = text.match(/\S+/gu) ?? [];
+      for (let offset = 0; offset < words.length; offset += 32) {
+        normalize(words.slice(offset, offset + 32).join(" ")).forEach((token) => tokens!.add(token));
+      }
+      overlapDocuments.set(text,tokens);
+    }
+    let intersection = 0;
+    for (const token of query) if (tokens.has(token)) intersection += 1;
+    return intersection / query.size;
+  };
+
+  function weightedOverlap(signals: SearchQuerySignal[], text: string): number {
+    return signals.reduce((score, signal) => score + overlapScore(tokenSet(signal.text), text) * signal.weight, 0);
   }
-  let intersection = 0;
-  for (const token of query) if (tokens.has(token)) intersection += 1;
-  return intersection / query.size;
-};
 
-function weightedOverlap(signals: SearchQuerySignal[], text: string): number {
-  return signals.reduce((score, signal) => score + overlapScore(new Set(normalizeSearchTokens(signal.text)), text) * signal.weight, 0);
-}
-
-function discriminativeWeightedOverlap(
-  signals: Array<{ tokens: Map<string, number>; weight: number }>,
-  text: string,
-): number {
-  return signals.reduce((score, signal) => score
-    + (idfWeightedCoverage(signal.tokens, text) + orderedProximityBonus(signal.tokens, text)) * signal.weight, 0);
-}
-
-function idfWeightedCoverage(weights: Map<string, number>, text: string): number {
-  if (weights.size === 0) return 0;
-  const present = new Set(normalizeSearchTokens(text));
-  const total = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
-  if (total <= 0) return 0;
-  return [...weights].reduce((sum, [token, weight]) => sum + (present.has(token) ? weight : 0), 0) / total;
-}
-
-function orderedProximityBonus(weights: Map<string, number>, text: string): number {
-  const distinctive = [...weights].sort((left, right) => right[1] - left[1]).slice(0, 4).map(([token]) => token);
-  if (distinctive.length < 2) return 0;
-  const sequence = normalizeSearchTokens(text);
-  let previous = -1;
-  let matched = 0;
-  let gap = 0;
-  for (const token of distinctive) {
-    const index = sequence.indexOf(token, previous + 1);
-    if (index < 0) continue;
-    if (previous >= 0) gap += Math.max(0, index - previous - 1);
-    previous = index;
-    matched += 1;
+  function discriminativeWeightedOverlap(
+    signals: Array<{ tokens: Map<string, number>; weight: number }>,
+    text: string,
+  ): number {
+    return signals.reduce((score, signal) => score
+      + (idfWeightedCoverage(signal.tokens, text) + orderedProximityBonus(signal.tokens, text)) * signal.weight, 0);
   }
-  if (matched < 2) return 0;
-  const coverage = matched / distinctive.length;
-  const compactness = 1 / (1 + gap / Math.max(1, matched - 1));
-  return Math.min(0.12, 0.12 * coverage * compactness);
+
+  function idfWeightedCoverage(weights: Map<string, number>, text: string): number {
+    if (weights.size === 0) return 0;
+    const present = tokenSet(text);
+    const total = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
+    if (total <= 0) return 0;
+    return [...weights].reduce((sum, [token, weight]) => sum + (present.has(token) ? weight : 0), 0) / total;
+  }
+
+  function orderedProximityBonus(weights: Map<string, number>, text: string): number {
+    const distinctive = [...weights].sort((left, right) => right[1] - left[1]).slice(0, 4).map(([token]) => token);
+    if (distinctive.length < 2) return 0;
+    const sequence = normalize(text);
+    let previous = -1;
+    let matched = 0;
+    let gap = 0;
+    for (const token of distinctive) {
+      const index = sequence.indexOf(token, previous + 1);
+      if (index < 0) continue;
+      if (previous >= 0) gap += Math.max(0, index - previous - 1);
+      previous = index;
+      matched += 1;
+    }
+    if (matched < 2) return 0;
+    const coverage = matched / distinctive.length;
+    const compactness = 1 / (1 + gap / Math.max(1, matched - 1));
+    return Math.min(0.12, 0.12 * coverage * compactness);
+  }
+
+  return {normalize,documentTokens,overlapScore,weightedOverlap,discriminativeWeightedOverlap,idfWeightedCoverage,orderedProximityBonus};
 }
 
-function entityAnchorsInAspect(aspect: string, entities: EntityItem[]): EntityItem[] {
-  const aspectTokens = new Set(normalizeSearchTokens(aspect));
-  return entities.filter((entity) => [entity.name, entity.key, ...entity.aliases].some((candidate) => {
-    const tokens = normalizeSearchTokens(candidate);
+function entityAnchorsInAspect(aspect: string, entities: EntityItem[], normalize = normalizeSearchTokens): EntityItem[] {
+  const aspectTokens = new Set(normalize(aspect));
+  return entities.filter((entity) => isSupportedEntityType(entity.type) && [entity.name, entity.key, ...entity.aliases].some((candidate) => {
+    const tokens = normalize(candidate);
     return tokens.length > 0 && tokens.every((token) => aspectTokens.has(token));
   }));
 }
 
-function hasEntityAnchorGrounding(aspect: string, answerText: string, entities: EntityItem[]): boolean {
-  const anchors = entityAnchorsInAspect(aspect, entities);
+function hasEntityAnchorGrounding(aspect: string, answerText: string, entities: EntityItem[], normalize = normalizeSearchTokens): boolean {
+  const anchors = entityAnchorsInAspect(aspect, entities, normalize);
   if (anchors.length === 0) return true;
-  const answerTokens = new Set(normalizeSearchTokens(answerText));
+  const answerTokens = new Set(normalize(answerText));
   return anchors.every((entity) => [entity.name, entity.key, ...entity.aliases].some((candidate) => {
-    const tokens = normalizeSearchTokens(candidate);
+    const tokens = normalize(candidate);
     return tokens.length > 0 && tokens.every((token) => answerTokens.has(token));
   }));
 }
 
-function contentTokensForAspect(aspect: string, tokens: Set<string>, entities: EntityItem[]): Set<string> {
-  const entityTokens = new Set(entityAnchorsInAspect(aspect, entities)
+function contentTokensForAspect(aspect: string, tokens: Set<string>, entities: EntityItem[], normalize = normalizeSearchTokens): Set<string> {
+  const entityTokens = new Set(entityAnchorsInAspect(aspect, entities, normalize)
     .flatMap((entity) => [entity.name, entity.key, ...entity.aliases])
-    .flatMap((candidate) => normalizeSearchTokens(candidate)));
+    .flatMap((candidate) => normalize(candidate)));
   const contentTokens = new Set([...tokens].filter((token) => !entityTokens.has(token)));
   return contentTokens;
 }
@@ -492,15 +554,17 @@ function aspectEvidence(
   lexicalHit?: SemanticMemoryHit,
   semanticRankEvidence?: number,
   atomHits: SemanticMemoryHit[] = hit ? [hit] : [],
+  texts = createRetrievalTextScoring(),
 ): { score: number; direct: boolean; atomicHit: boolean; strongItemMatch: boolean; detailIds: string[]; boundDetailIds: string[]; dialogueKeys: string[] } {
+  const {normalize,overlapScore}=texts;
   const body = `${searchEnvelope} ${item.title} ${item.content} ${item.storyTime ?? ""} ${item.locations.join(" ")} ${item.keyDialogues.length ? "dialogue quoted words" : ""} ${item.keyDialogues.map((dialogue) => `${dialogue.speaker} ${dialogue.text}`).join(" ")} ${item.details.map((detail) => detail.text).join(" ")}`;
-  if (!hasEntityAnchorGrounding(aspect, body, entities)) return { score: 0, direct: false, atomicHit: false, strongItemMatch: false, detailIds: [], boundDetailIds: [], dialogueKeys: [] };
-  const contentTokens = contentTokensForAspect(aspect, aspectTokens, entities);
+  if (!hasEntityAnchorGrounding(aspect, body, entities,normalize)) return { score: 0, direct: false, atomicHit: false, strongItemMatch: false, detailIds: [], boundDetailIds: [], dialogueKeys: [] };
+  const contentTokens = contentTokensForAspect(aspect, aspectTokens, entities,normalize);
   const lexical = overlapScore(contentTokens, body);
   const scene = overlapScore(sceneTokens, body);
   const directLexical = (text: string): boolean => {
-    const tokens = new Set(normalizeSearchTokens(text));
-    return contentTokens.size > 0 && hasEntityAnchorGrounding(aspect, text, entities)
+    const tokens = new Set(normalize(text));
+    return contentTokens.size > 0 && hasEntityAnchorGrounding(aspect, text, entities,normalize)
       && overlapScore(contentTokens, text) >= 0.72
       && [...contentTokens].filter(token => tokens.has(token)).length >= Math.min(2, contentTokens.size);
   };
@@ -521,14 +585,14 @@ function aspectEvidence(
 }
 
 
-function similaritySignature(item: Ranked): SimilaritySignature {
+function similaritySignature(item: Ranked, normalize = normalizeSearchTokens): SimilaritySignature {
   return {
     // Materialized atom views deliberately hide their parent synopsis from the
     // model, but that synopsis remains the episode's search envelope. MMR must
     // compare those envelopes rather than treating every atomized scene as
     // the same bag of participant and location names.
-    all: new Set(normalizeSearchTokens(`${item.raw.title} ${item.raw.content} ${item.raw.participants_json} ${item.raw.locations_json}`)),
-    body: new Set(normalizeSearchTokens(item.raw.content)),
+    all: new Set(normalize(`${item.raw.title} ${item.raw.content} ${item.raw.participants_json} ${item.raw.locations_json}`)),
+    body: new Set(normalize(item.raw.content)),
   };
 }
 
@@ -608,30 +672,12 @@ function contentSimilarity(left: Ranked, right: Ranked, signatures: Map<string, 
 
 
 function mmrOrder(items: Ranked[], signatures: Map<string, SimilaritySignature>, limit = 64): Ranked[] {
-  const remaining = [...items];
-  const ordered: Ranked[] = [];
-  const highest = Math.max(0, ...items.map((item) => item.score));
-  const lowest = Math.min(highest, ...items.map((item) => item.score));
-  const relevance = (item: Ranked): number => highest > lowest ? (item.score - lowest) / (highest - lowest) : 1;
-  while (remaining.length > 0 && ordered.length < limit) {
-    let bestIndex = 0;
-    let bestValue = Number.NEGATIVE_INFINITY;
-    for (let index = 0; index < remaining.length; index += 1) {
-      const item = remaining[index]!;
-      const redundancy = ordered.reduce((highest, selected) => Math.max(highest, contentSimilarity(item, selected, signatures)), 0);
-      const value = relevance(item) * 0.8 + (1 - redundancy) * 0.2 + (item.raw.pinned ? 1 : 0);
-      if (value > bestValue) {
-        bestValue = value;
-        bestIndex = index;
-      }
-    }
-    ordered.push(remaining.splice(bestIndex, 1)[0]!);
-  }
-  return ordered;
+  return mmrOrderWithSeed(items, signatures, [], limit);
 }
 
 function mmrOrderWithSeed(items: Ranked[], signatures: Map<string, SimilaritySignature>, seed: Ranked[], limit = 64): Ranked[] {
-  const remaining = [...items];
+  const remaining = items.map(item => ({item,
+    redundancy:seed.reduce((highest, selected) => Math.max(highest, contentSimilarity(item, selected, signatures)), 0)}));
   const ordered: Ranked[] = [];
   const highest = Math.max(0, ...items.map((item) => item.score));
   const lowest = Math.min(highest, ...items.map((item) => item.score));
@@ -640,15 +686,20 @@ function mmrOrderWithSeed(items: Ranked[], signatures: Map<string, SimilaritySig
     let bestIndex = 0;
     let bestValue = Number.NEGATIVE_INFINITY;
     for (let index = 0; index < remaining.length; index += 1) {
-      const item = remaining[index]!;
-      const redundancy = [...seed, ...ordered].reduce((highest, selected) => Math.max(highest, contentSimilarity(item, selected, signatures)), 0);
+      const {item,redundancy} = remaining[index]!;
       const value = relevance(item) * 0.8 + (1 - redundancy) * 0.2 + (item.raw.pinned ? 1 : 0);
       if (value > bestValue) {
         bestValue = value;
         bestIndex = index;
       }
     }
-    ordered.push(remaining.splice(bestIndex, 1)[0]!);
+    const selected=remaining.splice(bestIndex, 1)[0]!.item;
+    ordered.push(selected);
+    // A pair's similarity is stable during this ordering. Retain the running
+    // maximum instead of recomputing every earlier selected pair each round.
+    if (ordered.length < limit) for (const candidate of remaining) {
+      candidate.redundancy=Math.max(candidate.redundancy,contentSimilarity(candidate.item,selected,signatures));
+    }
   }
   return ordered;
 }
@@ -784,7 +835,7 @@ export function mergeMemoryContextItems(left: MemoryContextItem, right: MemoryCo
 type LedgerRelevance = (text: string, sourceId?: string | null) => number;
 interface StructuredRender { xml: string; atomKeys: string[]; ids: string[]; hits?: StateEvidenceHit[]; scopes?: KnowledgeScope[] }
 
-function renderPhysicalIntimacy(db: RcmDatabase, chatId: string, perspective: string, peers: string[], tokenBudget: number, detailed = false, archiveView = false, excluded = new Set<string>(), signals: SearchQuerySignal[] = [], relevance: LedgerRelevance = (text) => weightedOverlap(signals, text), author = false, pricing: PacketPricing = chatPacketPricing(db,chatId)): StructuredRender {
+function renderPhysicalIntimacy(db: RcmDatabase, chatId: string, perspective: string, peers: string[], tokenBudget: number, detailed = false, archiveView = false, excluded = new Set<string>(), signals: SearchQuerySignal[] = [], relevance: LedgerRelevance = createRetrievalTextScoring().weightedOverlap.bind(null,signals), author = false, pricing: PacketPricing = chatPacketPricing(db,chatId)): StructuredRender {
   if (tokenBudget <= 0) return { xml: "", atomKeys: [], ids: [] };
   type PhysicalRow = { id: string; participant_a: string; participant_b: string; milestone_key: string; act: string; custom_label: string | null; initiator: string | null; interaction_context: string; circumstance: string | null; source_memory_id: string | null; source_start_ordinal: number | null; auto_inject: number; created_at: number; access: ItemAccessScope };
   const candidates = db.prepare(`SELECT id,participant_a,participant_b,milestone_key,act,custom_label,initiator,interaction_context,circumstance,source_memory_id,source_start_ordinal,auto_inject,created_at
@@ -884,7 +935,7 @@ function renderRelationshipLandmarks(
   detailed = false,
   excluded = new Set<string>(),
   signals: SearchQuerySignal[] = [],
-  relevance: LedgerRelevance = (text) => weightedOverlap(signals, text),
+  relevance: LedgerRelevance = createRetrievalTextScoring().weightedOverlap.bind(null,signals),
   author = false,
   pricing: PacketPricing = chatPacketPricing(db,chatId),
 ): StructuredRender {
@@ -1004,9 +1055,10 @@ function stableAnchors(
   coverage?: PromptCoverage, answerOnly = false, activePerspectives: string[] = [],
   archiveView = false, manifest = emptyPacketManifest(), excluded: ReadonlySet<string> = new Set(),
   stateHits: StateEvidenceHit[] = [], relevance?: LedgerRelevance, semantic?: Map<string, number>, trace?: StateOutcomeCapture,
+  readState?: () => StateEvidence[],
 ): string {
   const pricing = chatPacketPricing(db,chatId);
-  const candidates = selectStateEvidence(collectStateEvidence(db, chatId, trace, perspective), signals.map(signal => signal.text).join("\n"), {
+  const candidates = selectStateEvidence((readState ?? stateEvidenceReader(db, chatId, trace, perspective))(), signals.map(signal => signal.text).join("\n"), {
     trace, perspective, archive: archiveView, continuity: !answerOnly, history: answerOnly || intent === "promise" || intent === "relationship", activeNames: activePerspectives, semantic,
   });
   const lines: string[] = [];
@@ -1035,7 +1087,7 @@ function stableAnchors(
   return lines.length ? `<recorded_state>\n${lines.join("\n")}\n</recorded_state>` : "";
 }
 
-export function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuerySignal[], language: MemoryLanguage): LexicalSearchResult {
+export function lexicalCandidates(db: RcmDatabase, chatId: string, signals: SearchQuerySignal[], language: MemoryLanguage, texts = createRetrievalTextScoring()): LexicalSearchResult {
   const peak = new Map<string, number>();
   const consensus = new Map<string, number>();
   const detailHits = new Map<string, SemanticMemoryHit>();
@@ -1059,7 +1111,7 @@ export function lexicalCandidates(db: RcmDatabase, chatId: string, signals: Sear
       const bestDetail = new Map<string, number>();
       const totalTokenWeight = [...tokenWeights.values()].reduce((sum, weight) => sum + weight, 0);
       const coverage = (text: string): { score: number; matched: string[] } => {
-        const present = documentSearchTokens(text, language);
+        const present = texts.documentTokens(text, language);
         const matched = tokens.filter(token => present.has(token));
         const mass = matched.reduce((sum, token) => sum + tokenWeights.get(token)!, 0);
         return { score: totalTokenWeight > 0 ? Math.min(1, mass / totalTokenWeight) : 0, matched };
@@ -1217,6 +1269,7 @@ export interface RetrieveOptions {
   activePerspectives?: string[];
   collectDiagnostics?: boolean;
   stateOutcomeCapture?: StateOutcomeCapture;
+  stateEvidence?: () => StateEvidence[];
   deferAutomaticBudget?: boolean;
   structuredBudgetScale?: number;
   semanticAtomHits?: Map<string, SemanticMemoryHit[]>;
@@ -1264,7 +1317,7 @@ function renderRelevantNameHints(db: RcmDatabase, chatId: string, memories: Memo
     ...item.keyDialogues.map((dialogue) => dialogue.speaker),
     ...item.details.flatMap((detail) => [...detail.participants, ...detail.knownBy]),
   ]).filter(Boolean).map(normalizeEntityName))];
-  const rows = listEntities(db, chatId).filter((entity) => entity.displayName !== entity.name
+  const rows = modelEntityContext(db, chatId).entities.filter((entity) => entity.displayName !== entity.name
     && [entity.key, entity.name, entity.displayName, ...entity.aliases].some((name) => involved.includes(normalizeEntityName(name))));
   const involvement = (entity: typeof rows[number]) => Math.min(...[entity.key, entity.name, entity.displayName, ...entity.aliases]
     .map(name => involved.indexOf(normalizeEntityName(name))).filter(index => index >= 0));
@@ -1387,12 +1440,14 @@ export function resolvePerspective(db: RcmDatabase, chatId: string, value: strin
   const raw = value.trim();
   const normalized = raw.toLocaleLowerCase().replace(/[\s_-]+/g, " ");
   if (!raw || normalized === "narrator" || normalized === "omniscient" || normalized === "omniscient narrator") return "narrator";
+  if (!modelEntityContext(db,chatId).allowsName(raw)) return "narrator";
   const rows = db.prepare(`
-    SELECT e.entity_key,e.name,e.display_name,a.alias
+    SELECT e.entity_key,e.name,e.display_name,e.type,a.alias
     FROM entities e LEFT JOIN aliases a ON a.entity_id=e.id
     WHERE e.chat_id=?
-  `).all(chatId) as Array<{ entity_key: string; name: string; display_name: string; alias: string | null }>;
+  `).all(chatId) as Array<{ entity_key: string; name: string; display_name: string; type:string; alias: string | null }>;
   for (const row of rows) {
+    if (!isSupportedEntityType(row.type)) continue;
     const candidates = [row.entity_key, row.name, row.display_name, row.alias ?? ""]
       .map((candidate) => candidate.toLocaleLowerCase().replace(/[\s_-]+/g, " "));
     // Identity-bearing ledger rows store canonical display names. Returning the
@@ -1433,6 +1488,8 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   diagnostics?: RetrievalDiagnostics;
 } {
   const started = performance.now();
+  const texts=createRetrievalTextScoring();
+  const {normalize,overlapScore,weightedOverlap,discriminativeWeightedOverlap,idfWeightedCoverage,orderedProximityBonus}=texts;
   invalidateChangedMemoryGroups(db, options.chatId);
   const chat = db.prepare("SELECT profile,revision,memory_language,completed_turn_count FROM chats WHERE id=?").get(options.chatId) as
     | { profile: RpProfile; revision: number; memory_language: MemoryLanguage; completed_turn_count: number }
@@ -1446,7 +1503,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   if (author) backfillLegacyParticipantAccess(db, options.chatId);
   const sceneCharacters = options.audience?.kind === "author" ? options.audience.sceneCharacters : [];
   const perspective = author ? "narrator" : resolvePerspective(db, options.chatId, options.perspective);
-  const entities = listEntities(db, options.chatId);
+  const entities = modelEntityContext(db, options.chatId).entities;
   const coveredIds = new Set(options.promptSourceMessageIds ?? []);
   const activeIds = coveredIds.size === 0 ? new Set<string>() : new Set((db.prepare(`
     SELECT message_id FROM messages WHERE chat_id=? AND lifecycle='committed' AND host_visibility IN ('active','all_before') AND content IS NOT NULL
@@ -1465,7 +1522,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   // intentionally discard terms absent from the archive, but doing that here
   // can reduce an unanswered question to a character name and falsely report
   // an adjacent memory as grounded.
-  const searchTokens = (text: string): Set<string> => new Set(normalizeSearchTokens(text, chat.memory_language));
+  const searchTokens = (text: string): Set<string> => new Set(normalize(text, chat.memory_language));
   const sceneTokens = searchTokens(options.query);
   const aspectTokens = new Map(aspects.map((aspect) => [aspect, searchTokens(aspect)]));
   const intent = options.intent ?? "recall";
@@ -1481,7 +1538,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const structuredMcpAnswer = mcpAnswerMode;
   const lexicalSearch = options.mcpCandidatesOnly && options.seedMemoryId
     ? { scores: new Map<string, number>(), detailHits: new Map<string, SemanticMemoryHit>(), atomHits: [], views: [] }
-    : options.lexicalSearch ?? lexicalCandidates(db, options.chatId, signals, chat.memory_language);
+    : options.lexicalSearch ?? lexicalCandidates(db, options.chatId, signals, chat.memory_language,texts);
   const fts = lexicalSearch.scores;
   const aspectLexicalHits = new Map<string, Map<string, SemanticMemoryHit>>();
   const aspectSemanticEvidence = new Map(aspects.map((aspect) => [aspect, relativeViewEvidence(options.aspectSemanticScores?.get(aspect))]));
@@ -1494,7 +1551,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         kind: "cue",
         text: aspect,
         weight: 1,
-      }], chat.memory_language);
+      }], chat.memory_language,texts);
       aspectLexicalHits.set(aspect, aspectSearch.detailHits);
       for (const [id, score] of aspectSearch.scores) fts.set(id, Math.max(fts.get(id) ?? 0, score));
     }
@@ -1600,10 +1657,28 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const detailRows = candidates.length > 0 ? db.prepare(`SELECT id,memory_id,detail_key,kind,role,seed_json,text,user_hidden,user_edited,original_text,participants_json,known_by_json,hidden_from_json,locations_json,epistemic,salience,retention_class,evidence_json,source_start_ordinal
     FROM memory_details d WHERE chat_id=? AND active=1 AND memory_id IN (${placeholders}) AND NOT ${recognitionDetailSql('d')}
     ORDER BY COALESCE(source_start_ordinal,2147483647),created_at`).all(options.chatId, ...candidates) as Array<Record<string, any>> : [];
-  const accessByItem = loadItemAccess(db, options.chatId, [
+  const detailOffsets = detailSourceOffsets(db, options.chatId, detailRows);
+  const accessItems = [
     ...dialogueRows.map((row) => ({ kind: "dialogue" as const, id: row.id })),
     ...detailRows.map((row) => ({ kind: "detail" as const, id: String(row.id) })),
-  ]);
+  ];
+  const accessByItem = loadItemAccess(db, options.chatId, accessItems);
+  const labels = loadKnownByLabels(db, options.chatId, accessItems);
+  const dialogueSources = new Map<string,{canonical_content:string;canonical_hash:string}>();
+  if (options.mcpCandidatesOnly && dialogueRows.length) {
+    // Preloading must not validate rows that visibility may exclude. Visible
+    // rows retain their normal evidence parsing and exact checks below.
+    const ids=[...new Set(dialogueRows.flatMap(row=>{
+      try {
+        const evidence:unknown=JSON.parse(row.evidence_json);
+        return Array.isArray(evidence) ? evidence.map(entry=>entry?.messageId).filter((id):id is string=>typeof id==='string') : [];
+      } catch {return [];}
+    }))];
+    for (const source of db.prepare(`SELECT message_id,canonical_content,canonical_hash FROM json_each(?) requested
+      CROSS JOIN messages ON messages.chat_id=? AND messages.message_id=requested.value
+      WHERE lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`)
+      .all(JSON.stringify(ids),options.chatId) as Array<{message_id:string;canonical_content:string;canonical_hash:string}>) dialogueSources.set(source.message_id,source);
+  }
   const rowsById = new Map(rows.map((row) => [row.id, row]));
   const atomVisible = (scope: ItemAccessScope, atomAccessVersion: number): boolean => {
     if (scope.pending) return false;
@@ -1630,15 +1705,14 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     }
     if (options.mcpCandidatesOnly) {
       const valid = dialogueEvidence.length > 0 && dialogueEvidence.every((evidence) => {
-        const source = db.prepare(`SELECT canonical_content,canonical_hash FROM messages WHERE chat_id=? AND message_id=?
-          AND lifecycle IN ('committed','client_pruned') AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).get(options.chatId,evidence.messageId) as {canonical_content:string;canonical_hash:string}|undefined;
+        const source = dialogueSources.get(evidence.messageId);
         return typeof source?.canonical_content === "string" && source.canonical_hash === evidence.canonicalHash && source.canonical_content.slice(evidence.startOffset,evidence.endOffset) === evidence.quote;
       });
       if (!valid) continue;
     }
     scopedMemoryIds.add(dialogue.memory_id);
     const list = dialoguesByMemory.get(dialogue.memory_id) ?? [];
-    list.push({ id: dialogue.id, ordinal: dialogue.ordinal, speaker: dialogue.speaker, text: dialogue.text, messageId: dialogue.message_id, evidence: dialogueEvidence, kind: dialogue.kind, knownBy: itemAccessKnowledge(access), knownByLabels:knownByLabels(db,options.chatId,"dialogue",dialogue.id,itemAccessKnowledge(access)),
+    list.push({ id: dialogue.id, ordinal: dialogue.ordinal, speaker: dialogue.speaker, text: dialogue.text, messageId: dialogue.message_id, evidence: dialogueEvidence, kind: dialogue.kind, knownBy: itemAccessKnowledge(access), knownByLabels:labels("dialogue",dialogue.id,itemAccessKnowledge(access)),
       __arcSelected: options.arcDialogueIds?.has(dialogue.id) });
     dialoguesByMemory.set(dialogue.memory_id, list);
   }
@@ -1660,8 +1734,8 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       continue;
     }
     const list = detailsByMemory.get(detail.memory_id) ?? [];
-    list.push({ id: detail.id, seed: accessibleStorySeed(detail.seed_json, knownBy), sourceOrdinal: detail.source_start_ordinal ?? undefined, key: detail.detail_key, kind: detail.kind, role: detail.role, text: detail.text, epistemic: detail.epistemic,
-      participants: parseList(detail.participants_json), knownBy, hiddenFrom: parseList(detail.hidden_from_json), knownByLabels:knownByLabels(db,options.chatId,"detail",detail.id,knownBy), locations: parseList(detail.locations_json), salience: detail.salience, retention: detail.retention_class });
+    list.push({ id: detail.id, seed: accessibleStorySeed(detail.seed_json, knownBy), sourceOrdinal: detail.source_start_ordinal ?? undefined, sourceOffset: detailOffsets.get(String(detail.id)), key: detail.detail_key, kind: detail.kind, role: detail.role, text: detail.text, epistemic: detail.epistemic,
+      participants: parseList(detail.participants_json), knownBy, hiddenFrom: parseList(detail.hidden_from_json), knownByLabels:labels("detail",detail.id,knownBy), locations: parseList(detail.locations_json), salience: detail.salience, retention: detail.retention_class });
     detailsByMemory.set(detail.memory_id, list);
   }
   const associationScores = new Map<string, number>();
@@ -1898,6 +1972,8 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         ? residualActivations.get(row.id)?.via_memory_id ?? undefined : undefined,
     });
   }
+  const stateTrace = !mcpAnswerMode && options.collectDiagnostics ? options.stateOutcomeCapture ?? new StateOutcomeCapture() : undefined;
+  const readState = options.stateEvidence ?? stateEvidenceReader(db, options.chatId, stateTrace, perspective);
   if (options.mcpCandidatesOnly) {
     // Reuse canonical/access materialization, then leave automatic lanes and the
     // legacy question selector entirely out of the MCP answer path.
@@ -1917,7 +1993,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       const relevance: LedgerRelevance = text => discriminativeWeightedOverlap(facetDiscriminativeSignals, text);
       const stateHits: StateEvidenceHit[] = [];
       stableAnchors(db, options.chatId, perspective, chat.profile, options.tokenBudget, intent, facetSignals, undefined,
-        true, options.activePerspectives ?? [], archiveView, emptyPacketManifest(), new Set(), stateHits, relevance, options.stateScores);
+        true, options.activePerspectives ?? [], archiveView, emptyPacketManifest(), new Set(), stateHits, relevance, options.stateScores, stateTrace, readState);
       const physical = renderPhysicalIntimacy(db, options.chatId, perspective, options.activePerspectives ?? [], options.tokenBudget,
         true, archiveView, new Set(), facetSignals, relevance, author);
       const landmarks = renderRelationshipLandmarks(db, options.chatId, perspective, options.activePerspectives ?? [], chat.profile,
@@ -1983,7 +2059,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       const evaluatedForAspect = ranked.map((item) => ({ item, temporalTier: temporalRangeTier(requestedDateRange, item.storyTime), ...aspectEvidence(aspect, aspectTokens.get(aspect)!, sceneTokens, item, entities,
         (aspect !== options.query ? options.aspectSemanticHits?.get(aspect)?.get(item.id) : options.aspectSemanticHits?.get(aspect)?.get(item.id) ?? options.semanticHits?.get(item.id)), `${item.raw.title} ${item.raw.content}`,
         aspectLexicalHits.get(aspect)?.get(item.id), aspectSemanticEvidence.get(aspect)?.get(item.id),
-        options.aspectSemanticAtomHits?.get(aspect)?.get(item.id) ?? (aspect !== options.query ? undefined : options.semanticAtomHits?.get(item.id))) }));
+        options.aspectSemanticAtomHits?.get(aspect)?.get(item.id) ?? (aspect !== options.query ? undefined : options.semanticAtomHits?.get(item.id)),texts) }));
       if (options.followAllDetails && options.seedMemoryId) {
         const seed = evaluatedForAspect.find(match => match.item.id === options.seedMemoryId);
         if (seed) Object.assign(seed, { direct: true, atomicHit: true, score: 1,
@@ -2060,7 +2136,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       || [...aspectMatches.values()].some((matches) => matches.some((match) => match.item.id === item.id))
     : item.candidateClass !== "unclassified"));
   eligible.sort((a, b) => b.score - a.score || (b.raw.source_ordinal ?? b.raw.created_revision) - (a.raw.source_ordinal ?? a.raw.created_revision));
-  const similaritySignatures = new Map(ranked.map((item) => [item.id, similaritySignature(item)]));
+  const similaritySignatures = new Map(ranked.map((item) => [item.id, similaritySignature(item,normalize)]));
   const recentContinuity = !mcpAnswerMode
     ? bridgeCandidateIds.map((id) => eligible.find((item) => item.id === id)).find((item): item is Ranked => Boolean(item))
     : undefined;
@@ -2204,17 +2280,16 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const structuredScale = options.structuredBudgetScale ?? 1;
   const anchorSceneBudget = mcpAnswerMode ? (structuredMcpAnswer ? Math.min(1_100, Math.floor(options.tokenBudget * 0.55)) : 0) : sharedStateBudget(options.tokenBudget);
   const anchorManifest = emptyPacketManifest();
-  const stateTrace = !mcpAnswerMode && options.collectDiagnostics ? options.stateOutcomeCapture ?? new StateOutcomeCapture() : undefined;
   if (options.memoryOnlyInjection && stateTrace && !options.deferAutomaticBudget) {
-    for (const item of collectStateEvidence(db, options.chatId, stateTrace, perspective)) stateTrace.record(perspective, item, "memory_only");
+    for (const item of readState()) stateTrace.record(perspective, item, "memory_only");
     stateTrace.budget(perspective, anchorSceneBudget, 0);
   }
   // Entity names locate participants; they cannot alone justify every ledger row.
   const ledgerOverlap = (text: string, requested = signals): number => requested.reduce((score, signal) =>
-    score + overlapScore(contentTokensForAspect(signal.text, searchTokens(signal.text), entities), text) * signal.weight, 0);
+    score + overlapScore(contentTokensForAspect(signal.text, searchTokens(signal.text), entities,normalize), text) * signal.weight, 0);
   const ledgerRelevance: LedgerRelevance = (text) => Math.max(0, ...aspects.map(aspect => {
-    const tokens = contentTokensForAspect(aspect, searchTokens(aspect), entities);
-    return hasEntityAnchorGrounding(aspect, text, entities) && tokens.size > 0 && overlapScore(tokens, text) >= 0.72 ? 1 : 0;
+    const tokens = contentTokensForAspect(aspect, searchTokens(aspect), entities,normalize);
+    return hasEntityAnchorGrounding(aspect, text, entities,normalize) && tokens.size > 0 && overlapScore(tokens, text) >= 0.72 ? 1 : 0;
   }));
   const stateHits: StateEvidenceHit[] = [];
   const openManifest = emptyPacketManifest();
@@ -2229,7 +2304,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     coverage,
     mcpAnswerMode,
     options.activePerspectives ?? [],
-    archiveView, anchorManifest, excludedAtomKeys, stateHits, mcpAnswerMode ? ledgerRelevance : undefined, options.stateScores, stateTrace,
+    archiveView, anchorManifest, excludedAtomKeys, stateHits, mcpAnswerMode ? ledgerRelevance : undefined, options.stateScores, stateTrace, readState,
   );
   const openThreads = ""; // Open promises share the canonical state selector and budget.
   // Historical milestones retain a small separate allowance; current rows are

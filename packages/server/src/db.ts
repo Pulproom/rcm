@@ -2,18 +2,21 @@ import { repairSourceCoverage } from './source-coverage.js';
 import { repairAbbreviationEvidence } from './abbreviation-evidence-repair.js';
 import { backfillLegacyParticipantAccess } from "./access-migration.js";
 import { installSetupStorageGuards, migrateSetupStorage } from "./setup-storage.js";
+import { installStateCorpusTracking, removePersistentStateCorpusTracking } from "./state-corpus-revision.js";
 import { migrateTranslationKeys } from "./translation-cache.js";
 import Database from "better-sqlite3";
 import { migrateMemoryGaps } from './gap-recovery.js';
 import { repairInheritedRevisions } from './lineage-revisions.js';
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID } from "node:crypto";
-import { isInitialCalibrationMemory } from "@rcm/shared";
+import { isInitialCalibrationMemory, processingRunId } from "@rcm/shared";
 import { refreshAlbumSummaries } from "./album-summary.js";
 import { snapshotBeforeMigration } from "./db-snapshot.js";
+import { cleanupUnsupportedEntities } from "./entity-cleanup.js";
+import { processingSchema, migrateLegacyProcessingRecords, repairProcessingOwnership } from "./processing-records.js";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 67 as const;
+export const DATABASE_SCHEMA_VERSION = 69 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -906,6 +909,13 @@ CREATE TABLE IF NOT EXISTS entity_prominence (
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, leased_until, created_at);
+-- Status-only entity cleanup probes must not load pending JSON documents.
+CREATE INDEX IF NOT EXISTS idx_jobs_chat_status_type ON jobs(chat_id,status,type);
+CREATE INDEX IF NOT EXISTS idx_conflicts_chat_status_resolution ON conflicts(chat_id,status,resolution,kind);
+CREATE INDEX IF NOT EXISTS idx_batches_chat_status ON extraction_batches(chat_id,status);
+CREATE INDEX IF NOT EXISTS idx_regeneration_shadow_status ON regeneration_runs(shadow_chat_id,status);
+CREATE INDEX IF NOT EXISTS idx_episodes_chat_status ON episodes(chat_id,status);
+CREATE INDEX IF NOT EXISTS idx_lineage_parent_status ON chat_lineage(parent_chat_id,status);
 
 CREATE TABLE IF NOT EXISTS recall_logs (
   id TEXT PRIMARY KEY,
@@ -1065,9 +1075,11 @@ export interface DatabaseHandle {
 export function openDatabase(path: string): DatabaseHandle {
   const db = new Database(path);
   db.function("is_initial_calibration_memory", { deterministic: true }, (memory_key: unknown) => Number(isInitialCalibrationMemory({ memory_key })));
+  db.function('processing_run_id',{deterministic:true},(value:unknown)=>{try{return processingRunId(JSON.parse(String(value)));}catch{return null;}});
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
+  removePersistentStateCorpusTracking(db);
   const hasSchemaLedger = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get());
   let version = 0;
   let vectorLoadedForSnapshot = false;
@@ -1077,7 +1089,7 @@ export function openDatabase(path: string): DatabaseHandle {
       db.close();
       throw Object.assign(new Error("Unreleased album schema 59 cannot be upgraded in place: it conflicts with released 1.0.25 schema 59. Preserve this development database and start with a fresh schema 62, or use a released schema 58/59 database."), { code: "ALBUM_SCHEMA_59_RESET_REQUIRED" });
     }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
@@ -1256,6 +1268,7 @@ export function openDatabase(path: string): DatabaseHandle {
     db.exec(`CREATE VIEW IF NOT EXISTS visible_memory_details AS SELECT rowid AS rowid,* FROM memory_details WHERE user_hidden=0;
       CREATE VIEW IF NOT EXISTS visible_relationship_events AS SELECT * FROM relationship_events WHERE user_hidden=0;`);
     installSetupStorageGuards(db);
+    installStateCorpusTracking(db);
     if (hasSchemaLedger && version < 53) migrateSetupStorage(db);
     if (hasSchemaLedger && version < 50) {
       // Older FTS rowids were independent and changed on every source edit.
@@ -1269,6 +1282,12 @@ export function openDatabase(path: string): DatabaseHandle {
     if (hasSchemaLedger && version < 62) { backfillLegacyParticipantAccess(db); }
     if (hasSchemaLedger && version < 67 && !(db.pragma("table_info(albums)") as Array<{ name: string }>).some(c => c.name === "summary_json")) db.exec("ALTER TABLE albums ADD COLUMN summary_json TEXT");
     refreshAlbumSummaries(db);
+    db.exec(processingSchema);
+    const processingColumns=new Set((db.pragma('table_info(processing_calls)') as Array<{name:string}>).map(c=>c.name));
+    if(!processingColumns.has('repair_reason'))db.exec('ALTER TABLE processing_calls ADD COLUMN repair_reason TEXT');
+    if(!processingColumns.has('completed_items'))db.exec('ALTER TABLE processing_calls ADD COLUMN completed_items INTEGER');
+    if(hasSchemaLedger && version<68)migrateLegacyProcessingRecords(db);
+    if(hasSchemaLedger && version<69)repairProcessingOwnership(db);
     db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)").run(DATABASE_SCHEMA_VERSION, Date.now());
   })();
   if (!hasSchemaLedger) {
@@ -1278,6 +1297,7 @@ export function openDatabase(path: string): DatabaseHandle {
   repairInheritedRevisions(db);
   repairSourceCoverage(db);
   repairAbbreviationEvidence(db);
+  cleanupUnsupportedEntities(db);
   let currentVectorEnabled = false;
   try {
     if (!vectorLoadedForSnapshot) sqliteVec.load(db);

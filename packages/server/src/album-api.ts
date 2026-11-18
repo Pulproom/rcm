@@ -9,6 +9,11 @@ import { collectAlbumMaterials, listAlbumChats } from "./album-materials.js";
 import type { AlbumExportStore } from "./album-exports.js";
 import { albumUpdateCandidates, albumUpdateSnapshot } from "./album-sync.js";
 import { createAlbumTransfers } from "./album-transfer.js";
+import { collectAlbumTogether } from "./album-together.js";
+
+const timeZoneSchema = z.string().refine(value => {
+  try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; }
+}, "Invalid time zone");
 
 const photoMeta = z.object({
   width: z.number().int().positive(), height: z.number().int().positive(), source: z.enum(["upload", "inlay"]),
@@ -88,10 +93,20 @@ export function registerAlbumRoutes(app: Hono, { db, photoStore, exportStore }: 
   routes.get("/chats/:id/album-materials", context => {
     const me = context.req.query("me"), partner = context.req.query("partner");
     const pair = me === undefined && partner === undefined ? undefined : AlbumPairSchema.parse({ me, partner });
-    const materials = collectAlbumMaterials(db, context.req.param("id"), { preferTranslation: true, pair });
+    const timeZone = timeZoneSchema.optional().parse(context.req.query("tz"));
+    const materials = collectAlbumMaterials(db, context.req.param("id"), { preferTranslation: true, pair, timeZone });
     return context.req.query("paged") === "1" ? context.body(transfers.open(materials), 200, { "Content-Type": "application/json" }) : context.json(materials);
   });
-  routes.get("/albums/:id/update-materials", context => context.body(transfers.open(albumUpdateSnapshot(db, album(context.req.param("id")).document)), 200, { "Content-Type": "application/json" }));
+  routes.get("/chats/:id/album-together", context => {
+    const timeZone = timeZoneSchema.parse(context.req.query("tz"));
+    const chatId = context.req.param("id");
+    if (!db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId)) notFound("ALBUM_SOURCE_NOT_FOUND");
+    return context.json(collectAlbumTogether(db, chatId, { timeZone }));
+  });
+  routes.get("/albums/:id/update-materials", context => {
+    const timeZone = timeZoneSchema.optional().parse(context.req.query("tz"));
+    return context.body(transfers.open(albumUpdateSnapshot(db, album(context.req.param("id")).document, { timeZone })), 200, { "Content-Type": "application/json" });
+  });
   routes.get("/albums/:id/update-candidates", context => context.json(albumUpdateCandidates(db, album(context.req.param("id")).document)));
   routes.get("/albums/:id/photos", context => {
     const id = context.req.param("id"); assertAlbumStorageId(id);

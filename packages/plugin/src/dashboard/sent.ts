@@ -10,7 +10,8 @@ export function sentOccasions(packet: string): { asOf: string; items: Array<{ da
   if (!block) return null;
   const decode = (value: string) => value.replace(/&(amp|lt|gt|quot|apos|#10|#13);/g, (_, entity: string) =>
     ({ amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#10": "\n", "#13": "\r" })[entity]!);
-  const items = [...block[2]!.matchAll(/<occasion date="(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})" offset="(-?\d+)" scope="[^"]*">([^<]*)<\/occasion>/g)]
+  // The leading [scope] tag is the packet's own access label; the row shows only the occasion text.
+  const items = [...block[2]!.matchAll(/<occasion date="(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})" offset="(-?\d+)"(?: scope="[^"]*")?>(?:\[[^\]<]*\] )?([^<]*)<\/occasion>/g)]
     .map(match => ({ date: match[1]!, offset: Number(match[2]), label: decode(match[3]!) }));
   return items.length ? { asOf: decode(block[1]!), items } : null;
 }

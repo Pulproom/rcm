@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, LedgerConsistencyResultSchema, type LedgerConsistencyResult, type LeasedJob, type MemoryLanguage, type RpProfile } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { auxiliaryInputFingerprint, auxiliaryInputOutcome, recordAuxiliaryInput } from "./auxiliary-input-cache.js";
-import { buildEntityIdentityResolver } from "./entities.js";
+import { buildEntityIdentityResolver, modelEntityContext } from "./entities.js";
 import { flushRelationshipProjectionQueue } from "./relationship-projections.js";
 import { maybeEnqueueStorySpine } from "./story-spine.js";
 import { transitionEvidenceJson, canAutomaticallyChange, isAutoLocked } from "./user-corrections.js";
@@ -58,6 +58,7 @@ const groupRows = <T>(rows: T[], keyOf: (row: T) => string): Map<string, T[]> =>
 
 function candidateGroups(db: RcmDatabase, chatId: string): LedgerGroup[] {
   const resolve = buildEntityIdentityResolver(db, chatId);
+  const {allowsName}=modelEntityContext(db,chatId);
   const assertionRows = db.prepare(`SELECT id,subject,predicate,value,confidence,valid_from_revision,valid_from_ordinal,
       source_batch_id,source_memory_id,evidence_json,user_edit_ordinal,auto_locked FROM assertions
     WHERE chat_id=? AND valid_to_revision IS NULL ORDER BY subject,valid_from_revision,created_at`).all(chatId) as Array<Record<string, any>>;
@@ -79,7 +80,7 @@ function candidateGroups(db: RcmDatabase, chatId: string): LedgerGroup[] {
       })),
     });
   }
-  const beliefs = groupRows(beliefRows, (row) => `${resolve(String(row.holder)).canonical.normalize("NFKC").toLocaleLowerCase()}\0${resolve(String(row.subject)).canonical.normalize("NFKC").toLocaleLowerCase()}`);
+  const beliefs = groupRows(beliefRows.filter(row=>allowsName(String(row.holder))), (row) => `${resolve(String(row.holder)).canonical.normalize("NFKC").toLocaleLowerCase()}\0${resolve(String(row.subject)).canonical.normalize("NFKC").toLocaleLowerCase()}`);
   for (const [key, rows] of beliefs) {
     if (rows.length < 2) continue;
     groups.push({

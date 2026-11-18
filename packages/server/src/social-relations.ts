@@ -1,5 +1,5 @@
 import { stateDetailSupport, type StateSupportRef, SocialRelationSchema, type SocialRelation } from "@rcm/shared";
-import { EVERYONE_HOLDER, linkedDetailKnowledge } from "./item-access.js";
+import { EVERYONE_HOLDER, linkedDetailKnowledge, type ItemAccessReadContext } from "./item-access.js";
 import type { RcmDatabase } from "./db.js";
 import { normalizeEntityName, type ResolvedEntityIdentity } from "./entities.js";
 
@@ -12,9 +12,9 @@ export function parseSocialRelation(value: unknown): StoredSocialRelation | unde
     ...(parsed.manual === true ? { manual: true, knownByEveryone: parsed.knownByEveryone === true, knownBy: Array.isArray(parsed.knownBy) ? parsed.knownBy : [] } : {}) };
 }
 /** Missing/revoked support hides the derived fact even from authorial retrieval. */
-export function socialRelationKnowledge(db: RcmDatabase, chatId: string, relation: StoredSocialRelation): string[] | undefined {
+export function socialRelationKnowledge(db: RcmDatabase, chatId: string, relation: StoredSocialRelation, reads?:ItemAccessReadContext): string[] | undefined {
   if (relation.manual) return relation.knownByEveryone ? [EVERYONE_HOLDER] : relation.knownBy ?? [];
-  return linkedDetailKnowledge(db, chatId, relation.detailIds);
+  return linkedDetailKnowledge(db, chatId, relation.detailIds,reads);
 }
 
 /** Resolve local typed keys only after all details have been stored. */

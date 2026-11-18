@@ -1,11 +1,17 @@
 import type { LeasedJob, MemoryContextItem } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { atomFingerprint, type RecallAtomReference } from "./atom-relations.js";
+import { modelEntityContext } from './entities.js';
 
 export interface RecallCandidateSnapshot {
   recallCandidates: NonNullable<LeasedJob["recallCandidates"]>;
   recallAtomRefs: RecallAtomReference[];
 }
+
+/** Retained snapshots keep their atom IDs; only identity hints are projected. */
+export const modelRecallCandidates = (candidates: RecallCandidateSnapshot['recallCandidates'], allowsName:(name:string)=>boolean) =>
+  candidates.map(candidate=>({...candidate,accessibleTo:candidate.accessibleTo.filter(allowsName),
+    atoms:candidate.atoms?.map(atom=>({...atom,accessibleTo:atom.accessibleTo.filter(allowsName)}))}));
 
 /** Bounded extraction lookup, sharing the existing retrieval call. The reduced
  * gist budget pays for explicit atom snippets instead of appending another
@@ -35,5 +41,5 @@ export function buildRecallCandidateSnapshot(db: RcmDatabase, chatId: string, se
       return [{ atomRef, text: detail.text.slice(0, 320), accessibleTo: detail.knownBy }];
     }),
   }));
-  return { recallCandidates, recallAtomRefs };
+  return { recallCandidates:modelRecallCandidates(recallCandidates,modelEntityContext(db,chatId).allowsName), recallAtomRefs };
 }

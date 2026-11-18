@@ -1,5 +1,5 @@
 import { initialTranslationConnection, SERVER_LLM_DEFAULT_MODELS, TranslationConnectionConfigSchema,
-  TranslationLegacySettingsSchema, TRANSLATION_TIMEOUT_MS, type TranslationConnectionConfig,
+  TranslationLegacySettingsSchema, translationTimeoutMs, type TranslationConnectionConfig,
   type TranslationConnectionPublicConfig } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { ConnectionCredentials } from "./connection-credentials.js";
@@ -31,7 +31,7 @@ export class TranslationConnection {
     const sharesConnection=config.credentialSource==="shared"&&config.provider===extraction.provider&&config.endpoint===extraction.endpoint;
     const model=config.model||(sharesConnection?extraction.model:SERVER_LLM_DEFAULT_MODELS[config.provider]);
     if(!model)throw new Error("이 프로바이더는 모델 ID를 입력해야 해요.");
-    return {...config,model,thinking:normalizeDirectGeminiThinking(config.provider,model,config.thinking),llmTimeoutMs:TRANSLATION_TIMEOUT_MS};
+    return {...config,model,thinking:normalizeDirectGeminiThinking(config.provider,model,config.thinking),llmTimeoutMs:translationTimeoutMs(config.maxOutputTokens)};
   }
   private prepare(input:unknown) {
     const {apiKey,...config}=TranslationConnectionConfigSchema.parse(input);

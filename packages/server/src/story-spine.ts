@@ -1,5 +1,6 @@
 import { automaticPacketBudget } from "./packet-budget.js";
 import { assertUpgradeJobWritable, chatUpgradeLock } from './upgrade-lock.js';
+import { modelEntityContext } from './entities.js';
 import { refreshChatUpgrade } from './upgrade-run.js';
 import { escapeMemoryText as xml } from "@rcm/shared";
 import { chatPacketPricing, type PacketPricing, chargedSectionTokens } from "./charged-cost.js";
@@ -160,11 +161,9 @@ function storySupportIsLive(db: RcmDatabase, chatId: string, itemId: string, all
 }
 
 function primaryCharacters(db: RcmDatabase, chatId: string): string[] {
-  return (db.prepare(`
-    SELECT e.name FROM entities e
-    WHERE e.chat_id=? AND e.setup_prominence='primary'
-    ORDER BY e.created_at
-  `).all(chatId) as Array<{ name: string }>).map((row) => row.name);
+  const allowed = new Set(modelEntityContext(db, chatId).entities.filter(e=>e.setupProminence==='primary').map(e=>e.name));
+  return (db.prepare("SELECT name FROM entities WHERE chat_id=? AND setup_prominence='primary' ORDER BY created_at").all(chatId) as Array<{name:string}>)
+    .map(row=>row.name).filter(name=>allowed.has(name));
 }
 
 function scopeFor(holders: string[], primary: string[]): Pick<StoryAtom, "accessibleTo" | "scopeHint" | "holderHint"> {
@@ -418,14 +417,16 @@ export function buildStoryConsolidationJob(db: RcmDatabase, row: { id: string; c
   const maxInputTokens = Number(budget.maxInputTokens ?? 80_000);
   const offset = row.payload.storyAtomOffset ?? 0;
   const mainCharacters = primaryCharacters(db, row.chatId);
+  const {allowsName}=modelEntityContext(db,row.chatId);
   const render = (end: number) => JSON.stringify({
     level: row.payload.level,
     mainCharacters,
     ...(previousUserSummary === undefined ? {} : { previousUserSummary }),
     sourceRange: { startOrdinal: row.payload.startOrdinal, endOrdinal: row.payload.endOrdinal },
-    ...(storyOutputScopes(db,row.payload) ? { replacementScopes: storyOutputScopes(db,row.payload) } : {}),
-    ...(row.payload.storyPartialResult ? { previousValidated: row.payload.storyPartialResult } : {}),
-    atoms: atoms.slice(offset, end),
+    ...(storyOutputScopes(db,row.payload) ? { replacementScopes: storyOutputScopes(db,row.payload)!.filter(scope=>!scope.holder||allowsName(scope.holder)) } : {}),
+    ...(row.payload.storyPartialResult ? { previousValidated: {...row.payload.storyPartialResult,nodes:row.payload.storyPartialResult.nodes.filter(node=>!node.holder||allowsName(node.holder))} } : {}),
+    atoms: atoms.slice(offset, end).map(atom=>({...atom,accessibleTo:atom.accessibleTo.filter(allowsName),
+      ...(atom.holderHint && !allowsName(atom.holderHint) ? {holderHint:undefined} : {})})),
   });
   const fits = (end: number) => measureAuxiliaryPrompt([{ role: "system", content: systemPrompt }, { role: "user", content: render(end) }], estimateTokens,
     { maxInputTokens, maxOutputTokens: Number(budget.maxOutputTokens ?? 24_000) }).fits;

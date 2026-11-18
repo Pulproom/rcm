@@ -45,6 +45,7 @@ export function targetDetailSourceEvidence(db: RcmDatabase, chatId: string, deta
       if (first < 0 || content.indexOf(quote, first + 1) >= 0) { invalidQuotedEvidence = true; break; }
       const id = createHash("sha256").update(`${chatId}\0${detail.id}\0${entry.messageId}\0${quote}`).digest("hex");
       const item: SourceEvidenceItem = { bundleKey: detail.id, memoryId: detail.memory_id, id, messageId: entry.messageId, quote, speaker: null, epistemic: detail.epistemic, ordinal: row.ordinal,
+        startOffset: first, endOffset: first + quote.length,
         holders: scope.narratorOnly ? ["narrator"] : scope.everyone ? ["everyone"] : itemAccessKnowledge(scope), score: 1 };
       if (excluded.has(sourceEvidenceAtomKey(item)) || result.some((old) => old.quote === item.quote)
         || bundle.some((old) => old.quote === item.quote)) continue;

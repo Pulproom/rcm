@@ -2,6 +2,7 @@ import { escapeMemoryText as escape, escapeMemoryAttribute } from "./memory-esca
 import { memoryGuidanceBlock, memoryAccessLabel, memoryEvidenceLabel, sameMemoryLabels } from "./memory-presentation.js";
 import { projectMemoryScene, renderMemoryScene } from "./memory-scene.js";
 import { narrationLine } from "./knowledge-scope.js";
+import { segmentSentences } from "./sentence-segmentation.js";
 import type { MemoryContextItem } from "./index.js";
 
 /** Internal final emission plan projection; never part of the tool wire schema. */
@@ -29,8 +30,12 @@ export interface McpSourceMetadata {
   location?: string;
 }
 
+/** Server-only display projection. Symbols never enter the public JSON contract. */
+export const mcpSourcePresentation = Symbol("mcpSourcePresentation");
+
 /** Internal evidence contract. IDs and delivery state never appear in model prose. */
 export interface McpEvidence {
+  [mcpSourcePresentation]?: { ordinal: number; range?: McpSourceRange; hasVisibleTextBetween?: (start: number, end: number) => boolean };
   atomKey: string;
   bundleKey?: string;
   memoryId?: string;
@@ -43,6 +48,9 @@ export interface McpEvidence {
   knownBy?: string[];
   knownByEveryone?: boolean;
   knownByLabels?: string[];
+  hiddenFrom?: string[];
+  /** Current directional recognition identity, for Names overlap suppression. */
+  recognitionId?: string;
   basis?: string;
   /** Authorial record heading, not evidence of any character's knowledge. */
   context?: string;
@@ -74,6 +82,31 @@ const scope = (entry: McpEvidence): string[] => entry.knownByEveryone ? ["everyo
 // Source message labels are our own legacy envelope, not scene locations.
 const place = (entry: McpEvidence): string | undefined => entry.location && !/^Source message\s+\d+$/i.test(entry.location) ? entry.location : undefined;
 
+/** Exact source coverage only; authored facts/dialogue are never deduplicated.
+ * Cuts use stored interval endpoints and typographic sentence boundaries. */
+export function unrepeatedMcpEvidence(entries: McpEvidence[], covered: McpSourceRange[] = []): McpEvidence[] {
+  return entries.flatMap(entry => {
+    const range=entry.sourceRange;
+    if(entry.kind!=="quote" || !range)return [entry];
+    let gaps=[{...range}];
+    for(const prior of covered.filter(prior=>prior.messageId===range.messageId))gaps=gaps.flatMap(gap=>
+      prior.end<=gap.start || prior.start>=gap.end ? [gap] : [
+        ...(gap.start<prior.start ? [{...gap,end:prior.start}] : []),
+        ...(prior.end<gap.end ? [{...gap,start:prior.end}] : []),
+      ]);
+    if(gaps.length===1 && gaps[0]!.start===range.start && gaps[0]!.end===range.end){covered.push(range);return [entry];}
+    if(!gaps.length || range.end-range.start!==entry.text.length)return [];
+    const boundaries=new Set([0,entry.text.length,...segmentSentences(entry.text).flatMap(part=>[
+      part.index,part.index+part.segment.length,part.index+part.segment.trimEnd().length,
+    ])]);
+    // A boundary inside a sentence makes this overlapping passage unsafe to cut.
+    if(gaps.some(gap=>!boundaries.has(gap.start-range.start)||!boundaries.has(gap.end-range.start)))return [];
+    covered.push(...gaps);
+    return gaps.map(gap=>({...entry,atomKey:`${entry.atomKey}:source:${gap.start}:${gap.end}`,
+      sourceRange:gap,text:entry.text.slice(gap.start-range.start,gap.end-range.start)}));
+  });
+}
+
 /** Character-facing MCP keeps its existing evidence grouping. */
 function mostFrequentFactScope(entries: readonly (readonly string[])[]): readonly string[] {
   const scopes: Array<{ labels: readonly string[]; count: number }> = [];
@@ -88,18 +121,28 @@ function renderRecord(record: McpEvidence[], index: number, reference: (id: stri
   const first = record[0]!;
   const ref = first.ref ?? (first.memoryId ? reference(first.memoryId) : undefined);
   const facts = record.filter(entry => entry.kind !== "quote"), quotes = record.filter(entry => entry.kind === "quote");
+  const range = (entry:McpEvidence) => entry.sourceRange ?? entry[mcpSourcePresentation]?.range;
+  // Admission stays relevance-first; only exact source display follows story order.
+  quotes.sort((a,b) => (a[mcpSourcePresentation]?.ordinal ?? 0) - (b[mcpSourcePresentation]?.ordinal ?? 0)
+    || (range(a)?.start ?? 0) - (range(b)?.start ?? 0));
+  const source = quotes.length ? `Source (exact text; narration does not show who knew it):\n${quotes.map((entry,index) => {
+    const previous=index?range(quotes[index-1]!):undefined, current=range(entry);
+    const gap=previous && current && (previous.messageId!==current.messageId
+      || (entry[mcpSourcePresentation]?.hasVisibleTextBetween?.(previous.end,current.start) ?? current.start>previous.end));
+    return `${index ? gap ? "\n\n[…]\n\n" : "\n\n" : ""}${escape(entry.text)}`;
+  }).join("")}` : "";
   if (card) {
     const item = {...card.item,
-      details: card.detailIds.flatMap(id => card.item.details.filter(detail => detail.id === id)),
+      details: card.item.details.filter(detail => card.detailIds.includes(detail.id)),
       keyDialogues: card.item.keyDialogues};
     const scene = projectMemoryScene(item);
-    // MCP depth follows relevance, unlike automatic cards' source order.
-    scene.details = scene.details.map(detail => ({...detail, sourceOrdinal:undefined}));
+    // Relevance already chose which details fit. Display them in the stored
+    // record order (source position, then extraction order), like automatic
+    // cards, so the card reads as one continuous scene.
     let text = renderMemoryScene(scene,{plot:card.plot,viewpoint,clarity:item.clarity});
     // MCP exposes persistent refs, never storage IDs. This is our card envelope.
     text = text.replace(/ id="[^"]*"/, ref ? ` ref="${escapeMemoryAttribute(ref)}"` : "");
     if (card.moreDetails && ref) text = text.replace("\n</memory>", `\nMore details: expand_rp_memory ref=${escape(ref)}\n</memory>`);
-    const source = quotes.length ? `Source (exact text; narration does not show who knew it):\n${quotes.map(entry => escape(entry.text)).join("\n\n")}` : "";
     return [text,source].filter(Boolean).join("\n");
   }
   // An unrecorded row cannot inherit a neighbouring fact's knowledge claim.
@@ -122,9 +165,8 @@ function renderRecord(record: McpEvidence[], index: number, reference: (id: stri
     const content = entry.kind === "dialogue" ? `${entry.speaker ? `${escape(entry.speaker)}: ` : ""}“${escape(entry.text)}”` : escape(entry.text);
     return `${entry.kind === "dialogue" ? "" : "- "}${access}${qualifier}${content}${timing}${suffix}`;
   });
-  const heading = first.atomKey.startsWith("state:") ? "Current state" : first.memoryId ? `Record ${index + 1}` : first.kind === "quote" ? "Source excerpt" : first.context ?? `Record ${index + 1}`;
+  const heading = first.atomKey.startsWith("state:") ? "State" : first.memoryId ? `Record ${index + 1}` : first.kind === "quote" ? "Source excerpt" : first.context ?? `Record ${index + 1}`;
   // Exact passages never inherit scene metadata and their text is left intact.
-  const source = quotes.length ? `Source (exact text; narration does not show who knew it):\n${quotes.map(entry => escape(entry.text)).join("\n\n")}` : "";
   return [`${heading}${isState && accessLabel ? ` [${escape(accessLabel.replace(/^Known by/,"known by").replace(/^No character knows/,"no character knows"))}]` : ""}${ref ? ` [ref=${escape(ref)}]` : ""}`, header, lines.join("\n"), source].filter(Boolean).join("\n");
 }
 
@@ -139,15 +181,16 @@ export function renderMcpAnswer(answers: McpQuestionAnswer[], reference: (id: st
     : answers.some(answer => answer.alreadyPresent)
     ? "<rp_memory_result>The relevant memory is already present in this turn. No new details were retrieved.</rp_memory_result>"
     : "<rp_memory_result>No matching memory was found. This does not mean it never happened.</rp_memory_result>";
+  const covered: McpSourceRange[]=[];
   const sections = answers.map(answer => {
-    const entries = [...new Map([...(answer.alreadyProvidedEvidence ?? []), ...answer.evidence].map(item => [item.atomKey, item])).values()];
+    const entries = unrepeatedMcpEvidence([...new Map([...(answer.alreadyProvidedEvidence ?? []), ...answer.evidence].map(item => [item.atomKey, item])).values()],covered);
     const records = new Map<string, McpEvidence[]>();
     for (const entry of entries) {
       const key = entry.memoryId ?? entry.bundleKey ?? entry.atomKey;
       records.set(key, [...(records.get(key) ?? []), entry]);
     }
     // Parse only the selector-owned citation envelope, never RP semantics.
-    const synthesized = answer.synthesizedText?.trim().replace(/\s*\[((?:\s*b\d+\s*(?:,\s*b\d+\s*)*))\]/gi, (_match, ids: string) => {
+    const synthesized = answer.synthesizedText?.trim().replace(/\s*\[((?:\s*[be]\d+\s*(?:,\s*[be]\d+\s*)*))\]/gi, (_match, ids: string) => {
       const refs = (ids.match(/b\d+/gi) ?? []).flatMap(id => (answer.synthesizedReferences?.[id.toLowerCase()] ?? []).flatMap(memoryId => {
         const ref = entries.find(entry => entry.memoryId === memoryId && entry.ref)?.ref ?? reference(memoryId);
         return ref ? [`[ref=${ref}]`] : [];
@@ -155,10 +198,10 @@ export function renderMcpAnswer(answers: McpQuestionAnswer[], reference: (id: st
       // A citation with no expandable record disappears with its leading space.
       return refs.length ? ` ${[...new Set(refs)].join(" ")}` : "";
     }).trim();
-    const body = [synthesized ? `Memory answer\n${escape(synthesized)}` : "", ...[...records.values()].map((record, index) => renderRecord(record, index, reference,
-      options?.cards.find(card => card.memoryId === record[0]?.memoryId),options?.viewpoint))].filter(Boolean).join("\n\n");
+    const body = [synthesized ? `Memory answer\n${escape(synthesized)}` : "", ...[...records.values()].map((record, index) => `<record>\n${renderRecord(record, index, reference,
+      options?.cards.find(card => card.memoryId === record[0]?.memoryId),options?.viewpoint)}\n</record>`)].filter(Boolean).join("\n\n");
     const status = answer.searchUnavailable ? "The lookup was incomplete. These records may leave out relevant past events."
-      : !entries.length && !synthesized ? answer.alreadyPresent
+      : !entries.length && !synthesized ? answer.alreadyPresent || answer.evidence.length || answer.alreadyProvidedEvidence?.length
         ? "The relevant memory is already present in this turn. No new details were retrieved."
         : "No matching memory was found. This does not mean it never happened." : "";
     return `${answers.length > 1 ? `Question: ${escape(answer.question)}\n` : ""}${[body, status].filter(Boolean).join("\n")}`;

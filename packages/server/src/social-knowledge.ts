@@ -1,3 +1,4 @@
+import { isPersonEntityType } from "@rcm/shared";
 import { escapeMemoryText, estimateTokens } from "@rcm/shared";
 import { deletedMemoryKeys } from './user-deletions.js';
 import { availableMemoryKey } from './extraction-memory-keys.js';
@@ -8,9 +9,10 @@ import type { ExtractionResult, SocialKnowledge } from "@rcm/shared";
 import { chatPacketPricing, type PacketPricing, chargedSectionTokens } from "./charged-cost.js";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
-import { buildEntityIdentityResolver, listEntities, normalizeEntityName } from "./entities.js";
+import { buildEntityIdentityResolver, listEntities, modelEntityContext, normalizeEntityName } from "./entities.js";
 import { canAutomaticallyChange, committedEditOrdinal, correctionView, UNCORRECTED_SQL } from "./user-corrections.js";
 import { invalidateStorySupports, storyMemorySupportIds } from "./story-spine.js";
+import { memoryAtomKey } from "./memory-atoms.js";
 
 export type SocialKnowledgeLevel = "aware_of" | "interacted";
 export const socialKnowledgeLevelLabel: Record<SocialKnowledgeLevel, string> = {
@@ -429,7 +431,7 @@ export function invalidateSocialKnowledgeEvidence(db: RcmDatabase, chatId: strin
 export function mentionedCharacters(db: RcmDatabase, chatId: string, text: string): string[] {
   const resolve = buildEntityIdentityResolver(db, chatId);
   const normalized = normalizeEntityName(text);
-  return listEntities(db, chatId).filter(entity => ["person", "character"].includes(entity.type)
+  return modelEntityContext(db, chatId).entities.filter(entity => isPersonEntityType(entity.type)
     && [entity.name, entity.key, ...entity.aliases].some(term => {
       const identity = resolve(term);
       if (identity.ambiguous || normalizeEntityName(identity.canonical) !== normalizeEntityName(entity.name)) return false;
@@ -447,7 +449,7 @@ export function mentionedCharacters(db: RcmDatabase, chatId: string, text: strin
 }
 
 export interface SceneNames {
-  text: string; pairCount: number; omittedCount: number; recognitionIds: string[];
+  text: string; pairCount: number; omittedCount: number; recognitionIds: string[]; atomKeys: string[];
   /** Subject is present or mentioned, before holder access, name availability and output caps. */
   sceneRecognitionIds: string[];
 }
@@ -484,9 +486,9 @@ export function recentAddressTerms(terms: readonly string[], userEdited = false)
 }
 
 /** Direction describes whose naming knowledge this is, not who can know the row. */
-export function renderSceneNames(db: RcmDatabase, chatId: string, holders: string[], present: string[], mentioned: string[], tokenBudget = 200, pricing: PacketPricing = chatPacketPricing(db, chatId)): SceneNames {
+export function renderSceneNames(db: RcmDatabase, chatId: string, holders: string[], present: string[], mentioned: string[], tokenBudget = 200, pricing: PacketPricing = chatPacketPricing(db, chatId), excludedRecognitionIds: ReadonlySet<string> = new Set(), supplied: ReadonlySet<string> = new Set()): SceneNames {
   const resolve = buildEntityIdentityResolver(db, chatId);
-  const characters = new Set(listEntities(db, chatId).filter(entity => ["person", "character"].includes(entity.type)).map(entity => normalizeEntityName(entity.name)));
+  const characters = new Set(modelEntityContext(db, chatId).entities.filter(entity => isPersonEntityType(entity.type)).map(entity => normalizeEntityName(entity.name)));
   const canonical = (value: string): string => {
     const identity = resolve(value);
     return identity.ambiguous ? "" : normalizeEntityName(identity.canonical);
@@ -497,7 +499,8 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
   const visible = new Map(listSocialKnowledge(db, chatId).map(item => [item.id, item]));
   const sceneRecognitions = socialKnowledgeView(db, chatId).filter(item => subjectSet.has(canonical(item.subject))
     && characters.has(canonical(item.subject)));
-  const pairs = sceneRecognitions.filter(item => hasRecognitionContent({...item,body:visible.get(item.id)?.cognition.map(detail=>detail.text).join(" ")} ) && holderSet.has(canonical(item.holder))
+  const pairs = sceneRecognitions.filter(item => !excludedRecognitionIds.has(`recognition:${item.holder}:${item.subject}`)
+    && hasRecognitionContent({...item,body:visible.get(item.id)?.cognition.map(detail=>detail.text).join(" ")} ) && holderSet.has(canonical(item.holder))
     && canonical(item.holder) !== canonical(item.subject)
     // A referenced recognition atom must still be accessible to its holder.
     && (!item.detailIds.length || visible.get(item.id)!.cognition.length > 0))
@@ -507,6 +510,7 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
   const quote = (value: string) => JSON.stringify(value);
   const lines: string[] = [];
   const recognitionIds: string[] = [];
+  const atomKeys: string[] = [];
   const render = () => escapeMemoryText(sceneNamesText(lines));
   for (const item of pairs) {
     if (lines.length >= 8) break;
@@ -516,16 +520,21 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
     const line = () => "- " + item.holder + " → " + label + ": " + [recognitionNaming(item.subject,item.knownAs),
       addressTerms.length ? "calls " + addressTerms.map(quote).join(", ") : ""].filter(Boolean).join("; ")
       + (item.level === "aware_of" ? ` (${socialKnowledgeLevelLabel[item.level]})` : "");
+    const key = () => memoryAtomKey("names", JSON.stringify([canonical(item.holder),canonical(item.subject)]), escapeMemoryText(line()));
+    // Skip a delivered full line before it can consume budget or be shortened.
+    if(supplied.has(key()))continue;
     lines.push(line());
     // Extra address terms must not evict an otherwise fitting full knownAs row.
     while (addressTerms.length && chargedSectionTokens(render(), pricing) > Math.min(200, tokenBudget)) {
       addressTerms.pop(); lines[lines.length - 1] = line();
     }
     if (chargedSectionTokens(render(), pricing) > Math.min(200, tokenBudget)) { lines.pop(); continue; }
+    if(supplied.has(key())){lines.pop();continue;}
     recognitionIds.push(`recognition:${item.holder}:${item.subject}`);
+    atomKeys.push(key());
   }
   return { text: render(),
-    pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds,
+    pairCount: lines.length, omittedCount: pairs.length - lines.length, recognitionIds, atomKeys,
     sceneRecognitionIds: sceneRecognitions.map(item => `recognition:${item.holder}:${item.subject}`) };
 }
 

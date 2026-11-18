@@ -1,9 +1,12 @@
-import { createEntityIdentityResolver, normalizeEntityName, type ResolvedEntityIdentity } from "./entity-identity.js";
+import { personIdentity } from "./entity-person-fields.js";
+import { createEntityIdentityResolver, modelEntityIdentityContext, normalizeEntityName, type ModelIdentityEntity, type ResolvedEntityIdentity } from "./entity-identity.js";
 export * from "./entity-identity.js";
+export * from "./entity-person-fields.js";
 import { MAX_MEMORY_BUDGET, MemoryBudgetPresetSchema } from "./memory-budget.js";
 import { PairProgressPatchesSchema, SetupPairProgressSchema } from "./pair-progress.js";
 export * from "./pair-progress.js";
 export * from "./album.js";
+export * from "./album-together.js";
 export * from "./album-draft.js";
 export * from "./album-update.js";
 export * from "./album-photo-fit.js";
@@ -48,7 +51,7 @@ export { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage 
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 100;
+export const RCM_API_REVISION = 104;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -105,7 +108,7 @@ export {
   SIGNED_RELATIONSHIP_BASELINE_VALUES,
 } from "./structured-contract-values.js";
 export { buildAuxiliaryRepairMessages, structuredJsonShapeDiagnostic, structuredValidationDiagnostic, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, structuredJsonErrorWindow, type AuxiliaryRepairMessage, type AuxiliaryRepairRequest } from "./structured-repair.js";
-export { canonicalizeSourceText, defaultCanonicalizationPolicy, isImageOnlySourceChange, sourceComparisonText, stripYumiTransportComments, validateCanonicalRemovalRule, type CanonicalizationPolicy, type CanonicalRemovalRule } from "./normalization.js";
+export { canonicalizeSourceText, defaultCanonicalizationPolicy, imageComparisonText, isImageOnlySourceChange, sourceComparisonText, selectGigaTransTranslation, stripYumiTransportComments, validateCanonicalRemovalRule, type CanonicalizationPolicy, type CanonicalRemovalRule } from "./normalization.js";
 export { STORY_TIME_GUIDANCE, formatStoryTime, compareParsedStoryTimes, compareStoryTimes, normalizeStoryTime, parseStoryTime, structuredStoryTimeEnd, type ParsedStoryTime } from "./story-time.js";
 export * from "./scene-order.js";
 export * from "./quiz.js";
@@ -347,8 +350,8 @@ export const InitialCalibrationEntitySchema = z.object({
 });
 
 export const InitialCalibrationRelationshipSchema = z.object({
-  fromKey: z.string().trim().min(1),
-  toKey: z.string().trim().min(1),
+  fromKey: personIdentity(z.string().trim().min(1)),
+  toKey: personIdentity(z.string().trim().min(1)),
   axes: z.object({
     affection: z.enum(INITIAL_AFFECTION_LEVELS).default("unknown"),
     trust: z.enum(INITIAL_TRUST_LEVELS).default("unknown"),
@@ -376,7 +379,7 @@ export const InitialCalibrationResultSchema = z.object({
   entities: z.array(InitialCalibrationEntitySchema).optional(),
   relationships: z.array(InitialCalibrationRelationshipSchema).optional(),
   socialKnowledge: z.array(z.object({
-    holderKey: z.string().trim().min(1), subjectKey: z.string().trim().min(1),
+    holderKey: personIdentity(z.string().trim().min(1)), subjectKey: personIdentity(z.string().trim().min(1)),
     level: z.enum(["aware_of", "interacted"]),
     knownAs: SocialTermsSchema.default([]),
     description: z.string().trim().min(1),
@@ -522,7 +525,7 @@ export type DialogueEvidence = z.infer<typeof DialogueEvidenceSchema>;
 
 export const SeedMarkerSchema = z.object({
   type: z.enum(["wish", "plan", "noticed", "promise", "curiosity"]).optional(),
-  noticedBy: z.array(z.string().trim().min(1)),
+  noticedBy: z.array(personIdentity(z.string().trim().min(1))),
   status: z.enum(["open", "fulfilled", "abandoned", "closed"]).default("open"),
 });
 export type SeedMarker = z.infer<typeof SeedMarkerSchema>;
@@ -597,6 +600,8 @@ export const MemoryContextItemSchema = z.object({
     seed: SeedMarkerSchema.optional(),
     id: z.string(),
     sourceOrdinal: z.number().int().optional(),
+    /** Position of the detail's exact quote inside its first source message. */
+    sourceOffset: z.number().int().optional(),
     key: z.string(),
     kind: z.enum(MEMORY_DETAIL_KIND_VALUES),
     role: z.enum(["core", "supporting"]).optional(),
@@ -723,7 +728,7 @@ export interface MemoryDetailAccess {
   narratorOnly: boolean;
 }
 export const ItemAccessGrantSchema = z.object({
-  holder: z.string().trim().min(1),
+  holder: personIdentity(z.string().trim().min(1)),
   basis: ItemAccessBasisSchema,
   evidence: z.array(EvidenceSchema).default([]),
   confidence: z.number().min(0).max(1).default(1),
@@ -733,7 +738,7 @@ export type ItemAccessGrant = z.infer<typeof ItemAccessGrantSchema>;
 export const SourcePassageSchema = z.object({
   messageId: z.string().min(1), quote: z.string().min(1),
   startOffset: z.number().int().nonnegative().optional(),
-  speaker: z.string().optional(),
+  speaker: personIdentity(z.string()).optional(),
   epistemic: z.enum(["observed", "stated", "inferred", "unresolved"]),
   access: z.array(ItemAccessGrantSchema),
 });
@@ -743,7 +748,7 @@ export const LANDMARK_KIND_VALUES = ["confession", "relationship_change", "first
 export const LandmarkKindSchema = z.object({
   kind: z.enum(LANDMARK_KIND_VALUES),
   label: z.string().trim().min(1).optional(),
-  pair: z.tuple([z.string().trim().min(1), z.string().trim().min(1)]).optional(),
+  pair: z.tuple([personIdentity(z.string().trim().min(1)), personIdentity(z.string().trim().min(1))]).optional(),
   storyTime: z.string().trim().min(1).optional(),
   evidence: z.array(EvidenceSchema).optional(),
   alwaysInject: z.boolean().optional(),
@@ -765,10 +770,10 @@ export const PhysicalIntimacyActSchema = z.enum(PHYSICAL_INTIMACY_ACT_VALUES);
 export type PhysicalIntimacyAct = z.infer<typeof PhysicalIntimacyActSchema>;
 
 export const PhysicalIntimacyEventSchema = z.object({
-  participants: z.tuple([z.string().trim().min(1), z.string().trim().min(1)]),
+  participants: z.tuple([personIdentity(z.string().trim().min(1)), personIdentity(z.string().trim().min(1))]),
   act: PhysicalIntimacyActSchema,
   customLabel: z.string().trim().min(1).optional(),
-  initiator: z.string().trim().min(1).optional(),
+  initiator: personIdentity(z.string().trim().min(1)).optional(),
   status: z.enum(["occurred", "reciprocated", "completed", "occurred_before_chat"]),
   interactionContext: z.enum(["mutual", "initiated", "coerced", "nonconsensual", "ambiguous"]).optional(),
   circumstance: z.string().trim().min(1).optional(),
@@ -785,7 +790,7 @@ export type PhysicalIntimacyEvent = z.infer<typeof PhysicalIntimacyEventSchema>;
 
 export const MemoryRecallObservationSchema = z.object({
   memoryId: z.string().trim().min(1),
-  holder: z.string().trim().min(1),
+  holder: personIdentity(z.string().trim().min(1)),
   action: z.enum(["mentioned", "recalled", "reexperienced"]),
   evidenceMessageIds: z.array(z.string().min(1)).min(1),
   confidence: z.number().min(0).max(1).default(1),
@@ -828,8 +833,8 @@ export const IntensityRelationshipBaselineSchema = z.preprocess(
   z.enum(INTENSITY_RELATIONSHIP_BASELINE_VALUES),
 );
 export const RelationshipBaselineSchema = z.object({
-  from: z.string().trim().min(1),
-  to: z.string().trim().min(1),
+  from: personIdentity(z.string().trim().min(1)),
+  to: personIdentity(z.string().trim().min(1)),
   affection: SignedRelationshipBaselineSchema.default("unknown"),
   trust: SignedRelationshipBaselineSchema.default("unknown"),
   intimacy: SignedRelationshipBaselineSchema.default("unknown"),
@@ -847,7 +852,7 @@ export const RelationshipBaselineSchema = z.object({
 export type RelationshipBaseline = z.infer<typeof RelationshipBaselineSchema>;
 
 export const KeyDialogueSchema = z.object({
-  speaker: z.string().min(1),
+  speaker: personIdentity(z.string().min(1)),
   text: z.string().min(1),
   messageId: z.string().min(1),
   evidence: z.array(DialogueEvidenceSchema).min(1),
@@ -878,15 +883,15 @@ export const ExtractedMemoryDetailSchema = z.object({
   originalKind: z.string().max(120).optional(),
   role: z.enum(["core", "supporting"]).optional(),
   text: z.string().trim().min(1),
-  participants: z.array(z.string().trim().min(1)).default([]),
-  knownBy: z.array(z.string().trim().min(1)).default([]),
+  participants: z.array(personIdentity(z.string().trim().min(1))).default([]),
+  knownBy: z.array(personIdentity(z.string().trim().min(1))).default([]),
   locations: z.array(z.string().trim().min(1)).default([]),
   epistemic: z.enum(["observed", "stated", "inferred", "unresolved"]),
   salience: z.number().min(0).max(1).default(0.5),
   retention: z.enum(["scene", "arc", "durable"]).default("arc"),
   evidence: z.array(EvidenceSchema).min(1),
   access: z.array(ItemAccessGrantSchema).optional(),
-  hiddenFrom: z.array(z.string().trim().min(1)).optional(),
+  hiddenFrom: z.array(personIdentity(z.string().trim().min(1))).optional(),
 }).superRefine((detail, context) => {
   const normalize = (name: string) => name.normalize("NFKC").trim().toLocaleLowerCase();
   const holders = new Set(detail.knownBy.map(normalize));
@@ -936,13 +941,13 @@ export const ExtractedMemorySchema = z.object({
   type: z.enum(["episode", "relationship", "promise", "secret", "world_state", "belief", "foreshadowing"]),
   title: z.string(),
   content: z.string(),
-  participants: z.array(z.string()).default([]),
+  participants: z.array(personIdentity(z.string())).default([]),
   witnesses: z.array(z.object({
-    name: z.string(),
+    name: personIdentity(z.string()),
     kind: z.enum(["participant", "witness", "heard", "inferred"]).default("witness"),
   })).optional(),
-  knownBy: z.array(z.string()).default([]),
-  perspective: z.string().optional(),
+  knownBy: z.array(personIdentity(z.string())).default([]),
+  perspective: personIdentity(z.string()).optional(),
   storyTime: z.string().trim().min(1).optional(),
   locations: z.array(z.string().trim().min(1)).optional(),
   landmark: z.boolean().optional(),
@@ -957,7 +962,7 @@ export const ExtractedMemorySchema = z.object({
 
 /** Social facts are world-state annotations, not emotional or knowledge grants. */
 export const SocialRelationSchema = z.object({
-  target: z.string().trim().min(1),
+  target: z.string().trim().min(1).meta({rcmPersonSlot:true,rcmPersonKind:"interpersonal"}),
   kind: z.enum(["interpersonal", "affiliation"]),
   direction: z.enum(["directed", "mutual"]),
   label: z.string().trim().min(1),
@@ -990,7 +995,7 @@ const AssertionSchema = z.object({
 
 const BeliefSchema = z.object({
   ...StateDetailLinks,
-  holder: z.string(),
+  holder: personIdentity(z.string()),
   subject: z.string(),
   predicate: z.string(),
   value: z.string(),
@@ -1006,8 +1011,8 @@ const BeliefSchema = z.object({
 });
 
 export const SocialKnowledgeSchema = z.object({
-  holder: z.string().trim().min(1),
-  subject: z.string().trim().min(1),
+  holder: personIdentity(z.string().trim().min(1)),
+  subject: personIdentity(z.string().trim().min(1)),
   level: z.enum(["aware_of", "interacted"]),
   knownAs: SocialTermsSchema.default([]),
   addressTerms: SocialTermsSchema.default([]),
@@ -1018,8 +1023,8 @@ export const SocialKnowledgeSchema = z.object({
 export type SocialKnowledge = z.infer<typeof SocialKnowledgeSchema>;
 
 export const RelationshipEventSchema = z.object({
-  from: z.string().trim().min(1),
-  to: z.string().trim().min(1),
+  from: personIdentity(z.string().trim().min(1)),
+  to: personIdentity(z.string().trim().min(1)),
   changes: z.array(z.object({
     axis: z.enum(["affection", "trust", "fear", "jealousy", "intimacy", "hostility"]),
     effect: z.enum(["increase", "decrease", "reveal", "complicate", "resolve"]),
@@ -1085,8 +1090,8 @@ const PromiseEventSchema = z.enum(["established", "reinforced", "kept", "broken"
 export const PromiseSchema = z.object({
   ...StateDetailLinks,
   key: z.string(),
-  promisor: z.string(),
-  promisee: z.string(),
+  promisor: personIdentity(z.string()),
+  promisee: personIdentity(z.string()),
   content: z.string(),
   event: PromiseEventSchema.optional(),
   amendment: z.string().trim().min(1).optional(),
@@ -1120,7 +1125,7 @@ export const StateObservationSchema = z.discriminatedUnion("kind", [
     kind: z.literal("character_belief"),
     ...StateDetailLinks,
     key: z.string().trim().min(1),
-    holder: z.string().trim().min(1),
+    holder: personIdentity(z.string().trim().min(1)),
     subject: z.string().trim().min(1),
     predicateHint: z.string().trim().min(1),
     value: z.string().trim().min(1),
@@ -1134,8 +1139,8 @@ export const StateObservationSchema = z.discriminatedUnion("kind", [
     kind: z.literal("promise_event"),
     ...StateDetailLinks,
     key: z.string().trim().min(1),
-    promisor: z.string().trim().min(1),
-    promisee: z.string().trim().min(1),
+    promisor: personIdentity(z.string().trim().min(1)),
+    promisee: personIdentity(z.string().trim().min(1)),
     promiseKeyHint: z.string().trim().min(1),
     content: z.string().trim().min(1),
     event: PromiseEventSchema,
@@ -1651,6 +1656,7 @@ export function extractionAuditAllowedValues(result: ExtractionDraftResult): {
 }
 
 export function buildExtractionAuditMessages(input: {
+  modelIdentityEntities?: readonly ModelIdentityEntity[];
   memoryLanguage: MemoryLanguage;
   sourceMessages: Array<{ id: string; role: string; content: string }>;
   draft: ExtractionDraftResult;
@@ -1659,12 +1665,14 @@ export function buildExtractionAuditMessages(input: {
   sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] };
   existingOpenPromises?: Array<{ key: string; promisor: string; promisee: string; content: string; scheduledFor?: string | null }>;
 }): Array<{ role: "system" | "user" | "assistant"; content: string }> {
+  const {entities,allowsName}=modelEntityIdentityContext(input.draft.entities,input.modelIdentityEntities);
   const allowed = extractionAuditAllowedValues(input.draft);
   const referencedAtoms = new Set((input.draft.atomRelations ?? []).flatMap(relation => "atomRef" in relation.target ? [relation.target.atomRef] : []));
   // Audit only the old snippets actually cited by a relation, rather than
   // repeating the whole retrieval lookup on every extraction audit call.
   const recallCandidates = (input.recallCandidates ?? []).flatMap(candidate => {
-    const atoms = (candidate.atoms ?? []).filter(atom => referencedAtoms.has(atom.atomRef));
+    const atoms = (candidate.atoms ?? []).filter(atom => referencedAtoms.has(atom.atomRef))
+      .map(atom=>({...atom,accessibleTo:atom.accessibleTo.filter(allowsName)}));
     return atoms.length ? [{ memoryId: candidate.memoryId, title: candidate.title, atoms }] : [];
   });
   return [
@@ -1679,13 +1687,13 @@ Check only the unresolved excerpts in this frozen draft against the supplied sou
       task: "audit_extraction",
       canonicalLanguage: input.memoryLanguage,
       sourceMessages: input.sourceMessages,
-      draft: input.draft,
+      draft: {...input.draft,entities},
       recallCandidates,
       ...(input.sourceRecovery ? { recoveryContext: input.sourceRecoveryContext ?? {} } : {}),
       ALLOWED_VALUES: {
         ...allowed,
         sourceMessageIds: input.sourceMessages.map((message) => message.id),
-        EXISTING_OPEN_PROMISES: input.existingOpenPromises ?? [],
+        EXISTING_OPEN_PROMISES: (input.existingOpenPromises ?? []).filter(p=>allowsName(p.promisor)&&allowsName(p.promisee)),
       },
     }) },
   ];
@@ -2035,14 +2043,14 @@ export const TranslationConnectionConfigSchema = ServerLlmConfigSchema.pick({
 }).extend({
   model: z.string().trim().max(240).default(""),
   credentialSource: z.enum(["shared", "dedicated"]).default("shared"),
-  maxOutputTokens: z.number().int().min(256).max(128000).default(8000),
+  maxOutputTokens: z.number().int().min(256).max(128000).default(16000),
 });
 export type TranslationConnectionConfig = z.output<typeof TranslationConnectionConfigSchema>;
 export type TranslationConnectionPublicConfig = Omit<TranslationConnectionConfig,"apiKey"> & { keyConfigured:boolean; dedicatedKeyConfigured:boolean };
 /** One-time import of the translation fields shipped in 1f3ec17. */
 export const TranslationLegacySettingsSchema = z.object({
   model: z.string().trim().max(240).default(""), temperature: z.number().min(0).max(2).default(.3),
-  thinking: ThinkingLevelSchema.default("default"), maxOutput: z.number().int().min(256).max(128000).default(8000),
+  thinking: ThinkingLevelSchema.default("default"), maxOutput: z.number().int().min(256).max(128000).default(16000),
 });
 export function initialTranslationConnection(extraction: Pick<ServerLlmPublicConfig,"provider"|"endpoint"|"serviceTier">,
   legacy: z.input<typeof TranslationLegacySettingsSchema> = {}): Omit<TranslationConnectionConfig,"apiKey"> {
@@ -2098,6 +2106,8 @@ export interface ServerWorkerStatus {
   controlLeaseUntil?: number;
   lastError?: string;
   queuedJobs?: number;
+  /** Global queue signal for draining; queuedJobs remains scoped to the open chat. */
+  globalQueuedJobs?: number;
   phase?: import("./operation-labels.js").WorkerPhase;
   activeJob?: { chatId?: string; sourceMessageCount: number; sourceTurnCount?: number; startedAt: number; kind?: LeasedJob["kind"]; sourceRecovery?: boolean; sourceRecoveryMetadata?: import("./source-recovery.js").SourceRecoveryMetadata };
   /** Another live chat's work, separate from the requested chat's counts and phase. */
@@ -2126,6 +2136,9 @@ export interface AuxiliaryBudgetSnapshot {
 }
 
 export interface LeasedJob {
+  /** Local controller metadata, never a prompt roster. Effective DB types
+   * override stale draft words when projecting audit/access-repair inputs. */
+  modelIdentityEntities?: ModelIdentityEntity[];
   promptContract?: "e1d" | "e1e" | "e1f";
   stateContract?: "r10" | "r11";
   relationshipProjection?: { pairs: Array<{ from: string; to: string }> };
@@ -2298,10 +2311,11 @@ export const estimateTokenUnits = (text: string): number => {
   }
   return ascii * 12 + wide * 35;
 };
-export const estimateTokens = (text: string): number => Math.max(1, Math.ceil(estimateTokenUnits(text) / 42));
+export const estimateTokensFromUnits = (units: number): number => Math.max(1, Math.ceil(units / 42));
+export const estimateTokens = (text: string): number => estimateTokensFromUnits(estimateTokenUnits(text));
 
 export function selectTailStart(
-  messageContents: string[],
+  messageContents: Array<string | number>,
   messageLimit = 64,
   tokenLimit = 32_000,
   protectedRecentMessages = 8,
@@ -2309,7 +2323,8 @@ export function selectTailStart(
   let start = messageContents.length;
   let tokens = 0;
   while (start > 0 && messageContents.length - start < messageLimit) {
-    const nextTokens = estimateTokens(messageContents[start - 1] ?? "");
+    const content = messageContents[start - 1] ?? "";
+    const nextTokens = typeof content === "number" ? content : estimateTokens(content);
     if (start < messageContents.length - protectedRecentMessages && tokens + nextTokens > tokenLimit) break;
     tokens += nextTokens;
     start -= 1;
@@ -2334,23 +2349,22 @@ const cjkNgrams = (value: string, sizes: number[]): string[] => {
   return result;
 };
 
-export const normalizeSearchTokens = (text: string, language?: MemoryLanguage): string[] => {
+export const normalizeSearchTokens = (text: string, language?: MemoryLanguage, limit = 96): string[] => {
   const normalized = text.normalize("NFKC").toLocaleLowerCase();
   const selectedLanguage = language ?? inferredSearchLanguage(normalized);
   const tokens: string[] = [];
   const seen = new Set<string>();
   const add = (value: string): void => {
-    if (tokens.length < 96 && !seen.has(value) && [...value].length >= 2) {
+    if (tokens.length < limit && !seen.has(value) && [...value].length >= 2) {
       seen.add(value);
       tokens.push(value);
     }
   };
   const raw = normalized.match(/[\p{L}\p{N}]{2,}/gu) ?? [];
-  // Later tokens cannot change the first 96 unique tokens returned by this
-  // contract. Avoid a growing linear duplicate scan on entire transcripts.
+  // Once the requested prefix is full, later tokens cannot change it.
   for (const token of raw) {
     add(token);
-    if (tokens.length === 96) return tokens;
+    if (tokens.length >= limit) return tokens;
   }
 
   if (selectedLanguage === "ko") {
@@ -2360,17 +2374,17 @@ export const normalizeSearchTokens = (text: string, language?: MemoryLanguage): 
         .replace(/(?:했습니다|하였다|했다|했던|하는|하고|하며|였다|였던|이다|된다|되었다|있는|있던)$/u, "");
       add(stem);
       if ([...stem].length >= 3) cjkNgrams(stem, [2, 3]).forEach(add);
-      if (tokens.length === 96) return tokens;
+      if (tokens.length >= limit) return tokens;
     }
   } else if (selectedLanguage === "ja" || selectedLanguage === "zh") {
     const chunks = normalized.match(/[\p{Script=Han}々〆ヵヶ]+|[\p{Script=Hiragana}ー]+|[\p{Script=Katakana}ー]+|[\p{Script=Latin}\p{N}]{2,}/gu) ?? [];
     for (const chunk of chunks) {
       add(chunk);
       if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(chunk)) cjkNgrams(chunk, [2, 3]).forEach(add);
-      if (tokens.length === 96) return tokens;
+      if (tokens.length >= limit) return tokens;
     }
   }
-  return tokens.slice(0, 96);
+  return tokens;
 };
 
 export const augmentSearchText = (text: string, language?: MemoryLanguage): string => {
@@ -2378,7 +2392,7 @@ export const augmentSearchText = (text: string, language?: MemoryLanguage): stri
   return normalized ? `${text} ${normalized}` : text;
 };
 
-export { renderMcpAnswer, type McpEvidence, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange } from "./mcp-answer.js";
+export { renderMcpAnswer, unrepeatedMcpEvidence, mcpSourcePresentation, type McpEvidence, type McpQuestionAnswer, type McpSourceMetadata, type McpSourceRange } from "./mcp-answer.js";
 
 export { projectMemoryScene, renderMemoryScene, povSlots, isAuthorCard, emitsMemoryPlot, type MemoryScene, type CardRenderOptions } from "./memory-scene.js";
 
@@ -2412,3 +2426,5 @@ export { escapeMemoryText, escapeMemoryAttribute } from "./memory-escaping.js";
 export { normalizeAuxiliaryShape, AuxiliaryShapeDiagnosticSchema, type AuxiliaryShapeDiagnostic, type AuxiliaryShapeContext } from "./auxiliary-shape.js";
 export { normalizeAuxiliaryResponse } from "./auxiliary-response-shape.js";
 export { estimateBackfillCalls } from './backfill-estimate.js';
+export type { ProcessingModel, ProcessingTotals, ProcessingCall, ProcessingStage, ProcessingJob, ProcessingUnit, ProcessingTranslationDay, ProcessingHistory } from './processing-history.js';
+export { processingRunId, PROCESSING_BATCH_TYPES, processingStageOrder, sumProcessingTotals } from './processing-history.js';

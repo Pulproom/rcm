@@ -1,7 +1,7 @@
 declare const __RCM_DISTRIBUTION__: boolean;
 import { INVALID_MEMORY_REF_MESSAGE, MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, initialMemoryGuidanceBlock, memoryGuidanceBlock } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
-import { readCurrentChatScope, readCurrentContext, sha256 } from "./context.js";
+import { readCurrentChatScope } from "./context.js";
 import { isChatMemoryEnabled } from "./settings.js";
 import mcpContract from "./mcp-contract.json" with { type: "json" };
 import type { RuntimeState } from "./types.js";
@@ -14,10 +14,13 @@ export const MCP_REQUEST_TIMEOUT_MS = MCP_MAX_REQUEST_TIMEOUT_MS;
 
 export type MemoryToolName = "recall_rp_memory" | "expand_rp_memory";
 
-export function currentTurnMemoryToolNames(state: RuntimeState, chatId?: string): MemoryToolName[] {
+export function currentTurnMemoryToolNames(state: RuntimeState, chatId?: string, registering = false): MemoryToolName[] {
   const opportunity = state.memoryToolOpportunity;
-  const currentChatId = chatId ?? state.current?.chatId;
+  const active = state.activeModelRequest;
+  const currentChatId = chatId ?? (active?.referenceTurnKey !== undefined ? active.chatId : state.current?.chatId);
   if (!state.settings.memoryToolsEnabled || !opportunity || opportunity.chatId !== currentChatId) return [];
+  if (opportunity.requestId && (opportunity.referenceTurnKey !== state.mcpTurnKey
+    || (!registering && (active?.requestId !== opportunity.requestId || active.chatId !== currentChatId)))) return [];
   const names: MemoryToolName[] = [];
   if (opportunity.value.archiveSearchAvailable || opportunity.value.recallCandidateMemoryIds.length > 0) names.push("recall_rp_memory", "expand_rp_memory");
   return names;
@@ -45,10 +48,14 @@ export function traceMemoryToolExposure(
   state.memoryToolExposureKeys ??= {};
   if (state.memoryToolExposureKeys[key]) return;
   state.memoryToolExposureKeys[key] = true;
-  const opportunity = state.memoryToolOpportunity?.value;
+  const preparedOpportunity = state.memoryToolOpportunity;
+  const opportunity = preparedOpportunity?.value;
+  const active = state.activeModelRequest;
+  const boundExposure = active?.referenceTurnKey !== undefined && active.referenceTurnKey === preparedOpportunity?.referenceTurnKey
+    && active.requestId === preparedOpportunity.requestId;
   void client.traceRetrieval({
-    id: crypto.randomUUID(), kind: "tool_exposure", chatId: state.memoryToolOpportunity?.chatId ?? state.current?.chatId ?? "unknown",
-    traceContext: { requestId: turnKey, turnKey, latestMessageId: state.current?.snapshot?.at(-1)?.id },
+    id: crypto.randomUUID(), kind: "tool_exposure", chatId: preparedOpportunity?.chatId ?? state.current?.chatId ?? "unknown",
+    traceContext: { requestId: turnKey, turnKey, latestMessageId: boundExposure ? active.latestMessageId : state.current?.snapshot?.at(-1)?.id },
     transport, plannedTools, offeredTools, outcome, elapsedMs, previousCleared,
     registration,
     opportunity: opportunity ? {
@@ -83,24 +90,20 @@ export function renderMemoryReferences(
   return packet.replace(_enabled ? /\s+id="[^"]*"/g : /\s+(?:id|ref)="[^"]*"/g, "");
 }
 
-export async function currentMemoryToolsAvailable(state: RuntimeState, client: ServerClient, chatId?: string, refresh = false): Promise<boolean> {
-  if (!state.settings.memoryToolsEnabled) return false;
-  const scope = await readCurrentChatScope();
-  const currentChatId = chatId ?? scope.chatId;
-  if (currentChatId !== scope.chatId || !isChatMemoryEnabled(state.settings, currentChatId, scope.characterId)) return false;
-  const cached = state.memoryToolAvailability?.[currentChatId];
-  if (!refresh && typeof cached === "boolean") return cached;
+async function currentMemoryToolsAvailable(state: RuntimeState, client: ServerClient, chatId: string, signal?: AbortSignal): Promise<boolean> {
+  const cached = state.memoryToolAvailability?.[chatId];
+  if (typeof cached === "boolean") return cached;
   try {
     const readiness = await client.request<{ available: boolean }>(
-      `/v1/chats/${encodeURIComponent(currentChatId)}/memory-tools/readiness`,
-      {},
+      `/v1/chats/${encodeURIComponent(chatId)}/memory-tools/readiness`,
+      { signal },
       2_000,
     );
     state.memoryToolAvailability ??= {};
-    state.memoryToolAvailability[currentChatId] = readiness.available === true;
+    state.memoryToolAvailability[chatId] = readiness.available === true;
     return readiness.available === true;
   } catch {
-    return state.memoryToolAvailability?.[currentChatId] === true;
+    return state.memoryToolAvailability?.[chatId] === true;
   }
 }
 
@@ -114,12 +117,18 @@ export async function executeMemoryTool(
   const toolStarted = performance.now();
   const toolStartedAt = Date.now();
   const generation = state.mcpTurnKey;
+  const active = state.activeModelRequest;
+  const bound = active?.referenceTurnKey !== undefined ? active : undefined;
+  const mainRequest = state.mainRequest;
+  const requestSignal = mainRequest && (!bound || mainRequest.id === bound.requestId) ? mainRequest.signal : undefined;
+  const callSignal = signal && requestSignal ? AbortSignal.any([signal, requestSignal]) : signal ?? requestSignal;
+  const opportunity = state.memoryToolOpportunity;
   const expanding = toolName === "expand_rp_memory";
   const ref = typeof args?.ref === "string" ? args.ref.trim() : "";
   const query = String(expanding ? args?.focus ?? "" : args?.query ?? "").trim();
   const aspects = undefined;
   const intent = "recall" as const;
-  let chatId = state.current?.chatId ?? state.memoryToolOpportunity?.chatId ?? "unknown";
+  let chatId = bound?.chatId ?? state.current?.chatId ?? opportunity?.chatId ?? "unknown";
   const call: TurnSearch = { kind: expanding ? "expand" : "recall", query, ...(expanding ? { ref } : {}), at: toolStartedAt,
     memoryIds: [], alreadyProvidedIds: [], response: "", responseTokens: 0, responseTruncated: false };
   if (!state.lastTurnSearches || state.lastTurnSearches.turnKey !== generation || (chatId !== "unknown" && state.lastTurnSearches.chatId !== chatId)) {
@@ -131,13 +140,14 @@ export async function executeMemoryTool(
   state.mcpTraceCalls = (state.mcpTraceCalls ?? 0) + 1;
   const traceContext = {
     requestId: crypto.randomUUID(),
-    turnKey: state.memoryToolOpportunity?.turnKey ?? generation,
-    latestMessageId: state.current?.snapshot?.at(-1)?.id,
+    turnKey: bound?.turnKey ?? opportunity?.turnKey ?? generation,
+    latestMessageId: bound?.latestMessageId,
     callIndex: state.mcpTraceCalls,
   };
   let timing: ReturnType<typeof startTiming> | undefined;
   let timingOutcome: "succeeded" | "failed" | "reused" = "failed";
   let requestMs: number | undefined;
+  let hostReadMs = 0;
   let serverTimings: Record<string, number> | undefined;
   const traceDelivery = (response: string, cacheHit: boolean, selectedIds: string[] = [], searchRequestId: string | undefined = traceContext.requestId, deliverySource?: string, newAtomCount?: number, opportunityError?: string, reason?: string): void => {
     completeTurnSearch(call, response, reason ?? (["transport_error", "invalid_packet", "budget_rejected"].includes(deliverySource ?? "") ? deliverySource : undefined));
@@ -148,7 +158,7 @@ export async function executeMemoryTool(
       searchRequestId: reason ? undefined : searchRequestId,
       toolName, query, ref: expanding ? ref : undefined, aspects, intent, cacheHit,
       deliverySource, newAtomCount, opportunityError, selectedIds, response,
-      elapsedMs: performance.now() - toolStarted, requestMs, serverTimings,
+      elapsedMs: performance.now() - toolStarted, hostReadMs, requestMs, serverTimings,
       postDeliveryWait: "not_observed", origin: "client", reason,
       outcome: reason ? "rejected" : ["transport_error", "invalid_packet", "budget_rejected"].includes(deliverySource ?? "") ? "error" : "delivered",
     }).catch(() => undefined);
@@ -159,37 +169,60 @@ export async function executeMemoryTool(
     return response;
   };
   if (!memoryToolFunctions.some((tool) => tool.name === toolName)) throw new Error(`Unknown memory tool: ${toolName}`);
+  const earlierGeneration = () => state.mcpTurnKey !== generation
+    || (bound && (bound.referenceTurnKey !== generation || state.activeModelRequest !== bound));
+  const stale = () => reject("earlier_generation", "This tool is unavailable for the current reply.");
+  const cancelled = () => reject("request_cancelled", MEMORY_TOOL_CANCELLED_MESSAGE);
   try {
     // Native/bridge tools carry no originating model request identity. A
     // concurrent RCM call is not evidence that this main-model tool is internal.
     if (!state.settings.memoryToolsEnabled) return reject("tools_disabled", "RCM memory tools are disabled in the dashboard.");
-    const scope = await readCurrentChatScope();
+    signal?.throwIfAborted();
+    if (earlierGeneration() || state.mainRequest?.preparing || (!bound && opportunity?.requestId)) return stale();
+    if (requestSignal?.aborted) return cancelled();
+    let scope: { chatId: string; characterId?: string } = bound ?? { chatId };
+    if (!bound) {
+      const started = performance.now();
+      try {
+        const current = await readCurrentChatScope();
+        scope = current;
+        const latest = current.hostSnapshot.chat.message?.at(-1);
+        const latestId = latest?.chatId ?? latest?.id;
+        if (latestId != null) traceContext.latestMessageId = String(latestId);
+      } finally {
+        hostReadMs = performance.now() - started;
+      }
+    }
     chatId = scope.chatId;
     turnCalls.chatId = chatId;
+    if (earlierGeneration() || state.mainRequest?.preparing || (bound
+      && (!currentTurnMemoryToolNames(state, chatId).includes(toolName as MemoryToolName)
+        || (bound.plannedTools && !bound.plannedTools.includes(toolName))))) return stale();
     if (!isChatMemoryEnabled(state.settings, chatId, scope.characterId)) return reject("chat_disabled", "RCM is disabled for the current chat. Continue without RCM memory tools.");
     if (expanding ? !ref : !query) return reject(expanding ? "empty_ref" : "empty_query", "Provide a non-empty query for recall or a previously supplied ref for expansion.");
-    if (!await currentMemoryToolsAvailable(state, client, chatId)) return reject("no_memory", "No processed long-term memory is available for this chat yet. Continue without calling RCM memory tools.");
-    const context = await readCurrentContext(state);
-    traceContext.latestMessageId = context.snapshot.at(-1)?.id;
-    const snapshot = await sha256(JSON.stringify(context.snapshot.map(message => [message.id, message.content, message.generationId])));
-    if (context.chatId !== chatId || (state.memoryReferenceSnapshot && state.memoryReferenceSnapshot !== snapshot)) {
-      return reject("chat_changed", "The chat changed after this request was prepared. Retry from the current chat; previously supplied refs still identify the same memories.");
-    }
-    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "This request is from an earlier reply and was set aside. Try again from the current chat.");
+    signal?.throwIfAborted();
+    if (requestSignal?.aborted) return cancelled();
+    const available = await currentMemoryToolsAvailable(state, client, chatId, callSignal);
+    signal?.throwIfAborted();
+    if (earlierGeneration() || state.mainRequest?.preparing) return stale();
+    if (requestSignal?.aborted) return cancelled();
+    if (!available) return reject("no_memory", "No processed long-term memory is available for this chat yet. Continue without calling RCM memory tools.");
     timing = startTiming(state, {
-      chatId: context.chatId,
+      chatId,
       kind: "mcp",
       label: expanding ? "기억 상세 조회" : "기억 회상",
       startedAt: toolStartedAt,
     });
     const desired = state.settings.mcpCap;
     const callBudget = Math.min(desired, state.settings.mcpCap);
-    const path = `/v1/chats/${encodeURIComponent(context.chatId)}/${expanding ? "expand" : "recall"}`;
+    const path = `/v1/chats/${encodeURIComponent(chatId)}/${expanding ? "expand" : "recall"}`;
     // Whole-memory exclusions would hide the remainder after a partial result.
-    const delivered = state.lastInjection?.manifest;
-    const automaticGuidance = state.lastInjection?.packet ?? "";
+    const injection = state.lastInjection && (state.lastInjection.chatId ?? chatId) === chatId
+      && (!bound || state.lastInjection.turnKey === bound.turnKey) ? state.lastInjection : undefined;
+    const delivered = injection?.manifest;
+    const automaticGuidance = injection?.packet ?? "";
     const fullGuidanceDelivered = automaticGuidance.includes(memoryGuidanceBlock)
-      || (state.lastInjection?.guidanceInjected === true && !automaticGuidance.includes(initialMemoryGuidanceBlock));
+      || (injection?.guidanceInjected === true && !automaticGuidance.includes(initialMemoryGuidanceBlock));
     const common = fullGuidanceDelivered || state.mcpGuidanceDelivered
       ? "" : memoryGuidanceBlock;
     const responseReserve = 24;
@@ -197,31 +230,27 @@ export async function executeMemoryTool(
       return reject("budget_rejected", "Ask a shorter question so the result fits its budget.");
     }
     const shared = { intent, tokenBudget: callBudget - responseReserve, excludeMemoryIds: [], excludeMemorySignatures: [],
-      memoryOnlyInjection: state.settings.memoryOnlyInjection[context.chatId] ?? false,
+      memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
       alreadyPresentMemoryIds: delivered?.memoryIds ?? [],
       alreadyPresentAtomKeys: [...new Set([...(delivered?.atomKeys ?? []), ...(state.mcpReturnedAtomKeys ?? [])])].slice(-512),
       excludeAtomKeys: [...new Set(state.mcpReturnedAtomKeys ?? [])].slice(-512),
       excludeSourceRanges: (state.mcpReturnedSourceRanges ?? []).slice(-256),
-      promptSourceMessageIds: state.lastPromptSourceMessageIds ?? [],
-      opportunityMemoryIds: state.memoryToolOpportunity?.value.recallCandidateMemoryIds ?? [],
-      opportunityAtomKeys: state.memoryToolOpportunity?.value.recallCandidateAtomKeys ?? [],
+      promptSourceMessageIds: bound?.promptSourceMessageIds ?? (injection ? state.lastPromptSourceMessageIds ?? [] : []),
+      opportunityMemoryIds: opportunity?.chatId === chatId ? opportunity.value.recallCandidateMemoryIds : [],
+      opportunityAtomKeys: opportunity?.chatId === chatId ? opportunity.value.recallCandidateAtomKeys : [],
       traceContext };
     const body = { ...shared, memoryGeneration: generation, ...(expanding ? { ref, ...(query ? { focus: query } : {}) } : { query }) };
     const requestStarted = performance.now();
     const result = await client.request<{ answers: McpQuestionAnswer[]; error?: string; code?: string; timings?: Record<string, number>; packet?: string; selected?: Array<{ id: string; signature?: string }>; coverage?: Array<{ aspect: string; status: string; memoryIds?: string[]; detailIds?: string[]; targetStatus?: string; targetMemoryIds?: string[]; targetDetailIds?: string[] }>; alreadyProvidedIds?: string[]; deliveredAtomKeys?: string[]; deliveredSourceRanges?: McpSourceRange[]; deliverySource?: string; newAtomCount?: number; opportunityError?: string }>(
       path,
-      { method: "POST", body: JSON.stringify(body), signal },
-      expanding ? 15000 : state.lastPrepare?.mcpRequestTimeoutMs ?? MCP_REQUEST_TIMEOUT_MS,
-    ).catch((error) => { if (signal?.aborted) throw error; return null; });
+      { method: "POST", body: JSON.stringify(body), signal: callSignal },
+      expanding ? 15000 : (bound ? bound.mcpRequestTimeoutMs : state.lastPrepare?.mcpRequestTimeoutMs) ?? MCP_REQUEST_TIMEOUT_MS,
+    ).catch(() => null);
     requestMs = performance.now() - requestStarted;
     serverTimings = result?.timings;
-    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "This result is from an earlier reply and was set aside. Try again from the current chat.");
-    const latestContext = await readCurrentContext(state);
-    const latestSnapshot = await sha256(JSON.stringify(latestContext.snapshot.map(message => [message.id, message.content, message.generationId])));
-    if (state.mcpTurnKey !== generation) return reject("earlier_generation", "This result is from an earlier reply and was set aside. Try again from the current chat.");
-    if (latestContext.chatId !== chatId || snapshot !== latestSnapshot) {
-      return reject("chat_changed", "The chat changed during this request. Retry from the current chat.");
-    }
+    signal?.throwIfAborted();
+    if (earlierGeneration() || state.mainRequest?.preparing) return stale();
+    if (requestSignal?.aborted) return cancelled();
     if (result?.code === "INVALID_MEMORY_REF") return reject("invalid_ref", INVALID_MEMORY_REF_MESSAGE);
     if (result?.code === "MEMORY_SNAPSHOT_CHANGED") return reject("snapshot_changed", "The memory changed during this request. Retry against the current chat.");
     if (!result) {
@@ -295,9 +324,11 @@ export async function registerMemoryMcp(state: RuntimeState, client: ServerClien
       description: "Optional search and expansion of processed RP history. Use supplied evidence first; avoid repeating an unchanged unsuccessful query.",
     },
     async () => {
-      if (!state.settings.memoryToolsEnabled) return [];
+      if (!state.settings.memoryToolsEnabled || state.mainRequest?.preparing) return [];
       try {
-        const { chatId, characterId } = await readCurrentChatScope();
+        const active = state.activeModelRequest;
+        const { chatId, characterId } = active?.referenceTurnKey !== undefined && active.referenceTurnKey === state.mcpTurnKey
+          ? active : await readCurrentChatScope();
         if (!isChatMemoryEnabled(state.settings, chatId, characterId)) return [];
         const names = currentTurnMemoryToolNames(state, chatId);
         traceMemoryToolExposure(state, client, "native", names, names, names.length ? "offered" : "empty");

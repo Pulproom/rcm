@@ -63,9 +63,12 @@ export function renderMemoryScene(scene: MemoryScene, options: CardRenderOptions
   const card = scopeOf(item);
   const plotScope = author ? scopeOf({knownBy:item.plotKnowers ?? []}) : card;
   // Only compare positions when every entry has one; partial positions must
-  // not invent an order for unpositioned facts. Equal positions remain stable.
+  // not invent an order for unpositioned facts. Within one source message the
+  // exact quote position orders the lines; a detail without one follows the
+  // positioned lines of its message. Equal positions remain stable.
+  const offset = (detail: MemoryScene["details"][number]) => detail.sourceOffset ?? Number.MAX_SAFE_INTEGER;
   const details = scene.details.every(detail => detail.sourceOrdinal !== undefined)
-    ? [...scene.details].sort((a, b) => a.sourceOrdinal! - b.sourceOrdinal!) : scene.details;
+    ? [...scene.details].sort((a, b) => a.sourceOrdinal! - b.sourceOrdinal! || offset(a) - offset(b)) : scene.details;
   const dialogues = scene.dialogues.every(dialogue => dialogue.ordinal !== undefined)
     ? [...scene.dialogues].sort((a, b) => a.ordinal! - b.ordinal!) : scene.dialogues;
   const headerLocations = [...new Set([...item.locations, ...details.flatMap(detail => detail.locations)])];

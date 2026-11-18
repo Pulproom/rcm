@@ -9,6 +9,49 @@ export type TranslationDisplay = "ko" | "en";
 export type DashboardTheme = "dark" | "light";
 export type DashboardSkin = "film" | "phone";
 
+/** Numeric observations only; source sizes are UTF-16 code units, never content. */
+export interface ContextReadTimings {
+  count: number;
+  totalMs: number;
+  hostChatReadMs: number;
+  descriptorComparisonMs: number;
+  loreDatabaseReadMs: number;
+  messageSourceResolutionMs: number;
+  visibilityMs: number;
+  messageCount: number;
+  sourceChars: number;
+  estimatedSourceTokens: number;
+}
+
+export interface ChatScopeTiming {
+  stage: "initial" | "source_head" | "retry_setup_projection" | "retry_setup_capture" | "context" | "setup_projection" | "setup_capture" | "before_prepare" | "prepare_response" | "prepared_response" | "prepare_error" | "before_apply";
+  totalMs: number;
+  hostChatReadMs: number;
+  hashingMs: number;
+  fullHostChatReads: number;
+}
+
+export interface AutomaticInjectionTimings {
+  /** Monotonic span with the widget's start/end boundaries. */
+  totalMs: number;
+  /** Exact wall-clock value computed by finishTiming for the widget. */
+  floatingElapsedMs?: number;
+  preflightMs: number;
+  sourceHeadMs: number;
+  contextRead: ContextReadTimings;
+  chatScopeChecks: { count: number; totalMs: number; hashingMs: number; fullHostChatReads: number; calls: ChatScopeTiming[] };
+  assertCurrentRequest: { count: number; totalMs: number; hashingMs: number };
+  setupProjectionMs: number;
+  setupCaptureMs: number;
+  turnKeyHashMs: number;
+  prepareRequestBuildMs: number;
+  prepareRequestMs: number;
+  postResponseChecksMs: number;
+  /** All awaited registration calls, including preflight removal. */
+  toolRegistrationMs: number;
+  packetApplyMs: number;
+}
+
 export interface PluginSettings {
   settingsRevision: number;
   serverUrl: string;
@@ -167,6 +210,9 @@ export interface RuntimeState {
   automaticTurnPacket?: {
     turnKey: string;
     chatId: string;
+    referenceTurnKey: string;
+    sourceInputs: ReturnType<typeof import("./context.js").readMessageSourceInputs>;
+    sourceHashes: CurrentContext["messageVisibility"];
     narrationViewpoint?: string;
     memoryOnlyInjection?: boolean;
   upcomingOccasions?: boolean;
@@ -188,6 +234,7 @@ export interface RuntimeState {
     prepareElapsedMs?: number;
     prepareTimeoutMs?: number;
     prepareClientTimings?: PrepareClientTimings;
+    injectionTimings?: AutomaticInjectionTimings;
     packetApplyMs?: number;
     memoryToolRegistrationMs?: number;
     memoryToolRegistration?: "not_run" | "completed" | "failed";
@@ -228,7 +275,11 @@ export interface RuntimeState {
   mainRequest?: { id: string; signal: AbortSignal; preparing: boolean; cancel: () => void };
   pendingPrepare?: { requestId: string; chatId: string; startedAt: number; visible: boolean; choose: (choice: "omit" | "block") => void };
   upgradeBlocked?: {chatId:string;lock:import('./api-client.js').UpgradeLock};
-  activeModelRequest?: { chatId: string; requestId?: string; turnKey?: string; latestMessageId?: string; startedAt?: number; packet?: string; plannedTools?: string[] };
+  activeModelRequest?: {
+    chatId: string; characterId?: string; requestId?: string; turnKey?: string; referenceTurnKey?: string;
+    latestMessageId?: string; promptSourceMessageIds?: string[]; mcpRequestTimeoutMs?: number;
+    startedAt?: number; packet?: string; plannedTools?: string[];
+  };
   mainGeneration?: {
     id: string; chatId?: string; expiresAt: number; resume: () => void;
     observe: (chatId: string | undefined, chat: any, hashes?: Array<{ id: string; displayContentHash?: string }>) => void;
@@ -326,9 +377,8 @@ export interface RuntimeState {
   mcpReturnedSourceRanges?: import("@rcm/shared").McpSourceRange[];
   mcpGuidanceDelivered?: boolean;
   retrievalTraceEnabled?: boolean;
-  memoryReferenceSnapshot?: string;
   memoryToolAvailability?: Record<string, boolean>;
-  memoryToolOpportunity?: { chatId: string; turnKey: string; referenceTurnKey: string; value: MemoryToolOpportunity };
+  memoryToolOpportunity?: { chatId: string; turnKey: string; referenceTurnKey: string; requestId?: string; value: MemoryToolOpportunity };
   memoryToolExposureKeys?: Record<string, boolean>;
   lastPromptSourceMessageIds?: string[];
   internalModelCalls?: Set<string>;

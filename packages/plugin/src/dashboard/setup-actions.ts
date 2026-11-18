@@ -132,7 +132,7 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
             return;
           }
           const lineage = await client.request<ChatLineageStatus>(`/v1/chats/${encodeURIComponent(view.chatId)}/lineage`);
-          if (["choice_required", "ambiguous"].includes(lineage.status) || (lineage.status === "inherited" && !view.reread)) {
+          if (["choice_required", "ambiguous"].includes(lineage.status) || (lineage.status === "inherited" && !view.reread && !view.rebuild)) {
             setupView.picker = undefined;
             await host.refresh();
             return;
@@ -160,7 +160,7 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
             ? upgradeErrorReason((error as { code?: string }).code)
             : error instanceof Error ? error.message : "설정을 읽지 못했어요. 다시 시도해 주세요.";
         }
-        finally { view.busy = false; }
+        finally { view.busy = false; state.requestActivityRefresh?.(); }
       }
       render();
     },
@@ -204,7 +204,7 @@ export function createSetupController(setupView: SetupViewState, root: HTMLEleme
           state.publishStatusSummary?.();
           host.drainWorker();
           return { clearEditor: false };
-        } finally { setupView.confirming = undefined; render(false); }
+        } finally { setupView.confirming = undefined; state.requestActivityRefresh?.(); render(false); }
       } else if (action === "save-initial-entity" || action === "add-initial-entity") {
         if (!await people.savePerson(action, target, chat)) return;
         return { clearEditor: true };

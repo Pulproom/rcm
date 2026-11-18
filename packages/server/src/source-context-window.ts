@@ -25,7 +25,7 @@ export class ContextWindows {
   const visible=blocks.filter(b=>!presentationOnlySourcePassage(b.text)&&!/^<tool_call>[\s\S]*<\/tool_call>$/u.test(b.text)&&!/^<!--\s*pm:tool:v1:[\s\S]*-->$/u.test(b.text));
   this.cache.set(cacheKey,visible);return visible;
  }
- around(citation:Citation,ceiling=512){
+ around(citation:Citation,ceiling=512,limit?:readonly [number,number]){
   const source=this.sources.get(citation.messageId);if(!source||citation.canonicalHash&&citation.canonicalHash!==source.canonical_hash)return;
   const raw=source.canonical_content;
   let start=citation.startOffset,end=citation.endOffset;
@@ -38,14 +38,21 @@ export class ContextWindows {
   const blocks=this.blocks(source);
   let left=blocks.findIndex(b=>b.start<=start!&&b.end>start!),right=blocks.findIndex(b=>b.start<end!&&b.end>=end!);
   if(left<0||right<left)return;
-  const continuous=(l:number,r:number)=>blocks.slice(l+1,r+1).every((b,i)=>/^\s*$/u.test(raw.slice(blocks[l+i]!.end,b.start)));
-  if(!continuous(left,right)||estimateTokens(raw.slice(blocks[left]!.start,blocks[right]!.end))>ceiling)return;
+  // Bounds are exact evidence offsets, rounded out to whole display paragraphs.
+  // The verified anchor's own paragraphs remain allowed even outside the span.
+  const lower=limit?Math.min(blocks[left]!.start,blocks.find(b=>b.end>limit[0])?.start??limit[0]):0;
+  const upper=limit?Math.max(blocks[right]!.end,[...blocks].reverse().find(b=>b.start<limit[1])?.end??limit[1]):raw.length;
+  const joins=(l:number,r:number)=>/^\s*$/u.test(raw.slice(blocks[l]!.end,blocks[r]!.start));
+  if(estimateTokens(raw.slice(blocks[left]!.start,blocks[right]!.end))>ceiling)return;
+  for(let i=left;i<right;i++)if(!joins(i,i+1))return;
   let before=0,after=0;
   // Whole paragraphs, balanced context on both sides. Never infer speakers,
   // conditions, scene identity or access from prose. Protocol gaps are barriers.
   while(true){
    const choices=[{l:left,r:right+1,side:'after',used:after},{l:left-1,r:right,side:'before',used:before}]
-    .filter(x=>x.l>=0&&x.r<blocks.length&&continuous(x.l,x.r)&&estimateTokens(raw.slice(blocks[x.l]!.start,blocks[x.r]!.end))<=ceiling)
+    .filter(x=>x.l>=0&&x.r<blocks.length&&blocks[x.l]!.start>=lower&&blocks[x.r]!.end<=upper
+      // The retained window is contiguous. Only the new join needs checking.
+      &&(x.side==='after'?joins(right,x.r):joins(x.l,left))&&estimateTokens(raw.slice(blocks[x.l]!.start,blocks[x.r]!.end))<=ceiling)
     .sort((a,b)=>a.used-b.used);
    const next=choices[0];if(!next)break;
    if(next.side==='after')after+=blocks[next.r]!.tokens;else before+=blocks[next.l]!.tokens;

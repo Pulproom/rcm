@@ -11,7 +11,7 @@ export const ALBUM_TINT_SWATCHES: Record<AlbumTheme, Record<string, string>> = {
   lp: { mustard: "#efb71d", tomato: "#c23e22", sky: "#8fc1e3", pink: "#f2a9b6", black: "#1c1a19" },
   film: { seal: "#9d3527", navy: "#2b4a7a", grass: "#3d6442", gray: "#cdcbc4", kraft: "#c4a983" },
 };
-const titles: Record<AlbumBlockKind, string> = { cover: "", intro: "두 사람", firsts: "처음", story: "이야기", quotes: "저장한 말", promises: "약속", bond: "관계", hearts: "서로에게", progress: "함께한 걸음", nicknames: "부르는 말", gallery: "사진", intimacy: "가까워진 순간", text: "기록", photo: "사진", divider: "" };
+const titles: Record<AlbumBlockKind, string> = { cover: "", intro: "두 사람", firsts: "처음", story: "이야기", quotes: "저장한 말", promises: "약속", bond: "관계", hearts: "서로에게", progress: "함께한 걸음", nicknames: "부르는 말", gallery: "사진", intimacy: "가까워진 순간", text: "기록", photo: "사진", divider: "", together: "함께한 시간" };
 export function albumThemeVoice(theme: AlbumTheme) {
   const overrides: Partial<Record<AlbumBlockKind, string>> = { quotes: theme === "lp" ? "가사" : "남겨 둔 말", bond: "가까워진 순간", intimacy: "스킨십" };
   return { blocks: Object.fromEntries(ALBUM_BLOCK_KINDS.map(kind => [kind, { title: overrides[kind] ?? titles[kind] }])) as Record<AlbumBlockKind, { title: string }> };

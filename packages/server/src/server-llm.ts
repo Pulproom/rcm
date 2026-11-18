@@ -220,7 +220,7 @@ export class ServerLlmStore {
     return this.#jobApiKeys.get(jobId) ?? this.apiKeyFor(provider);
   }
   backupApiKeys(): Partial<Record<ServerLlmProvider,string>> { return {...this.#apiKeys}; }
-  recordCall(jobId: string, purpose: ServerLlmPurpose): void { recordJobLlmCall(this.db, jobId, purpose); }
+  recordCall(jobId: string, purpose: ServerLlmPurpose, identity = this.config, repairReason?:string): void { recordJobLlmCall(this.db, jobId, purpose, undefined, { site: 'server', provider: identity.provider, model: identity.model },repairReason??(purpose.endsWith('_repair')?purpose==='state_field_repair'?'fields':'format':undefined)); }
   setTimingObserver(observer: (event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }) => void): void { this.#timingObserver = observer; }
   recordTiming(event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }): void { this.#timingObserver?.(event); }
   canRepair(jobId: string, purpose: "general" | "state_response" = "general"): boolean {
@@ -628,6 +628,7 @@ async function callProvider(
   signal: AbortSignal,
   purpose: ServerLlmPurpose,
   onNormalStop?: (normalStop: boolean) => void,
+  repairReason?:string,
 ): Promise<string> {
   // Recovery settings are current per call; the job snapshot is history only.
   const config = ServerLlmConfigSchema.omit({ apiKey: true }).parse(store.config);
@@ -661,7 +662,7 @@ async function callProvider(
     }
     const promptChars = messages.reduce((sum, message) => sum + message.content.length, 0);
     console.log(`[RCM] Server LLM request start provider=${config.provider} model=${sanitizeDiagnosticText(config.model, [apiKey], 160)} purpose=${purpose} promptChars=${promptChars} jsonBudget=${limit} maxTokens=${limit}`);
-    const result = await requestStructuredProvider(store, config, apiKey, messages, signal, limit, () => { store.recordCall(jobId, purpose); dispatched = true; }, purpose === "quiz" ? "text" : "json");
+    const result = await requestStructuredProvider(store, config, apiKey, messages, signal, limit, () => { store.recordCall(jobId, purpose, config,repairReason); dispatched = true; }, purpose === "quiz" ? "text" : "json");
     metadata = result;
     usage = auxiliaryUsageMetadata(result.usage);
     const staged = onNormalStop ? sanitizeStateResponseForStaging(result.content) : result.content;
@@ -847,7 +848,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     console.warn(`[RCM] Server LLM validation repair purpose=extraction issue=${validationSummary(firstError)}${rawWindow === undefined ? "" : ` rawWindow=${JSON.stringify(rawWindow)}`}`);
     const fieldRepair = job.sourceUnits ? planExtractionFieldRepair(raw, resolved, firstError, job.sourceUnits) : undefined;
     if (fieldRepair) {
-      const response = await callRepairProvider(() => callProvider(store, job.id, fieldRepair.messages, signal, "extraction_repair"));
+      const response = await callRepairProvider(() => callProvider(store, job.id, fieldRepair.messages, signal, "extraction_repair",undefined,"fields"));
       if (isUnchangedStructuredRepair(first, response)) return store.cacheExtraction(job, await validateRepair(response));
       const result = await validateStructuredRepairOrRegenerate({
         original: first, repaired: response, purpose: "extraction",
@@ -878,12 +879,12 @@ export async function repairSourceEvidenceWithServerLlm(store: ServerLlmStore, j
   if (!issues.length || !job.sourceUnits || (!job.smallReviewRetry && optionalSourceSelectorsOnly(issues))) return draft;
   const messages = sourceRepairMessages(draft, issues, job.sourceUnits);
   if (!messages) return draft;
-  const raw = await callProvider(store, job.id, messages, signal, "extraction_repair");
+  const raw = await callProvider(store, job.id, messages, signal, "extraction_repair",undefined,"source");
   return rescueDialogueEvidence(applySourceRepairs(draft, parseServerJson(store, job.id, raw, "extraction_repair"), issues, job.sourceUnits), job.auditSourceMessages ?? [], job.sourceUnits);
 }
 
 export async function repairPassageAccessWithServerLlm(store: ServerLlmStore, job: LeasedJob, draft: ExtractionDraftResult, plan: SourceAccessRepairPlan, signal: AbortSignal): Promise<ExtractionDraftResult> {
-  const response = await callProvider(store, job.id, [{ role: "system", content: plan.systemPrompt }, { role: "user", content: plan.userPrompt }], signal, "extraction_repair");
+  const response = await callProvider(store, job.id, [{ role: "system", content: plan.systemPrompt }, { role: "user", content: plan.userPrompt }], signal, "extraction_repair",undefined,"access");
   return applySourceAccessRepair(draft, plan, parseServerJson(store, job.id, response, "extraction_repair"));
 }
 
@@ -924,6 +925,7 @@ export async function calibrateInitialSetupWithServerLlm(store: ServerLlmStore, 
 export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: LeasedJob, result: unknown, signal: AbortSignal, onRepair?: () => void): Promise<ExtractionAuditSubmission> {
   const draft = extractionAuditDraftForJob(job, result);
   const messages = buildExtractionAuditMessages({
+    modelIdentityEntities:job.modelIdentityEntities,
     memoryLanguage: job.memoryLanguage,
     sourceMessages: job.auditSourceMessages ?? [],
     draft,

@@ -69,7 +69,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     state.memoryToolRegistration = { status: "unavailable", at: Date.now(), failures: 0 };
     addLog(state.logs, "warn", "Provider Manager 기억 도구 연결에 필요한 플러그인 통신 API가 없습니다.", "PROVIDER_MANAGER_IPC_MISSING");
     state.syncMemoryToolRegistration = async (enabled) => {
-      const planned = enabled ? currentTurnMemoryToolNames(state) : [];
+      const planned = enabled ? currentTurnMemoryToolNames(state, undefined, true) : [];
       traceMemoryToolExposure(state, client, "yumi", planned, [], "not_connected");
     };
     state.restoreMemoryToolDiscoveryRegistration = async () => undefined;
@@ -87,6 +87,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
   const cancelledCalls = new Set<string>();
   let registeredFunctions = new Set<MemoryToolName>();
   let registeredTurnKey = "";
+  let attemptedTurnRegistration = false;
   let disposed = false;
   let discoveryWanted = false;
   let discoveryTimer: number | undefined;
@@ -137,6 +138,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
     const chatId = state.memoryToolOpportunity?.chatId ?? state.current?.chatId;
     const latestMessageId = state.current?.snapshot?.at(-1)?.id;
     const tracing = state.retrievalTraceEnabled && registrationKey !== DISCOVERY_REGISTRATION_KEY;
+    const traceTurnKey = state.memoryToolOpportunity?.turnKey ?? registrationKey;
     const response = new Promise<ToolIpcEnvelope>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         pending.delete(message.id);
@@ -147,7 +149,7 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
           if (!tracing || !chatId) return;
           void client.traceRetrieval({
             id: crypto.randomUUID(), kind: "tool_exposure", chatId,
-            traceContext: { requestId: registrationKey, turnKey: registrationKey, latestMessageId },
+            traceContext: { requestId: traceTurnKey, turnKey: traceTurnKey, latestMessageId },
             transport: "yumi", plannedTools: names, offeredTools: [],
             outcome: reply.type === "error" ? "registration_rejected_late" : "registration_acknowledged_late",
             registration: { ...diagnostics, status: reply.type === "error" ? "rejected_late" : "acknowledged_late", exposure: "unknown", ackWaitMs: performance.now() - startedAt },
@@ -225,22 +227,32 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
   state.syncMemoryToolRegistration = async (enabled) => {
     if (disposed) return;
     stopDiscovery();
+    const epoch = registrationEpoch;
     setStatus(state.settings.memoryToolsEnabled ? "paused" : "disabled");
-    const planned = enabled ? currentTurnMemoryToolNames(state) : [];
+    const planned = enabled ? currentTurnMemoryToolNames(state, undefined, true) : [];
+    const turnKey = state.memoryToolOpportunity?.referenceTurnKey ?? "";
     const startedAt = Date.now();
     const plannedKey = [...planned].sort().join(",");
     const registeredKey = [...registeredFunctions].sort().join(",");
-    if (planned.length && state.memoryToolOpportunity?.turnKey === registeredTurnKey && plannedKey === registeredKey) {
+    if (planned.length && turnKey === registeredTurnKey && plannedKey === registeredKey) {
       traceMemoryToolExposure(state, client, "yumi", planned, planned, "offered", 0, false);
       return;
     }
     if (!planned.length) {
       const clearingDiscoveryOnly = registeredTurnKey === DISCOVERY_REGISTRATION_KEY;
-      const changed = registeredFunctions.size > 0 || discoveryPending !== undefined;
+      const changed = attemptedTurnRegistration || registeredFunctions.size > 0 || discoveryPending !== undefined;
       if (changed) {
-        void post(EVENT_CHANNEL, envelope("event", "tools/unregister", { all: true })).catch(() => undefined);
         registeredFunctions.clear();
         registeredTurnKey = "";
+        attemptedTurnRegistration = false;
+        let timeout: number | undefined;
+        try {
+          await Promise.race([
+            post(EVENT_CHANNEL, envelope("event", "tools/unregister", { all: true })).catch(() => undefined),
+            new Promise<void>(resolve => { timeout = window.setTimeout(resolve, REGISTRATION_TIMEOUT_MS); }),
+          ]);
+        } finally { window.clearTimeout(timeout); }
+        if (epoch !== registrationEpoch) return;
       }
       if (!clearingDiscoveryOnly) {
         traceMemoryToolExposure(state, client, "yumi", planned, [], "empty", Date.now() - startedAt, changed);
@@ -252,7 +264,8 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
       // Provider Manager replaces a tool bundle with the same id. Registering the
       // new turn directly avoids a visible missing/error state between unregister
       // and register, while the longer bound covers normal browser IPC variance.
-      if (!await registerFunctions(planned, state.memoryToolOpportunity?.turnKey ?? "", registration)) return;
+      attemptedTurnRegistration = true;
+      if (!await registerFunctions(planned, turnKey, registration)) return;
       setStatus("registered");
       traceMemoryToolExposure(state, client, "yumi", planned, planned, "offered", Date.now() - startedAt, false, registration);
     } catch (error) {
@@ -303,6 +316,11 @@ export async function registerYumiToolBridge(state: RuntimeState, client: Server
       const functionId = String(requestMessage.params?.functionId ?? "");
       if (toolId !== yumiToolDefinition.id || !registeredFunctions.has(functionId as MemoryToolName)) {
         await respond(requestMessage, undefined, { code: "TOOL_NOT_FOUND", message: "The requested RCM tool is not registered.", retryable: false });
+        return;
+      }
+      if (registeredTurnKey !== DISCOVERY_REGISTRATION_KEY && (registeredTurnKey !== state.mcpTurnKey
+        || !currentTurnMemoryToolNames(state).includes(functionId as MemoryToolName))) {
+        await respond(requestMessage, undefined, { code: "TOOL_NOT_FOUND", message: "The requested RCM tool is unavailable for the current reply.", retryable: false });
         return;
       }
       const controller = new AbortController();

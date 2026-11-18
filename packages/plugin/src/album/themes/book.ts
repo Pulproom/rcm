@@ -1,3 +1,4 @@
+import { albumTogetherCss } from "./together.js";
 /**
  * Theme "book" (한 권의 책): a cloth-bound hardcover on cool paper. Values follow the approved
  * reading mockup; the album scrolls inside the viewer, so viewport units become container units
@@ -189,4 +190,4 @@ ${B} .xp-slot{display:grid;place-items:center;width:100%;min-height:72px;margin-
  ${B} .rd-plates.n5,${B} .rd-shots{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media (prefers-reduced-motion:reduce){${B} *{scroll-behavior:auto!important}}
-`;
+` + albumTogetherCss("book", B);

@@ -1,5 +1,6 @@
 import { ROLEPLAY_ARCHIVE_FRAMING, MEMORY_DETAIL_KIND_VALUES, KEY_DIALOGUE_KIND_VALUES, ITEM_ACCESS_BASIS_VALUES, type MemoryLanguage, type RpProfile } from "@rcm/shared";
-// Owner-approved E1d revision 3. Source SHA-256:
+// Base: owner-approved E1d revision 3; entity policy amended for all contracts.
+// Original source SHA-256:
 // 73173ac26113ad59ef815eebc33386f958f14d2931d7aac76ac549c81c20f91e
 export function eventWritingSystem(language: MemoryLanguage, profile: RpProfile, contract: "e1d" | "e1e" | "e1f" = "e1d"): string {
   const names = { en: "English", ko: "Korean", ja: "Japanese", zh: "Chinese" };
@@ -18,7 +19,7 @@ Never invent actions, outcomes, motives, consent or knowledge. Proposals, attemp
 WHAT YOU RECEIVE
 The regular input fields are listed below. Additional task-specific context may follow them, but it is not new source evidence. Judge everything from what you receive.
 - messages: the CURRENT SOURCE, in order. Each message has a messageId, a role and units. Each unit has a ref such as "s1" and its text. This is the only new evidence. Source units are mechanical text boundaries, not speakers or access grants.
-- canonicalEntities: a bounded identity lookup with names, types and aliases. Absence from this list does not mean that a person or place is new.
+- canonicalEntities: a bounded identity lookup with names, types and aliases. Absence from this list does not mean that a person or organization is new.
 - referenceIndex.recentMemories: the key and title of recently saved memories.
 - recallCandidates: older saved memories: memoryId, title, a shortened gist, accessibleTo (who may know it), and atoms, which are older details with an atomRef, text and accessibleTo.
 The last three are lookup aids, never new evidence. Older text may be cut short; do not infer the part that is missing.
@@ -45,12 +46,12 @@ An empty list is valid.
 Each section ends with the shape of its items, with fields in the order to write them. Write field names exactly as shown. All fields are required except grant evidence, memory storyTime, passage speaker, skippedSource memoryKey, and landmark label, pair, storyTime and evidence; include these when their rules require them, at the positions shown. "…" is your text. "a"|"b" means choose exactly one of those values; copy it exactly and never put prose there. 0..1 is a number in that range.
 
 1. entities
-- List the source-established named people, places and things that this result's participants, witnesses, speakers, access or hiddenFrom need, and their explicitly established aliases. Never make up a name. Reuse the exact name from canonicalEntities when the identity is established. Add a new alias only when the source identifies the same person.
-- type is a short word such as character, place or organization.
-- aliases are other NAMES, titles or identities the person is known by: full names, surnames, nicknames used as names by narration or by several people, ranks or titles used as names, and alter egos. Endearments, pet names and teasing forms used only as address are not aliases. Relationship nouns and generic descriptions are not identities.
+- List the source-established named people and organizations that this result's participants, witnesses, speakers, access or hiddenFrom need, with their explicitly established aliases. A place or an object is never an entity, even when it has a name. Never make up a name. Reuse the exact name from canonicalEntities when the identity is established. Add a new alias only when the source identifies the same person or organization.
+- type is character for a person, or for any being that speaks or acts like one, and organization for a group that acts as one.
+- aliases are other NAMES, titles or identities the person or organization is known by: full names, surnames, nicknames used as names by narration or by several people, ranks or titles used as names, and alter egos. Endearments, pet names and teasing forms used only as address are not aliases. Relationship nouns and generic descriptions are not identities.
 
 Items:
-{"key":"…","name":"…","type":"…","aliases":["…"]}
+{"key":"…","name":"…","type":"character"|"organization","aliases":["…"]}
 
 2. memories: ONE MEMORY FOR EACH EVENT
 Splitting events:
@@ -179,7 +180,7 @@ Never invent actions, outcomes, motives, consent or knowledge. Proposals, attemp
 WHAT YOU RECEIVE
 Judge everything from these fields. Some requests add mode-specific context after them (such as earlier pages or a user note); use it as described there, as lookup only, never as new source evidence.
 - messages: the CURRENT SOURCE, in order. Each message has a messageId, a role and units. Each unit has a ref such as "s1" and its text. This is the only new evidence. Units are mechanical text boundaries, not speakers or access grants.
-- canonicalEntities: a short identity list. Write each person with "name"; "internalName" and "aliases" are other names for the same identity. A person or place missing from this list is not necessarily new.
+- canonicalEntities: a short identity list. Write each person with "name"; "internalName" and "aliases" are other names for the same identity. A person or organization missing from this list is not necessarily new.
 - referenceIndex.recentMemories: the key and title of recently saved memories.
 - recallCandidates: older saved memories: memoryId, title, a shortened gist, accessibleTo (who may know it), and atoms (older details with an atomRef, text and accessibleTo).
 The last three are lookup aids, never new evidence. Older text may be cut short; do not infer the missing part.
@@ -206,12 +207,12 @@ An empty list is valid.
 Each section ends with the shape of its items, with fields in the order to write them. Write field names exactly as shown. All fields are required except grant evidence, memory storyTime, passage speaker, skippedSource memoryKey, moment detailKey, and landmark label, pair, storyTime and evidence; include those when their rules call for them, at the positions shown. "…" is your text. "a"|"b" means choose exactly one of those values; copy it exactly and never put prose there. 0..1 is a number in that range.
 
 1. entities
-- List the source-established named people, places and things that this result's participants, witnesses, speakers, access or hiddenFrom need, with their explicitly established aliases. Never make up a name. Reuse the exact name from canonicalEntities when the identity is established. Add a new alias only when the source identifies the same person.
-- type is a short word such as character, place or organization.
-- aliases are other NAMES, titles or identities the person is known by: full names, surnames, nicknames used as names by narration or by several people, ranks or titles used as names, and alter egos. Endearments, pet names and teasing forms used only as address are not aliases. Relationship nouns and generic descriptions are not identities.
+- List the source-established named people and organizations that this result's participants, witnesses, speakers, access or hiddenFrom need, with their explicitly established aliases. A place or an object is never an entity, even when it has a name. Never make up a name. Reuse the exact name from canonicalEntities when the identity is established. Add a new alias only when the source identifies the same person or organization.
+- type is character for a person, or for any being that speaks or acts like one, and organization for a group that acts as one.
+- aliases are other NAMES, titles or identities the person or organization is known by: full names, surnames, nicknames used as names by narration or by several people, ranks or titles used as names, and alter egos. Endearments, pet names and teasing forms used only as address are not aliases. Relationship nouns and generic descriptions are not identities.
 
 Items:
-{"key":"…","name":"…","type":"…","aliases":["…"]}
+{"key":"…","name":"…","type":"character"|"organization","aliases":["…"]}
 
 2. memories: ONE MEMORY FOR EACH EVENT
 Splitting events:
@@ -350,7 +351,7 @@ Never invent actions, outcomes, motives, consent or knowledge. Proposals, attemp
 WHAT YOU RECEIVE
 Judge everything from these fields. Some requests add mode-specific context after them (such as earlier pages or a user note); use it as described there, as lookup only, never as new source evidence.
 - messages: the CURRENT SOURCE, in order. Each message has a messageId, a role and units. Each unit has a ref such as "s1" and its text. This is the only new evidence. Units are mechanical text boundaries, not speakers or access grants.
-- canonicalEntities: a short identity list. Write each person with "name"; "internalName" and "aliases" are other names for the same identity. A person or place missing from this list is not necessarily new.
+- canonicalEntities: a short identity list. Write each person with "name"; "internalName" and "aliases" are other names for the same identity. A person or organization missing from this list is not necessarily new.
 - referenceIndex.recentMemories: the key and title of recently saved memories.
 - recallCandidates: older saved memories: memoryId, title, a shortened gist, accessibleTo (who may know it), and atoms (older details with an atomRef, text and accessibleTo).
 The last three are lookup aids, never new evidence. Older text may be cut short; do not infer the missing part.
@@ -378,12 +379,12 @@ An empty list is valid.
 Each section ends with the shape of its items, with fields in the order to write them. Write field names exactly as shown. All fields are required except grant evidence, memory storyTime, passage speaker, skippedSource memoryKey, moment detailKey, and landmark label, pair, storyTime and evidence; include those when their rules call for them, at the positions shown. "…" is your text. "a"|"b" means choose exactly one of those values; copy it exactly and never put prose there. 0..1 is a number in that range.
 
 1. entities
-- List the source-established named people, places and things that this result's participants, witnesses, speakers, access or hiddenFrom need, with their explicitly established aliases. Never make up a name. Reuse the exact name from canonicalEntities when the identity is established. Add a new alias only when the source identifies the same person.
-- type is a short word such as character, place or organization.
-- aliases are other NAMES, titles or identities the person is known by: full names, surnames, nicknames used as names by narration or by several people, ranks or titles used as names, and alter egos. Endearments, pet names and teasing forms used only as address are not aliases. Relationship nouns and generic descriptions are not identities.
+- List the source-established named people and organizations that this result's participants, witnesses, speakers, access or hiddenFrom need, with their explicitly established aliases. A place or an object is never an entity, even when it has a name. Never make up a name. Reuse the exact name from canonicalEntities when the identity is established. Add a new alias only when the source identifies the same person or organization.
+- type is character for a person, or for any being that speaks or acts like one, and organization for a group that acts as one.
+- aliases are other NAMES, titles or identities the person or organization is known by: full names, surnames, nicknames used as names by narration or by several people, ranks or titles used as names, and alter egos. Endearments, pet names and teasing forms used only as address are not aliases. Relationship nouns and generic descriptions are not identities.
 
 Items:
-{"key":"…","name":"…","type":"…","aliases":["…"]}
+{"key":"…","name":"…","type":"character"|"organization","aliases":["…"]}
 
 2. memories: ONE MEMORY FOR EACH EVENT
 Splitting events:

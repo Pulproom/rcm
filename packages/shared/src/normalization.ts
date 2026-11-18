@@ -28,23 +28,38 @@ export function validateCanonicalRemovalRule(rule: CanonicalRemovalRule): string
   }
 }
 
+// GigaTrans owns these marker tags: a control marker it appends to every reply
+// and a separator between preserved head blocks and the display translation.
+const GIGATRANS_MARKERS = /<GT-(?:CTRL\b[^>]*|SEP)\s*\/>/gi;
+
+/** Parses GigaTrans's owned layout, never prose:
+ * `head <GT-SEP/> translation <GigaTrans>source</GigaTrans> tail <GT-CTRL/>`.
+ * Keep what the main model receives (head, source, tail) and drop only the
+ * display translation, so a reply reads the same before and after translation.
+ * Without a separator everything before a block is treated as translation. */
 function selectGigaTransSource(value: string): string {
   const blocks = [...value.matchAll(/<GigaTrans\b[^>]*>([\s\S]*?)<\/GigaTrans\s*>/gi)];
   if (blocks.length === 0) return value;
-  const completeRanges = blocks.map((match) => ({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length }));
-  const fragments = blocks.map((match) => ({
-    start: match.index ?? 0,
-    text: (match[1] ?? "").replace(/<GT-(?:CTRL\b[^>]*|SEP)\s*\/>/gi, ""),
-  }));
-  // Keep malformed/incomplete GigaTrans input visible even when another
-  // complete block exists; silently dropping raw source would lose evidence.
-  for (const opening of value.matchAll(/<GigaTrans\b[^>]*>/gi)) {
-    const start = opening.index ?? 0;
-    if (completeRanges.some((range) => start >= range.start && start < range.end)) continue;
-    const nextComplete = completeRanges.find((range) => range.start > start)?.start ?? value.length;
-    fragments.push({ start, text: value.slice(start, nextComplete) });
+  const kept: string[] = [];
+  let cursor = 0;
+  for (const block of blocks) {
+    const start = block.index ?? 0;
+    const before = value.slice(cursor, start);
+    const separator = before.search(/<GT-SEP\s*\/>/i);
+    // The lazy block match always starts at the leftmost opening tag, so an
+    // incomplete opening can only remain after the last complete block, where
+    // the tail below keeps it visible instead of silently dropping source.
+    kept.push(separator >= 0 ? before.slice(0, separator) : "", block[1] ?? "");
+    cursor = start + block[0].length;
   }
-  return fragments.sort((left, right) => left.start - right.start).map((fragment) => fragment.text).join("\n");
+  kept.push(value.slice(cursor));
+  return kept.map((part) => part.trim()).filter(Boolean).join("\n");
+}
+
+/** Parse GigaTrans's owned format, not prose: only the display between SEP and source. */
+export function selectGigaTransTranslation(value: string): string | undefined {
+  const match = /<GT-SEP\s*\/>([\s\S]*?)<GigaTrans\b[^>]*>[\s\S]*?<\/GigaTrans\s*>/i.exec(value);
+  return match?.[1]?.trim() || undefined;
 }
 
 function stripLightboardData(value: string): string {
@@ -69,7 +84,7 @@ function tidyRemovedText(value: string): string {
 }
 
 /** Comparison only: never use this projection as a quote or source-unit input. */
-function imageComparisonText(value: string): string {
+export function imageComparisonText(value: string): string {
   let text = value.replace(/\r\n/g, "\n");
   const ranges = modelImageRanges(text);
   // Work backwards so all positions still address the original string.
@@ -108,7 +123,7 @@ export function sourceComparisonText(value: string, policy = defaultCanonicaliza
 export function canonicalizeSourceText(value: string, policy: CanonicalizationPolicy): string {
   // GigaTrans source selection is unconditional. Current clients also publish
   // the policy marker as true; the UI no longer exposes a toggle.
-  let result = selectGigaTransSource(value);
+  let result = selectGigaTransSource(value).replace(GIGATRANS_MARKERS, "");
   result = stripYumiTransportComments(result);
   if (policy.useLightboard) result = stripLightboardData(result);
   result = result.replace(/<thoughts\b[^>]*>[\s\S]*?<\/thoughts\s*>/gi, "");

@@ -480,7 +480,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     ? db.prepare(`SELECT json_extract(payload_json,'$.sourceMessageIds') ids FROM jobs WHERE id=? AND chat_id=?
       UNION ALL SELECT source_message_ids_json ids FROM extraction_batches WHERE id=? AND chat_id=? LIMIT 1`)
       .get(sourceJobId, chatId, sourceBatchId ?? null, chatId) as { ids: string | null } | undefined : undefined;
-  result = canonicalizeExtraction(db, chatId, result, source?.ids ? JSON.parse(source.ids) : [], sourceBatchId);
+  result = canonicalizeExtraction(db, chatId, result, source?.ids ? JSON.parse(source.ids) : [], sourceBatchId, relationWarnings);
   const identityIsolation=isolateMemoryIdentityCollisions(db,chatId,result,sourceBatchId,additionsOnly);
   result=identityIsolation.result;
   appendJobStateDrops(db,sourceJobId,identityIsolation.drops);
@@ -535,7 +535,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       if (additionsOnly && existing) { entityIds.set(entity.key, id); continue; }
       db.prepare(`
         INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,created_at) VALUES(?,?,?,?,?,?,'transcript',?)
-        ON CONFLICT(chat_id,entity_key) DO UPDATE SET type=excluded.type
+        ON CONFLICT(chat_id,entity_key) DO NOTHING
       `).run(id, chatId, entity.key, entity.name, entity.name, entity.type, timestamp);
       entityIds.set(entity.key, id);
       const aliasInsert = db.prepare("INSERT OR IGNORE INTO aliases(entity_id,alias,normalized) VALUES(?,?,?)");

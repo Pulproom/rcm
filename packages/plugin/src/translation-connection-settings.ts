@@ -1,12 +1,43 @@
 import { initialTranslationConnection, TranslationConnectionConfigSchema, SERVER_LLM_PROVIDER_OPTIONS,
-  type ServerLlmPublicConfig, type TranslationConnectionPublicConfig } from "@rcm/shared";
+  defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_MODELS, type TranslationConnectionConfig, type ServerLlmPublicConfig, type TranslationConnectionPublicConfig } from "@rcm/shared";
 import type { PluginSettings } from "./types.js";
 import { providerCapability, updateProviderFields } from "./provider-settings.js";
 import { secretInput, maskSecretInputs } from "./dashboard/film/ui.js";
 
 const escape=(value:unknown)=>String(value).replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+type TranslationSettingsContext = {
+  settings: PluginSettings;
+  extraction?: Pick<ServerLlmPublicConfig, "provider" | "endpoint" | "serviceTier" | "model">;
+  connection?: TranslationConnectionConfig | TranslationConnectionPublicConfig;
+};
+
+/** Use the same saved-or-local source and schema defaults as the connection form. */
+export function displayedTranslationConnection({ settings, extraction, connection }: TranslationSettingsContext): TranslationConnectionConfig {
+  const config = connection ?? initialTranslationConnection(extraction ?? { ...defaultAuxiliaryModelConfig, serviceTier: "standard" }, {
+    model: settings.translationServerModel, temperature: settings.translationTemperature,
+    thinking: settings.translationThinking, maxOutput: settings.translationServerMaxOutput,
+  });
+  return TranslationConnectionConfigSchema.parse({ ...config, temperature: Number(config.temperature), maxOutputTokens: Number(config.maxOutputTokens ?? 16000) });
+}
+
+/** Translation content only: scheduling, budgets and extraction-only controls do not invalidate prose. */
+export function translationOutputSettingsChanged(previous: TranslationSettingsContext, next: TranslationSettingsContext): boolean {
+  const output = (context: TranslationSettingsContext) => {
+    const settings = context.settings;
+    if (settings.translationProvider === "google") return ["google"];
+    if (settings.translationProvider === "risu") return ["risu", settings.translationSlot, settings.translationSlot === "static" ? settings.translationModel : ""];
+    const config = displayedTranslationConnection(context);
+    const endpoint = config.endpoint.replace(/\/+$/, "");
+    const extraction = context.extraction ?? defaultAuxiliaryModelConfig;
+    const shared = config.credentialSource === "shared" && config.provider === extraction.provider && endpoint === extraction.endpoint.replace(/\/+$/, "");
+    const model = config.model || (shared ? extraction.model : SERVER_LLM_DEFAULT_MODELS[config.provider]);
+    return ["server", config.provider, endpoint, config.credentialSource, model, config.temperature, config.thinking];
+  };
+  return JSON.stringify(output(previous)) !== JSON.stringify(output(next));
+}
+
 export function translationConnectionSettings(settings:PluginSettings, extraction:ServerLlmPublicConfig, saved?:TranslationConnectionPublicConfig):string {
-  const c=saved??{...initialTranslationConnection(extraction,{model:settings.translationServerModel,temperature:settings.translationTemperature,thinking:settings.translationThinking,maxOutput:settings.translationServerMaxOutput}),keyConfigured:extraction.keyConfigured,dedicatedKeyConfigured:false};
+  const c={...displayedTranslationConnection({settings,extraction,connection:saved}),keyConfigured:saved?.keyConfigured??extraction.keyConfigured,dedicatedKeyConfigured:saved?.dedicatedKeyConfigured??false};
   const capability=providerCapability(c.provider);
   const options=(values:ReadonlyArray<readonly [string,string]>,selected:string)=>values.map(([value,label])=>`<option value="${value}" ${value===selected?"selected":""}>${label}</option>`).join("");
   const field=(body:string,extra="",supported=true)=>`<label class="field" data-translation-mode="server" ${extra} ${settings.translationProvider==="server"&&supported?"":"hidden"}>${body}</label>`;

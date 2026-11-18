@@ -7,6 +7,13 @@ import type { PluginSettings } from "./types.js";
 
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_MS = 15_000;
 export const SERVER_STATUS_TIMEOUT_MS = 12_000;
+export type HeartbeatObservation = ServerWorkerStatus & {
+  chatStatus?: import("./activity.js").StatusResponse;
+  idleWatch?: { version: string; busy: boolean };
+};
+export type HeartbeatWait = { waitMs: number; statusVersion?: string; signal: AbortSignal };
+// Dense archive prompt planning needs more headroom than ordinary HTTP reads.
+export const JOB_LEASE_TIMEOUT_MS = 120_000;
 // Allow slow valid retrieval, but bound the send path including response-body read.
 export const TURN_PREPARE_TIMEOUT_MS = null;
 
@@ -206,16 +213,18 @@ export class ServerClient {
           });
         }
         const sourcePath = path.match(/^\/v1\/chats\/([^/]+)\/(?:status|source-head|source-sync|open)$/);
-        const sourceChatId = sourcePath ? decodeURIComponent(sourcePath[1]!)
-          : path === '/v1/turn/prepare' && typeof init.body === 'string' ? JSON.parse(init.body).chatId : undefined;
-        if (sourceChatId && Number.isSafeInteger(parsed.sourceRevision)) {
+        const heartbeatChatId = path === '/v1/worker/heartbeat' && parsed.chatStatus && typeof init.body === 'string' ? JSON.parse(init.body).chatId : undefined;
+        const source = heartbeatChatId ? parsed.chatStatus : parsed;
+        const sourceChatId = heartbeatChatId ?? (sourcePath ? decodeURIComponent(sourcePath[1]!)
+          : path === '/v1/turn/prepare' && typeof init.body === 'string' ? JSON.parse(init.body).chatId : undefined);
+        if (sourceChatId && Number.isSafeInteger(source.sourceRevision)) {
           let receipts = sourceReceipts.get(requestSettings);
           if (!receipts) sourceReceipts.set(requestSettings, receipts = new Map());
           const key = `${serverUrl}\0${sourceChatId}`, previous = receipts.get(key);
-          if (!previous || parsed.sourceRevision >= previous.sourceRevision || parsed.serverInstanceId && parsed.serverInstanceId !== previous.serverInstanceId) {
-            const keepPending = path.endsWith('/status') || path.endsWith('/open') && parsed.lineage?.status === 'none';
-            receipts.set(key, { sourceRevision: parsed.sourceRevision, sourceInventory: parsed.sourceInventory,
-              sourceChangeHeld: parsed.sourceChangeHeld ?? (keepPending ? previous?.sourceChangeHeld : undefined), sourceNotice: parsed.sourceNotice ?? (keepPending ? previous?.sourceNotice : undefined), serverInstanceId: parsed.serverInstanceId ?? previous?.serverInstanceId });
+          if (!previous || source.sourceRevision >= previous.sourceRevision || source.serverInstanceId && source.serverInstanceId !== previous.serverInstanceId) {
+            const keepPending = !!heartbeatChatId || path.endsWith('/status') || path.endsWith('/open') && source.lineage?.status === 'none';
+            receipts.set(key, { sourceRevision: source.sourceRevision, sourceInventory: source.sourceInventory,
+              sourceChangeHeld: source.sourceChangeHeld ?? (keepPending ? previous?.sourceChangeHeld : undefined), sourceNotice: source.sourceNotice ?? (keepPending ? previous?.sourceNotice : undefined), serverInstanceId: source.serverInstanceId ?? previous?.serverInstanceId });
           }
         }
         if (timings) timings.jsonStage = "parsed";
@@ -394,7 +403,7 @@ export class ServerClient {
     return parsed.data;
   }
 
-  async traceRetrieval(event: Record<string, unknown>): Promise<void> {
+  async traceRetrieval(event: Record<string, unknown>, timingsReady?: Promise<void>): Promise<void> {
     if (event.kind === "automatic_injection" && event.blocked === false && event.omitted === false
       && ["fresh", "reused"].includes(String(event.prepareOutcome))) {
       await this.request("/v1/turn/delivery", { method: "POST", body: JSON.stringify({
@@ -405,13 +414,30 @@ export class ServerClient {
     }
     if (event.receiptOnly === true) return;
     if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return Promise.resolve();
-    return this.request("/v1/diagnostics/retrieval-events", { method: "POST", body: JSON.stringify(event) }, 2_000);
+    // Fresh injection measurements close at the widget's existing finally.
+    // Keep receipt dispatch above in place; only diagnostic serialization waits.
+    if (timingsReady) await timingsReady;
+    // Callers enqueue diagnostic delivery without awaiting it on the RP path.
+    // Serialize once so the retry carries the same event identity and contents.
+    // request/raw dispatch nativeFetch synchronously, without a client queue.
+    // Each attempt starts its own deadline, excluding receipt/retry waits.
+    // Server-side waiting is indistinguishable from transit here; allow 30s.
+    const body = JSON.stringify(event);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.request("/v1/diagnostics/retrieval-events", { method: "POST", body }, 30_000);
+        return;
+      } catch (error) {
+        if (attempt === 1) throw error;
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
   }
 
   async lease(workerId: string, modelSettingsFingerprint?:string): Promise<LeasedJob | null> {
     const result = await this.request<{ job: LeasedJob | null }>("/v1/jobs/lease", {
       method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled, capabilities:{stateExtractionV2:true,stateWritingFormat:true,eventWritingFormat:true,eventWritingFormatE1e:true,eventWritingFormatE1f:true,stateWritingFormatR10:true,stateWritingFormatR11:true} }),
-    });
+    }, JOB_LEASE_TIMEOUT_MS);
     return result.job;
   }
 
@@ -458,14 +484,14 @@ export class ServerClient {
     });
   }
 
-  async heartbeat(workerId: string, chatId?: string): Promise<ServerWorkerStatus> {
+  async heartbeat(workerId: string, chatId?: string, wait?: HeartbeatWait): Promise<HeartbeatObservation> {
     const serverUrl=this.settings().serverUrl;
     const requestedCursor=this.settings().incidentServerUrl === serverUrl ? this.settings().incidentCursor : undefined;
-    const result = await this.request<{ worker: ServerWorkerStatus } & Partial<IncidentFeed>>("/v1/worker/heartbeat", {
-      method: "POST", body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), incidentCursor: requestedCursor, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
-    });
+    const result = await this.request<{ worker: ServerWorkerStatus; chatStatus?: import("./activity.js").StatusResponse; idleWatch?: HeartbeatObservation["idleWatch"] } & Partial<IncidentFeed>>("/v1/worker/heartbeat", {
+      method: "POST", ...(wait ? { signal: wait.signal } : {}), body: JSON.stringify({ workerId, ...(chatId ? { chatId } : {}), ...(wait ? { waitMs: wait.waitMs, statusVersion: wait.statusVersion } : {}), incidentCursor: requestedCursor, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled }),
+    }, wait ? wait.waitMs + DEFAULT_SERVER_REQUEST_TIMEOUT_MS : DEFAULT_SERVER_REQUEST_TIMEOUT_MS);
     await this.onIncidentFeed?.(result,serverUrl,requestedCursor);
-    return result.worker;
+    return { ...result.worker, ...(result.chatStatus ? { chatStatus: result.chatStatus } : {}), ...(result.idleWatch ? { idleWatch: result.idleWatch } : {}) };
   }
 
   async pauseServerWorker(): Promise<ServerWorkerStatus> {

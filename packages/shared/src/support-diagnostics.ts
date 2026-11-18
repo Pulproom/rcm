@@ -19,6 +19,7 @@ export const SETTINGS_FAILURE_GUIDANCE: Record<string, string> = {
   NETWORK_ERROR: "모델에 연결하지 못했어요. 엔드포인트와 서버 실행 상태를 확인해 주세요.",
   INVALID_CONFIG: "연결 설정을 확인해 주세요. 프로바이더·엔드포인트·모델 ID가 서로 맞아야 해요.",
   INVALID_RESPONSE: "응답 형식이 맞지 않아요. 보조 모델 또는 모델 ID를 바꿔 주세요.",
+  STORY_SUPPORT_INVALID: "보조 모델이 줄거리에 제공되지 않은 근거 번호를 인용했어요. 이 구간의 줄거리 갱신을 다시 시도해 주세요.",
   RATE_LIMITED: "요청 한도를 넘었어요. 잠시 뒤 재시도하거나 사용 가능한 모델 ID·API 키로 바꿔 주세요.",
   UNAUTHORIZED: "서버 인증에 실패했어요. 설정 → 서버의 토큰을 확인해 주세요.",
   FORBIDDEN: "접근이 거절됐어요. API 키·인증정보의 권한과 모델 ID를 확인해 주세요.",
@@ -29,6 +30,8 @@ export const SETTINGS_FAILURE_GUIDANCE: Record<string, string> = {
 export function settingsFailureCode(error: unknown): string | undefined {
   const value = error as { code?: string; status?: number; kind?: string; name?: string; message?: string; providerMessage?: string } | null;
   const text = typeof error === "string" ? error : `${value?.code ?? ""} ${value?.message ?? ""} ${value?.providerMessage ?? ""}`;
+  // Product-owned validator marker, including errors stored before this code existed.
+  if (text.includes("Story spine cited an unknown support item:")) return "STORY_SUPPORT_INVALID";
   const explicit = Object.keys(SETTINGS_FAILURE_GUIDANCE).find(code => value?.code === code || new RegExp(`\\b${code}\\b`).test(text));
   if (explicit) return explicit;
   if (isProviderContextLimitError(text) || value?.status === 413) return "AUXILIARY_INPUT_TOO_LARGE";
@@ -157,10 +160,10 @@ export interface ProviderFailureMetadata { status?: number; code?: string; finis
 /** Allowlisted provider accounting fields only; never retain response bodies. */
 export function auxiliaryUsageMetadata(raw: any): Record<string, number> {
   return Object.fromEntries(Object.entries({
-    promptTokens: raw?.prompt_tokens ?? raw?.input_tokens ?? raw?.promptTokenCount,
-    completionTokens: raw?.completion_tokens ?? raw?.output_tokens ?? raw?.candidatesTokenCount,
-    reasoningTokens: raw?.reasoning_tokens ?? raw?.completion_tokens_details?.reasoning_tokens ?? raw?.thoughtsTokenCount,
-    cachedInputTokens: raw?.cachedContentTokenCount ?? raw?.prompt_tokens_details?.cached_tokens ?? raw?.cached_tokens,
+    promptTokens: raw?.promptTokens ?? raw?.inputTokens ?? raw?.prompt_tokens ?? raw?.input_tokens ?? raw?.promptTokenCount,
+    completionTokens: raw?.completionTokens ?? raw?.outputTokens ?? raw?.completion_tokens ?? raw?.output_tokens ?? raw?.candidatesTokenCount,
+    reasoningTokens: raw?.reasoningTokens ?? raw?.reasoning_tokens ?? raw?.completion_tokens_details?.reasoning_tokens ?? raw?.thoughtsTokenCount,
+    cachedInputTokens: raw?.cachedInputTokens ?? raw?.cachedContentTokenCount ?? raw?.prompt_tokens_details?.cached_tokens ?? raw?.cached_tokens,
   }).filter(([, value]) => typeof value === "number" && Number.isFinite(value) && value >= 0)) as Record<string, number>;
 }
 export function providerFailureMetadata(error: unknown): ProviderFailureMetadata {

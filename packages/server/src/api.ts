@@ -1,3 +1,8 @@
+import { jobListMetadata } from './job-list-metadata.js';
+import { isPersonEntityType } from "@rcm/shared";
+import { auxiliaryUsageMetadata } from '@rcm/shared';
+import { recordTranslationCall } from './processing-records.js';
+import { readProcessingHistory, readProcessingToday, readProcessingUnit, readProcessingCalls, readTranslationCalls } from './processing-history.js';
 import { automaticPacketBudget, packetFloorUsage } from "./packet-budget.js";
 import { memoryEpoch, renewMemoryEpoch } from './derived-state.js';
 import { assertUserChat, userChatSql } from './chat-work.js';
@@ -18,7 +23,7 @@ import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage 
 import { initialMemoryGuidanceBlock, memoryGuidanceBlock, sharedPastPacket, withMemoryGuidance, clipLandmarkDisplayText } from "@rcm/shared";
 import { editPairProgress, listPairProgress, pairProgressResponse, renderPairProgress } from "./pair-progress.js";
 import { prepareOccasions, renderOccasions } from "./occasions.js";
-import { readSmallReviews, visibleSmallReviews, resolveSmallReviews } from "./small-review.js";
+import { countPendingSmallReviews, readSmallReviews, visibleSmallReviews, resolveSmallReviews } from "./small-review.js";
 import { patchMemoryLine } from './memory-detail-edits.js';
 import { CharacterWorkRequestSchema } from "@rcm/shared";
 import { beginChatWork, isChatWorkHeld, setChatWorkEnabled, CHAT_WORK_HELD } from "./chat-work.js";
@@ -29,7 +34,7 @@ import { withAuxiliaryStoryFraming } from "@rcm/shared";
 import { isProviderAuthenticationError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_FAILURE_CODES } from "@rcm/shared";
 import { StateOutcomeCapture } from "./state-outcomes.js";
 import { automaticStateSources, automaticStateCandidates, renderAutomaticState, selectAutomaticState, trimAutomaticStateNote, sharedStateBudget } from "./automatic-state.js";
-import { planTranslation, translationSystemPrompt, validateTranslation, TRANSLATION_TIMEOUT_MS, TranslationError, sanitizeDiagnosticText } from "@rcm/shared";
+import { planTranslation, splitTranslationBatch, translationParts, translationItemCost, translationReferenceCost, TranslationRequestSchema, TranslationBatchSchema, TRANSLATION_DEFAULT_OUTPUT, untranslatedParts, type TranslationBatch, translationSystemPrompt, validateTranslation, translationTimeoutMs, TranslationError, sanitizeDiagnosticText } from "@rcm/shared";
 import { requestStructuredProvider } from "./server-llm.js";
 import { connectionFailureReason, type ConnectionFailureCode } from "@rcm/shared";
 import { readStorySeed, storySeedCounts, editStorySeed, editStorySeeds, dashboardStorySeeds, recordSeedDelivery } from "./story-seeds.js";
@@ -42,20 +47,22 @@ import { TranslationLegacySettingsSchema } from "@rcm/shared";
 import { TranslationConnection } from "./translation-connection.js";
 import { McpSelector } from "./mcp-selector.js";
 import { INVALID_MEMORY_REF_MESSAGE, mcpRequestTimeoutMs, structuredStoryTimeEnd } from "@rcm/shared";
-import { collectStateEvidence, resolveAssertionHolders } from "./state-evidence.js";
+import { resolveAssertionHolders } from "./state-evidence.js";
+import { stateEvidenceReader } from "./state-search-index.js";
 import { SocialRelationSchema } from "@rcm/shared";
 import { activeSocialRelations, findSocialRelationConflict, isReverseMutualSocialRelation, parseSocialRelation, sameSocialRelationIdentity, socialRelationKnowledge, socialRelationPredicateCollisions } from "./social-relations.js";
 import { timeout } from "hono/timeout";
 import { MemoryReferences } from "./memory-references.js";
-import { finalizeMcpAnswer, renderAuthorMcpAnswer } from "./mcp-answer.js";
+import { finalizeMcpAnswer, mcpRecognitionIds, renderAuthorMcpAnswer } from "./mcp-answer.js";
 import { AUTHOR_ACTIVATION_KEY, longtermFloorActive, automaticDeliveryHistory, recordAutomaticDelivery, persistAutomaticActivationObservations, deliveredActivationObservation, type AutomaticActivationObservation } from "./recall-activation.js";
 import { projectJobListPayload, stageJobModelOutput, manualRetryPayload } from "./jobs.js";
-import { inspectDraftEvidence, rescueDraftDialogues, describeEvidenceReview, countBlockingExtractionAudits, describeWithheldRecognitions } from "./evidence-review.js";
+import { inspectDraftEvidence, rescueDraftDialogues, describeEvidenceReview, countBlockingExtractionAudits, describeWithheldRecognitions, evidenceReviewIsBlocking } from "./evidence-review.js";
 import { emptyPacketManifest, mergePacketManifests, type PacketManifest } from "./packet-manifest.js";
 import { queueSourceRecovery, retrieveSourceEvidence, renderSourceEvidence, sourceEvidenceAtomKey } from "./source-evidence.js";
 import { fitAutomaticCard, automaticAtoms, planAutomaticAtoms, selectCueAnchor, selectAutomaticPortfolio, AUTOMATIC_ROLE_SHARES, type AutomaticPortfolioCandidate, type AutomaticAtomPriority } from "./automatic-packet.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createAlbumPhotoStore } from "./album-photos.js";
 import { createAlbumExportStore, registerAlbumExportReadRoute } from "./album-exports.js";
@@ -118,7 +125,7 @@ import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
 import { ServerExtractionWorker } from "./server-worker.js";
 import { detachRetryStorySupports, chatPacketBudgetKey, compileStorySpine, createStorySpineCompiler, completeStoryConsolidationById, expandArcForMemory, expandArcHits, invalidateStorySpine, invalidateStorySupports, storyMemoryCascadeSupportIds, storyMemorySupportIds, listStorySpine, maybeEnqueueStorySpine, storyBudgetLimit, storyOverviewRenderBudgetLimit, updateStorySpineGroup } from "./story-spine.js";
-import { buildEntityIdentityResolver, deleteEntity, listEntities, mergeEntities, previewEntityDelete, previewEntityMerge, refreshMemoryParticipantCounts } from "./entities.js";
+import { buildEntityIdentityResolver, deleteEntity, listEntities, modelEntityContext, mergeEntities, previewEntityDelete, previewEntityMerge, refreshMemoryParticipantCounts } from "./entities.js";
 import { EVERYONE_HOLDER, NARRATOR_ARCHIVE_HOLDER, PENDING_ACCESS_HOLDER, linkedDetailKnowledge, promiseLinkedSupport, snapshotKnowledgeGrants, correctedPromiseDetailIds, publicKnowledgeScope, publicMemoryContext, publicMcpAnswers, memoryDetailAccess, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy, projectPromiseRow, promiseContributionState } from "./item-access.js";
 import { normalizeUnitScore } from "./scores.js";
 import { listReconciliationReviews, prepareReconciliation, resolveReconciliationReview } from "./reconciliation.js";
@@ -245,6 +252,7 @@ export function createApp(dependencies: Dependencies): Hono {
   const translationConnection=new TranslationConnection(db,config.secretsPath,llmStore);
   embeddings.setTimeoutMs(llmStore.config.embeddingTimeoutMs);
   const serverWorker = dependencies.serverWorker ?? new ServerExtractionWorker(db, llmStore, embeddings, config.leaseSeconds);
+  const connectionChanges = db.prepare('SELECT total_changes()').pluck();
   const reranker = dependencies.reranker ?? new VoyageReranker({ apiKey: () => config.voyageApiKey,
     endpoint: config.rerankEndpoint, model: config.rerankModel, timeoutMs: llmStore.config.rerankTimeoutMs });
   const retrievalTrace = new RetrievalTraceWriter(db, {
@@ -262,7 +270,7 @@ export function createApp(dependencies: Dependencies): Hono {
   const restartScheduler = dependencies.restartScheduler ?? scheduleManagedRestart;
   let managedRestartScheduled = false;
   const serverInstanceId = (db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value: string }).value;
-  app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "Authorization", "X-RCM-Plugin-Version", "X-RCM-API-Revision", "X-HTTP-Method-Override", "X-RCM-Photo-Meta"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], exposeHeaders: ["Retry-After"] }));
+  app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type", "Authorization", "X-RCM-Plugin-Version", "X-RCM-API-Revision", "X-HTTP-Method-Override", "X-RCM-Photo-Meta", "Range"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], exposeHeaders: ["Retry-After", "Content-Range"] }));
   const overrideMethod = methodOverride({ app, header: "X-HTTP-Method-Override" });
   app.use("*", async (context, next) => {
     const override = context.req.header("X-HTTP-Method-Override");
@@ -272,6 +280,34 @@ export function createApp(dependencies: Dependencies): Hono {
     }
     // Hono must dispatch again with the effective method before route matching.
     return overrideMethod(context, next);
+  });
+  // Risu checks the banner without bearer credentials before downloading an update.
+  app.get("/plugin/risu-cognitive-memory.js", async (context) => {
+    context.header("Cache-Control", "no-store");
+    const path = process.env.RCM_DEV_PLUGIN_PATH;
+    if (!path) return context.json({ error: "Dev plugin is not available" }, 404);
+    let file: Uint8Array<ArrayBuffer>;
+    try {
+      file = new Uint8Array(await readFile(path));
+    } catch (error) {
+      if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        return context.json({ error: "Dev plugin is not available" }, 404);
+      }
+      throw error;
+    }
+    context.header("Content-Type", "text/javascript; charset=utf-8");
+    context.header("Accept-Ranges", "bytes");
+    const range = /^bytes=(\d+)-(\d*)$/.exec(context.req.header("Range") ?? "");
+    if (range) {
+      const start = Number(range[1]);
+      const end = range[2] ? Number(range[2]) : file.length - 1;
+      if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start < file.length && end >= start) {
+        const last = Math.min(end, file.length - 1);
+        context.header("Content-Range", `bytes ${start}-${last}/${file.length}`);
+        return context.body(file.subarray(start, last + 1), 206);
+      }
+    }
+    return context.body(file, 200);
   });
   app.get("/v1/health", (context) => {
     const health = {
@@ -354,6 +390,50 @@ export function createApp(dependencies: Dependencies): Hono {
   app.use('/v1/jobs/:id/*',async (context,next) => {
     if (!['GET','HEAD','OPTIONS'].includes(context.req.method)) assertUpgradeJobWritable(db,context.req.param('id')!);
     await next();
+  });
+  const processingQuery = z.object({ offset:z.coerce.number().int().min(0).max(100_000).default(0),
+    translationOffset:z.coerce.number().int().min(0).max(100_000).default(0),
+    timezoneMinutes:z.coerce.number().int().min(-840).max(840).default(0) });
+  app.get('/v1/chats/:id/processing', context => {
+    const query=processingQuery.parse(context.req.query());
+    return context.json(readProcessingHistory(db,{chatId:context.req.param('id'),...query}));
+  });
+  app.get('/v1/processing', context => context.json(readProcessingHistory(db,processingQuery.parse(context.req.query()))));
+  app.get('/v1/processing/today', context => {
+    const query=processingQuery.parse(context.req.query()),chatId=context.req.query('chatId');
+    if(chatId) assertUserChat(db,chatId);
+    return context.json(readProcessingToday(db,chatId,query.timezoneMinutes));
+  });
+  app.get('/v1/chats/:id/processing/runs/:runId',context=>{
+    const query=processingQuery.parse(context.req.query());
+    const unit=readProcessingUnit(db,context.req.param('id'),`run:${context.req.param('runId')}`,query.offset);
+    return unit?context.json(unit):context.json({error:'Run not found'},404);
+  });
+  app.get('/v1/chats/:id/processing/jobs/:jobId',context=>{
+    const unit=readProcessingUnit(db,context.req.param('id'),`job:${context.req.param('jobId')}`);
+    return unit?context.json(unit):context.json({error:'Job not found'},404);
+  });
+  app.get('/v1/chats/:id/processing/jobs/:jobId/calls',context=>{
+    const query=processingQuery.parse(context.req.query());
+      if(!db.prepare('SELECT 1 FROM processing_jobs WHERE id=? AND chat_id=? UNION ALL SELECT 1 FROM jobs WHERE id=? AND chat_id=?').get(context.req.param('jobId'),context.req.param('id'),context.req.param('jobId'),context.req.param('id'))) return context.json({error:'Job not found'},404);
+    return context.json(readProcessingCalls(db,context.req.param('jobId'),query.offset));
+  });
+  app.get('/v1/processing/translations/:day',context=>{
+    const query=processingQuery.parse(context.req.query()),chatId=context.req.query('chatId'),day=context.req.param('day');
+    if(chatId) assertUserChat(db,chatId);
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(`${day}T00:00:00Z`))) return context.json({error:'Invalid day'},400);
+    return context.json(readTranslationCalls(db,chatId,day,query.timezoneMinutes,query.offset));
+  });
+  app.post('/v1/chats/:id/processing/translations',async context=>{
+    if(!db.prepare('SELECT 1 FROM chats WHERE id=?').get(context.req.param('id'))) return context.json({code:'CHAT_NOT_FOUND',error:'Chat not found'},404);
+    const record=z.object({id:z.string().uuid(),slot:z.enum(['model','static','memory','otherAx','translate','emotion','submodel']),
+      model:z.string().max(200).optional(),provider:z.string().max(200).optional(),
+      startedAt:z.number().int().min(Date.now()-86_400_000).max(Date.now()+60_000),durationMs:z.number().int().min(0).max(3_600_000),
+      itemCount:z.number().int().min(1).max(500),completedItems:z.number().int().min(0).max(500).optional(),outcome:z.enum(['succeeded','failed']),
+      usage:z.record(z.string(),z.number().nonnegative()).optional(),code:z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).optional()}).strict().parse(await context.req.json());
+    if((record.completedItems??0)>record.itemCount)return context.json({error:'Invalid completed item count'},400);
+    recordTranslationCall(db,{...record,chatId:context.req.param('id'),site:'risu',failure:record.code?{code:record.code}:undefined});
+    return context.json({ok:true});
   });
   app.get("/v1/chats/:id/dashboard-home", (context) => {
     const chatId = context.req.param("id");
@@ -527,11 +607,32 @@ export function createApp(dependencies: Dependencies): Hono {
     if (querySignals !== requestSignals) parsed.query = querySignals.find(signal => signal.kind === 'focus')?.text
       ?? querySignals.find(signal => signal.kind === 'scene')?.text ?? 'continue';
     const retrievalSignals = buildRetrievalQuerySignals(db, parsed.chatId, querySignals, languageState.memory_language);
-    const semantic = await embeddings.searchManyDetailed(retrievalSignals, parsed.chatId);
+    const signalBuildingMs = performance.now() - syncFinishedAt;
+    const stateTrace = retrievalTrace.isChatEnabled(parsed.chatId) ? new StateOutcomeCapture() : undefined;
+    const readState = stateEvidenceReader(db, parsed.chatId, stateTrace, "shared");
+    const semanticPending = embeddings.searchManyDetailed(retrievalSignals, parsed.chatId, 80, { stateEvidence: readState });
+    // Observe before any synchronous preparation can throw. The normal join
+    // still awaits the original promise and propagates its rejection.
+    void semanticPending.catch(() => {});
+    readState();
+    // Lexical retrieval also reads non-state material (dialogues/FTS). Keep
+    // its existing broad freshness guard independent of the scoped state cache.
+    const lexicalChanges = db.prepare("SELECT total_changes() AS changes");
+    const lexicalVersion = () => `${(lexicalChanges.get() as {changes:number}).changes}:${db.pragma("data_version", {simple:true})}`;
+    const lexicalBeforeWait = lexicalVersion();
+    const preparationStartedAt = performance.now();
+    let lexicalSearch = lexicalCandidates(db, parsed.chatId, retrievalSignals, languageState.memory_language);
+    const allocation = automaticPacketBudget(parsed.tokenBudget);
+    const maximumStoryBudget = storyBudgetLimit(parsed.tokenBudget);
+    const overviewRenderMaximum = storyOverviewRenderBudgetLimit(parsed.tokenBudget);
+    const retrievalPreparationMs = performance.now() - preparationStartedAt;
+    const semantic = await semanticPending;
     assertChatUnlocked(db,parsed.chatId);
+    // Required API state collection still fails the request on an error.
+    readState();
+    if (lexicalVersion() !== lexicalBeforeWait) lexicalSearch = lexicalCandidates(db, parsed.chatId, retrievalSignals, languageState.memory_language);
     const embeddingFinishedAt = performance.now();
     const perspectiveQuery = querySignals.map((signal) => signal.text).join("\n");
-    const lexicalSearch = lexicalCandidates(db, parsed.chatId, retrievalSignals, languageState.memory_language);
     const sceneHitScores = new Map(semantic.scores);
     for (const [id, score] of lexicalSearch.scores) sceneHitScores.set(id, Math.max(sceneHitScores.get(id) ?? 0, score));
     const strongSceneIds = [...new Set([...sceneHitScores].filter(([, score]) => score >= .72)
@@ -571,20 +672,30 @@ export function createApp(dependencies: Dependencies): Hono {
     const namesMentioned = mentionedCharacters(db, parsed.chatId, [parsed.query, perspectiveQuery, namesPrompt].join("\n"));
     const sceneNames = renderSceneNames(db, parsed.chatId, namesPresent, namesPresent,
       namesMentioned, Math.min(200, Math.floor(parsed.tokenBudget * .1)), pricing);
-    const allocation = automaticPacketBudget(parsed.tokenBudget);
-    const maximumStoryBudget = storyBudgetLimit(parsed.tokenBudget);
-    const overviewRenderMaximum = storyOverviewRenderBudgetLimit(parsed.tokenBudget);
     const storyProbe = compileStorySpine(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, maximumStoryBudget,new Set(),false,pricing,overviewRenderMaximum);
-    const stateTrace = retrievalTrace.isChatEnabled(parsed.chatId) ? new StateOutcomeCapture() : undefined;
-    const stateCorpus = collectStateEvidence(db, parsed.chatId, stateTrace, "shared");
-    const stateMemorySources = db.prepare(`WITH sources AS (SELECT value id FROM json_each(?))
+    const stateCorpus = readState();
+    const stateMemorySources = db.prepare(`WITH sources AS MATERIALIZED (SELECT value id FROM json_each(?))
       SELECT m.id memory_id,e.value ->> '$.messageId' source_id FROM memories m,json_each(m.evidence_json) e
-        JOIN sources s ON s.id=e.value ->> '$.messageId' WHERE m.chat_id=? AND m.active=1
+        WHERE m.chat_id=? AND m.active=1 AND e.value ->> '$.messageId' IN (SELECT id FROM sources)
       UNION SELECT d.memory_id,e.value ->> '$.messageId' source_id FROM memory_details d,json_each(d.evidence_json) e
-        JOIN sources s ON s.id=e.value ->> '$.messageId' WHERE d.chat_id=? AND d.active=1`)
+        WHERE d.chat_id=? AND d.active=1 AND e.value ->> '$.messageId' IN (SELECT id FROM sources)`)
       .all(JSON.stringify([...new Set(stateCorpus.filter(state => state.current).flatMap(state => state.sourceIds))]), parsed.chatId, parsed.chatId) as Array<{memory_id:string;source_id:string}>;
-    const stateSources = (state: typeof stateCorpus[number]) => state.memoryId ? [state.memoryId]
-      : [...new Set(stateMemorySources.filter(row => state.sourceIds.includes(row.source_id)).map(row => row.memory_id))];
+    const stateMemoriesBySource = new Map<string, Array<{memoryId:string;order:number}>>();
+    stateMemorySources.forEach((row,order)=>{
+      const entries=stateMemoriesBySource.get(row.source_id) ?? [];
+      entries.push({memoryId:row.memory_id,order}); stateMemoriesBySource.set(row.source_id,entries);
+    });
+    const stateSourceCache = new Map<typeof stateCorpus[number],string[]>();
+    const stateSources = (state: typeof stateCorpus[number]): string[] => {
+      if (state.memoryId) return [state.memoryId];
+      let ids=stateSourceCache.get(state);
+      if (!ids) {
+        // Preserve the UNION's row order even when one state cites many sources.
+        const matches=state.sourceIds.flatMap(id=>stateMemoriesBySource.get(id) ?? []).sort((a,b)=>a.order-b.order);
+        ids=[...new Set(matches.map(row=>row.memoryId))]; stateSourceCache.set(state,ids);
+      }
+      return ids;
+    };
     const arcExpansion = expandArcHits(db, parsed.chatId, activeTurnPerspectives, semantic.storyScores, 3, { kind: "author", sceneCharacters });
     // Retrieval competes against the full packet budget. Story overlap is
     // known only after leaf memories are selected; reserving the unsuppressed
@@ -633,6 +744,7 @@ export function createApp(dependencies: Dependencies): Hono {
         hardTokenCeiling: automaticHardTokenCeiling(Math.max(128, retrievalBudget)),
         semanticScores: semantic.scores,
         stateScores: semantic.stateScores,
+        stateEvidence: readState,
         semanticHits: semantic.hits,
         semanticAtomHits: semantic.atomHits,
         semanticViewScores: semantic.viewScores,
@@ -733,9 +845,10 @@ export function createApp(dependencies: Dependencies): Hono {
       return end === undefined ? latest : latest === undefined ? end : Math.max(latest, end);
     }, undefined);
     const resolveRelationshipName = buildEntityIdentityResolver(db, parsed.chatId);
+    const {allowsName: modelAllowsName}=modelEntityContext(db,parsed.chatId);
     const preferredRelationshipNames = [parsed.identityHints?.userPersonaName, parsed.identityHints?.hostCharacterName,
       ...(db.prepare("SELECT entity_name FROM entity_prominence WHERE chat_id=? AND (tier='core' OR pinned=1)").all(parsed.chatId) as Array<{entity_name:string}>).map(row => row.entity_name)]
-      .flatMap(name => { if (!name) return []; const identity = resolveRelationshipName(name); return identity.ambiguous ? [] : [identity.canonical]; });
+      .flatMap(name => { if (!name || !modelAllowsName(name)) return []; const identity = resolveRelationshipName(name); return identity.ambiguous || !modelAllowsName(identity.canonical) ? [] : [identity.canonical]; });
     const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives, sceneCharacters, preferredRelationshipNames,
       activeNames: [...new Set([...namesPresent, ...namesMentioned])], query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
       covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
@@ -743,7 +856,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(remainingBudget);
     const selectedState = selectAutomaticState(stateCandidates, stateBudget, pricing, allocation.sceneRelationships);
     const ceilingDroppedState = new Set<string>();
-    let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName),namesPresent,{ initialSetupOnly });
+    let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName).filter(pair=>modelAllowsName(pair.persona)&&modelAllowsName(pair.character)),namesPresent,{ initialSetupOnly });
     const occasions = parsed.upcomingOccasions === false ? { asOf: null, items: [] } : prepareOccasions(db, parsed.chatId, parsed.profile, retrievalPerspectives, parsed.identityHints?.userPersonaName, { kind: "author", sceneCharacters });
     // Present calendar context is fixed output, charged before memories compete.
     let emissionPlan: EmissionPlan;
@@ -939,6 +1052,7 @@ export function createApp(dependencies: Dependencies): Hono {
       .map(name => name === "__shared__" ? "shared" : name);
     const finalManifest = { ...injectionManifest(packet, emittedManifest, deliveredPerspectives, finalStory.nodeIds), sourceEvidenceIds: deliveredSources.map((item) => item.id),
       longtermMemoryIds: [...finalSelectedIds].filter(id=>selectedRoles.get(id)==="longterm") };
+    if(sceneNames.text)finalManifest.atomKeys=[...new Set([...finalManifest.atomKeys,...sceneNames.atomKeys])];
     if (parsed.memoryGeneration) memoryReferences.deliver(parsed.chatId, parsed.memoryGeneration, [...packet.matchAll(/ref="(m[0-9]+)"/g)].map(match => match[1]!));
     const deliveredActivationAtoms = new Set(finalManifest.atomKeys);
     for (const entry of activationByPerspective) persistAutomaticActivationObservations(
@@ -1056,6 +1170,14 @@ export function createApp(dependencies: Dependencies): Hono {
     const timings = {
       syncMs: syncFinishedAt - prepareStartedAt,
       embeddingMs: embeddingFinishedAt - syncFinishedAt,
+      signalBuildingMs,
+      queryVectorMs: semantic.timings?.queryVectorMs ?? 0,
+      queryVectorCacheHit: semantic.timings?.queryVectorCacheHit ?? 0,
+      queryVectorRequests: semantic.timings?.queryVectorRequests ?? 0,
+      stateSearchMs: semantic.timings?.stateSearchMs ?? 0,
+      stateCollections: readState.collections,
+      vectorSearchMs: semantic.timings?.vectorSearchMs ?? 0,
+      retrievalPreparationMs,
       retrievalMs: retrievalFinishedAt - embeddingFinishedAt,
       assemblyMs: assemblyFinishedAt - retrievalFinishedAt,
       finalizeMs: finalizedAt - assemblyFinishedAt,
@@ -1468,7 +1590,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (llmStore.config.engine === "server") return context.json({ job: null });
     if(body.modelSettingsFingerprint) db.prepare("INSERT INTO server_meta(key,value) VALUES('risu_model_settings_fingerprint',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(body.modelSettingsFingerprint);
     let leased;
-    try {leased=leaseJob(db,body.workerId,config.leaseSeconds,{stateContract:body.capabilities?.stateExtractionV2===true,stateWriting:body.capabilities?.stateWritingFormat===true,eventWriting:body.capabilities?.eventWritingFormat===true,eventWritingE1e:body.capabilities?.eventWritingFormatE1e===true,eventWritingE1f:body.capabilities?.eventWritingFormatE1f===true,stateWritingR10:body.capabilities?.stateWritingFormatR10===true,stateWritingR11:body.capabilities?.stateWritingFormatR11===true});}
+    try {leased=leaseJob(db,body.workerId,config.leaseSeconds,{recoverUnstartedLease:true,stateContract:body.capabilities?.stateExtractionV2===true,stateWriting:body.capabilities?.stateWritingFormat===true,eventWriting:body.capabilities?.eventWritingFormat===true,eventWritingE1e:body.capabilities?.eventWritingFormatE1e===true,eventWritingE1f:body.capabilities?.eventWritingFormatE1f===true,stateWritingR10:body.capabilities?.stateWritingFormatR10===true,stateWritingR11:body.capabilities?.stateWritingFormatR11===true});}
     catch(error) {
       if((error as {code?:string}).code==="PLUGIN_UPDATE_REQUIRED")return context.json({code:"PLUGIN_UPDATE_REQUIRED",error:"기억 플러그인을 업데이트해 주세요."},409);
       throw error;
@@ -1512,7 +1634,7 @@ export function createApp(dependencies: Dependencies): Hono {
     });
   });
   app.post("/v1/jobs/:id/progress", async (context) => {
-    const body = await context.req.json() as { shapeNormalizations?:unknown; workerId?: string; stage?: string; repairDelta?: number; llmCallStats?: { total?: unknown; repairs?: unknown; byPurpose?: unknown }; llmCallDiagnostic?: { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; code?: unknown; httpStatus?: unknown; risuCall?: unknown } };
+    const body = await context.req.json() as { shapeNormalizations?:unknown; workerId?: string; stage?: string; repairDelta?: number; llmCallStats?: { total?: unknown; repairs?: unknown; byPurpose?: unknown }; llmCallDiagnostic?: { purpose?: unknown; attempt?: unknown; outcome?: unknown; at?: unknown; error?: unknown; code?: unknown; httpStatus?: unknown; risuCall?: unknown; usage?: unknown; repairReason?:unknown } };
     return withJobWrite(db, context.req.param('id'), () => {
       const allowed = new Set<JobPipelineStage>(["queued", "first_extraction", "post_extraction_audit", "state_reconciliation", "ledger_consistency", "relationship_projection", "story_consolidation", "storing", "complete", "failed"]);
       if (!body.workerId || !allowed.has(body.stage as JobPipelineStage)) return context.json({ error: "Invalid pipeline progress" }, 400);
@@ -1525,6 +1647,8 @@ export function createApp(dependencies: Dependencies): Hono {
         && Number.isInteger(Number(rawDiagnostic.attempt)) && ["started", "succeeded", "failed"].includes(String(rawDiagnostic.outcome))
         ? { purpose: rawDiagnostic.purpose, attempt: Number(rawDiagnostic.attempt), outcome: String(rawDiagnostic.outcome) as "started" | "succeeded" | "failed", at: Math.max(0, Number(rawDiagnostic.at) || Date.now()),
           risuCall: projectRisuAuxiliaryCallDiagnostic(rawDiagnostic.risuCall),
+          ...(['format','fields','source','access'].includes(String(rawDiagnostic.repairReason))?{repairReason:String(rawDiagnostic.repairReason)}:{}),
+          ...(rawDiagnostic.usage ? { usage: auxiliaryUsageMetadata(rawDiagnostic.usage) } : {}),
           ...(RISU_AUXILIARY_FAILURE_CODES.includes(rawDiagnostic.code as any) ? { code: String(rawDiagnostic.code) } : {}),
           ...(typeof rawDiagnostic.httpStatus === "number" && Number.isInteger(rawDiagnostic.httpStatus) && rawDiagnostic.httpStatus >= 100 && rawDiagnostic.httpStatus <= 599 ? { httpStatus: rawDiagnostic.httpStatus } : {}),
           ...(typeof rawDiagnostic.error === "string" ? { error: rawDiagnostic.error.slice(0, 300) } : {}) } : undefined;
@@ -1667,6 +1791,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const recallSignal=AbortSignal.any([context.req.raw.signal,AbortSignal.timeout(mcpRequestTimeoutMs(mcpSelector.publicConfig)-5_000)]);
     const handlerStarted = performance.now();
     const body = RecallRequestSchema.parse(await context.req.json());
+    const requestDecodeMs = performance.now() - handlerStarted;
     const staleResponse = () => context.json({ answers: [], packet: "", selected: [], deliveredAtomKeys: [], deliveredSourceRanges: [],
       opportunityError: "stale_turn", newAtomCount: 0, error: "The request generation is no longer current." });
     const audience = mcpRetrievalAudience(body.activePerspectives);
@@ -1676,8 +1801,9 @@ export function createApp(dependencies: Dependencies): Hono {
         archiveEmpty: true, timings: { serverMs: performance.now() - handlerStarted, rerankCalls: 0, rerankTotalTokens: 0 } });
     }
     if (body.memoryGeneration && !memoryReferences.ensure(context.req.param("id"), body.memoryGeneration)) return staleResponse();
+    const readState = stateEvidenceReader(db, context.req.param("id"), undefined, "shared");
     const embeddingStarted = performance.now();
-    const semanticResults = await embeddings.searchBatchDetailed([body.query], context.req.param("id"));
+    const semanticResults = await embeddings.searchBatchDetailed([body.query], context.req.param("id"), 80, { stateEvidence: readState });
     const embeddingMs = performance.now() - embeddingStarted;
     const retrievalStarted = performance.now();
     const semantic = semanticResults[0]!;
@@ -1686,6 +1812,7 @@ export function createApp(dependencies: Dependencies): Hono {
     let result = retrieve(db, {
       chatId: context.req.param("id"), query: body.query, perspective: "narrator", audience,
       intent: "recall", tokenBudget: body.tokenBudget, semanticScores: semantic.scores,
+      stateEvidence: readState,
       memoryOnlyInjection: body.memoryOnlyInjection,
         stateScores: semantic.stateScores, semanticHits: semantic.hits,
         semanticAtomHits: semantic.atomHits,
@@ -1705,14 +1832,16 @@ export function createApp(dependencies: Dependencies): Hono {
     const deliverySource = "search" as const;
     const opportunityCurrent = opportunityTurnIsCurrent(db, context.req.param("id"), body.traceContext?.latestMessageId);
     const retrievalMs = performance.now() - retrievalStarted;
-    const queriedCharacters = mentionedCharacters(db, context.req.param("id"), body.query);
-    const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
     const finalizationStarted = performance.now();
+    const queriedCharacters = mentionedCharacters(db, context.req.param("id"), body.query);
+    const characterLookupMs = performance.now() - finalizationStarted;
+    const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
     let finalized: Awaited<ReturnType<typeof finalizeMcpAnswer>>;
     try {
       finalized = await finalizeMcpAnswer(db, context.req.param("id"), result, {
         audience,
         memoryOnlyInjection: body.memoryOnlyInjection,
+        stateEvidence: readState,
         query: body.query, aspects: undefined,
         tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives?.length ? body.activePerspectives : ["narrator"],
         promptIds: body.promptSourceMessageIds, excludedAtoms: [...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])],
@@ -1731,6 +1860,7 @@ export function createApp(dependencies: Dependencies): Hono {
       return context.json({ error:"MCP evidence verification service unavailable", code:"MCP_RERANK_UNAVAILABLE", failureKind:kind, timings }, 503);
     }
     if (body.memoryGeneration && !memoryReferences.current(context.req.param("id"),body.memoryGeneration)) return staleResponse();
+    const referenceStarted = performance.now();
     const referenceGeneration = body.memoryGeneration ?? randomUUID();
     const requestReferences = body.memoryGeneration ? memoryReferences : new MemoryReferences(db);
     if (!body.memoryGeneration) requestReferences.begin(context.req.param("id"), referenceGeneration);
@@ -1743,21 +1873,36 @@ export function createApp(dependencies: Dependencies): Hono {
         reference,storedNarrationViewpoint(db,context.req.param("id")),new Set([...(body.alreadyPresentAtomKeys??[]),...(body.excludeAtomKeys??[])]));
       result.estimatedTokens = estimateTokens(result.packet);
     }
+    const referenceRenderMs = performance.now() - referenceStarted;
+    const namesStarted = performance.now();
     const involvedCharacters = queriedCharacters.length ? [...new Set([...queriedCharacters, ...result.selected.flatMap(item => item.participants)])] : [];
     const names = renderSceneNames(db, context.req.param("id"),
-      ["narrator", ...involvedCharacters], involvedCharacters, [], namesBudget);
+      ["narrator", ...involvedCharacters], involvedCharacters, [], namesBudget, undefined, mcpRecognitionIds(result.answers??[]),
+      new Set([...(body.alreadyPresentAtomKeys??[]),...(body.excludeAtomKeys??[])]));
     result.packet = appendSceneNames(result.packet, names);
+    result.deliveredAtomKeys=[...new Set([...result.deliveredAtomKeys,...names.atomKeys])];
     result.estimatedTokens = estimateTokens(result.packet);
+    const namesMs = performance.now() - namesStarted;
     const spanRerankTokens=finalized.sourceSpans.usage?.total_tokens;
-    const timings = { embeddingMs, retrievalMs, rerankMs: finalized.rerank.elapsedMs,
+    const timings = { ...finalized.timings, requestDecodeMs, embeddingMs, retrievalMs, characterLookupMs, referenceRenderMs, namesMs,
+      rerankMs: finalized.rerank.elapsedMs,
       rerankCalls: finalized.rerank.calls, spanRerankMs: finalized.sourceSpans.elapsedMs,
       spanRerankCalls: finalized.sourceSpans.calls, finalizationMs: performance.now() - finalizationStarted,
       serverMs: performance.now() - handlerStarted,
       selectorCalls:Number(finalized.selector?.calls??0),
       selectorMs:Number(finalized.selector?.elapsedMs??0),
+      selectorInputSerializationMs: finalized.selector?.inputSerializationMs ?? 0,
       rerankTokens:0,rerankUsageCalls:0,
       ...(spanRerankTokens===undefined?{}:{spanRerankTokens,spanRerankUsageCalls:finalized.sourceSpans.usage!.calls_with_usage}),
       rerankTotalTokens:spanRerankTokens??0 };
+    const serializationStarted = performance.now();
+    const followableMemoryIds = result.mcpFollowableMemoryIds ?? [];
+    const { emissionPlan: _emissionPlan, standaloneScopes: _standaloneScopes, diagnostics: _diagnostics, eligibleCandidates: _eligible, mcpSearchEnvelopes: _envelopes,
+      mcpFollowableMemoryIds: _followable, directAtomKeys: _direct, structuredManifest: _structured, ...publicResult } = result;
+    const opportunityError = !opportunityCurrent && (result.deliveredAtomKeys?.length ?? 0) === 0 ? "stale_turn" : undefined;
+    const response = context.json({ ...publicResult, selected: result.selected.map(publicMemoryContext), answers: publicMcpAnswers(result.answers ?? []), timings, followableMemoryIds, deliverySource, newAtomCount: result.deliveredAtomKeys.filter(key => ![...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])].includes(key)).length, ...(opportunityError ? { opportunityError } : {}) });
+    const responseSerializationMs = performance.now() - serializationStarted;
+    const traceStarted = performance.now();
     const traceRequestId = body.traceContext?.requestId ?? randomUUID();
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
       id: traceRequestId,
@@ -1765,7 +1910,7 @@ export function createApp(dependencies: Dependencies): Hono {
       cardEmission: traceEmissionPlan(result.emissionPlan),
       names: { pairCount: names.pairCount, omittedCount: names.omittedCount },
       selector: finalized.selector,
-      timings, elapsedMs: timings.serverMs,
+      timings: { ...timings, responseSerializationMs }, elapsedMs: timings.serverMs,
       answers: publicMcpAnswers(result.answers ?? []),
       chatId: context.req.param("id"),
       traceContext: body.traceContext,
@@ -1790,12 +1935,9 @@ export function createApp(dependencies: Dependencies): Hono {
       packet: result.packet,
       retrieval: result.diagnostics,
     });
-    const followableMemoryIds = result.mcpFollowableMemoryIds ?? [];
-    const { emissionPlan: _emissionPlan, standaloneScopes: _standaloneScopes, diagnostics: _diagnostics, eligibleCandidates: _eligible, mcpSearchEnvelopes: _envelopes,
-      mcpFollowableMemoryIds: _followable, directAtomKeys: _direct, structuredManifest: _structured, ...publicResult } = result;
-    const opportunityError = !opportunityCurrent && (result.deliveredAtomKeys?.length ?? 0) === 0 ? "stale_turn" : undefined;
     if (body.memoryGeneration && !memoryReferences.current(context.req.param("id"),body.memoryGeneration)) return staleResponse();
-    return context.json({ ...publicResult, selected: result.selected.map(publicMemoryContext), answers: publicMcpAnswers(result.answers ?? []), timings, followableMemoryIds, deliverySource, newAtomCount: result.deliveredAtomKeys.filter(key => ![...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])].includes(key)).length, ...(opportunityError ? { opportunityError } : {}) });
+    if (retrievalTrace.enabled) response.headers.set("Server-Timing", `rcm-trace;dur=${(performance.now() - traceStarted).toFixed(2)}`);
+    return response;
   });
   app.post("/v1/chats/:id/expand", async (context) => {
     const started = performance.now();
@@ -1814,7 +1956,9 @@ export function createApp(dependencies: Dependencies): Hono {
     const memoryId = memoryReferences.resolve(chatId, body.ref);
     if (!memoryId) return reject("INVALID_MEMORY_REF", "invalid_ref", INVALID_MEMORY_REF_MESSAGE);
     const version = memoryReferences.version(chatId, memoryId);
+    const readState = stateEvidenceReader(db, chatId, undefined, "shared");
     const result = retrieve(db, { chatId, query: body.focus ?? "", perspective: "narrator", audience,
+      stateEvidence: readState,
       memoryOnlyInjection: body.memoryOnlyInjection,
       tokenBudget: body.tokenBudget, seedMemoryId: memoryId, followAllDetails: true,
       reinforce: true, deferReinforcement: true, mcpCandidatesOnly: true,
@@ -1822,21 +1966,41 @@ export function createApp(dependencies: Dependencies): Hono {
     result.eligibleCandidates = result.eligibleCandidates.filter(item => item.id === memoryId);
     if (!result.eligibleCandidates.length) return reject("INVALID_MEMORY_REF", "invalid_ref", INVALID_MEMORY_REF_MESSAGE);
     result.answers = [];
+    let semantic: Awaited<ReturnType<EmbeddingService["searchBatchDetailed"]>> = [];
+    let semanticStatus = body.focus ? "unavailable" : "not_requested";
+    let embeddingMs = 0;
+    if (body.focus && embeddings.ready) {
+      const embeddingStarted = performance.now();
+      const deadline = AbortSignal.timeout(2_000);
+      const signal = AbortSignal.any([context.req.raw.signal, deadline]);
+      try {
+        const results = await embeddings.searchBatchDetailed([body.focus], chatId, 80, { targetMemoryId:memoryId, signal });
+        if (!signal.aborted && results[0] && !results[0].searchUnavailable) {
+          semantic = results;
+          semanticStatus = results[0].hits.size || results[0].sourceHits?.length ? "available" : "no_hits";
+        }
+      } catch { /* Continue with the lexical candidates already prepared. */ }
+      if (deadline.aborted) semanticStatus = "timeout";
+      embeddingMs = performance.now() - embeddingStarted;
+    }
     const involved = [...new Set(result.eligibleCandidates.flatMap(item => item.participants))];
     const namesBudget = Math.min(200, Math.floor(body.tokenBudget * .1));
     await finalizeMcpAnswer(db, chatId, result, { audience, query: body.focus ?? "",
+      stateEvidence: readState,
       tokenBudget: body.tokenBudget - namesBudget, perspectives: body.activePerspectives ?? ["narrator"],
       promptIds:body.promptSourceMessageIds,excludedAtoms:[...(body.alreadyPresentAtomKeys ?? []),...(body.excludeAtomKeys ?? [])],
-      semantic: [], seedMemoryId: memoryId });
+      semantic, seedMemoryId: memoryId });
     // A change before the request is allowed; a change during assembly is not.
     if (version !== memoryReferences.version(chatId, memoryId)) return reject("MEMORY_SNAPSHOT_CHANGED", "snapshot_changed", "The memory changed during this request. Retry against the current chat.");
     for (const answer of result.answers ?? []) for (const evidence of answer.evidence) if (evidence.memoryId === memoryId) evidence.ref = body.ref;
     const names = renderSceneNames(db, chatId, ["narrator", ...involved], involved,
-      mentionedCharacters(db, chatId, body.focus ?? ""), namesBudget);
+      mentionedCharacters(db, chatId, body.focus ?? ""), namesBudget, undefined, mcpRecognitionIds(result.answers??[]),
+      new Set([...(body.alreadyPresentAtomKeys??[]),...(body.excludeAtomKeys??[])]));
     result.packet = appendSceneNames(renderAuthorMcpAnswer(result.answers ?? [],result.emissionPlan,result.eligibleCandidates,()=>body.ref,storedNarrationViewpoint(db,chatId),
         new Set([...(body.alreadyPresentAtomKeys??[]),...(body.excludeAtomKeys??[])])), names);
+    result.deliveredAtomKeys=[...new Set([...result.deliveredAtomKeys,...names.atomKeys])];
     result.estimatedTokens = estimateTokens(result.packet);
-    const timings = { serverMs: performance.now() - started, rerankCalls: 0, rerankTotalTokens: 0 };
+    const timings = { serverMs: performance.now() - started, rerankCalls: 0, rerankTotalTokens: 0, embeddingMs };
     if (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) await retrievalTrace.record({
       id: body.traceContext?.requestId ?? randomUUID(), kind: "mcp_search", chatId,
       cardEmission: traceEmissionPlan(result.emissionPlan),
@@ -1844,11 +2008,11 @@ export function createApp(dependencies: Dependencies): Hono {
       names: { pairCount: names.pairCount, omittedCount: names.omittedCount },
       answers: publicMcpAnswers(result.answers ?? []), selectedIds: result.selected.map(item => item.id), packet: result.packet,
       deliveredAtomKeys: result.deliveredAtomKeys, deliveredSourceRanges: result.deliveredSourceRanges,
-      retrieval: result.diagnostics, timings, elapsedMs: timings.serverMs, deliverySource: "reference",
+      retrieval: result.diagnostics, timings, semanticStatus, elapsedMs: timings.serverMs, deliverySource: "reference",
     });
     return context.json({ answers: publicMcpAnswers(result.answers ?? []), packet: result.packet, selected: result.selected.map(publicMemoryContext),
       deliveredAtomKeys: result.deliveredAtomKeys, deliveredSourceRanges: result.deliveredSourceRanges,
-      timings });
+      timings, semanticStatus });
   });
 
   app.post("/v1/turn/delivery", async (context) => {
@@ -1947,31 +2111,74 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/admin/server-llm", (context) => context.json({ config: llmStore.publicConfig, worker: serverWorker.status }));
   app.post("/v1/admin/auxiliary/translation-plan", async context => {
     const body = await context.req.json();
-    const parsed = z.object({ items: z.array(z.object({ id: z.string(), text: z.string() })).max(10000), maxOutput: z.number().int().min(256).max(128000).default(8000) }).safeParse(body);
+    const parsed = TranslationRequestSchema.safeExtend({ maxOutput: z.number().int().min(256).max(128000).default(TRANSLATION_DEFAULT_OUTPUT) }).safeParse(body);
     if (!parsed.success) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation plan" }, 400);
-    const batches = planTranslation(parsed.data.items, parsed.data.maxOutput);
-    return context.json({ parts: batches.map(items => ({ systemPrompt: withAuxiliaryStoryFraming([{ role: "system", content: translationSystemPrompt }], llmStore.config.relaxAuxiliaryCensorship === true)[0]!.content, userPrompt: JSON.stringify({ items }), items })) });
+    const batches = planTranslation(parsed.data, parsed.data.maxOutput);
+    return context.json({ parts: batches.map(batch => ({ systemPrompt: withAuxiliaryStoryFraming([{ role: "system", content: translationSystemPrompt }], llmStore.config.relaxAuxiliaryCensorship === true)[0]!.content, userPrompt: JSON.stringify(batch), items: translationParts(batch) })) });
   });
   app.post("/v1/translations/batch", async context => {
-    const parsed = TranslationLegacySettingsSchema.extend({
-      chatId: z.string().min(1),
-      items: z.array(z.object({ id: z.string().max(512), text: z.string(), partIndex: z.number().int().nonnegative(), partCount: z.number().int().positive() })).min(1).max(10000),
+    const parsed = TranslationBatchSchema.safeExtend({
+      ...TranslationLegacySettingsSchema.shape, chatId: z.string().min(1),
     }).safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation batch" }, 400);
     const body = parsed.data;
+    const batch = { scenes: body.scenes, other: body.other };
+    const items = translationParts(batch);
+    if (!items.length) return context.json({ code: "INVALID_CONFIG", error: "Invalid translation parts" }, 400);
+    assertUserChat(db,body.chatId);
+    if(!db.prepare('SELECT 1 FROM chats WHERE id=?').get(body.chatId)) return context.json({code:'CHAT_NOT_FOUND',error:'Chat not found'},404);
     if (isChatWorkHeld(db, body.chatId)) return context.json({ code: "CHAT_WORK_HELD", error: CHAT_WORK_HELD }, 409);
     const scope = beginChatWork(db, body.chatId);
-    let apiKey = "";
+    let apiKey = "", model = "";
+    const completed: ReturnType<typeof validateTranslation> = [];
+    let usage: any;
     try {
       const resolved = translationConnection.resolve(body);
       const config = resolved.config; apiKey = resolved.apiKey;
       if (!apiKey) throw new TranslationError("AUTH_FAILED", "번역 연결의 인증정보가 없어요.");
-      if (estimateTokens(JSON.stringify({ items: body.items })) > Math.floor(config.maxOutputTokens / 1.5)) throw new TranslationError("INVALID_CONFIG", "Translation batch exceeds output budget");
-      const result = await requestStructuredProvider(llmStore, config, apiKey,
-        [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify({ items: body.items }) }],
-        AbortSignal.any([scope.controller.signal, context.req.raw.signal, AbortSignal.timeout(TRANSLATION_TIMEOUT_MS)]), config.maxOutputTokens);
-      scope.controller.signal.throwIfAborted();
-      return context.json({ items: validateTranslation(result.content, body.items, result.finishReason), usage: result.usage, model: config.model });
+      if (translationItemCost(batch) > Math.floor(config.maxOutputTokens / 3) || translationReferenceCost(batch) > Math.floor(config.maxOutputTokens / 2)) throw new TranslationError("INVALID_CONFIG", "Translation batch exceeds budget");
+      model = config.model;
+      const translateAndCollect = async (batch: TranslationBatch) => {
+        // Each original/half batch owns a deadline, including its Korean-script retry.
+        const signal = AbortSignal.any([scope.controller.signal, context.req.raw.signal, AbortSignal.timeout(translationTimeoutMs(config.maxOutputTokens))]);
+        const translate = async (batch: TranslationBatch, finalRetry=false) => {
+          let startedAt: number | undefined;
+          let callUsage: unknown;
+          try {
+          const result = await requestStructuredProvider(llmStore, config, apiKey,
+            [{ role: "system", content: translationSystemPrompt }, { role: "user", content: JSON.stringify(batch) }], signal, config.maxOutputTokens,()=>{startedAt=Date.now();});
+          callUsage = result.usage;
+          scope.controller.signal.throwIfAborted();
+          if (result.usage) for (const [key, value] of Object.entries(result.usage)) {
+            usage ??= {};
+            usage[key] = typeof usage[key] === "number" && typeof value === "number" ? usage[key] + value : value;
+          }
+          const translated = validateTranslation(result.content, translationParts(batch), result.finishReason);
+          if(startedAt!==undefined)recordTranslationCall(db, { chatId: body.chatId, site: 'server', provider: config.provider, model: config.model, startedAt,
+            durationMs: Date.now()-startedAt, usage: callUsage, itemCount: translationParts(batch).length, completedItems:translated.length-(finalRetry?0:untranslatedParts(translationParts(batch),translated).length), outcome: 'succeeded' });
+          return translated;
+          } catch (error) {
+            if(startedAt!==undefined)recordTranslationCall(db, { chatId: body.chatId, site: 'server', provider: config.provider, model: config.model, startedAt,
+              durationMs: Date.now()-startedAt, usage: callUsage ?? (error as any)?.usage, itemCount: translationParts(batch).length, completedItems:0, outcome: 'failed', failure: error });
+            throw error;
+          }
+        };
+        let result = await translate(batch);
+        const retry = untranslatedParts(translationParts(batch), result);
+        if (retry.length) {
+          const second = await translate({ scenes: [], other: retry.map(({ speaker: _speaker, ...part }) => part) },true);
+          result = result.map(item => second.find(row => row.id === item.id && row.partIndex === item.partIndex) ?? item);
+        }
+        completed.push(...result);
+      };
+      try { await translateAndCollect(batch); }
+      catch (error) {
+        const halves = (error as { code?: string })?.code === "MODEL_OUTPUT_TRUNCATED" ? splitTranslationBatch(batch) : undefined;
+        if (!halves) throw error;
+        // A failed half escapes directly; only the original batch may split.
+        for (const half of halves) await translateAndCollect(half);
+      }
+      return context.json({ items: completed, usage, model });
     } catch (error) {
       if (scope.controller.signal.aborted) return context.json({ code: "CHAT_WORK_HELD", error: CHAT_WORK_HELD }, 409);
       const code = error instanceof TranslationError ? error.code : error instanceof ProviderRequestError
@@ -1980,6 +2187,9 @@ export function createApp(dependencies: Dependencies): Hono {
       if (code === "RATE_LIMITED" && error instanceof ProviderRequestError && error.retryAfterMs !== undefined) {
         context.header("Retry-After", String(Math.ceil(error.retryAfterMs / 1000)));
       }
+      // Return verified progress so the plugin can persist complete source rows before reporting failure.
+      if (completed.length) return context.json({ items: completed, usage, model, failure: { code,
+        ...(error instanceof ProviderRequestError && error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}) } });
       return context.json({ code, error: settingsFailureMessage(error, "translation") }, 502);
     } finally { scope.finish(); }
   });
@@ -2006,8 +2216,51 @@ export function createApp(dependencies: Dependencies): Hono {
     syncChatWork(body);
     recordOpenChat(db, body.workerId, body.chatId);
     serverWorker.heartbeat(body.workerId);
-    return context.json({ ok: true, worker: body.chatId ? serverWorker.statusForChat(body.chatId) : serverWorker.status,
-      ...incidentsSince(db,typeof raw.incidentCursor === 'number' ? raw.incidentCursor : undefined) });
+    const read = () => {
+      const globalWorker = serverWorker.status;
+      const worker = { ...(body.chatId ? serverWorker.statusForChat(body.chatId) : globalWorker), globalQueuedJobs: globalWorker.queuedJobs };
+      const chatStatus = body.chatId ? readDashboardStatus(body.chatId) : undefined;
+      const feed = incidentsSince(db,typeof raw.incidentCursor === 'number' ? raw.incidentCursor : undefined);
+      // Include quizzes and all chats/embedding queues, even work hidden by the open-chat view.
+      const busy = !!globalWorker.activeCalls || !!globalWorker.quizGenerating || !!db.prepare("SELECT 1 FROM jobs WHERE status IN ('queued','leased') LIMIT 1").get()
+        || !!db.prepare("SELECT 1 FROM embedding_blocks WHERE status='queued' LIMIT 1").get()
+        || embeddings.retryDue;
+      const version = createHash('sha256').update(JSON.stringify({ worker, chatStatus, busy, incidentCursor: feed.incidentCursor },
+        (key, value) => key === 'controlLeaseUntil' ? undefined : value)).digest('hex');
+      return { ok: true, worker, ...(chatStatus ? { chatStatus } : {}), idleWatch: { version, busy }, ...feed };
+    };
+    let result = read();
+    const waitMs = typeof raw.waitMs === 'number' && Number.isFinite(raw.waitMs) ? Math.max(0, Math.min(45_000, raw.waitMs)) : 0;
+    const until = Date.now() + waitMs;
+    // SQLite counters cover every persisted status input (including triggers and
+    // writes from another connection), without scanning jobs, sources or memories.
+    // Unrelated writes may cause a conservative re-read. Sample AFTER read(), whose
+    // episode projection can itself write, so it cannot invalidate its own snapshot.
+    const changeToken = () => JSON.stringify([connectionChanges.get(), db.pragma('data_version', { simple: true }),
+      serverWorker.idleWaitToken(body.chatId), embeddings.idleWaitToken]);
+    let observedChanges = waitMs > 0 ? changeToken() : undefined;
+    // Long idle intervals still observe remote jobs and incidents within one second.
+    // The client keeps scanning the host and can cancel this wait on any local wake.
+    while (body.chatId && !result.idleWatch.busy && !result.incidents.length && raw.statusVersion === result.idleWatch.version && Date.now() < until && db.open && !context.req.raw.signal.aborted) {
+      await new Promise<void>(resolve => {
+        const signal = context.req.raw.signal;
+        const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve(); };
+        const timer = setTimeout(finish, Math.min(1_000, until - Date.now()));
+        signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) finish();
+      });
+      if (!db.open || context.req.raw.signal.aborted || Date.now() >= until) break;
+      if (changeToken() !== observedChanges) {
+        result = read();
+        observedChanges = changeToken();
+      }
+    }
+    if (waitMs > 0 && db.open && !context.req.raw.signal.aborted) {
+      serverWorker.heartbeat(body.workerId);
+      recordOpenChat(db, body.workerId, body.chatId);
+      result = read();
+    }
+    return context.json(result);
   });
   app.post("/v1/worker/resume", async (context) => {
     const body = WorkerControlSchema.parse(await context.req.json());
@@ -2081,49 +2334,36 @@ export function createApp(dependencies: Dependencies): Hono {
           }
         }
         const calibrationBefore = initialCalibrationView(db, chatId);
-        const needsCalibration = ["unseeded", "awaiting_setup", "failed"].includes(calibrationBefore.status);
         if (["queued", "awaiting_confirmation"].includes(calibrationBefore.status)) {
           return context.json({ error: "Initial calibration is already in progress", code: "INITIAL_CALIBRATION_IN_PROGRESS", calibration: calibrationBefore }, 409);
         }
-        if (needsCalibration && !setupResult?.success) {
+        if (!setupResult?.success) {
           return context.json({
             error: "Choose setup materials in the picker before rebuilding initial memory.",
             code: "INITIAL_SETUP_REQUIRED",
             calibration: calibrationBefore,
           }, 409);
         }
-        recanonicalizeSourceLedger(db, chatId);
-        const pendingMessages = reprocessChat(db, embeddings, chatId, body.activatePendingMemoryLanguage === true);
-        if (needsCalibration && setupResult?.success) {
+        const result = db.transaction(() => {
+          recanonicalizeSourceLedger(db, chatId);
+          const pendingMessages = reprocessChat(db, embeddings, chatId, body.activatePendingMemoryLanguage === true);
           const operationRunId = randomUUID();
           beginInitialCalibration(db, chatId, "cold_start", setupResult.data, {
             confirmationRequired: true,
             forceBackfill: true,
             extractionReview: body.extractionReviewOverride as boolean | undefined,
           });
-          const queued = enqueueInitialCalibration(
-            db,
-            chatId,
-            setupResult.data,
-            (body.identityHints ?? {}) as Record<string, unknown>,
-            operationRunId,
-          );
-          if (queued) serverWorker.wake();
+          const queued = enqueueInitialCalibration(db, chatId, setupResult.data,
+            (body.identityHints ?? {}) as Record<string, unknown>, operationRunId);
           const language = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
-          return context.json({
-            ok: true,
-            pendingMessages,
-            queuedJobs: queued ? 1 : 0,
-            awaitingCalibration: true,
+          return {
+            ok: true, pendingMessages, queuedJobs: queued ? 1 : 0, awaitingCalibration: true,
             calibration: initialCalibrationView(db, chatId),
-            memoryLanguage: language.memory_language,
-            pendingMemoryLanguage: language.pending_memory_language,
-          });
-        }
-        const queuedJobs = enqueueExtractionJobs(db, chatId, chat.profile, true, chat.include_user_messages !== 0, chat.extraction_group_turns, "ledger", body.extractionReviewOverride as boolean | undefined, undefined, randomUUID());
-        if (queuedJobs > 0) serverWorker.wake();
-        const language = db.prepare("SELECT memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { memory_language: string; pending_memory_language: string | null };
-        return context.json({ ok: true, pendingMessages, queuedJobs, memoryLanguage: language.memory_language, pendingMemoryLanguage: language.pending_memory_language });
+            memoryLanguage: language.memory_language, pendingMemoryLanguage: language.pending_memory_language,
+          };
+        })();
+        if (result.queuedJobs) serverWorker.wake();
+        return context.json(result);
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
@@ -2499,7 +2739,7 @@ export function createApp(dependencies: Dependencies): Hono {
       let retryDraft = JSON.parse(audit.draft_json);
       if (readSmallReviews(retryDraft).length) return context.json({error: "작은 확인 목록에서 후보별로 다시 확인해 주세요."}, 409);
       const issues = inspectDraftEvidence(db, chatId, sourceMessageIds, retryDraft);
-      const sourceRecovery = originalJob?.status === "done" || originalPayload.sourceRecovery === true;
+      const sourceRecovery = !evidenceReviewIsBlocking(originalJob?.status, originalPayload);
       const dialogueRecovery: DialogueRecoveryCandidate[] = [];
       // Already-applied state is not replayed to repair optional evidence.
       if (sourceRecovery && issues.some((issue) => issue.blocking)) return context.json({ error: "이미 적용된 상태의 근거는 개별 수정이 필요해요. 중복 누적을 막기 위해 전체 재시도를 하지 않았어요." }, 409);
@@ -2641,7 +2881,9 @@ export function createApp(dependencies: Dependencies): Hono {
       try { participants = JSON.parse(String(item.participants_json ?? "[]")) as string[]; } catch { participants = []; }
       try { knownBy = JSON.parse(String(item.known_by_json ?? "[]")) as string[]; } catch { knownBy = []; }
       try { landmarkKinds = JSON.parse(String(item.landmark_kinds_json ?? "[]")) as unknown[]; } catch { landmarkKinds = []; }
-      const { locations_json: _locationsJson, landmark_kinds_json: _landmarkKindsJson, ...rest } = item;
+      const evidence = JSON.parse(String(item.evidence_json ?? "[]")) as Array<{ messageId?: string; quote?: string }>;
+      const messageIds = [...new Set(evidence.flatMap(source => source.messageId ? [source.messageId] : []))];
+      const { locations_json: _locationsJson, landmark_kinds_json: _landmarkKindsJson, evidence_json: _evidenceJson, ...rest } = item;
       rest.recognitionOnly = Boolean(item.recognitionOnly);
       rest.userOnlyRetry = Boolean(item.userOnlyRetry);
       const episode = db.prepare("SELECT id,status,resolution,source_tokens FROM episodes WHERE memory_id=? LIMIT 1").get(item.id) as any;
@@ -2657,7 +2899,11 @@ export function createApp(dependencies: Dependencies): Hono {
           locations: JSON.parse(detail.locations || "[]"), evidence: JSON.parse(detail.evidence || "[]") };
       });
       const keyDialogues = (dialogueQuery.all(item.id) as Array<Record<string,any>>).map(dialogue => ({...dialogue,access:memoryDetailAccess(db,chatId,dialogue.id,"dialogue"),evidence:JSON.parse(dialogue.evidence)}));
-      return { ...rest, access: memoryDetailAccess(db, chatId, String(item.id), "memory"), known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
+      return { ...rest,
+        // Message-only provenance also lets older readers fall back to their source-message view.
+        evidence_json: JSON.stringify(messageIds.map(messageId => ({ messageId }))),
+        evidenceSummary: { messageCount: messageIds.length, quoteCount: evidence.length, hasMissingQuotes: evidence.some(source => !source.quote) },
+        access: memoryDetailAccess(db, chatId, String(item.id), "memory"), known_by_json: JSON.stringify(publicKnowledgeScope(knownBy).knownBy), participants, ...publicKnowledgeScope(knownBy), locations, landmarkKinds, landmark: item.landmark === 1, pinned: item.pinned === 1,
         alwaysInject:item.always_inject===1,alwaysInjectEstimatedTokens:alwaysTokens.get(item.id)?.estimatedTokens ?? 0,alwaysInjectChargedTokens:alwaysTokens.get(item.id)?.chargedTokens ?? 0,
         active: item.active === 1, bookmarked: bookmarks.has(item.id), keyDialogues, details, detailCount: details.filter(detail => !detail.hidden).length, episode, sections };
     }) };
@@ -2677,8 +2923,15 @@ export function createApp(dependencies: Dependencies): Hono {
     });
   });
   app.get("/v1/chats/:id/memories", (context) => context.json(readDashboardMemories(context.req.param("id"))));
+  app.get("/v1/chats/:id/memories/:memoryId/evidence", context => {
+    const memory = db.prepare("SELECT evidence_json,updated_at FROM memories WHERE chat_id=? AND id=?")
+      .get(context.req.param("id"), context.req.param("memoryId")) as { evidence_json: string; updated_at: number } | undefined;
+    if (!memory) return context.json({ error: "Memory not found in this chat" }, 404);
+    // Preserve storage order: existing translation keys address these exact indexes.
+    return context.json({ items: JSON.parse(memory.evidence_json), updatedAt: memory.updated_at });
+  });
   app.get("/v1/chats/:id/messages", (context) => context.json({ items: db.prepare(`
-    SELECT message_id,role,ordinal,content,lifecycle,host_visibility,visible,event_time,generation_id,extraction_state,updated_at
+    SELECT message_id,role,ordinal,content,CASE WHEN canonical_hash<>'' THEN canonical_content END AS canonical_content,lifecycle,host_visibility,visible,event_time,generation_id,extraction_state,updated_at
     FROM messages WHERE chat_id=? ORDER BY ordinal
   `).all(context.req.param("id")) }));
   app.get("/v1/chats/:id/memory-details/search", (context) => {
@@ -2728,7 +2981,7 @@ export function createApp(dependencies: Dependencies): Hono {
       evidence = db.prepare("SELECT message_id AS messageId,quote FROM evidence_spans WHERE chat_id=? AND memory_id=? ORDER BY created_at").all(chatId, memoryId) as Array<{ messageId: string; quote?: string }>;
     }
     const items = evidence.map((item) => {
-      const source = db.prepare("SELECT role,ordinal,content,lifecycle,host_visibility AS hostVisibility FROM messages WHERE chat_id=? AND message_id=?").get(chatId, item.messageId) as Record<string, any> | undefined;
+      const source = db.prepare("SELECT role,ordinal,CASE WHEN canonical_hash<>'' THEN canonical_content ELSE content END AS content,lifecycle,host_visibility AS hostVisibility FROM messages WHERE chat_id=? AND message_id=?").get(chatId, item.messageId) as Record<string, any> | undefined;
       return { ...item, source: source ? { ...source, messageId: item.messageId } : null };
     });
     return context.json({ explicitEvidence: true, items });
@@ -2857,7 +3110,7 @@ export function createApp(dependencies: Dependencies): Hono {
           : db.prepare(`SELECT evidence_json FROM ${kind === "memory" ? "memories" : "physical_intimacy_milestones"} WHERE chat_id=? AND id=? AND active=1`).get(chatId, detailId) as { evidence_json: string } | undefined;
       if (!detail) return context.json({ error: "Memory atom not found in this chat and memory" }, 404);
       const resolve = buildEntityIdentityResolver(db, chatId);
-      const names = new Set(listEntities(db, chatId).filter(entity => entity.type === "person" || entity.type === "character").map(entity => entity.name));
+      const names = new Set(listEntities(db, chatId).filter(entity => isPersonEntityType(entity.type)).map(entity => entity.name));
       const holders: string[] = [];
       const bases = new Map<string, import("@rcm/shared").ItemAccessBasis>();
       for (const name of body.data.everyone ? [] : body.data.holders) {
@@ -3301,6 +3554,7 @@ export function createApp(dependencies: Dependencies): Hono {
       FROM jobs WHERE chat_id=?`).get(chatId) as { completed: number | null; lastCompleted: number | null; queued: number | null; failed: number | null; blockingFailed: number | null; advisoryFailed: number | null };
     const pendingReconciliations = (db.prepare("SELECT count(*) AS count FROM reconciliation_items WHERE chat_id=? AND status='pending'").get(chatId) as { count: number }).count;
     const pendingExtractionAudits = countBlockingExtractionAudits(db, chatId);
+    const pendingSmallReviews = countPendingSmallReviews(db, chatId);
     const pendingConflicts = (db.prepare("SELECT count(*) AS count FROM conflicts WHERE chat_id=? AND status='pending' AND kind<>'static_projection_changed'").get(chatId) as { count: number }).count;
     const ingestion = ingestionSummary(db, chatId);
     const embeddingJobs = db.prepare("SELECT count(*) AS pending FROM embedding_blocks WHERE chat_id=? AND status='queued'").get(chatId) as { pending: number };
@@ -3371,7 +3625,7 @@ export function createApp(dependencies: Dependencies): Hono {
     return {
       serverInstanceId, memoryLanguage: chat?.memory_language,
       translationRevision: JSON.stringify([chat?.revision, memoryUpdatedAt, derivedCounts.memories, derivedCounts.details, jobs.completed, jobs.lastCompleted]),
-      queuedJobs: worker.queuedJobs ?? Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts,
+      queuedJobs: worker.queuedJobs ?? Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts + pendingSmallReviews,
       pendingReconciliations,
       ...ingestion,
       pendingEmbeddings: embeddingJobs.pending, failedEmbeddings: embeddingFailures.count,
@@ -3837,48 +4091,14 @@ export function createApp(dependencies: Dependencies): Hono {
   app.get("/v1/chats/:id/conflicts", (context) => context.json(readDashboardConflicts(context.req.param("id"))));
   function readDashboardJobs(chatId: string) {
     const ingestion = ingestionSummary(db, chatId);
-    const jobMetadata = (job: any): Record<string, unknown> => {
-      let payload: Record<string, any> = {};
-      try { payload = JSON.parse(job.payload_json || "{}"); } catch { return {}; }
-      const { messages: failureRows, turns } = job.status === 'failed' && job.type === 'extract'
-        ? failedExtractionSources(db, chatId, payload) : { messages: [], turns: 0 };
-      const failureMetadata=failureRows.length ? {failedRange:{startOrdinal:failureRows[0]!.ordinal,endOrdinal:failureRows.at(-1)!.ordinal,startTurn:failureRows.find(row=>row.completed_turn_seq!==null)?.completed_turn_seq,endTurn:failureRows.filter(row=>row.completed_turn_seq!==null).at(-1)?.completed_turn_seq,turnCount:turns,
-        reason:String(job.last_error ?? '').slice(0,400),canResplit:turns>1}} : {};
-      const audits = db.prepare(`SELECT draft_json AS draft,source_message_ids_json AS source_ids
-        FROM extraction_audits WHERE chat_id=? AND job_id=? AND status IN ('pending_review','failed') ORDER BY updated_at DESC`).all(chatId, job.id) as Array<{ draft: string; source_ids: string }>;
-      let withheld: ReturnType<typeof describeWithheldRecognitions> = [];
-      let sourceMessageIds: string[] = [];
-      let withheldReviewable = false;
-      for (const audit of audits) {
-        try {
-          const draft = JSON.parse(audit.draft) as any;
-          const found = describeWithheldRecognitions(draft,buildEntityIdentityResolver(db,chatId));
-          if (found.length) {
-            withheld = found; sourceMessageIds = JSON.parse(audit.source_ids || "[]");
-            withheldReviewable = visibleSmallReviews(db, chatId, sourceMessageIds, readSmallReviews(draft))
-              .some(item => item.kind === "recognition" && item.status === "pending");
-            break;
-          }
-        } catch { /* A malformed audit remains visible through the normal audit endpoint. */ }
-      }
-      if (!withheld.length) return failureMetadata;
-      const batchId = typeof payload.batchId === "string" ? payload.batchId : undefined;
-      const batch = batchId ? db.prepare("SELECT id,start_ordinal AS startOrdinal,end_ordinal AS endOrdinal FROM extraction_batches WHERE id=? AND chat_id=?").get(batchId, chatId) as { id: string; startOrdinal: number; endOrdinal: number } | undefined : undefined;
-      const sourceRange = batch ?? (sourceMessageIds.length ? listSourceRanges(db, chatId, sourceMessageIds).find((range) => sourceMessageIds.every((id) => range.sourceMessageIds.includes(id))) : undefined);
-      const memoriesSaved = batchId ? Number((db.prepare("SELECT count(*) AS count FROM memories WHERE chat_id=? AND source_batch_id=? AND active=1").get(chatId, batchId) as { count: number }).count) : 0;
-      return {
-        ...failureMetadata,
-        memoriesSaved,
-        withheldRecognitions: withheld,
-        withheldReviewable,
-        ...(sourceRange ? { sourceRange: { id: sourceRange.id, startOrdinal: sourceRange.startOrdinal, endOrdinal: sourceRange.endOrdinal } } : {}),
-      };
-    };
     return {
       items: db.prepare(`
         SELECT id,type,status,attempts,leased_until,last_error,payload_json,created_at,updated_at FROM jobs
         WHERE chat_id=? AND status<>'archived' ORDER BY created_at DESC,rowid DESC LIMIT 200
-      `).all(chatId).map((job: any) => ({ ...job, payload_json: JSON.stringify({ ...projectJobListPayload(JSON.parse(job.payload_json),job.type), ...jobMetadata(job) }) })),
+      `).all(chatId).map((job: any) => ({ ...job, payload_json: JSON.stringify({ ...projectJobListPayload(JSON.parse(job.payload_json),job.type), ...jobListMetadata(db,chatId,job) }) })),
+      completedProcessingJobs: Number((db.prepare(`SELECT COUNT(*) n FROM (
+        SELECT id FROM jobs WHERE chat_id=? AND status IN ('done','completed','cancelled','superseded')
+        UNION SELECT id FROM processing_jobs WHERE chat_id=? AND status IN ('done','completed','cancelled','superseded'))`).get(chatId,chatId) as {n:number}).n),
       cancelledMessages: (db.prepare("SELECT count(*) AS count FROM messages WHERE chat_id=? AND memory_excluded=0 AND extraction_state='cancelled'").get(chatId) as { count: number }).count,
       ...ingestion,
     };
@@ -3963,7 +4183,8 @@ export function createApp(dependencies: Dependencies): Hono {
       UPDATE jobs SET status='archived',lease_owner=NULL,leased_until=NULL,updated_at=?
       WHERE chat_id=? AND status IN ('done','completed','cancelled','superseded')
     `).run(Date.now(), context.req.param("id"));
-      return context.json({ ok: true, archivedJobs: result.changes });
+      const retained=db.prepare("UPDATE processing_jobs SET status='archived' WHERE chat_id=? AND status IN ('done','completed','cancelled','superseded')").run(context.req.param('id'));
+      return context.json({ ok: true, archivedJobs: result.changes+retained.changes });
     });
   });
   app.delete("/v1/chats/:id/jobs", (context) => withChatWrite(db, context.req.param('id'), () => context.json({ ok: true, ...cancelExtractionJobs(db, context.req.param("id")) })));

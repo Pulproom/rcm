@@ -1,6 +1,7 @@
 import { ALBUM_BLOCK_KINDS, AlbumItemSchema, type AlbumBlockKind, type AlbumDocument, type AlbumItem } from "./album.js";
 import { sortAlbumItemsByDate, type AlbumMaterials } from "./album-draft.js";
 import { compareStoryTimes } from "./story-time.js";
+import { albumTogetherItems, type AlbumTogetherRecords } from "./album-together.js";
 
 export interface Candidate { blockKind: AlbumBlockKind; item: AlbumItem; placeAfterItemId?: string; chapter?: { item: AlbumItem; placeAfterItemId?: string } }
 export interface ChangedCandidate { blockKind: AlbumBlockKind; itemId: string; before: Record<string, string>; after: Record<string, string>; userEdited: boolean }
@@ -71,10 +72,21 @@ function flatten(items: AlbumItem[]): Entry[] {
 export const albumMaterialsSince = (document: AlbumDocument): number => document.lastUpdatedFromMaterialsAt ?? document.createdAt;
 export const isNewAlbumMaterial = (document: AlbumDocument, item: AlbumItem): boolean => (item.createdAt ?? 0) > albumMaterialsSince(document);
 
+export function refreshAlbumTogether(doc: AlbumDocument, records: AlbumTogetherRecords): AlbumDocument {
+  const next = structuredClone(doc);
+  for (const block of next.blocks) {
+    if (block.kind !== "together") continue;
+    block.together = structuredClone(records);
+    const existing = new Set(block.items.map(item => item.id));
+    block.items.push(...albumTogetherItems(records).filter(item => !existing.has(item.id)));
+  }
+  return next;
+}
+
 export function collectAlbumUpdateCandidates(document: AlbumDocument, materials: AlbumMaterials, options: { includeOld?: boolean } = {}): AlbumUpdateCandidates {
   const result: AlbumUpdateCandidates = { available: true, collectedAt: materials.collectedAt, added: [], changed: [], removed: [] };
   for (const kind of ALBUM_BLOCK_KINDS) {
-    if (kind === "cover") continue; // The cover is document chrome, never an update material.
+    if (kind === "cover" || kind === "together") continue; // Chrome and record snapshots are never update materials.
     const previous = document.blocks.filter(block => block.kind === kind).flatMap(block => flatten(block.items));
     const currentByKey = new Map<string, Entry[]>();
     for (const entry of previous) {
@@ -131,6 +143,7 @@ export function unusedAlbumMaterials(document: AlbumDocument, materials: AlbumMa
   const result = Object.fromEntries(ALBUM_BLOCK_KINDS.map(kind => [kind, []])) as unknown as Record<AlbumBlockKind, Candidate[]>;
   const candidates = collectAlbumUpdateCandidates(document, materials, { includeOld: true });
   for (const candidate of candidates.added) {
+    if (candidate.blockKind === "cover" || candidate.blockKind === "together") continue;
     if (candidate.blockKind !== "story") { result[candidate.blockKind].push(candidate); continue; }
     const chapter = materials.blocks.story.find(item => sameItem(item, candidate.item));
     if (chapter) {

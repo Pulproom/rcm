@@ -1,5 +1,5 @@
-import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPolicy, sourceComparisonText, estimateTokens, selectTailStart, type CanonicalizationPolicy, type LineageProbeRequest, type MessageHostVisibility, type ResolvedSetupProjection, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
-import type { CurrentContext, DashboardContext, RuntimeState } from "./types.js";
+import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPolicy, imageComparisonText, sourceComparisonText, estimateTokens, selectTailStart, selectGigaTransTranslation, type CanonicalizationPolicy, type LineageProbeRequest, type MessageHostVisibility, type ResolvedSetupProjection, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
+import type { ChatScopeTiming, ContextReadTimings, CurrentContext, DashboardContext, RuntimeState } from "./types.js";
 import { serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
 import { cachedSourceReceipt, ServerRequestError, type ServerClient } from './api-client.js';
@@ -118,15 +118,97 @@ export async function readHostSourceLedgers(onlyChatIds?: ReadonlySet<string>): 
   return result;
 }
 
-async function resolveMessageSource(chat: any, message: any): Promise<ResolvedMessageSource> {
-  const display = String(message?.data ?? message?.content ?? "");
+function messageDisplay(message: any): string {
+  return String(message?.data ?? message?.content ?? "");
+}
+
+function yumiSourceRecordId(message: any, display: string): string {
   // Yumi's transport marker can precede its message metadata (including after
   // a tail replacement). The displayed record ID owns this representation;
   // never use a stale metadata ID to resolve a different response's original.
-  const markerId = display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->/)?.[1]
+  return display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->/)?.[1]
     ?? (typeof message?.__yumi_tr === "string" ? message.__yumi_tr : "");
+}
+
+function yumiSourceRecord(chat: any, id: string): string | undefined {
+  const raw = id ? chat?.scriptstate?.[`$__yumi_tr.${id}`] : undefined;
+  return typeof raw === "string" ? raw : undefined;
+}
+
+export function readMessageSourceInputs(chat: any) {
+  assertCompleteHostChat(chat);
+  return (chat.message as any[]).map(message => {
+    const display = messageDisplay(message);
+    const yumiId = yumiSourceRecordId(message, display);
+    return {
+      id: message?.chatId ?? message?.id,
+      role: messageRole(message),
+      display,
+      generationId: message?.generationInfo?.generationId,
+      time: message?.time,
+      name: message?.name,
+      saying: message?.saying,
+      disabled: message?.disabled,
+      isComment: message?.isComment,
+      yumiMetadata: message?.__yumi_tr,
+      yumiId,
+      yumiRecord: yumiSourceRecord(chat, yumiId),
+    };
+  });
+}
+
+/** Compare the ordered source inputs without re-decoding or re-hashing them. */
+export function sameMessageSourceInputs(previous: ReturnType<typeof readMessageSourceInputs>, chat: any, prefixLength?: number): boolean {
+  if (!Array.isArray(chat?.message) || chat._placeholder) return false;
+  if (prefixLength === undefined && previous.length !== chat.message.length) return false;
+  if (prefixLength !== undefined && chat.message.length < prefixLength) return false;
+  const sources = prefixLength === undefined ? previous : previous.slice(0, prefixLength);
+  return sources.every((source, ordinal) => {
+    const next = chat.message[ordinal];
+    const display = messageDisplay(next);
+    return source.id === (next?.chatId ?? next?.id)
+      && source.role === messageRole(next)
+      && source.display === display
+      && source.generationId === next?.generationInfo?.generationId
+      && source.time === next?.time
+      && source.name === next?.name
+      && source.saying === next?.saying
+      && source.disabled === next?.disabled
+      && source.isComment === next?.isComment
+      && source.yumiId === (source.yumiMetadata === next?.__yumi_tr ? source.yumiId : yumiSourceRecordId(next, display))
+      && source.yumiRecord === yumiSourceRecord(chat, source.yumiId);
+  });
+}
+
+export function readContextMetadata() {
+  return Promise.all([
+    risuai.getCurrentLorebookEntries?.() ?? Promise.resolve([]),
+    risuai.getDatabase(["personas", "selectedPersona"]),
+  ]);
+}
+
+/** Host descriptors are JSON data. Compare their fields without serializing chat text. */
+function sameHostFields(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object"
+    || Array.isArray(left) !== Array.isArray(right)) return false;
+  if (Array.isArray(left) && left.length !== (right as unknown[]).length) return false;
+  const previous = left as Record<string, unknown>;
+  const current = right as Record<string, unknown>;
+  const keys = Object.keys(previous).filter(key => previous[key] !== undefined);
+  return keys.length === Object.keys(current).filter(key => current[key] !== undefined).length
+    && keys.every(key => Object.hasOwn(current, key) && sameHostFields(previous[key], current[key]));
+}
+
+async function resolveMessageSource(chat: any, message: any): Promise<ResolvedMessageSource> {
+  const display = messageDisplay(message);
+  const markerId = yumiSourceRecordId(message, display);
+  return resolveSourceInput(display, markerId, yumiSourceRecord(chat, markerId));
+}
+
+async function resolveSourceInput(display: string, markerId: string, raw?: string): Promise<ResolvedMessageSource> {
   if (markerId) {
-    const record = await decodeYumiRecord(chat?.scriptstate?.[`$__yumi_tr.${markerId}`]);
+    const record = await decodeYumiRecord(raw);
     const model = typeof record?.model === "string" ? record.model : "";
     if (model.trim()) return { content: model, sourceKind: "yumi_model", sourceRecordId: markerId };
     const segmented = record?.segments?.map((segment) => segment.source ?? "").join("") ?? "";
@@ -141,6 +223,35 @@ async function resolveMessageSource(chat: any, message: any): Promise<ResolvedMe
 
 export async function resolveMessageContent(chat: any, message: any): Promise<string> {
   return (await resolveMessageSource(chat, message)).content;
+}
+
+/** Parse Yumi's owned display envelope once for all reader-translation consumers. */
+export function selectYumiTranslation(message: any, recordId: string): string | undefined {
+  const display = String(message?.data ?? message?.content ?? "");
+  const marked = display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->([\s\S]*?)<!--\s*yumi-tr:v1:\1:end\s*-->/);
+  return marked?.[1] === recordId ? marked[2] : !display.includes('<!--') && message.__yumi_tr === recordId ? display : undefined;
+}
+
+/** One host read per run; resolve/decode only the requested messages. No host writes or cache probes. */
+export async function readCurrentChatReaderTranslations(chatId: string, messageIds: ReadonlySet<string>, policy: CanonicalizationPolicy = defaultCanonicalizationPolicy()): Promise<Map<string, { source: string; translation: string }>> {
+  const result = new Map<string, { source: string; translation: string }>();
+  if (!messageIds.size) return result;
+  try {
+    const identity = await readCurrentChatIdentity();
+    if (identity.chatId !== chatId || identity.chat._placeholder || !Array.isArray(identity.chat.message)) return result;
+    for (const [ordinal, message] of identity.chat.message.entries()) {
+      const messageId = String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`);
+      if (!messageIds.has(messageId)) continue;
+      const resolved = await resolveMessageSource(identity.chat, message);
+      const display = String(message?.data ?? message?.content ?? "");
+      const id = resolved.sourceRecordId;
+      const translation = (id ? selectYumiTranslation(message, id) : undefined) ?? selectGigaTransTranslation(display);
+      // Typographic script check, not natural-language meaning inference.
+      if (!translation || !/\p{Script=Hangul}/u.test(translation)) continue;
+      result.set(messageId, { source: canonicalizeSourceText(resolved.content, policy), translation });
+    }
+  } catch { /* Missing or changing host selection simply supplies no reference. */ }
+  return result;
 }
 
 /** Read-only display translations. Never call a translator or mutate source text. */
@@ -162,9 +273,7 @@ export async function readHostSourceTranslations(chatId: string, sources: Array<
       const display = String(message.data ?? message.content ?? '');
       if (resolved.sourceKind === 'yumi_model') {
         const id = resolved.sourceRecordId!;
-        // Parse Yumi's owned envelope, not arbitrary comments or prose.
-        const marked = display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->([\s\S]*?)<!--\s*yumi-tr:v1:\1:end\s*-->/);
-        const text = marked?.[1] === id ? marked[2] : !display.includes('<!--') && message.__yumi_tr === id ? display : undefined;
+        const text = selectYumiTranslation(message, id);
         if (text?.trim()) { translated.set(source.id, text); continue; }
       }
       // GigaTrans stores the source inside its complete owned blocks and the
@@ -247,19 +356,40 @@ function assertCompleteHostChat(chat: any): void {
   if (!chat || chat._placeholder === true || !Array.isArray(chat.message)) throw new Error('HOST_SOURCE_INCOMPLETE');
 }
 
-async function assertHostSelection(characterIndex: number, chatIndex: number, chatId?: string): Promise<void> {
-  const [currentCharacter, currentChat] = await Promise.all([risuai.getCurrentCharacterIndex(), risuai.getCurrentChatIndex()]);
+export function readHostSelection() {
+  return Promise.all([risuai.getCurrentCharacterIndex(), risuai.getCurrentChatIndex()]);
+}
+
+export async function assertHostSelection(characterIndex: number, chatIndex: number): Promise<void> {
+  const [currentCharacter, currentChat] = await readHostSelection();
   if (currentCharacter !== characterIndex || currentChat !== chatIndex) throw new Error('HOST_SELECTION_CHANGED');
 }
 
-async function readCurrentChatIdentity(): Promise<{ characterIndex: number; character: any; chatIndex: number; chat: any; chatId: string }> {
+interface HostChatSnapshot {
+  characterIndex: number;
+  character: any;
+  chatIndex: number;
+  chat: any;
+  chatId: string;
+}
+
+async function readCurrentChatIdentity(preferDescriptor = false, timing?: ChatScopeTiming): Promise<HostChatSnapshot> {
   const characterIndex = await risuai.getCurrentCharacterIndex();
   if (!Number.isInteger(characterIndex) || characterIndex < 0) throw new NoActiveChatError();
+  if (timing) timing.fullHostChatReads += 1;
   const character = await risuai.getCharacter();
   if (!character || typeof character !== "object") throw new NoActiveChatError();
   const chatIndex = await risuai.getCurrentChatIndex();
   if (!Number.isInteger(chatIndex) || chatIndex < 0) throw new NoActiveChatError();
-  let chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+  const descriptor = character?.chats?.[chatIndex];
+  // Both supported V3 implementations snapshot the same loaded chat slot in
+  // getCharacter and getChatFromIndex. Only a stable, complete loaded slot can
+  // supply the initial baseline; placeholders/legacy descriptors still fetch.
+  let chat = descriptor;
+  if (!preferDescriptor || !descriptor?.id || descriptor._placeholder || !Array.isArray(descriptor.message)) {
+    if (timing) timing.fullHostChatReads += 1;
+    chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+  }
   if (!chat) throw new NoActiveChatError();
   const characterId = String(character?.chaId ?? character?.id ?? characterIndex);
   await assertHostSelection(characterIndex, chatIndex);
@@ -281,23 +411,36 @@ function chatIdentityFields(characterIndex: number, character: any, chatIndex: n
   return { characterId, chatTitle, chatTitles };
 }
 
-async function sourceMessageVisibility(chatId: string, messages: any[], messageSources: Awaited<ReturnType<typeof resolveMessageSource>>[], canonicalizationPolicy: CurrentContext["canonicalizationPolicy"]): Promise<NonNullable<CurrentContext["messageVisibility"]>> {
+async function sourceMessageProjection(chatId: string, messages: any[], messageSources: ResolvedMessageSource[], canonicalizationPolicy = defaultCanonicalizationPolicy()) {
   const allBefore = messages.reduce((last: number, message: any, index: number) => message?.disabled === "allBefore" ? index : last, -1);
   return Promise.all(messages.map(async (message: any, ordinal: number) => {
     const role = messageRole(message);
     const content = messageSources[ordinal]?.content ?? "";
-    const contentHash = await sha256(`${role}\0${content}`);
-    const comparison = sourceComparisonText(content, canonicalizationPolicy);
-    const display = String(message?.data ?? message?.content ?? "");
-    const displayComparison = sourceComparisonText(display, canonicalizationPolicy);
+    const display = messageDisplay(message);
+    const canonicalContent = canonicalizeSourceText(content, canonicalizationPolicy);
+    const canonicalDisplay = display === content ? canonicalContent : canonicalizeSourceText(display, canonicalizationPolicy);
+    const comparison = imageComparisonText(canonicalContent);
+    const displayComparison = canonicalDisplay === canonicalContent ? comparison : imageComparisonText(canonicalDisplay);
+    // A normal display source often has just one distinct input for all four digests.
+    const hashes = new Map<string, Promise<string>>();
+    const hash = (text: string) => {
+      const existing = hashes.get(text);
+      if (existing) return existing;
+      const digest = sha256(`${role}\0${text}`);
+      hashes.set(text, digest);
+      return digest;
+    };
+    const [contentHash, comparisonHash, displayContentHash, displayComparisonHash] = await Promise.all([
+      hash(content), hash(comparison), hash(display), hash(displayComparison),
+    ]);
     return {
-      id: String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`), ordinal,
-      visibility: hostVisibility(messages, ordinal, allBefore), role,
-      contentHash,
-      comparisonHash: comparison === content ? contentHash : await sha256(`${role}\0${comparison}`),
-      sourceRecordId: messageSources[ordinal]?.sourceRecordId,
-      displayContentHash: await sha256(`${role}\0${display}`),
-      displayComparisonHash: await sha256(`${role}\0${displayComparison}`),
+      visibility: {
+        id: String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`), ordinal,
+        visibility: hostVisibility(messages, ordinal, allBefore), role,
+        contentHash, comparisonHash, sourceRecordId: messageSources[ordinal]?.sourceRecordId,
+        displayContentHash, displayComparisonHash,
+      },
+      canonicalContent,
     };
   }));
 }
@@ -309,11 +452,11 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
   assertCompleteHostChat(chat);
   const messages = chat.message;
   const sources = await Promise.all(messages.map((message: any) => resolveMessageSource(chat, message)));
-  const messageVisibility = await sourceMessageVisibility(chatId, messages, sources, context.canonicalizationPolicy);
+  const messageVisibility = (await sourceMessageProjection(chatId, messages, sources, context.canonicalizationPolicy)).map(source => source.visibility);
   const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
-  if (JSON.stringify(latest?.message) !== JSON.stringify(messages)
-    || sources.some((source: ResolvedMessageSource) => source.sourceRecordId && JSON.stringify(chat.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]) !== JSON.stringify(latest?.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]))) throw new Error('HOST_SOURCE_CHANGED');
-  await assertHostSelection(characterIndex, chatIndex, chatId);
+  if (!sameHostFields(latest?.message, messages)
+    || sources.some((source: ResolvedMessageSource) => source.sourceRecordId && yumiSourceRecord(chat, source.sourceRecordId) !== yumiSourceRecord(latest, source.sourceRecordId))) throw new Error('HOST_SOURCE_CHANGED');
+  await assertHostSelection(characterIndex, chatIndex);
   return {
     chatTitle: context.chatTitle, characterId: context.characterId, profile: context.profile,
     messageVisibility,
@@ -327,7 +470,7 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
   const generation = state.mainGeneration;
   const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
   const database = await risuai.getDatabase(["personas", "selectedPersona"]);
-  await assertHostSelection(characterIndex, chatIndex, chatId);
+  await assertHostSelection(characterIndex, chatIndex);
   if (state.current?.chatId !== chatId) {
     state.statusSummary = undefined;
     state.lastPrepare = undefined;
@@ -394,23 +537,58 @@ export async function readCurrentChatPresence(): Promise<{ chatId: string; chatT
   return { chatId, chatTitle, inventory: { characterId, chatIds } };
 }
 
-export async function readCurrentChatId(state?: RuntimeState): Promise<string> {
-  return (await readCurrentChatScope(state)).chatId;
+export async function readCurrentChatId(state?: RuntimeState, timing?: ChatScopeTiming, expected?: HostChatSnapshot): Promise<string> {
+  return (await readCurrentChatScope(state, timing, expected)).chatId;
 }
 
-/** Read both activation keys from the same lightweight host snapshot. */
-export async function readCurrentChatScope(state?: RuntimeState): Promise<{ chatId: string; characterId: string }> {
+/** Current V3 hosts expose indices, but no message-free stable chat ID API.
+ * Once a request owns a stable identity, re-read only its chat, not the entire
+ * character. ID-less/legacy snapshots retain the full identity fallback.
+ */
+export async function readCurrentChatScope(state?: RuntimeState, timing?: ChatScopeTiming, expected?: HostChatSnapshot): Promise<{ chatId: string; characterId: string; hostSnapshot: HostChatSnapshot }> {
+  const startedAt = timing ? performance.now() : 0;
   const generation = state?.mainGeneration;
-  const { chatId, chat, character, characterIndex, chatIndex } = await readCurrentChatIdentity();
+  let hostSnapshot: HostChatSnapshot;
+  if (expected?.chat.id) {
+    await assertHostSelection(expected.characterIndex, expected.chatIndex);
+    if (timing) timing.fullHostChatReads += 1;
+    const chat = await risuai.getChatFromIndex(expected.characterIndex, expected.chatIndex);
+    if (!chat) throw new NoActiveChatError();
+    if (!chat.id) throw new Error('HOST_CHAT_ID_LOADING');
+    hostSnapshot = { ...expected, chat, chatId: String(chat.id) };
+  } else hostSnapshot = await readCurrentChatIdentity(!expected, timing);
+  const { chatId, chat, character, characterIndex, chatIndex } = hostSnapshot;
+  if (timing) timing.hostChatReadMs += performance.now() - startedAt;
   generation?.observe(chatId, chat);
   if (generation && state?.mainGeneration?.id === generation.id) {
+    const hashingStartedAt = timing ? performance.now() : 0;
     const hashes = await Promise.all((Array.isArray(chat.message) ? chat.message : []).map((message: any, ordinal: number) => {
       const id = String(message?.chatId ?? message?.id ?? `${chatId}:${ordinal}`);
       return sha256(`${messageRole(message)}\0${String(message?.data ?? message?.content ?? "")}`).then(displayContentHash => ({ id, displayContentHash }));
     }));
+    if (timing) timing.hashingMs += performance.now() - hashingStartedAt;
     generation.observe(chatId, chat, hashes);
   }
-  return { chatId, characterId: chatIdentityFields(characterIndex, character, chatIndex, chat).characterId };
+  if (generation || expected?.chat.id) await assertHostSelection(characterIndex, chatIndex);
+  const scope = { chatId, characterId: String(character?.chaId ?? character?.id ?? characterIndex), hostSnapshot };
+  if (timing) timing.totalMs += performance.now() - startedAt;
+  return scope;
+}
+
+/** Read the original slot to detect a shifted index, then recheck the selection. */
+export async function confirmCurrentChatScope(expected: HostChatSnapshot, timing: ChatScopeTiming): Promise<HostChatSnapshot> {
+  const startedAt = performance.now();
+  try {
+    if (!expected.chat.id) return await readCurrentChatIdentity(false, timing);
+    const { characterIndex, chatIndex } = expected;
+    timing.fullHostChatReads += 1;
+    const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    await assertHostSelection(characterIndex, chatIndex);
+    if (!chat?.id) throw new Error("HOST_SOURCE_CHANGED");
+    return { ...expected, chat, chatId: String(chat.id) };
+  } finally {
+    timing.hostChatReadMs += performance.now() - startedAt;
+  }
 }
 
 /** Existing host snapshots only: false before headers is not a generation-end signal. */
@@ -420,7 +598,7 @@ export async function observeCurrentHostGeneration(state: RuntimeState): Promise
   try {
     const { chatId, chat } = await readCurrentChatIdentity();
     generation.observe(chatId, chat);
-    if (state.mainGeneration?.id === generation.id) {
+    if (state.mainGeneration?.id === generation.id && generation.chatId === chatId) {
       // Exact source-revision checks reuse the display hash contract. Only the
       // existing source prefix is hashed; streaming output is excluded.
       const messages = Array.isArray(chat.message) ? chat.message : [];
@@ -455,39 +633,59 @@ export async function readOptionalCurrentContext(
 
 export async function readCurrentContext(
   state: RuntimeState,
-  options: { snapshotMode?: "auto" | "full" | "tail" } = {},
+  options: {
+    snapshotMode?: "auto" | "full" | "tail"; timings?: ContextReadTimings;
+    hostSnapshot?: HostChatSnapshot; sourceInputs?: ReturnType<typeof readMessageSourceInputs>;
+    sourceReceipt?: ReturnType<typeof cachedSourceReceipt>; metadata?: Awaited<ReturnType<typeof readContextMetadata>>;
+  } = {},
 ): Promise<CurrentContext> {
+  const timing = options.timings;
+  const startedAt = timing ? performance.now() : 0;
+  if (timing) timing.count += 1;
   const generation = state.mainGeneration;
   const serverUrl = state.settings.serverUrl;
-  const receiptChatId = state.current?.chatId;
+  const receiptChatId = options.hostSnapshot?.chatId ?? state.current?.chatId;
   // Capture before any host await: an older host read must not acquire a newer receipt.
-  const receipt = receiptChatId ? cachedSourceReceipt(state.settings, receiptChatId) : undefined;
+  const receipt = options.hostSnapshot ? options.sourceReceipt : receiptChatId ? cachedSourceReceipt(state.settings, receiptChatId) : undefined;
   // PocketRisu may throw inside getCurrentChatIndex() while its home screen has
   // no selected character. Resolve the character first so that this normal UI
   // state does not masquerade as a server failure in callers such as Dashboard.
-  const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  const hostReadStartedAt = timing ? performance.now() : 0;
+  // The injection caller will confirm this snapshot at its delivery boundary.
+  const { characterIndex, character, chatIndex, chat, chatId } = options.hostSnapshot ?? await readCurrentChatIdentity();
+  if (timing) timing.hostChatReadMs += performance.now() - hostReadStartedAt;
   const sourceHead = chatId === receiptChatId ? receipt : undefined;
   assertCompleteHostChat(chat);
   const descriptor = character?.chats?.[chatIndex];
-  if (descriptor && !descriptor._placeholder && Array.isArray(descriptor.message)
-    && JSON.stringify(descriptor.message) !== JSON.stringify(chat.message)) throw new Error('HOST_SOURCE_CHANGED');
-  const [lore, database] = await Promise.all([
-    risuai.getCurrentLorebookEntries?.() ?? Promise.resolve([]),
-    risuai.getDatabase(["personas", "selectedPersona", "characters"]),
-  ]);
+  const comparisonStartedAt = timing ? performance.now() : 0;
+  if (descriptor && !descriptor._placeholder && Array.isArray(descriptor.message) && descriptor.message !== chat.message
+    && !sameHostFields(descriptor.message, chat.message)) throw new Error('HOST_SOURCE_CHANGED');
+  if (timing) timing.descriptorComparisonMs += performance.now() - comparisonStartedAt;
+  const loreDatabaseStartedAt = timing ? performance.now() : 0;
+  const [lore, database] = options.metadata ?? await readContextMetadata();
+  if (timing) timing.loreDatabaseReadMs += performance.now() - loreDatabaseStartedAt;
   const { characterId, chatTitle, chatTitles } = chatIdentityFields(characterIndex, character, chatIndex, chat);
   const messages = Array.isArray(chat.message) ? chat.message : [];
   const lineageHint = parseBranchLineageHint(messages);
-  const messageSources = await Promise.all(messages.map((message: any) => resolveMessageSource(chat, message)));
-  const messageContents = messageSources.map((source) => source.content);
-  const allBefore = messages.reduce((last: number, message: any, index: number) => message?.disabled === "allBefore" ? index : last, -1);
+  const resolutionStartedAt = timing ? performance.now() : 0;
+  const sourceInputs = options.sourceInputs ?? readMessageSourceInputs(chat);
+  const messageSources = await Promise.all(sourceInputs.map(source => resolveSourceInput(source.display, source.yumiId, source.yumiRecord)));
+  if (timing) timing.messageSourceResolutionMs += performance.now() - resolutionStartedAt;
+  let sourceChars = 0;
+  const messageContents = messageSources.map((source) => {
+    if (timing) sourceChars += source.content.length;
+    return source.content;
+  });
+  const visibilityStartedAt = timing ? performance.now() : 0;
+  const sourceProjection = await sourceMessageProjection(chatId, messages, messageSources, state.settings.canonicalizationPolicy);
+  const messageVisibility = sourceProjection.map(source => source.visibility);
+  const messageTokens = messageContents.map(estimateTokens);
   let sourceActiveMessageCount = 0;
   let estimatedSourceTokens = 0;
   for (let ordinal = 0; ordinal < messages.length; ordinal += 1) {
-    const message = messages[ordinal];
-    if (hostVisibility(messages, ordinal, allBefore) !== "active") continue;
+    if (messageVisibility[ordinal]?.visibility !== "active") continue;
     sourceActiveMessageCount += 1;
-    estimatedSourceTokens += estimateTokens(messageContents[ordinal] ?? "");
+    estimatedSourceTokens += messageTokens[ordinal]!;
   }
   const requestedMode = options.snapshotMode ?? "auto";
   const snapshotScope: "full" | "tail" = requestedMode === "full"
@@ -497,9 +695,15 @@ export async function readCurrentContext(
       : messages.length <= LARGE_CHAT_MESSAGE_LIMIT && estimatedSourceTokens <= LARGE_CHAT_TOKEN_LIMIT ? "full" : "tail";
   let startOrdinal = 0;
   if (snapshotScope === "tail") {
-    startOrdinal = selectTailStart(messageContents, TAIL_MESSAGE_LIMIT, TAIL_TOKEN_LIMIT);
+    startOrdinal = selectTailStart(messageTokens, TAIL_MESSAGE_LIMIT, TAIL_TOKEN_LIMIT);
   }
-  const messageVisibility = await sourceMessageVisibility(chatId, messages, messageSources, state.settings.canonicalizationPolicy);
+  if (timing) {
+    timing.visibilityMs += performance.now() - visibilityStartedAt;
+    // A full catch-up read replaces sizes, while durations/count accumulate.
+    timing.messageCount = messages.length;
+    timing.sourceChars = sourceChars;
+    timing.estimatedSourceTokens = estimatedSourceTokens;
+  }
   const snapshot: CurrentContext["snapshot"] = messages.slice(startOrdinal).map((message: any, localOrdinal: number) => {
     const ordinal = startOrdinal + localOrdinal;
     const content = messageContents[ordinal] ?? "";
@@ -521,7 +725,28 @@ export async function readCurrentContext(
   }));
   const characterName = String(character?.name ?? "Character");
   const userPersonaName = resolveUserPersonaName(database, chat);
-  const hostCharacters = database?.characters && typeof database.characters === "object" ? database.characters : {};
+  // V3 characters is an indexed array on all supported hosts. Preserve the
+  // existing indexed saying lookup; UUID saying values never matched it.
+  const speakerIndexes = [...new Set<number>(messages.slice(-12).flatMap((message: any) => {
+    const saying = message?.saying;
+    const index = typeof saying === "string" && saying !== "" ? Number(saying) : -1;
+    return Number.isSafeInteger(index) && index >= 0 && String(index) === saying ? [index] : [];
+  }))];
+  const hostCharacters: Record<string, any> = { [characterIndex]: character };
+  const otherIndexes = speakerIndexes.filter(index => index !== characterIndex);
+  if (otherIndexes.length) {
+    const namesStartedAt = timing ? performance.now() : 0;
+    if (risuai.getCharacterFromIndex) {
+      try {
+        const speakers = await Promise.all(otherIndexes.map(async index => [index, await risuai.getCharacterFromIndex!(index)] as const));
+        for (const [index, speaker] of speakers) hostCharacters[index] = speaker;
+      } catch {
+        // V3's RPC proxy can expose a function for an unsupported method.
+        Object.assign(hostCharacters, (await risuai.getDatabase(["characters"]))?.characters ?? {});
+      }
+    } else Object.assign(hostCharacters, (await risuai.getDatabase(["characters"]))?.characters ?? {});
+    if (timing) timing.loreDatabaseReadMs += performance.now() - namesStartedAt;
+  }
   const recentSpeakerNames: string[] = [...new Set<string>(messages.slice(-12).flatMap((message: any): string[] => {
     const explicit = typeof message?.name === "string" ? message.name.trim() : "";
     const saying = typeof message?.saying === "string" ? message.saying : "";
@@ -536,7 +761,7 @@ export async function readCurrentContext(
   };
   const canonicalSnapshot = snapshot.map((message) => ({
     ...message,
-    content: canonicalizeSourceText(message.content, state.settings.canonicalizationPolicy),
+    content: sourceProjection[message.ordinal]!.canonicalContent,
   }));
   // Exclusion belongs to the server. Send IDs, never a precombined source query
   // that the server could no longer separate into allowed/excluded messages.
@@ -580,21 +805,27 @@ export async function readCurrentContext(
     postExtractionReview: state.settings.postExtractionReview,
   };
   // A destructive re-check uses another full read; normal turns use the host's full-read contract.
-  if (options.snapshotMode === 'full') {
+  if (options.snapshotMode === 'full' && !options.hostSnapshot) {
+    const recheckStartedAt = timing ? performance.now() : 0;
     const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    if (timing) timing.hostChatReadMs += performance.now() - recheckStartedAt;
     assertCompleteHostChat(latest);
+    const recheckComparisonStartedAt = timing ? performance.now() : 0;
     if (String(latest.id || `${context.characterId}:${chatIndex}`) !== chatId
-      || JSON.stringify(latest.message) !== JSON.stringify(chat.message)
-      || messageSources.some((source: ResolvedMessageSource) => source.sourceRecordId && JSON.stringify(chat.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]) !== JSON.stringify(latest.scriptstate?.[`$__yumi_tr.${source.sourceRecordId}`]))) throw new Error('HOST_SOURCE_CHANGED');
+      || !sameHostFields(latest.message, chat.message)
+      || !sameMessageSourceInputs(sourceInputs, latest)) throw new Error('HOST_SOURCE_CHANGED');
+    if (timing) timing.descriptorComparisonMs += performance.now() - recheckComparisonStartedAt;
   }
   context.sourceSnapshot = { baseRevision: sourceHead?.sourceRevision ?? 0, baseInventory: sourceHead?.sourceInventory, complete: true, messageCount: messages.length };
   if (!chat.id) context.hostIdentity = { kind: 'position', listFingerprint: Array.isArray(character.chats) ? await sha256(JSON.stringify(character.chats.map((item: any) => [item?.id ?? null, item?.name ?? item?.title ?? '']))) : '' };
   await assertHostSelection(characterIndex, chatIndex);
   if (state.settings.serverUrl !== serverUrl) throw new Error('SERVER_SCOPE_CHANGED');
+  if (options.hostSnapshot && generation && state.mainGeneration?.id !== generation.id) throw new Error('HOST_GENERATION_CHANGED');
   state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   generation?.observe(chatId, chat, messageVisibility);
   state.current = context;
   state.refreshStatusWidget?.();
+  if (timing) timing.totalMs += performance.now() - startedAt;
   return context;
 }
 

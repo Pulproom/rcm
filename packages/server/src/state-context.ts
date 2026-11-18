@@ -1,5 +1,7 @@
 import { estimateTokens, estimateTokenUnits, normalizeSearchTokens, type ExtractionDraftResult } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
+import { modelEntityContext } from './entities.js';
+import { modelEntityIdentityContext } from '@rcm/shared';
 
 // Large prior inputs degrade the auxiliary model; raising the user's cap must not grow them.
 export const STATE_PRIOR_CONTEXT_TOKENS = 24_000;
@@ -60,9 +62,10 @@ export function selectStatePrior(db:RcmDatabase,chatId:string,context:Context,sy
   for(const detail of details) if(linked.has(detail.memory_id)) linked.add(detail.id);
   const relationships=new Map((db.prepare('SELECT * FROM relationship_projections WHERE chat_id=?').all(chatId) as Row[]).map(r=>[JSON.stringify([r.from_entity,r.to_entity]),r]));
   const sourceText=JSON.stringify(context.sources).toLocaleLowerCase();
-  const names=new Set([...draft.entities.map(e=>e.name),...draft.memories.flatMap(m=>[...m.participants,...(m.details ?? []).flatMap(d=>d.participants ?? [])])].map(n=>n.toLocaleLowerCase()));
-  for(const row of db.prepare('SELECT e.name,a.alias FROM entities e LEFT JOIN aliases a ON a.entity_id=e.id WHERE e.chat_id=?').all(chatId) as Row[])
-    if([row.name,row.alias].some(n=>n&&n.length>1&&sourceText.includes(n.toLocaleLowerCase()))) names.add(row.name.toLocaleLowerCase());
+  const {entities,allowsName,identityEntities}=modelEntityContext(db,chatId);
+  const names=new Set([...modelEntityIdentityContext(draft.entities,identityEntities).entities.map(e=>e.name),...draft.memories.flatMap(m=>[...m.participants,...(m.details ?? []).flatMap(d=>d.participants ?? [])])].filter(allowsName).map(n=>n.toLocaleLowerCase()));
+  for(const row of entities)
+    if([row.name,row.displayName,...row.aliases].some(n=>n&&n.length>1&&sourceText.includes(n.toLocaleLowerCase()))) names.add(row.name.toLocaleLowerCase());
   const query=new Set(normalizeSearchTokens(context.sources.map((s:Row)=>s.units.map((u:Row)=>u.text).join(' ')).join(' '),draft.language));
   const propertyQuery=new Set([...query,...normalizeSearchTokens(JSON.stringify(context.eventDraft),draft.language)]);
   const ranked=components.flatMap(key=>((context[key] ?? []) as Row[]).map((item,index)=>{

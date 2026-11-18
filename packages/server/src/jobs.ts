@@ -1,3 +1,6 @@
+import { isSupportedEntityType } from "./entity-cleanup.js";
+import { beginProcessingAttempt, endProcessingAttempt, recordProcessingCall, type CallIdentity } from './processing-records.js';
+import { modelEntityIdentityContext } from '@rcm/shared';
 import { originalTurnKeySql, responseTurns, sourceTurnMembership, sourceTurns } from './turn-clock.js';
 import { assertSourceSnapshotAccepted, isSourceSnapshotHeld, sourceSnapshotHeldSql } from './source-snapshot.js';
 import { recordIncident } from './incidents.js';
@@ -7,6 +10,9 @@ export const DEFAULT_EXTRACTION_CONTRACTS: {event:"e1d"|"e1e"|"e1f";state:"r10"|
 // Capsule writes events and state together; it does not use E1f/R11 extraction.
 export const EPISODE_CAPSULE_CONTRACT = 'capsule-v1';
 export const UPGRADE_AGING_MS = 120_000;
+const JOB_LAST_SERVED_PREFIX = 'job_last_served:';
+export function jobLastServedKey(chatId:string):string { return `${JOB_LAST_SERVED_PREFIX}${chatId}`; }
+
 
 /** Product-owned payload tags, shared by job and embedding scheduling. */
 export const jobQueueClassSql = (job: string) => `CASE
@@ -53,7 +59,7 @@ import {
 } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { now } from "./db.js";
-import { listEntities, normalizeEntityName } from "./entities.js";
+import { modelEntityContext, normalizeEntityName } from "./entities.js";
 import { stripThoughtBlocks } from "./source-text.js";
 import { listSocialKnowledge } from "./social-knowledge.js";
 import { listRelationshipProjections, planProjectionInput } from "./relationship-projections.js";
@@ -62,7 +68,7 @@ import { calibrationBlocksExtraction } from "./initial-calibration.js";
 import { IDENTITY_TERM_GUIDANCE } from "./identity-guidance.js";
 import { buildStoryConsolidationJob, maybeEnqueueStorySpine, refreshStoryInputGuard } from "./story-spine.js";
 import { retrieve } from "./retrieval.js";
-import { buildRecallCandidateSnapshot, type RecallCandidateSnapshot } from "./recall-candidates.js";
+import { buildRecallCandidateSnapshot, modelRecallCandidates, type RecallCandidateSnapshot } from "./recall-candidates.js";
 import { buildLedgerConsistencyJob } from "./ledger-consistency.js";
 import { cachedAuxiliaryPage, resetRejectedJobCache } from "./auxiliary-page-cache.js";
 import { diagnoseAuxiliaryModelResponse } from "./server-llm.js";
@@ -138,7 +144,7 @@ export function recordJobStateRecovery(db: RcmDatabase, jobId: string, report: i
     .run(JSON.stringify(report), now(), jobId, workerId ?? null, workerId ?? null).changes === 1;
 }
 
-export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string, workerId?: string): OperationLlmCallStats {
+export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string, workerId?: string, identity?: CallIdentity, repairReason?:string): OperationLlmCallStats {
   assertUpgradeJobWritable(db,jobId);
   return db.transaction(() => {
     const row = db.prepare("SELECT payload_json,status,lease_owner,attempts FROM jobs WHERE id=?").get(jobId) as { payload_json: string; status: string; lease_owner: string | null; attempts: number } | undefined;
@@ -154,6 +160,7 @@ export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string
     }
     payload.llmCallStats = stats;
     appendLlmCallDiagnostic(payload, { purpose, attempt: row.attempts, outcome: "started", at: now() });
+    recordProcessingCall(db, jobId, { purpose, outcome: 'started', at: now(),repairReason }, identity ?? { site: 'server' });
     payload.pipelineRepairCount = stats.repairs;
     db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?").run(JSON.stringify(payload), now(), jobId);
     return stats;
@@ -172,7 +179,7 @@ export function stageJobModelOutput(db: RcmDatabase, jobId: string, output: stri
   db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?").run(JSON.stringify(payload), now(), jobId);
   return true;
 }
-const promptEntities = (db: RcmDatabase, chatId: string) => listEntities(db, chatId)
+const promptEntities = (db: RcmDatabase, chatId: string) => modelEntityContext(db, chatId).entities
   .filter((entity) => entity.setupProminence !== "reference" || entity.userManaged
     || db.prepare("SELECT 1 FROM entity_prominence WHERE chat_id=? AND entity_name=? AND tier<>'incidental'").get(chatId, entity.name))
   .slice(0, 64)
@@ -218,7 +225,7 @@ export function adaptiveExtractionGroups(units: PendingMessage[][], targetTurns:
 export { editProtectedMessageIds } from "./turn-clock.js";
 
 type LlmCallOutcome = "succeeded" | "failed";
-interface LlmCallDiagnostic { purpose: string; attempt: number; outcome: "started" | LlmCallOutcome; at: number; error?: string; code?: string; httpStatus?: number; risuCall?: RisuAuxiliaryCallDiagnostic; usage?: Record<string, number>; }
+interface LlmCallDiagnostic { repairReason?:string; purpose: string; attempt: number; outcome: "started" | LlmCallOutcome; at: number; error?: string; code?: string; httpStatus?: number; risuCall?: RisuAuxiliaryCallDiagnostic; usage?: Record<string, number>; }
 
 function appendActualLlmUsage(payload: Record<string, unknown>, usage: Record<string, unknown> | undefined): void {
   if (!usage) return;
@@ -242,6 +249,7 @@ function configuredAuxiliaryInputBudget(db: RcmDatabase): number {
 }
 
 function appendLlmCallDiagnostic(payload: Record<string, unknown>, entry: LlmCallDiagnostic): void {
+  if (entry.outcome === "started") payload.leaseModelStarted = true;
   const previous = Array.isArray(payload.llmCallDiagnostics) ? payload.llmCallDiagnostics : [];
   payload.llmCallDiagnostics = [...previous, entry].slice(-24);
 }
@@ -261,6 +269,7 @@ export function settleJobLlmCall(db: RcmDatabase, jobId: string, purpose: string
       ...(Object.keys(usage).length ? { usage } : {}),
     });
     appendActualLlmUsage(payload, usage);
+    recordProcessingCall(db, jobId, { purpose, outcome, at: now(), usage, error: details.error });
     db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?").run(JSON.stringify(payload), now(), jobId);
   })();
 }
@@ -478,11 +487,16 @@ interface ExtractionLookup extends RecallCandidateSnapshot {
 
 export function buildPrompt(db: RcmDatabase, chatId: string, profile: RpProfile, memoryLanguage: MemoryLanguage, messages: PendingMessage[], remaining?: Array<{ messageId: string; quote: string }>, previousRecall?: ExtractionLookup, eventWriting: boolean | "e1d" | "e1e" | "e1f" = false): { systemPrompt: string; userPrompt: string; prompt: string; sourceUnits: SourceUnit[]; promptContract?: "e1d" | "e1e" | "e1f"; lookup: ExtractionLookup } & RecallCandidateSnapshot {
   const systemPrompt = eventWriting ? eventWritingSystem(memoryLanguage, profile, typeof eventWriting === "string" ? eventWriting : "e1d") : `${eventExtractionSystem(memoryLanguage)}\n\nPROFILE: ${profile}\nPreserve ${profile === "companion" ? "relationship scenes, emotions, promises, boundaries and shared or private experiences" : "relationships, discoveries, world changes, conflicts, causal events and information transfer"} as event evidence for later use.`;
-  const canonicalEntities = previousRecall?.canonicalEntities ?? promptEntities(db, chatId);
+  const { allowsName,identityEntities } = modelEntityContext(db, chatId);
+  // Frozen lookups from queued/continuation jobs can predate the input policy.
+  const canonicalEntities = modelEntityIdentityContext(previousRecall?.canonicalEntities ?? promptEntities(db, chatId),identityEntities).entities
+    .filter(entity => isSupportedEntityType(entity.type) && allowsName(entity.name) && allowsName(entity.internalName) && allowsName(entity.key))
+    .map(entity => ({...entity,aliases:entity.aliases.filter(allowsName)}));
   const referenceIndex = previousRecall?.referenceIndex ?? firstPassReferenceIndex(db, chatId);
   const query = messages.map((message) => modelContent(message)).join("\n\n");
-  const { recallCandidates, recallAtomRefs } = previousRecall ?? buildRecallCandidateSnapshot(db, chatId,
+  const { recallCandidates:rawRecallCandidates, recallAtomRefs } = previousRecall ?? buildRecallCandidateSnapshot(db, chatId,
     retrieve(db, { chatId, query, perspective: "omniscient narrator", intent: "recall", tokenBudget: 8_000 }).selected);
+  const recallCandidates=modelRecallCandidates(rawRecallCandidates,allowsName);
   let sourceUnits = buildSourceUnits(messages.map((message) => ({ id: message.message_id, content: message.content, canonicalHash: message.content_hash })), { granularity: "display" });
   if (remaining?.length) {
     const ranges = remaining.map((range) => {
@@ -850,9 +864,13 @@ function recordAuxiliaryFailure(db:RcmDatabase,row:{type:string;chat_id:string;p
   if(row.type==='ledger_consistency') recordLedgerInputs(db,row.chat_id,payload,'failed');
 }
 
-export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number, options: { storyOnly?: boolean; excludeJobIds?: string[]; stateContract?: boolean; stateWriting?: boolean; eventWriting?: boolean; eventWritingE1e?: boolean; eventWritingE1f?: boolean; stateWritingR10?: boolean; stateWritingR11?: boolean } = {}): LeasedJob | null {
+export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number, options: { recoverUnstartedLease?: boolean; storyOnly?: boolean; excludeJobIds?: string[]; stateContract?: boolean; stateWriting?: boolean; eventWriting?: boolean; eventWritingE1e?: boolean; eventWritingE1f?: boolean; stateWritingR10?: boolean; stateWritingR11?: boolean } = {}): LeasedJob | null {
+  // Every unsuccessful pass must retire a candidate. The initial row count
+  // bounds cleanup even if planning enqueues replacements along the way.
+  const passes = Number(db.prepare("SELECT count(*) FROM jobs WHERE status IN ('queued','leased')").pluck().get()) + 1;
+  for (let pass=0; pass<passes; pass++) {
   let planningJobId: string | undefined;
-  try { return db.transaction(() => {
+  try { const result = db.transaction(() => {
     const timestamp = now();
     const leased = (() => {
     for (const blocked of db.prepare(`SELECT id,chat_id,payload_json FROM jobs WHERE status='failed' AND type IN ('extract','episode','social_backfill') AND NOT ${upgradeLockSql('jobs.chat_id')} AND NOT ${sourceSnapshotHeldSql('jobs.chat_id')}`).all() as Array<{ id: string; chat_id: string; payload_json: string }>) {
@@ -883,13 +901,15 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
         SELECT id,COALESCE(last_progress_at,created_at) last_progress_at FROM regeneration_runs
         WHERE mode='upgrade' AND status NOT IN ('applied','discarded','stale')
       ), candidates AS (
-      SELECT j.id,j.chat_id,j.type,j.payload_json,j.attempts,c.profile,c.memory_language,j.created_at,j.rowid queue_rowid,
+      SELECT j.id,j.chat_id,j.type,j.payload_json,j.attempts,j.status,j.lease_owner,j.leased_until,c.profile,c.memory_language,j.created_at,j.rowid queue_rowid,
         ${jobQueueClassSql('j')} queue_class,
         COALESCE(json_extract(j.payload_json,'$.upgradeRunId'),json_extract(j.payload_json,'$.upgradePhase2RunId')) upgrade_run_id,
         ROW_NUMBER() OVER (PARTITION BY j.chat_id ORDER BY CASE WHEN j.type='quiz' THEN 1 ELSE 0 END,j.created_at,j.rowid) chat_position
       FROM jobs j JOIN chats c ON c.id=j.chat_id
-      WHERE (j.status='queued' OR (j.status='leased' AND j.leased_until < ?))
-        AND j.attempts < 3
+      WHERE (j.status='queued' OR (j.status='leased' AND j.leased_until < ?)
+          OR (? AND j.status='leased' AND j.lease_owner=?
+            AND json_extract(j.payload_json,'$.leaseModelStarted')=0))
+        AND (j.attempts < 3 OR (j.status='leased' AND j.leased_until>=?))
         AND NOT ${sourceSnapshotHeldSql('j.chat_id')}
         AND (NOT ${upgradeLockSql('j.chat_id')} OR (j.type IN ('story_consolidation','relationship_projection') AND EXISTS (
           SELECT 1 FROM regeneration_runs u WHERE u.chat_id=j.chat_id AND u.id=json_extract(j.payload_json,'$.upgradePhase2RunId')
@@ -922,6 +942,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
         CASE WHEN NOT EXISTS (SELECT 1 FROM chats WHERE ${upgradeLockSql('chats.id')}) THEN 0
           WHEN queue_class='upgrade' AND (SELECT last_progress_at FROM upgrade_progress WHERE id=upgrade_run_id) < ? THEN 0
           WHEN queue_class='routine' THEN 1 ELSE 2 END,
+        COALESCE((SELECT CAST(value AS INTEGER) FROM server_meta WHERE key='${JOB_LAST_SERVED_PREFIX}'||candidates.chat_id),0),
         created_at,queue_rowid LIMIT 1
     `);
     const excluded = [...(options.excludeJobIds ?? [])];
@@ -929,7 +950,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     // Each run gets one priority slot after 120s without a lease/completion,
     // falling back to its start. All prequeued jobs share that progress clock.
     // Per-chat heads retain FIFO and all existing eligibility barriers.
-    const next = () => selectNext.get(timestamp,timestamp,options.storyOnly ? 1 : 0,JSON.stringify(excluded),timestamp-UPGRADE_AGING_MS) as { id: string; chat_id: string; type: string; payload_json: string; attempts: number; profile: RpProfile; memory_language: MemoryLanguage } | undefined;
+    const next = () => selectNext.get(timestamp,options.recoverUnstartedLease ? 1 : 0,workerId,timestamp,timestamp,options.storyOnly ? 1 : 0,JSON.stringify(excluded),timestamp-UPGRADE_AGING_MS) as { id: string; chat_id: string; type: string; payload_json: string; attempts: number; status: string; lease_owner: string | null; leased_until: number | null; profile: RpProfile; memory_language: MemoryLanguage } | undefined;
     let row = next();
     while (row) {
       const contractPayload=JSON.parse(row.payload_json);
@@ -958,6 +979,12 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     }
     assertUpgradeJobWritable(db,row.id);
     planningJobId = row.id;
+    if (row.status === 'leased' && row.lease_owner === workerId && row.leased_until! >= timestamp && options.recoverUnstartedLease) {
+      // The same Risu worker lost its HTTP response before any model call.
+      // Rebuild from the pinned lookup/checkpoints without consuming an attempt.
+      db.prepare("UPDATE jobs SET attempts=attempts-1 WHERE id=?").run(row.id);
+      row.attempts -= 1;
+    }
     const payload = JSON.parse(row.payload_json) as Partial<RecallCandidateSnapshot> & { sourceMessageIds?: string[]; sourceFingerprint?: SourceFingerprintItem[] | string; includeUserMessages?: boolean; episodeId?: string; resolvedSetup?: ResolvedSetupProjection; identityHints?: Record<string, unknown>; pairs?: Array<{ from: string; to: string; mode?: "incremental" | "replay" }>; memoryLanguage?: MemoryLanguage; postExtractionReview?: boolean; auditDraft?: ExtractionDraftResult; smallReviewRetry?: {auditId: string; candidateId: string}; continuationDraft?: ExtractionDraftResult; sourceRecovery?: boolean; selectDefaultContracts?: boolean; sourceRecoveryMetadata?: SourceRecoveryMetadata; sourceRecoveryContext?: { query?: string; matchKinds?: string[]; matchedPhrases?: string[] }; batchId?: string; regenerationRunId?: string; backfillRunId?: string; groups?: any[]; level?: "segment" | "arc" | "overview"; generationId?: string; startOrdinal?: number; endOrdinal?: number; sourceNodeIds?: string[]; sourceBatchIds?: string[]; sourceTokens?: number; llmCallStats?: OperationLlmCallStats; repairBudgetUsed?: boolean; stateRepairBudgetUsed?: boolean; operationStage?: string; operationStageOrdinal?: number; operationStageTotal?: number };
     // Null pins legacy just as "e1d" pins E1d. Pre-marker retries/pages already
     // have output and therefore retain legacy rather than following a new worker.
@@ -969,7 +996,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       : freshContract && (DEFAULT_EXTRACTION_CONTRACTS.state === "r11" ? options.stateWritingR11 === true : options.stateWritingR10 === true) ? DEFAULT_EXTRACTION_CONTRACTS.state : null;
     Object.assign(payload,{stateContract});
     const memoryLanguage = payload.memoryLanguage ?? row.memory_language;
-    const operationMeta = { ...(stateContract ? {stateContract} : {}), llmCallStats: normalizeLlmCallStats(payload.llmCallStats), repairBudgetUsed: payload.repairBudgetUsed, stateRepairBudgetUsed: payload.stateRepairBudgetUsed, operationStage: payload.operationStage,
+    const operationMeta = { modelIdentityEntities:modelEntityContext(db,row.chat_id).identityEntities, ...(stateContract ? {stateContract} : {}), llmCallStats: normalizeLlmCallStats(payload.llmCallStats), repairBudgetUsed: payload.repairBudgetUsed, stateRepairBudgetUsed: payload.stateRepairBudgetUsed, operationStage: payload.operationStage,
       operationStageOrdinal: payload.operationStageOrdinal, operationStageTotal: payload.operationStageTotal };
     if (['extract','episode','audit_retry','memory_addition','social_backfill'].includes(row.type)) {
       const input=db.prepare(`SELECT m.message_id,m.role,${originalTurnKeySql} AS turn_key FROM messages m
@@ -1033,7 +1060,9 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       }), operationMeta);
     }
     if (row.type === "relationship_projection") {
+      const {allowsName}=modelEntityContext(db,row.chat_id);
       const pairs = (payload.pairs ?? []).filter(pair => {
+        if (!allowsName(pair.from) || !allowsName(pair.to)) return false;
         const reused=auxiliaryInputOutcome(db,row.chat_id,'relationship',relationshipInputFingerprint(db,row.chat_id,pair.from,pair.to));
         if(!reused || (payload as any).trigger==='retry') return true;
         db.prepare('DELETE FROM relationship_projection_queue WHERE chat_id=? AND from_entity=? AND to_entity=?').run(row.chat_id,pair.from,pair.to);
@@ -1073,8 +1102,13 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
         db.prepare("UPDATE jobs SET status='failed',last_error='Final ledger groups unavailable',updated_at=? WHERE id=?").run(timestamp, row.id);
         return null;
       }
-      db.prepare(`UPDATE jobs SET status='leased',lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?`)
-        .run(workerId, timestamp + leaseSeconds * 2_000, timestamp, row.id);
+      const {allowsName}=modelEntityContext(db,row.chat_id);
+      payload.groups=payload.groups.filter((group:any)=>group.kind!=='character_belief'||allowsName(group.holder));
+      const supplied=new Set(payload.groups.map((group:any)=>group.itemRef));
+      const groupInputFingerprints=(payload as any).groupInputFingerprints;
+      if(groupInputFingerprints)(payload as any).groupInputFingerprints=Object.fromEntries(Object.entries(groupInputFingerprints).filter(([key])=>supplied.has(key)));
+      db.prepare(`UPDATE jobs SET status='leased',payload_json=?,lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?`)
+        .run(JSON.stringify(payload),workerId, timestamp + leaseSeconds * 2_000, timestamp, row.id);
       return Object.assign(buildLedgerConsistencyJob({
         id: row.id, chatId: row.chat_id, profile: row.profile, memoryLanguage, attempt: row.attempts + 1,
         payload: { backfillRunId: payload.backfillRunId, groups: payload.groups as any,
@@ -1089,8 +1123,11 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       }
       db.prepare(`UPDATE jobs SET status='leased',lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?`)
         .run(workerId, timestamp + leaseSeconds * 1000, timestamp, row.id);
+      const {allowsName}=modelEntityContext(db,row.chat_id);
+      const modelHints=Object.fromEntries(Object.entries(payload.identityHints ?? {}).filter(([key,value])=>
+        !['hostCharacterName','userPersonaName'].includes(key) || typeof value!=='string' || allowsName(value)));
       const userPrompt = JSON.stringify({
-        identityHints: payload.identityHints ?? {},
+        identityHints: modelHints,
         progressDefaults: PAIR_PROGRESS_DEFAULTS, pendingProgress: pendingProgress(db,row.chat_id),
         renderedSetup: payload.resolvedSetup.messages.map((message, sourceIndex) => ({ sourceIndex, role: message.role, content: message.content })),
       });
@@ -1117,11 +1154,12 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     }
 
     const auditSourceMessages = messages.map((message) => ({ id: message.message_id, role: message.role, content: modelContent(message), canonicalHash: message.content_hash }));
-    const auditExistingOpenPromises = db.prepare(`
+    const {allowsName: auditAllowsName}=modelEntityContext(db,row.chat_id);
+    const auditExistingOpenPromises = (db.prepare(`
       SELECT promise_key AS key,promisor,promisee,content,scheduled_for AS scheduledFor FROM promises
       WHERE chat_id=? AND status='open'
       ORDER BY created_at DESC LIMIT 24
-    `).all(row.chat_id) as NonNullable<LeasedJob["auditExistingOpenPromises"]>;
+    `).all(row.chat_id) as NonNullable<LeasedJob["auditExistingOpenPromises"]>).filter(p=>auditAllowsName(p.promisor)&&auditAllowsName(p.promisee));
     const auditLedger = { auditSourceMessages, auditExistingOpenPromises };
     const sourceTurnCount = extractionUnits(messages, payload.includeUserMessages ?? true).length;
     const remaining = payload.continuationDraft?.unfinishedSource;
@@ -1194,8 +1232,23 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       ...auditLedger, ...operationMeta,
     } satisfies LeasedJob;
     })();
+    if (leased) {
+      beginProcessingAttempt(db, leased.id, leased.attempt, timestamp,true);
+      // A fresh grant starts a new lease even when a continuation/manual retry
+      // reuses attempt numbers. Missing markers on older leases are not recoverable.
+      db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.leaseModelStarted',json('false')) WHERE id=?").run(leased.id);
+      // updated_at also changes on renew/retry/completion and millisecond ties
+      // cannot identify lease order. Keep one monotonic ordinal per chat in the
+      // existing metadata table, atomically with the successful lease.
+      db.prepare(`INSERT INTO server_meta(key,value)
+        SELECT ?,CAST(COALESCE(MAX(CAST(value AS INTEGER)),0)+1 AS TEXT) FROM server_meta WHERE key GLOB ?
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
+        .run(jobLastServedKey(leased.chatId),`${JOB_LAST_SERVED_PREFIX}*`);
+    }
     return leased;
-  })(); } catch (error) {
+  })();
+    if (result || !planningJobId) return result;
+  } catch (error) {
     if (!planningJobId) throw error;
     const message = `Auxiliary input planning failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4_000);
     const payloadRow = db.prepare("SELECT type,chat_id,payload_json FROM jobs WHERE id=?").get(planningJobId) as {type:string;chat_id:string;payload_json:string} | undefined;
@@ -1206,11 +1259,16 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
     if(payloadRow) recordAuxiliaryFailure(db,payloadRow);
     db.prepare("UPDATE jobs SET status='failed',payload_json=?,lease_owner=NULL,leased_until=NULL,last_error=?,updated_at=? WHERE id=?")
       .run(JSON.stringify(payload), message, now(), planningJobId);
-    return null;
   }
+  }
+  return null;
 }
 
 export function releaseJob(db: RcmDatabase, jobId: string, workerId: string): boolean {
+  if(db.prepare(`SELECT 1 FROM processing_calls pc JOIN processing_attempts pa ON pa.id=pc.attempt_id
+    JOIN jobs j ON j.id=pc.job_id WHERE pc.job_id=? AND pa.outcome='running' AND j.status='leased' AND j.lease_owner=? LIMIT 1`).get(jobId,workerId)) {
+    endProcessingAttempt(db,jobId,'interrupted',{code:'WORKER_RELEASED'});
+  }
   const result = db.prepare(`
     UPDATE jobs
     SET status='queued',attempts=MAX(0,attempts-1),lease_owner=NULL,leased_until=NULL,last_error=NULL,updated_at=?
@@ -1327,6 +1385,7 @@ export function setJobPipelineStage(db: RcmDatabase, jobId: string, stage: JobPi
     payload.pipelineRepairCount = normalizeLlmCallStats(payload.llmCallStats).repairs;
   }
   if (llmCallDiagnostic) {
+    recordProcessingCall(db, jobId, llmCallDiagnostic);
     appendLlmCallDiagnostic(payload, llmCallDiagnostic);
     if (llmCallDiagnostic.outcome === "succeeded" || llmCallDiagnostic.outcome === "failed") appendActualLlmUsage(payload, llmCallDiagnostic.usage);
   }
@@ -1395,6 +1454,7 @@ export function failJob(db: RcmDatabase, jobId: string, workerId: string, failur
   const nonRetryable = truncated || isPermanentProviderError(failure) || completionInvalid;
   if (completionInvalid) error = `EXTRACTION_COMPLETION_INVALID: ${error}`;
   const status = nonRetryable || repairBudgetSpent(originalPayload) || stateRepairBudgetSpent(originalPayload) || row.attempts >= maxAttempts ? "failed" : "queued";
+  endProcessingAttempt(db, jobId, 'failed', completionInvalid ? { code: 'VALIDATION_FAILED' } : failure);
   const failedPayload = {
     ...originalPayload,
     providerFailure,

@@ -1,9 +1,24 @@
 import { renderAlbumForBoard } from "./album/board-render.js";
 import { buildAlbumPhotoList, createAlbumViewController } from "./dashboard/album-editor.js";
 import { dashboardStylesheet, confirmDashboard } from "./dashboard.js";
-import { ALBUM_BLOCK_KINDS, type AlbumMaterials, type AlbumMaterialItem, ALBUM_THEMES, AlbumBondSchema, albumTurningPoints, resolveAlbumTint, AlbumDocumentSchema, type AlbumItem, type AlbumUpdateCandidates } from "@rcm/shared";
+import { ALBUM_BLOCK_KINDS, type AlbumMaterials, type AlbumMaterialItem, ALBUM_THEMES, AlbumBondSchema, albumTurningPoints, resolveAlbumTint, AlbumDocumentSchema, type AlbumItem, type AlbumUpdateCandidates, albumTogetherItems, type AlbumTogetherRecords } from "@rcm/shared";
 import { albumClient } from "./album/api.js";
 import { ALBUM_FONT_LINKS } from "./album/themes/index.js";
+
+/** Fabricated records for comparing the approved together layouts, never collected from a chat. */
+function previewTogetherRecords(): AlbumTogetherRecords {
+  const firstAt = Date.parse("2026-03-02T01:00:00Z");
+  const days: Array<[string, number]> = Array.from({ length: 262 }, (_, n) => {
+    const x = Math.sin(n * 91.7) * 10000, v = x - Math.floor(x), quiet = Math.floor(n / 7) >= 22 && Math.floor(n / 7) <= 24;
+    const count = quiet ? (v > .9 ? 1 : 0) : v < .28 ? 0 : v < .55 ? 1 : v < .8 ? 4 : v < .95 ? 11 : 25;
+    return [new Date(firstAt + n * 86_400_000).toISOString().slice(0, 10), n === 134 ? 86 : count];
+  });
+  return { asOf: Date.parse("2026-11-18T03:00:00Z"), timeZone: "Asia/Seoul", firstAt, dayNumber: 262, stories: 1284, chars: 1820000, books: 7,
+    lastTurnAt: Date.parse("2026-11-18T01:00:00Z"), storyDays: 7, realSpan: "8개월", days, topDay: { date: "2026-07-14", turns: 86 },
+    hours: [6,3,1,0,0,0,0,0,0,0,1,1,2,2,1,2,3,3,4,6,9,12,15,13], peakHour: 22,
+    longest: { startAt: Date.parse("2026-08-03T14:00:00Z"), minutes: 252, turns: 61 }, streak: { days: 19, from: "2026-06-02", to: "2026-06-20" },
+    quiz: { answered: 48, correct: 39, bestStreak: 12 } };
+}
 
 /** Synthetic by default; a private same-origin JSON file is loaded only with fixture=local. */
 export async function showAlbumPreview(params: URLSearchParams): Promise<void> {
@@ -66,6 +81,10 @@ export async function showAlbumPreview(params: URLSearchParams): Promise<void> {
         { id: "divider", kind: "divider" },
       ],
     });
+    const together = previewTogetherRecords();
+    const togetherItems = albumTogetherItems(together);
+    if (params.get("together") === "all") togetherItems.forEach(i => { i.hidden = false; });
+    doc.blocks.splice(2, 0, { id: "together", kind: "together", layout: "ledger", hidden: false, together, items: togetherItems });
     const bond = AlbumBondSchema.parse({ events: Array.from({ length: 6 }, (_, n) => ({
       id: `bond-event-${n}`, from: n % 2 ? "나루" : "이솔", to: n % 2 ? "이솔" : "나루", sourceOrdinal: n * 10, scene: n + 1,
       sourceMemoryId: `bond-scene-${n}`, date: ["2026-04-08", "2026-04-08", "2026-04-19", "2026-05-03", "2026-05-19", "2026-06-19"][n],
@@ -205,7 +224,11 @@ export async function showAlbumPreview(params: URLSearchParams): Promise<void> {
     materials.blocks.story = chapters.map(ch => ({ ...structuredClone(ch), suggested: true, children: ch.children!.map(scene => ({ ...structuredClone(scene), suggested: true, children: scene.children?.map(material), inlayIds: Array.from({ length: 25 }, () => uuid(inlayIndex++)) })) }));
     // The editor reads the same source snapshot for all kinds, including private local previews.
     // Extra records are invented here; fixture JSON is never rewritten.
-    for (const block of doc.blocks) if (block.kind !== "story") materials.blocks[block.kind].push(...block.items.map(material));
+    materials.together = doc.blocks.find(b => b.kind === "together")?.together;
+    if (!local && params.get("togetherNew") === "1" && materials.together) materials.together = { ...structuredClone(materials.together),
+      asOf: materials.together.asOf + 86_400_000, lastTurnAt: (materials.together.lastTurnAt ?? materials.together.asOf) + 86_400_000,
+      stories: materials.together.stories + 1, dayNumber: (materials.together.dayNumber ?? 0) + 1 };
+    for (const block of doc.blocks) if (block.kind !== "story" && block.kind !== "together") materials.blocks[block.kind].push(...block.items.map(material));
     if (local) materials.blocks.story = doc.blocks.filter(b => b.kind === "story").flatMap(b => b.items.map(material));
     if (!local && review && params.get("groupF") === "1") {
       const nickname = doc.blocks.find(b => b.kind === "nicknames")!.items[0]!;
@@ -235,11 +258,12 @@ export async function showAlbumPreview(params: URLSearchParams): Promise<void> {
       url: path => `${location.origin}${path}`,
       async request<T>(path: string, init?: RequestInit): Promise<T> {
         if (path.split("?")[0]!.endsWith("/album-materials")) return materials as T;
+        if (path.split("?")[0]!.endsWith("/album-together")) return materials.together as T;
         const parts = path.split("/"), id = decodeURIComponent(parts[3] ?? ""), book = books.get(id);
-        if (path.endsWith("/update-materials")) {
+        if (path.split("?")[0]!.endsWith("/update-materials")) {
           if (params.get("state") === "loading") return new Promise<T>(() => {});
           const candidates = params.get("state") === "none" ? { available: true, added: [], changed: [], removed: [] } : structuredClone(review ?? updateCandidates());
-          return { candidates, materials: candidates.available ? materials : undefined } as T;
+          return { candidates, materials: candidates.available ? materials : undefined, together: candidates.available ? materials.together : undefined } as T;
         }
         if (path.endsWith("/update-candidates")) {
           if (params.get("state") === "loading") return new Promise<T>(() => {});

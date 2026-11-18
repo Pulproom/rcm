@@ -2,18 +2,18 @@ import { publishActivity, publishStatusSummary, stopDeletedHostChatWork, runBack
 export { publishActivity, publishStatusSummary, subscribeActivity, stopDeletedHostChatWork } from "./activity-state.js";
 import { prefetchCurrentChatTranslations } from "./dashboard.js";
 import { observeSetupAttention } from "./setup-sources.js";
-import { backgroundTranslationEnabled, translationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
+import { backgroundTranslationEnabled, resetBackgroundTranslationRetries, translationCooldownMs, prefetchTranslationRecords, type TranslationSource } from "./translation.js";
 import { recheckHeldSources, observeCurrentHostGeneration, readCurrentChatPresence, readOptionalDashboardContext, hasHeldSourceRecheck } from "./context.js";
 import { SERVER_STATUS_TIMEOUT_MS, ServerRequestError, type ServerClient } from "./api-client.js";
 import type { RuntimeState } from "./types.js";
-import { reconcileAutomaticServerPause } from "./worker.js";
+import { drainWorker, heartbeatServerWorker, reconcileAutomaticServerPause } from "./worker.js";
 import { ServerCompatibilityError, isServerApiIncompatible, describeServerConnectionIssue, isServerConfigured, noteServerConnectionFailure, noteServerConnectionSuccess } from "./connection.js";
 import { syncQuizEnabled } from "./quiz-sync.js";
 import { isChatMemoryEnabled, saveSettings } from "./settings.js";
 import { observeServerUpdateVersion, refreshUpdateStatus } from "./updates.js";
 import { currentLineageOperation, needsOpenedChatResolution, resolveOpenedChat, reconcileLineageOperation } from "./lineage-settings.js";
 
-interface StatusResponse {
+export interface StatusResponse {
   upgrade?: import('./api-client.js').UpgradeStatus;
   auxiliaryAuthFailed?: boolean;
   modelResponseDiagnostic?: import("@rcm/shared").ModelResponseDiagnostic;
@@ -90,10 +90,72 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
   let idleStatus: { chatId: string; serverUrl: string; token: string; nextAt: number } | undefined;
   let polling = false;
   let refreshRequested = false;
+  let quietSince = Date.now();
+  let observation: string | undefined;
+  let heartbeatVersion: string | undefined;
+  let combinedConnection: string | undefined;
+  let combined: StatusResponse | undefined;
+  let heartbeatAbort: AbortController | undefined;
+  const connection = () => JSON.stringify([state.settings.serverUrl, state.settings.serverToken, state.current?.chatId]);
+  const quiet = () => !isActive(state) && !state.serverWorker?.globalQueuedJobs && !state.serverWorker?.otherChatActiveJob
+    && !state.dashboardOpen && !state.mainGeneration && !state.settings.workerPaused
+    && !state.statusStale && !state.activityStatusError && !state.serverConnectionIssue
+    && !state.upgradeBlocked && !state.statusSummary?.upgrade?.lock && !state.episodeActivity
+    && !currentLineageOperation(state) && !hasHeldSourceRecheck(state, state.current?.chatId ?? "")
+    && !prefetchPending.length;
+  const resetQuiet = () => {
+    quietSince = Date.now();
+    heartbeatVersion = undefined;
+    heartbeatAbort?.abort();
+  };
+  // Keep the host scan independent of the network wait, including same-slot copies.
+  const wake = (explicit: boolean) => {
+    if (unloaded || state.unloaded) return;
+    if (explicit) { resetQuiet(); combined = undefined; idleStatus = undefined; }
+    if (polling) { refreshRequested = true; return; }
+    clearTimeout(state.activityTimer);
+    state.activityTimer = window.setTimeout(() => void run(), 0);
+  };
+  const heartbeat = async () => {
+    if (unloaded || state.unloaded) return;
+    const scope = connection(), revision = state.statusSummaryRevision ?? 0;
+    const age = Date.now() - quietSince;
+    const interval = quiet() && heartbeatVersion ? age >= 300_000 ? 60_000 : age >= 240_000 ? 45_000 : age >= 180_000 ? 30_000 : 15_000 : 15_000;
+    const controller = new AbortController();
+    heartbeatAbort = controller;
+    try {
+      const result = await heartbeatServerWorker(state, client, interval > 15_000
+        ? { waitMs: interval - 15_000, statusVersion: heartbeatVersion, signal: controller.signal } : undefined);
+      if (unloaded || state.unloaded || controller.signal.aborted || connection() !== scope) return;
+      if (result?.chatStatus && (state.statusSummaryRevision ?? 0) === revision) {
+        combinedConnection = scope;
+        const next = result.idleWatch?.version;
+        if (result.idleWatch?.busy || !next || next !== heartbeatVersion) quietSince = Date.now();
+        heartbeatVersion = result.idleWatch?.busy ? undefined : next;
+        if (!state.dashboardOpen && !state.mainGeneration && !isActive(state)) {
+          combined = result.chatStatus;
+          observation = signature(state);
+          wake(false);
+        }
+      } else if (!result?.chatStatus) {
+        combinedConnection = undefined;
+        resetQuiet();
+        if (!result) { idleStatus = undefined; wake(false); }
+      }
+    } finally {
+      if (heartbeatAbort === controller) heartbeatAbort = undefined;
+      // A late local wake may cancel a wait near the 45s control-lease limit.
+      // Renew immediately rather than adding another 15s after cancellation.
+      if (!unloaded && !state.unloaded) state.serverHeartbeatTimer = window.setTimeout(() => void heartbeat(), controller.signal.aborted && interval > 15_000 ? 0 : 15_000);
+    }
+  };
   const poll = async (): Promise<number> => {
+    // The active injection owns the host snapshots until its closing check.
+    if (state.mainRequest?.preparing) return 1_000;
     const pollServerUrl = state.settings.serverUrl;
     const pollToken = state.settings.serverToken;
-    const sameConnection = () => !unloaded && !state.unloaded && state.settings.serverUrl === pollServerUrl && state.settings.serverToken === pollToken;
+    const sameConnection = () => !unloaded && !state.unloaded && !state.mainRequest?.preparing
+      && state.settings.serverUrl === pollServerUrl && state.settings.serverToken === pollToken;
     let requestCurrent = sameConnection;
     try {
       if (state.mainGeneration) await observeCurrentHostGeneration(state);
@@ -105,6 +167,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         return Number.isInteger(chat) && chat >= 0 ? `${character}:${chat}` : "none";
       })();
       // Branching/copying can replace the chat at the same host indices.
+      if (!requestCurrent()) return 1_000;
       const presence = selection === "none" ? undefined : await readCurrentChatPresence();
       if (!requestCurrent()) {
         return 1_000;
@@ -151,6 +214,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         hostInventories.set(characterId, ids);
       }
       if (selection !== hostSelection || activeChatId !== state.current?.chatId) {
+        resetQuiet();
+        combined = undefined;
         idleStatus = undefined;
         hostSelection = selection;
         if (activeChatId !== state.current?.chatId) {
@@ -193,10 +258,13 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
           if (currentLineageOperation(state)?.status === "running") {
             return 1_000;
           }
-          const needsStatus = refreshRequested || !idleStatus || idleStatus.chatId !== chatId
-            || idleStatus.serverUrl !== pollServerUrl || idleStatus.token !== pollToken || now >= idleStatus.nextAt
+          if (!quiet()) resetQuiet();
+          const currentObservation = signature(state);
+          if (observation !== currentObservation) { observation = currentObservation; resetQuiet(); }
+          const needsStatus = combined || refreshRequested || !idleStatus || idleStatus.chatId !== chatId
+            || idleStatus.serverUrl !== pollServerUrl || idleStatus.token !== pollToken || (now >= idleStatus.nextAt && combinedConnection !== connection())
             || !state.activityReady || state.statusStale || state.activityStatusError || state.serverConnectionIssue
-            || isActive(state) || state.serverWorker?.otherChatActiveJob || state.dashboardOpen || state.mainGeneration || state.settings.workerAttention
+            || isActive(state) || state.serverWorker?.otherChatActiveJob || state.dashboardOpen || state.mainGeneration
             || state.upgradeBlocked || state.statusSummary?.upgrade?.lock || state.episodeActivity
             || currentLineageOperation(state) || hasHeldSourceRecheck(state, chatId) || prefetchPending.length > 0;
           if (needsStatus) {
@@ -204,7 +272,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
             refreshRequested = false;
             const startedRevision = state.statusSummaryRevision ?? 0;
             requestCurrent = () => sameConnection() && state.current?.chatId === chatId && (state.statusSummaryRevision ?? 0) === startedRevision;
-            const result = await client.request<StatusResponse>(`/v1/chats/${encodeURIComponent(chatId)}/status`, {}, SERVER_STATUS_TIMEOUT_MS);
+            const result = combined ?? await client.request<StatusResponse>(`/v1/chats/${encodeURIComponent(chatId)}/status`, {}, SERVER_STATUS_TIMEOUT_MS);
+            combined = undefined;
             if (requestCurrent() && (await readCurrentChatPresence()).chatId !== chatId) {
               state.statusStale = true;
               return 1_000;
@@ -267,7 +336,8 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
               && !translationCooldownMs()) {
               prefetchBusy = true; prefetchNextAt = now + 30_000;
               const current = () => !unloaded && state.current?.chatId === chatId && state.settings.serverUrl === serverUrl
-                && isChatMemoryEnabled(state.settings, chatId, state.current?.chatId === chatId ? state.current.characterId : undefined) && state.settings.autoTranslate && state.settings.translationDisplay === "ko";
+                && isChatMemoryEnabled(state.settings, chatId, state.current?.chatId === chatId ? state.current.characterId : undefined);
+              if (revision !== prefetchRevision) resetBackgroundTranslationRetries(state, chatId);
               const work = revision !== prefetchRevision
                 ? prefetchCurrentChatTranslations(state, client, chatId, { serverInstanceId: result.serverInstanceId, memoryLanguage: result.memoryLanguage }, current)
                 : prefetchTranslationRecords(state, prefetchPending, current);
@@ -288,6 +358,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
             idleStatus = isActive(state) || heldSource ? undefined : {
               chatId, serverUrl: pollServerUrl, token: pollToken, nextAt: Date.now() + IDLE_STATUS_INTERVAL_MS,
             };
+            observation = signature(state);
           }
         } else {
           idleStatus = undefined;
@@ -312,6 +383,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
         return 1_000;
       }
       idleStatus = undefined;
+      resetQuiet();
       state.statusStale = true;
       state.activityReady = true;
       if (!(error instanceof ServerCompatibilityError) && (error as { code?: string })?.code === "API_REVISION_MISMATCH") {
@@ -344,17 +416,27 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
       if (!unloaded && !state.unloaded) state.activityTimer = window.setTimeout(() => void run(), refreshRequested ? 0 : delay);
     }
   };
-  state.requestActivityRefresh = () => {
-    if (unloaded || state.unloaded) return;
-    idleStatus = undefined;
-    if (polling) { refreshRequested = true; return; }
-    clearTimeout(state.activityTimer);
-    state.activityTimer = window.setTimeout(() => void run(), 0);
+  state.requestActivityRefresh = () => wake(true);
+  const visible = () => {
+    if (document.visibilityState !== "visible") return;
+    state.requestActivityRefresh?.();
+    if (!state.mainRequest?.preparing) void observeCurrentHostGeneration(state).then(() => drainWorker(state, client));
   };
+  const online = () => { state.requestActivityRefresh?.(); void drainWorker(state, client); };
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", visible);
+  window.addEventListener?.("online", online);
+  if (typeof client.heartbeat === "function") {
+    clearTimeout(state.serverHeartbeatTimer);
+    state.serverHeartbeatTimer = window.setTimeout(() => void heartbeat(), 15_000);
+  }
   void run();
   void risuai.onUnload(() => {
     unloaded = true;
     clearTimeout(state.activityTimer);
+    clearTimeout(state.serverHeartbeatTimer);
+    heartbeatAbort?.abort();
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", visible);
+    window.removeEventListener?.("online", online);
     state.requestActivityRefresh = undefined;
   });
 }

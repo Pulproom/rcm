@@ -1,3 +1,4 @@
+import { cleanupUnsupportedEntities } from "./entity-cleanup.js";
 import { userChatSql } from './chat-work.js';
 import { readMemoryPreferenceFields, writeMemoryPreferenceFields } from './memory-bookmarks.js';
 import { assertChatUnlocked, chatUpgradeLock } from './upgrade-lock.js';
@@ -1162,6 +1163,8 @@ function cloneLineage(
     advanceInheritedRevision(db,child,parentChat.revision);
 
     if (pendingReextractionIds.size) counts.pendingReextraction = pendingReextractionIds.size;
+    cleanupUnsupportedEntities(db, child);
+    counts.entities = Number((prepare("SELECT COUNT(*) count FROM entities WHERE chat_id=?").get(child) as {count:number}).count);
     counts.relationships = (prepare("SELECT COUNT(*) count FROM relationship_projections WHERE chat_id=?").get(child) as {count:number}).count;
     prepare(`INSERT OR REPLACE INTO chat_lineage(child_chat_id,parent_chat_id,parent_title,kind,fork_message_id,fork_ordinal,ordinal_offset,detection,status,counts_json,candidates_json,created_at,applied_at) VALUES(?,?,?,?,?,?,?,?,'inherited',?,'[]',?,?)`).run(child, parent, candidate.title, kind, candidate.forkMessageId, fork, ordinalOffset, detection, JSON.stringify(counts), now, now);
     finishReceipt();

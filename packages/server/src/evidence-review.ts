@@ -25,7 +25,9 @@ export function describeWithheldRecognitions(draft: ExtractionDraftResult, resol
 }
 
 export function evidenceReviewIsBlocking(jobStatus: string | undefined, payload: Record<string, unknown>): boolean {
-  return jobStatus !== "done" && payload.sourceRecovery !== true;
+  // Archiving a terminal job hides its history without reopening evidence review.
+  if (jobStatus === "done" || jobStatus === "completed" || jobStatus === "archived") return false;
+  return payload.sourceRecovery !== true;
 }
 
 export function countBlockingExtractionAudits(db: RcmDatabase, chatId: string): number {
@@ -39,29 +41,38 @@ export function countBlockingExtractionAudits(db: RcmDatabase, chatId: string): 
 }
 
 function sourceMessages(db: RcmDatabase, chatId: string, sourceIds: string[]) {
-  return db.prepare(`SELECT message_id AS id,canonical_content AS content,canonical_hash AS canonicalHash FROM messages WHERE chat_id=?
+  return db.prepare(`SELECT message_id AS id,role,canonical_content AS content,canonical_hash AS canonicalHash FROM messages WHERE chat_id=?
     AND message_id IN (SELECT value FROM json_each(?)) AND lifecycle IN ('committed','client_pruned')
-    AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).all(chatId, JSON.stringify(sourceIds)) as Array<{ id: string; content: string; canonicalHash: string }>;
+    AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).all(chatId, JSON.stringify(sourceIds)) as Array<{ id: string; role: string; content: string; canonicalHash: string }>;
+}
+
+/** When dialogue occurs in both sides of a turn, prefer the model response. */
+export function preferAssistantDialogueSources<T extends {role:string}>(matches:T[]):T[] {
+  const responses = matches.filter(match => match.role === "assistant");
+  return responses.length ? responses : matches;
 }
 
 export function rescueDraftDialogues(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult): ExtractionDraftResult {
   const messages = sourceMessages(db, chatId, sourceIds);
-  const exact = (quote: string) => {
+  const exact = (quote: string, preferResponse = false) => {
     if (!quote.trim()) return;
-    let match: { messageId: string; canonicalHash: string; startOffset: number; endOffset: number; quote: string } | undefined;
-    for (const message of messages) {
-      const startOffset = message.content.indexOf(quote);
-      if (startOffset < 0) continue;
-      // Count repeated occurrences too, even inside one message. No fuzzy matching.
-      if (match || message.content.indexOf(quote, startOffset + 1) >= 0
-        || !sourceRangeIsVisible(message.content, startOffset, startOffset + quote.length)) return;
-      match = { messageId: message.id, canonicalHash: message.canonicalHash, startOffset, endOffset: startOffset + quote.length, quote };
-    }
-    return match;
+    const matches = messages.flatMap(message => {
+      const spans = [];
+      for (let startOffset = message.content.indexOf(quote); startOffset >= 0; startOffset = message.content.indexOf(quote, startOffset + 1)) {
+        const endOffset = startOffset + quote.length;
+        if (sourceRangeIsVisible(message.content, startOffset, endOffset)) spans.push({role:message.role,
+          messageId:message.id,canonicalHash:message.canonicalHash,startOffset,endOffset,quote});
+      }
+      return spans;
+    });
+    const eligible = preferResponse ? preferAssistantDialogueSources(matches) : matches;
+    if (eligible.length !== 1) return;
+    const {role, ...span} = eligible[0]!;
+    return span;
   };
   const rescued = structuredClone(draft);
   for (const memory of rescued.memories) for (const dialogue of memory.keyDialogues ?? []) {
-    const span = exact(dialogue.text);
+    const span = exact(dialogue.text, true);
     if (span) { dialogue.messageId = span.messageId; dialogue.evidence = [span]; }
   }
   for (const passage of rescued.sourcePassages ?? []) {

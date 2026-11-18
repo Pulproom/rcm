@@ -3,11 +3,15 @@ const release = JSON.parse(readFileSync(new URL("../../release-config.json", imp
 export const PRODUCT_VERSION = release.productVersion;
 export const PLUGIN_VERSION = release.pluginVersion;
 
-export function pluginBanner({ distribution = false, updateUrl = "" } = {}) {
+export function pluginBanner({ distribution = false, updateUrl = "", dev = false } = {}) {
   if (updateUrl && !updateUrl.startsWith("https://")) throw new Error("Plugin update URL must use HTTPS");
+  const devUpdate = dev && Boolean(updateUrl);
+  const now = new Date();
+  const stamp = devUpdate ? [now.getFullYear(), now.getMonth() + 1, now.getDate(), now.getHours(), now.getMinutes()]
+    .map((part, index) => String(part).padStart(index === 0 ? 4 : 2, "0")).join("") : "";
   return `//@name risu-cognitive-memory
-//@display-name Risu Cognitive Memory ${PLUGIN_VERSION}
-//@version ${PLUGIN_VERSION}
+//@display-name Risu Cognitive Memory ${PLUGIN_VERSION}${devUpdate ? " dev" : ""}
+//@version ${PLUGIN_VERSION}${devUpdate ? `.${stamp}` : ""}
 ${updateUrl ? `//@update-url ${updateUrl}\n` : ""}//@api 3.0
 //@description Relation-first cognitive memory with optional temporal world simulation
 //@author Risu Cognitive Memory contributors

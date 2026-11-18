@@ -1,7 +1,7 @@
 import { backfillLegacyParticipantAccess } from "./access-migration.js";
 import { isEndedPromiseStatus, promiseFirstMade, type PromiseFirstMade } from "./promise-recency.js";
 import { validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, intersectAccessKnowledge, type ItemAccessScope } from "./item-access.js";
-import { linkedDetailKnowledge, promiseLinkedSupport, correctedPromiseDetailIds, projectPromiseRow, knownByLabels } from "./item-access.js";
+import { createItemAccessReadContext, loadKnownByLabels, type ItemAccessReadContext, linkedDetailKnowledge, promiseLinkedSupport, correctedPromiseDetailIds, projectPromiseRow } from "./item-access.js";
 import { createHash } from "node:crypto";
 import { normalizeSearchTokens, scopeOf, structuredStoryTimeEnd, type KnowledgeScope, type McpEvidence, type StateKind } from "@rcm/shared";
 import { publicKnowledgeScope } from "./item-access.js";
@@ -63,40 +63,84 @@ const evidenceKey = (item: any): string => JSON.stringify([
 ]);
 
 export function resolveAssertionHolders(db: RcmDatabase, chatId: string, row: any): string[] | null {
-  if (row.linked_detail_ids_json != null && row.user_edit_ordinal == null)
-    return linkedDetailKnowledge(db,chatId,parse(row.linked_detail_ids_json)) ?? null;
-  const directScopes = loadItemAccessScopes(db, chatId, [{ kind: "assertion", id: String(row.id) }]);
-  const direct = storedItemAccessScope(directScopes, "assertion", String(row.id));
-  if (direct.explicit && validItemAccessScope(direct)) return direct.narratorOnly ? [NARRATOR_ARCHIVE_HOLDER] : itemAccessKnowledge(direct);
-  const relation = parseSocialRelation(row.social_relation_json);
-  if (relation && !direct.pending) return relation.manual && !relation.knownByEveryone && !relation.knownBy?.length ? [NARRATOR_ARCHIVE_HOLDER] : socialRelationKnowledge(db,chatId,relation) ?? null;
-  if (!restrictedStateKind(row.state_kind)) return direct.pending ? null : [];
-  if (direct.explicit) return null;
+  return assertionHolders(db, chatId, [row]).get(String(row.id)) ?? null;
+}
 
-  const evidence = parse(row.evidence_json);
-  if (!evidence.length) return null;
-  const evidenceKeys = new Set(evidence.map(evidenceKey));
-  const details = db.prepare(`SELECT d.id,d.evidence_json,d.known_by_json FROM visible_memory_details d
-    JOIN memories m ON m.id=d.memory_id
-    WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND (? IS NULL OR d.memory_id=?)`).all(chatId, row.source_memory_id, row.source_memory_id) as Array<{ id: string; evidence_json: string; known_by_json: string }>;
-  const matching = details.filter((detail) => parse(detail.evidence_json).some((item: any) => evidenceKeys.has(evidenceKey(item))));
-  if (!matching.length) return null;
-  const scopes = loadItemAccessScopes(db, chatId, matching.map((detail) => ({ kind: "detail" as const, id: detail.id })));
-  const resolved = matching.map(detail => storedItemAccessScope(scopes, "detail", detail.id));
-  if (resolved.some(scope => !scope.explicit || !validItemAccessScope(scope))) return null;
-  const holders = [...new Set(resolved.map(itemAccessKnowledge).reduce(intersectAccessKnowledge))];
-  return holders.length || resolved.every(scope => scope.narratorOnly) ? holders : null;
+/** One snapshot per collection, preserving detail scan/intersection order. */
+function assertionHolders(db: RcmDatabase, chatId: string, rows: any[], reads?:ItemAccessReadContext): Map<string, string[] | null> {
+  const directScopes = loadItemAccessScopes(db, chatId, rows.map(row => ({kind:"assertion",id:String(row.id)})));
+  type Detail = { id:string; memory_id:string; evidence_json:string; known_by_json:string };
+  let fallback: { byEvidence:Map<string,Detail[]>; byMemory:Map<string,Map<string,Detail[]>>;
+    order:Map<Detail,number>; scopes:Map<string,ItemAccessScope> } | undefined;
+  const supported = (row:any): string[] | null => {
+    if (row.linked_detail_ids_json != null && row.user_edit_ordinal == null)
+      return linkedDetailKnowledge(db,chatId,parse(row.linked_detail_ids_json),reads) ?? null;
+    const direct = storedItemAccessScope(directScopes, "assertion", String(row.id));
+    if (direct.explicit && validItemAccessScope(direct)) return direct.narratorOnly ? [NARRATOR_ARCHIVE_HOLDER] : itemAccessKnowledge(direct);
+    const relation = parseSocialRelation(row.social_relation_json);
+    if (relation && !direct.pending) return relation.manual && !relation.knownByEveryone && !relation.knownBy?.length ? [NARRATOR_ARCHIVE_HOLDER] : socialRelationKnowledge(db,chatId,relation,reads) ?? null;
+    if (!restrictedStateKind(row.state_kind)) return direct.pending ? null : [];
+    if (direct.explicit) return null;
+    const evidence = parse(row.evidence_json);
+    if (!evidence.length) return null;
+    if (!fallback) {
+      // Single-row dashboard/editor reads retain their parent projection;
+      // collection reads materialize the archive once for every assertion.
+      const sourceMemory=rows.length===1 ? rows[0].source_memory_id ?? null : null;
+      const details = db.prepare(`SELECT d.id,d.memory_id,d.evidence_json,d.known_by_json FROM visible_memory_details d
+        JOIN memories m ON m.id=d.memory_id WHERE d.chat_id=? AND d.active=1 AND m.active=1
+        AND (? IS NULL OR d.memory_id=?)`).all(chatId,sourceMemory,sourceMemory) as Detail[];
+      const byEvidence=new Map<string,Detail[]>(), byMemory=new Map<string,Map<string,Detail[]>>();
+      const append=(map:Map<string,Detail[]>,key:string,detail:Detail) => {
+        const entries=map.get(key) ?? []; entries.push(detail); map.set(key,entries);
+      };
+      for (const detail of details) {
+        const local=byMemory.get(detail.memory_id) ?? new Map<string,Detail[]>();
+        for (const key of new Set(parse(detail.evidence_json).map(evidenceKey))) {
+          append(byEvidence,key,detail); append(local,key,detail);
+        }
+        byMemory.set(detail.memory_id,local);
+      }
+      fallback={byEvidence,byMemory,order:new Map(details.map((detail,index)=>[detail,index])),
+        scopes:loadItemAccessScopes(db,chatId,details.map(detail=>({kind:"detail",id:detail.id})))};
+    }
+    const evidenceKeys = new Set(evidence.map(evidenceKey));
+    // Shared source spans across many memories must not fan out a parent's
+    // lookup over the whole archive before applying its memory constraint.
+    const index=row.source_memory_id == null ? fallback.byEvidence : fallback.byMemory.get(row.source_memory_id);
+    const matching = [...new Set([...evidenceKeys].flatMap(key=>index?.get(key) ?? []))]
+      .sort((a,b)=>fallback!.order.get(a)!-fallback!.order.get(b)!);
+    if (!matching.length) return null;
+    const resolved = matching.map(detail => storedItemAccessScope(fallback!.scopes, "detail", detail.id));
+    if (resolved.some(scope => !scope.explicit || !validItemAccessScope(scope))) return null;
+    const holders = [...new Set(resolved.map(itemAccessKnowledge).reduce(intersectAccessKnowledge))];
+    return holders.length || resolved.every(scope => scope.narratorOnly) ? holders : null;
+  };
+  return new Map(rows.map(row=>[String(row.id),supported(row)]));
 }
 
 /** Re-materialize from canonical rows; cached prose never grants validity or access.
  * Historical supersession is distinct from source deletion and branch rollback. */
 export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcomeCapture, perspective = ""): StateEvidence[] {
+  return readStateEvidence(db, chatId, trace, perspective);
+}
+
+/** Migration only: compare both formulas from the same canonical snapshot. */
+export function stateEvidenceFingerprintMigration(db: RcmDatabase, chatId: string): Map<string, { legacy: string; current: string }> {
+  const fingerprints = new Map<string, { legacy: string; current: string }>();
+  readStateEvidence(db, chatId, undefined, "", fingerprints);
+  return fingerprints;
+}
+
+function readStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcomeCapture, perspective = "",
+  migration?: Map<string, { legacy: string; current: string }>): StateEvidence[] {
   backfillLegacyParticipantAccess(db, chatId);
   const turn = Number((db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(chatId) as { completed_turn_count: number } | undefined)?.completed_turn_count ?? 0);
   const result: StateEvidence[] = [];
   const pending: Array<() => void> = [];
   const sourceIds = new Set<string>();
   const sources = new Map<string, any>();
+  const sourceIdentities = new Map<string, unknown>();
   const correctedIds = new Set<string>();
   const predecessors = new Map<string, Array<{ id: string; evidence: any[] }>>();
   const link = (id: string, successor: string | undefined, evidence: any[]) => {
@@ -114,7 +158,10 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
   };
   const recordRejection = (kind: string, id: string, reason: string): void => trace?.record(perspective, { id: `${kind}:${id}`, kind }, "not_collected", { reason });
   const rejected = (kind: string, id: string, reason: string): void => { pending.push(() => recordRejection(kind, id, reason)); };
+  const reads=createItemAccessReadContext(db,chatId);
   const origins=promiseFirstMade(db,chatId);
+  const labelItems:Array<{kind:import('./item-access.js').ItemAccessKind;id:string}>=[];
+  const pendingLabels:Array<()=>void>=[];
   const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json,story_time,story_time_normalized FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
   const supportTimes = new Map<string, Set<string>>();
   for (const memory of memories.values()) {
@@ -141,7 +188,10 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
         ...(stateKind ? { stateKind } : {}),
         ...(kind === "relationship" ? {relationship: {from:row.from, to:row.to, stale:row.stale}} : {}),
         subjects: [...new Set(subjects.filter(Boolean))], current, memoryId: row.source_memory_id || undefined, sourceIds: [...new Set<string>(ids)] };
-      const fingerprint = createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sources.get(id))])).digest("hex");
+      const fingerprint = createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sourceIdentities.get(id))])).digest("hex");
+      // Legacy whole-message formula is used only by the one-time sidecar migration.
+      if (migration) migration.set(item.id, { current: fingerprint,
+        legacy: createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sources.get(id))])).digest("hex") });
       // Ordinal selects the latest support, not the largest calendar value.
       // Ambiguous/missing clocks and manual corrections never borrow an older time.
       const latestSource = ids.reduce<string | undefined>((latest, id) => latest === undefined
@@ -149,20 +199,27 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       const times = latestSource ? supportTimes.get(latestSource) : undefined;
       const recordedStoryTime = !corrected && times?.size === 1 ? [...times][0] : undefined;
       const accessKind=kind==="world_fact" || kind==="basic_relation"?"assertion":kind==="promise"?"promise":kind==="intimacy"?"physical_milestone":undefined;
-      result.push({ ...item, fingerprint, citations: evidence, citationScope, automatic, ...presentation, recordedStoryTime,
+      const collected:StateEvidence={ ...item, fingerprint, citations: evidence, citationScope, automatic, ...presentation, recordedStoryTime,
         updatedRevision: row.updated_revision ?? row.updatedRevision ?? row.valid_from_revision ?? row.created_revision,
         updatedOrdinal: Math.max(row.user_edit_ordinal ?? row.userEditOrdinal ?? -1, row.source_end_ordinal ?? row.valid_from_ordinal ?? -1,
           ...ids.map(id => sources.get(id)?.ordinal ?? -1)),
         ...(kind === "promise_history" ? {promiseStatus:row.status} : {}),
         ...(kind === "promise" ? { firstMade: origins.get(row.id), promiseStatus: row.status, promisePinned: row.pinned === 1 && (row.status === "open" || isEndedPromiseStatus(row.status)),
           promiseRecent: isEndedPromiseStatus(row.status) && row.ended_at_turn != null && turn >= row.ended_at_turn && turn < row.recency_until_turn, due: row.scheduled_for ?? undefined } : {}),
-        ...(accessKind?{knownByLabels:knownByLabels(db,chatId,accessKind,String(row.id),item.holders)}:{}) });
+        };
+      if (accessKind) {
+        labelItems.push({kind:accessKind,id:String(row.id)});
+        pendingLabels.push(()=>{collected.knownByLabels=labels(accessKind,String(row.id),item.holders);});
+      }
+      result.push(collected);
     });
   };
-  for (const row of db.prepare("SELECT * FROM assertions WHERE chat_id=? ORDER BY valid_from_revision DESC,id").iterate(chatId) as Iterable<any>) {
+  const assertions = db.prepare("SELECT * FROM assertions WHERE chat_id=? ORDER BY valid_from_revision DESC,id").all(chatId) as any[];
+  const assertionAccess = assertionHolders(db,chatId,assertions,reads);
+  for (const row of assertions) {
     const relation = parseSocialRelation(row.social_relation_json);
     const evidence = parse(row.evidence_json);
-    const holders = resolveAssertionHolders(db, chatId, row);
+    const holders = assertionAccess.get(String(row.id));
     if (!holders) { rejected(relation ? "basic_relation" : "world_fact", row.id, "access"); continue; }
     const current = row.valid_to_revision === null;
     const kind = relation ? "basic_relation" : "world_fact";
@@ -174,12 +231,14 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       { subject: relation ? `${row.subject} → ${relation.target}` : row.subject, body: row.value },
       {linkedDetailIds: row.linked_detail_ids_json != null ? parse(row.linked_detail_ids_json) : relation?.detailIds, displayText:`${relation ? `${row.subject} & ${relation.target}` : row.subject}: ${relation ? "" : `${row.predicate.replaceAll("_", " ")} — `}${row.value}${row.source && row.source !== "manual" ? ` (Source: ${row.source})` : ""}`, ...(!current ? {historyLabel:"before it changed",currentItemId:successors.length === 1 ? `${kind}:${successors[0]}` : undefined} : {})});
   }
-  for (const row of db.prepare("SELECT * FROM beliefs WHERE chat_id=? ORDER BY created_revision DESC,id").iterate(chatId) as Iterable<any>) {
+  const beliefs=db.prepare("SELECT * FROM beliefs WHERE chat_id=? ORDER BY created_revision DESC,id").all(chatId) as any[];
+  const beliefScopes=loadItemAccessScopes(db,chatId,beliefs.map(row=>({kind:'belief',id:row.id})));
+  for (const row of beliefs) {
     if (!(row.active === 1 || row.status === "superseded") || ["pending_review", "disputed"].includes(row.status)) {
       rejected("belief", row.id, ["pending_review", "disputed"].includes(row.status) ? "review" : "inactive"); continue;
     }
-    const recorded = storedItemAccessScope(loadItemAccessScopes(db,chatId,[{kind:'belief',id:row.id}]),'belief',row.id,[row.holder]);
-    const holders = row.linked_detail_ids_json != null && row.user_edit_ordinal == null ? linkedDetailKnowledge(db,chatId,parse(row.linked_detail_ids_json))
+    const recorded = storedItemAccessScope(beliefScopes,'belief',row.id,[row.holder]);
+    const holders = row.linked_detail_ids_json != null && row.user_edit_ordinal == null ? linkedDetailKnowledge(db,chatId,parse(row.linked_detail_ids_json),reads)
       : validItemAccessScope(recorded) ? recorded.narratorOnly ? [NARRATOR_ARCHIVE_HOLDER] : itemAccessKnowledge(recorded) : undefined;
     if (!holders) { rejected("belief",row.id,"access"); continue; }
     const current = row.active === 1 && row.status === "active";
@@ -195,13 +254,13 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
         displayText:`${subject}: ${body}${suffix}`, dedupeText:`${row.holder} → ${row.subject}: ${legacyBody}${suffix}`, dedupeBody:legacyBody,
         ...(!current ? {historyLabel:"before it changed", currentItemId:row.superseded_by ? `belief:${row.superseded_by}` : undefined} : {})});
   }
-  const promises = (db.prepare("SELECT * FROM promises WHERE chat_id=? ORDER BY updated_revision DESC,id").all(chatId) as any[]).map(row=>projectPromiseRow(db,chatId,row));
-  const access = loadItemAccess(db, chatId, promises.map(row => ({ kind: "promise" as const, id: row.id })));
-  const promiseScopes = loadItemAccessScopes(db, chatId, promises.map(row => ({ kind: "promise" as const, id: row.id })));
+  const promises = reads.promises.map(row=>projectPromiseRow(db,chatId,row,undefined,reads));
+  const access = loadItemAccess(db, chatId, promises.map(row => ({ kind: "promise" as const, id: row.id })),reads);
+  const promiseScopes = loadItemAccessScopes(db, chatId, promises.map(row => ({ kind: "promise" as const, id: row.id })),reads);
   const promiseById = new Map(promises.map(row => [row.id, row]));
-  const promiseEvents = (db.prepare("SELECT * FROM promise_events WHERE chat_id=? AND active=1 AND status<>'invalidated' ORDER BY source_ordinal,created_revision,created_at,rowid").all(chatId) as any[]).map(row=>projectPromiseRow(db,chatId,row,row.id));
+  const promiseEvents = reads.events.filter(row=>row.active===1 && row.status!=='invalidated').map(row=>projectPromiseRow(db,chatId,row,row.id,reads));
   for (const row of promises) {
-    const support = promiseLinkedSupport(db,chatId,row.id);
+    const support = promiseLinkedSupport(db,chatId,row.id,undefined,reads);
     if (support && !support.holders.length) { rejected("promise",row.id,"access"); continue; }
     const scope = resolveItemAccess(access, "promise", row.id, [row.promisor, row.promisee]);
     const recorded = storedItemAccessScope(promiseScopes, "promise", row.id);
@@ -215,7 +274,7 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
   for (const row of [...promiseEvents].reverse()) {
     const parent = promiseById.get(row.promise_id);
     if (!parent || parent.content === row.content && parent.status === row.status && parent.status_reason === row.status_reason) continue;
-    const support = promiseLinkedSupport(db,chatId,parent.id,row.id);
+    const support = promiseLinkedSupport(db,chatId,parent.id,row.id,reads);
     if (support && !support.holders.length) { rejected("promise_history",row.id,"access"); continue; }
     const scope = resolveItemAccess(access, "promise", row.promise_id, [row.promisor, row.promisee]);
     const recorded = storedItemAccessScope(promiseScopes, "promise", row.promise_id);
@@ -239,9 +298,11 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
       {linkedDetailIds:details.map(detail=>detail.id),historyLabel:row.user_edit_ordinal != null ? "corrected" : recognitionActionLabel[row.action] ?? "recognition changed",
         currentItemId:`recognition:${row.holder}:${row.subject}`});
   }
+  const relationshipEvents=db.prepare("SELECT * FROM visible_relationship_events WHERE chat_id=? AND active=1 ORDER BY source_end_ordinal DESC,created_revision DESC,id").all(chatId) as any[];
+  const relationshipById=new Map(relationshipEvents.map(row=>[row.id,row]));
   for (const row of listRelationshipProjections(db, chatId)) {
     const {summaryReady,...projection} = row;
-    const basis = row.basisEventIds.map(id => db.prepare("SELECT evidence_json,source_detail_id FROM visible_relationship_events WHERE chat_id=? AND id=? AND active=1").get(chatId,id) as {evidence_json:string;source_detail_id:string|null} | undefined);
+    const basis = row.basisEventIds.map(id => relationshipById.get(id) as {evidence_json:string;source_detail_id:string|null} | undefined);
     if (!row.userEdited && !row.locked && basis.some(event => !event)) { rejected("relationship", `${row.from}:${row.to}`, "inactive_basis"); continue; }
     const basisEvidence = JSON.stringify(basis.flatMap(event => event ? parse(event.evidence_json) : []));
     const summary = row.summary || Object.entries(row.axes).filter(([, axis]) => axis.level !== "unknown").map(([axis, value]) => `${axis}: ${value.level}`).join("; ");
@@ -254,10 +315,10 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
         {displayText:`${row.from} toward ${row.to} — ${plainStateValue(axis)}: ${plainStateValue(value.level)}; ${plainStateValue(value.trend)}.`});
     }
   }
-  for (const row of db.prepare("SELECT * FROM visible_relationship_events WHERE chat_id=? AND active=1 ORDER BY source_end_ordinal DESC,created_revision DESC,id").iterate(chatId) as Iterable<any>) {
+  for (const row of relationshipEvents) {
     add("relationship_history", row, `${row.from_entity} → ${row.to_entity}: ${row.reason}. Recorded change: ${parse(row.changes_json).map(change => `${change.axis}: ${change.effect} (${change.impact})`).join("; ")}`, [row.from_entity], [row.from_entity, row.to_entity], false,undefined,undefined,undefined,
       {linkedDetailIds:row.source_detail_id ? [row.source_detail_id] : [],historyLabel:"relationship changed",currentItemId:`relationship:${row.from_entity}:${row.to_entity}`,
-        displayText:`${row.from_entity} → ${row.to_entity}: ${row.reason}. ${parse(row.changes_json).map(change=>`${plainStateValue(change.axis)} ${plainStateValue(change.effect)} (${plainStateValue(change.impact)})`).join("; ")}`});
+        displayText:`${row.from_entity} → ${row.to_entity}: ${joinSentences([row.reason,parse(row.changes_json).map(change=>`${plainStateValue(change.axis)} ${plainStateValue(change.effect)} (${plainStateValue(change.impact)})`).join("; ")])}`});
   }
   const milestones = db.prepare("SELECT * FROM physical_intimacy_milestones WHERE chat_id=? AND active=1 AND deleted_by_user=0 ORDER BY source_start_ordinal,id").all(chatId) as any[];
   const physicalAccess = loadItemAccess(db, chatId, milestones.map(row => ({kind:"physical_milestone" as const,id:row.id})));
@@ -277,12 +338,17 @@ export function collectStateEvidence(db: RcmDatabase, chatId: string, trace?: St
     }
   }
   // Fetch only cited source rows, once, after parent-memory citation fallback.
-  // Keep the projection/order identical: source rows also enter the fingerprint.
+  // Keep the legacy projection/order for migration; ordinary fingerprints use
+  // source identity and hashes, never the whole canonical message.
   if (sourceIds.size) for (const row of db.prepare(`SELECT message_id,canonical_hash,content_hash,canonical_content,ordinal,lifecycle,host_visibility
     FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?)) AND memory_excluded=0`).all(chatId, JSON.stringify([...sourceIds])) as any[]) {
     sources.set(row.message_id, row);
+    const { canonical_content: _content, ...identity } = row;
+    sourceIdentities.set(row.message_id, identity);
   }
   for (const collect of pending) collect();
+  const labels=loadKnownByLabels(db,chatId,labelItems,reads);
+  for (const annotate of pendingLabels) annotate();
   const byId = new Map(result.map(item => [item.id, item]));
   for (const item of result) {
     // A manual correction no longer asserts the original transition value/date.
@@ -405,5 +471,6 @@ export function stateMcpEvidence(item: StateEvidence): McpEvidence {
   const label = item.historyLabel ? `Earlier (${item.historyLabel})` : item.kind === "promise" ? `${kind}, ${promiseStatusLabel[item.promiseStatus ?? "open"] ?? "outcome unknown"}` : kind;
   return { atomKey: `state:${item.id}:${item.fingerprint}`, kind: "fact", text: `${label}: ${lastRecordedStateText(item,stateEvidenceText(item))}`,
     knownBy:narratorOnly ? [NARRATOR_ARCHIVE_HOLDER] : item.holders, knownByLabels:narratorOnly ? undefined : item.knownByLabels,
+    recognitionId:item.kind === "recognition" && item.current ? item.id : undefined,
     basis:item.kind === "belief" ? "recorded belief" : item.current ? "current recorded state" : "historical record" };
 }

@@ -36,7 +36,7 @@ import { markStoryRangesInvalid, maybeEnqueueStorySpine } from './story-spine.js
 import { flushRelationshipProjectionQueue } from './relationship-projections.js';
 import { normalizeLedgerPredicate, normalizeLedgerText } from './normalization.js';
 import { stripThoughtBlocks } from './source-text.js';
-import { canonicalizeExtraction } from './entities.js';
+import { canonicalizeExtraction, modelEntityContext, modelMemoryLookups } from './entities.js';
 import { intimacyMilestoneKeys } from './intimacy-milestones.js';
 
 const fail = (message: string, code = 'MEMORY_ADDITION_INVALID') => Object.assign(new Error(message), { code });
@@ -117,9 +117,10 @@ export function buildAdditionJob(db: RcmDatabase, id: string, chatId: string, pr
     && between.ordinal > rows[index]!.ordinal && between.ordinal < row.ordinal)
     ? [{ afterMessage: rows[index]!.ordinal + 1, beforeMessage: row.ordinal + 1, omitted: true }] : []);
   const memoryAddition = { userRequest: payload.userRequest, existingMemories: payload.existingMemories };
+  const existingMemories=modelMemoryLookups(payload.existingMemories,modelEntityContext(db,chatId).allowsName);
   const recovery = payload.mode === 'gap_recovery';
   const systemPrompt = `${built.systemPrompt}\n\n${eventWriting ? EVENT_ADDITION_GUIDANCE : MEMORY_ADDITION_GUIDANCE}\n${memoryAdditionRequestGuidance(payload.userRequest)}${recovery ? eventWriting ? `\n${EVENT_GAP_GUIDANCE}` : '\nGAP RECOVERY: Archive only the selected historical hole. Keep memories with details, keyDialogues and sourcePassages only. Return no entities, stateObservations, assertions, beliefs, promises, relationshipEvents, relationshipBaselines, physicalIntimacy, socialKnowledge, seedResolutions, atomRelations, or recall observations. Accumulated state is already correct. READ_ONLY_CONTEXT_JSON is context, never evidence. Evidence and unfinishedSource must refer only to selected hole messages. An empty memories array is a valid completed outcome when there is nothing worth adding.' : ''}`;
-  const userPrompt = appendExtractionContinuation(`${built.userPrompt}\nADDITIVE_CONTEXT_JSON\n${JSON.stringify({ existingMemories: payload.existingMemories,
+  const userPrompt = appendExtractionContinuation(`${built.userPrompt}\nADDITIVE_CONTEXT_JSON\n${JSON.stringify({ existingMemories,
     selectedMessageNumbers: rows.map(row => ({ id: row.id, number: row.ordinal + 1 })), gaps,
     userNote: memoryAdditionUserNote(payload.userRequest) })}\nEND_ADDITIVE_CONTEXT_JSON${recovery ? `\nREAD_ONLY_CONTEXT_JSON\n${JSON.stringify(allRows.filter(row=>payload.contextMessageIds?.includes(row.id)).map(row=>({id:row.id,role:row.role,content:row.content})))}\nEND_READ_ONLY_CONTEXT_JSON` : ''}`, payload.continuationDraft, built.promptContract);
   return { ...built, extractionLookup: { key: lookupKey, value: lookup }, id, chatId, profile, kind: 'extract', memoryAddition, attempt, systemPrompt, userPrompt, prompt: `${systemPrompt}\n\n${userPrompt}`,

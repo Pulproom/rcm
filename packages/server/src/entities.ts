@@ -1,4 +1,4 @@
-import { createEntityIdentityResolver, normalizeEntityName, type ResolvedEntityIdentity } from "@rcm/shared";
+import { classifyEntityType, createEntityIdentityResolver, effectiveEntityType, mapEntityPersonFields, modelEntityIdentityContext, normalizeEntityName, type ResolvedEntityIdentity } from "@rcm/shared";
 export { normalizeEntityName, type ResolvedEntityIdentity } from "@rcm/shared";
 import { addressTermAliasGuard, syncManualCognition } from "./social-knowledge.js";
 import type { EntityBirthday, ExtractionResult } from "@rcm/shared";
@@ -10,6 +10,7 @@ import { personaHintKey, readViewPreferences } from "./view-preferences.js";
 import { updateSetupRecognition } from "./setup-recognition.js";
 import { invalidateStorySupports, storySupportScopes } from "./story-spine.js";
 import { readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, writeDetailAccessEdits, pruneDetailAccessEdits } from "./item-access.js";
+import { structuredEntityPersonReferences, isSupportedEntityType } from "./entity-cleanup.js";
 
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -45,13 +46,47 @@ function entityIdentityTerms(entity: EntityItem, removed: (entityId: string, ali
   return [...new Set([entity.id, entity.key, entity.name, entity.displayName, ...entity.aliases.filter(alias => !removed(entity.id, alias))])];
 }
 
-export function listEntities(db: RcmDatabase, chatId: string): EntityItem[] {
+function storedEntities(db: RcmDatabase, chatId: string): EntityItem[] {
   const rows = db.prepare(`SELECT id,entity_key AS key,name,CASE WHEN display_name='' THEN name ELSE display_name END AS displayName,
     type,color,birthday_json AS birthday,origin,setup_prominence AS setupProminence,source_json AS source,user_managed AS userManaged
     FROM entities WHERE chat_id=? ORDER BY displayName COLLATE NOCASE`).all(chatId) as Array<Omit<EntityItem, "aliases" | "source" | "userManaged" | "birthday"> & { source: string; userManaged: number; birthday: string | null }>;
   const aliases = db.prepare("SELECT alias FROM aliases WHERE entity_id=? ORDER BY alias COLLATE NOCASE");
-  return rows.map((row) => ({ ...row, birthday: row.birthday ? parseJson<EntityBirthday | undefined>(row.birthday, undefined) : undefined, source: parseJson(row.source, []), userManaged: row.userManaged === 1,
+  const items = rows.map((row) => ({ ...row, birthday: row.birthday ? parseJson<EntityBirthday | undefined>(row.birthday, undefined) : undefined, source: parseJson(row.source, []), userManaged: row.userManaged === 1,
     aliases: (aliases.all(row.id) as Array<{ alias: string }>).map((item) => item.alias) }));
+  return items;
+}
+
+/** Models and the dashboard share the same effective identity classification.
+ * Unknown names and aliases shared with a legitimate being/group stay usable. */
+export function modelEntityContext(db: RcmDatabase, chatId: string) {
+  const stored = listEntities(db, chatId);
+  const removed = aliasRemovalGuard(db, chatId);
+  const identityEntities=stored.map(({id,key,name,displayName,type,aliases})=>({id,key,name,displayName,type,aliases:aliases.filter(alias=>!removed(id,alias))}));
+  return {...modelEntityIdentityContext(stored.map(entity=>({...entity,aliases:entity.aliases.filter(alias=>!removed(entity.id,alias))}))),identityEntities};
+}
+
+/** Lookup metadata only. Text, evidence and the stored snapshot are preserved. */
+export function modelMemoryLookups(memories: readonly unknown[], allowsName:(name:string)=>boolean): unknown[] {
+  return memories.map(value=>{
+    if(!value || typeof value!=='object' || Array.isArray(value))return value;
+    const row={...value} as Record<string,any>;
+    for(const field of ['participants','knownBy'])if(Array.isArray(row[field]))row[field]=row[field].filter((name:unknown)=>typeof name!=='string'||allowsName(name));
+    if(typeof row.perspective==='string'&&!allowsName(row.perspective))delete row.perspective;
+    if(Array.isArray(row.keyDialogues))row.keyDialogues=row.keyDialogues.map((dialogue:Record<string,unknown>)=>{
+      if(typeof dialogue?.speaker!=='string'||allowsName(dialogue.speaker))return dialogue;
+      const {speaker:_,...rest}=dialogue;return rest;
+    });
+    return row;
+  });
+}
+
+export function listEntities(db: RcmDatabase, chatId: string): EntityItem[] {
+  const items = storedEntities(db, chatId);
+  const references = items.some(item => !isSupportedEntityType(effectiveEntityType(item))) ? structuredEntityPersonReferences(db, chatId) : undefined;
+  // Pending/opaque work only postpones cleanup. Canonical person slots and
+  // explicit setup/manual/user authority establish effective personhood.
+  return items.map(item=>({...item,type:effectiveEntityType(item,[item.id,item.key,item.name,item.displayName,...item.aliases]
+    .some(name=>references?.has(normalizeEntityName(name))))}));
 }
 
 export function entityDisplayName(db: RcmDatabase, chatId: string, value: string): string {
@@ -275,7 +310,7 @@ export function previewEntityMerge(db: RcmDatabase, chatId: string, sourceId: st
   return { revision, source, target, preservedAliases: aliases, affected: { memories, relationships, beliefs, promises }, busy: Boolean(db.prepare("SELECT 1 FROM jobs WHERE chat_id=? AND status='leased' AND leased_until>? LIMIT 1").get(chatId, Date.now())) };
 }
 
-export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: ExtractionResult, sourceMessageIds?: string[], sourceBatchId?: string): ExtractionResult {
+export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: ExtractionResult, sourceMessageIds?: string[], sourceBatchId?: string, entityWarnings?: string[]): ExtractionResult {
   const result = suppressDeletedExtraction(db, chatId, structuredClone(source), sourceMessageIds, sourceBatchId);
   const known = listEntities(db, chatId);
   const aliasMap = new Map<string, EntityItem>();
@@ -290,6 +325,27 @@ export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: 
   const existingFor = (entity: ExtractionResult["entities"][number]) =>
     [entity.key, entity.name, ...entity.aliases].map(value => aliasMap.get(normalizeEntityName(value))).find(Boolean);
   const incomingResolve=createEntityIdentityResolver(result.entities.map(entity=>({id:entity.key,name:entity.name,terms:[entity.key,entity.name,...entity.aliases]})));
+  const uses: string[] = [];
+  mapEntityPersonFields(result, value => {
+    uses.push(...[value, resolve(value).canonical, incomingResolve(value).canonical].map(normalizeEntityName));
+    return value;
+  });
+  const reportEntity = (message: string) => {
+    entityWarnings?.push(message);
+    console.info(`[RCM] entity ingest: ${message}`);
+  };
+  result.entities = result.entities.flatMap(entity => {
+    const type = entity.type.trim().toLowerCase();
+    if (type === "person") return [{ ...entity, type: "character" }];
+    if (classifyEntityType(entity.type) !== "place_object") return [entity];
+    const terms = [entity.key, entity.name, ...entity.aliases].flatMap(value => [value, resolve(value).canonical, incomingResolve(value).canonical]).map(normalizeEntityName);
+    if (terms.some(term => uses.includes(term))) {
+      reportEntity(`entities ${entity.key}: place/object type ${JSON.stringify(entity.type)} retained unchanged because a person-only slot uses its identity`);
+      return [entity];
+    }
+    reportEntity(`entities ${entity.key}: dropped unused place/object type ${JSON.stringify(entity.type)}; other records preserved`);
+    return [];
+  });
   const replacements = new Map<string, string>();
   result.entities = result.entities.map((entity) => {
     const existing = existingFor(entity);
@@ -304,45 +360,17 @@ export function canonicalizeExtraction(db: RcmDatabase, chatId: string, source: 
     return { key: existing.key, name: existing.name, type: existing.type, aliases: [...new Set([...existing.aliases, entity.name, ...entity.aliases])].filter(alias => !removed(existing.id, alias)) };
   }).filter((entity, index, items) => items.findIndex((candidate) => candidate.key === entity.key) === index);
   const canonical = (value: string): string => resolve(value).ambiguous || incomingResolve(value).ambiguous ? value : aliasMap.get(normalizeEntityName(value))?.name ?? replacements.get(normalizeEntityName(value)) ?? value;
-  for (const memory of result.memories) {
-    memory.participants = memory.participants.map(canonical);
-    memory.knownBy = memory.knownBy.map(canonical);
-    if (memory.cardShape === 1) memory.knownBy = [...new Set(memory.knownBy)];
-    if (memory.perspective) memory.perspective = canonical(memory.perspective);
-    for (const landmark of memory.landmarkKinds ?? []) {
-      if (landmark.pair) landmark.pair = [canonical(landmark.pair[0]), canonical(landmark.pair[1])];
-    }
-    if (memory.witnesses) for (const witness of memory.witnesses) witness.name = canonical(witness.name);
-    if (memory.keyDialogues) for (const dialogue of memory.keyDialogues) {
-      dialogue.speaker = canonical(dialogue.speaker);
-      if (dialogue.access) for (const grant of dialogue.access) grant.holder = canonical(grant.holder);
-    }
-    for (const detail of memory.details ?? []) {
-      detail.participants = detail.participants.map(canonical);
-      detail.knownBy = detail.knownBy.map(canonical);
-      if (detail.seed) detail.seed.noticedBy = detail.seed.noticedBy.map(canonical);
-      if (detail.access) for (const grant of detail.access) grant.holder = canonical(grant.holder);
-    }
+  mapEntityPersonFields(result, canonical);
+  for (const memory of result.memories) if (memory.cardShape === 1) memory.knownBy = [...new Set(memory.knownBy)];
+  // State subjects/affiliation targets still resolve identity, but may name
+  // places or organizations and never establish personhood for cleanup.
+  for (const assertion of result.assertions) {
+    assertion.subject = canonical(assertion.subject);
+    if (assertion.socialRelation) assertion.socialRelation.target = canonical(assertion.socialRelation.target);
   }
-  for (const assertion of result.assertions) { assertion.subject = canonical(assertion.subject); if (assertion.socialRelation) assertion.socialRelation.target = canonical(assertion.socialRelation.target); }
-  for (const relation of result.atomRelations ?? []) for (const grant of relation.access) grant.holder = canonical(grant.holder);
-  for (const belief of result.beliefs) { belief.holder = canonical(belief.holder); belief.subject = canonical(belief.subject); }
-  for (const event of result.relationshipEvents ?? []) { event.from = canonical(event.from); event.to = canonical(event.to); }
-  for (const promise of result.promises) {
-    promise.promisor = canonical(promise.promisor);
-    promise.promisee = canonical(promise.promisee);
-    if (promise.access) for (const grant of promise.access) grant.holder = canonical(grant.holder);
-  }
-  for (const item of result.socialKnowledge ?? []) { item.holder = canonical(item.holder); item.subject = canonical(item.subject); }
+  for (const belief of result.beliefs) belief.subject = canonical(belief.subject);
   const addressTerm = addressTermAliasGuard(db, chatId, result.socialKnowledge);
   for (const entity of result.entities) entity.aliases = entity.aliases.filter(alias => !addressTerm(entity.name, alias));
-  for (const item of result.relationshipBaselines ?? []) { item.from = canonical(item.from); item.to = canonical(item.to); }
-  for (const item of result.physicalIntimacy ?? []) {
-    item.participants = [canonical(item.participants[0]), canonical(item.participants[1])];
-    if (item.initiator) item.initiator = canonical(item.initiator);
-    if (item.access) for (const grant of item.access) grant.holder = canonical(grant.holder);
-  }
-  for (const passage of result.sourcePassages ?? []) for (const grant of passage.access) grant.holder = canonical(grant.holder);
   return suppressDeletedExtraction(db, chatId, result, sourceMessageIds, sourceBatchId);
 }
 

@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RETRIEVAL_TRACE_CHAT_PREFIX } from "./retrieval-trace.js";
+import { RETRIEVAL_TRACE_CHAT_PREFIX, retrievalTraceEventKey } from "./retrieval-trace.js";
 import type { CardEmissionTrace } from "./emission-plan.js";
 import type { RecallPathObservation } from "./recall-path.js";
 import type { AtomPath } from "./atom-path-search.js";
@@ -85,7 +85,7 @@ export interface TurnAnalysis {
   queryExcerpt: string;
   eventKinds: string[];
   searchInjection: string;
-  prepare: { outcome?: string; elapsedMs?: number; latency: LatencyBand; timeoutMs?: number; fallbackTokens?: number; clientTimings?: Record<string, number> };
+  prepare: { outcome?: string; elapsedMs?: number; latency: LatencyBand; timeoutMs?: number; fallbackTokens?: number; clientTimings?: Record<string, number>; injectionTimings?: Record<string, unknown> };
   timings?: Record<string, number>;
   syncTimings?: Record<string, number>;
   currentState?: import("./state-outcomes.js").StateOutcomeReport;
@@ -101,7 +101,7 @@ export interface TurnAnalysis {
   targetTokens: number;
   hardTokenCeiling: number;
   toolSummary: string;
-  mcpTimings: Array<{ requestId?: string; toolName?: string; outcome?: string; reason?: string; ref?: string; origin?: string; latency: LatencyBand; server?: Record<string, number>; selector?: import("./mcp-selector.js").SelectorDiagnostic; requestMs?: number; elapsedMs?: number; cacheHit: boolean }>;
+  mcpTimings: Array<{ requestId?: string; toolName?: string; outcome?: string; reason?: string; ref?: string; origin?: string; latency: LatencyBand; server?: Record<string, number>; selector?: import("./mcp-selector.js").SelectorDiagnostic; hostReadMs?: number; requestMs?: number; elapsedMs?: number; cacheHit: boolean }>;
   elapsedMs?: number;
   status: "정상" | "확인 필요";
   warnings: string[];
@@ -148,6 +148,24 @@ function clientStageSummary(event: TraceEvent | undefined): string {
   const fields = ["response", "body", "json", "schema", "registration", "packet", "diagnostic"];
   const delivery = event?.traceDelivery as Record<string, unknown> | undefined;
   return `${fields.map((key) => `${key}=${String(stages[key] ?? "미기록")}`).join(", ")}; packetApplyMs=${typeof event?.packetApplyMs === "number" ? event.packetApplyMs.toFixed(2) : "미기록"}; memoryToolRegistrationMs=${typeof event?.memoryToolRegistrationMs === "number" ? event.memoryToolRegistrationMs.toFixed(2) : "미기록"}; traceDelivery=${String(delivery?.status ?? "미기록")}`;
+}
+
+/** Numeric client observations; older plugins have no breakdown. */
+function injectionTimingSummary(timing: Record<string, unknown> | undefined): string[] {
+  if (!timing) return ["- 플러그인 전체 기억 준비 세부: 미기록"];
+  const numberFields = (value: Record<string, unknown>, keys: string[]) => keys.map(key =>
+    `${key}=${typeof value[key] === "number" ? value[key].toFixed(2) : "미기록"}`).join(", ");
+  const context = timing.contextRead as Record<string, unknown> | undefined;
+  const scopes = timing.chatScopeChecks as Record<string, unknown> | undefined;
+  const assertions = timing.assertCurrentRequest as Record<string, unknown> | undefined;
+  return [
+    `- 플러그인 전체 기억 준비(ms): ${numberFields(timing, ["totalMs", "floatingElapsedMs", "preflightMs", "sourceHeadMs"])}`,
+    `- context 읽기: ${context ? numberFields(context, ["count", "totalMs", "hostChatReadMs", "descriptorComparisonMs", "loreDatabaseReadMs", "messageSourceResolutionMs", "visibilityMs", "messageCount", "sourceChars", "estimatedSourceTokens"]) : "미기록"}`,
+    `- chat scope 검사: ${scopes ? numberFields(scopes, ["count", "totalMs", "hashingMs"]) : "미기록"}; assertCurrentRequest: ${assertions ? numberFields(assertions, ["count", "totalMs", "hashingMs"]) : "미기록"}`,
+    ...(Array.isArray(scopes?.calls) ? scopes.calls.map((call: Record<string, unknown>) => `  - ${escapeCell(call.stage)}: ${numberFields(call, ["totalMs", "hostChatReadMs", "hashingMs"])}`) : []),
+    `- 플러그인 단계(ms): ${numberFields(timing, ["setupProjectionMs", "setupCaptureMs", "referenceSnapshotHashMs", "turnKeyHashMs", "prepareRequestBuildMs", "prepareRequestMs", "postResponseChecksMs", "toolRegistrationMs", "packetApplyMs"])}`,
+    "- totalMs는 위젯과 같은 경계의 단조 시계, floatingElapsedMs는 위젯의 실제 벽시계 값. preflightMs/sourceHeadMs와 initial scope는 전체 기억 준비 이전이며, context 하위 단계·scope·assert·응답 후 검사는 서로 포함되므로 합산하지 않음. sourceChars는 전체 해석 원문의 UTF-16 길이, estimatedSourceTokens는 활성 원문의 기존 추정치.",
+  ];
 }
 
 export function parseTrace(content: string): TraceParseResult {
@@ -222,6 +240,7 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
   const prepare = {
     outcome: injection?.prepareOutcome,
     clientTimings: injection?.prepareClientTimings as Record<string, number> | undefined,
+    injectionTimings: injection?.injectionTimings as Record<string, unknown> | undefined,
     elapsedMs: nonnegativeNumber(injection?.prepareElapsedMs),
     latency: latencyBand(injection?.prepareElapsedMs, injection?.prepareOutcome),
     timeoutMs: typeof injection?.prepareTimeoutMs === "number" ? injection.prepareTimeoutMs : undefined,
@@ -345,6 +364,7 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
       toolName: delivery.toolName, outcome: delivery.outcome, reason: delivery.reason as string | undefined, ref: delivery.ref as string | undefined, origin: delivery.origin as string | undefined, latency: latencyBand(delivery.elapsedMs, delivery.outcome),
       server: ((delivery.searchRequestId ? mcpSearches.find(event => event.id === delivery.searchRequestId || event.traceContext?.requestId === delivery.searchRequestId)?.timings : undefined) ?? delivery.serverTimings) as Record<string, number> | undefined,
       selector: delivery.searchRequestId ? mcpSearches.find(event => event.id === delivery.searchRequestId || event.traceContext?.requestId === delivery.searchRequestId)?.selector : undefined,
+      hostReadMs: nonnegativeNumber(delivery.hostReadMs),
       requestMs: nonnegativeNumber(delivery.requestMs),
       elapsedMs: nonnegativeNumber(delivery.elapsedMs), cacheHit: delivery.cacheHit === true})),
     prepare,
@@ -419,9 +439,18 @@ function analyzeTurn(events: TraceEvent[]): TurnAnalysis {
 
 export function analyzeTrace(parsed: TraceParseResult, options: { source: string; enabledChatIds?: Set<string>; latestEnabledChatId?: string; chatId?: string; allChats?: boolean; turns?: number;
   sourceRecoveryJobs?: Array<{ chatId: string; metadata?: import("@rcm/shared").SourceRecoveryMetadata }> }): DiagnosticAnalysis {
+  // Collapse historical retry duplicates before turn grouping or any counters.
+  // Events without an identity remain independent observations.
+  const seen = new Set<string>();
+  const events = parsed.events.filter(event => {
+    const key = retrievalTraceEventKey(event);
+    if (key === undefined) return true;
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
   const allowedEvents = options.chatId
-    ? parsed.events.filter((event) => event.chatId === options.chatId)
-    : options.enabledChatIds ? parsed.events.filter((event) => options.enabledChatIds!.has(String(event.chatId))) : parsed.events;
+    ? events.filter((event) => event.chatId === options.chatId)
+    : options.enabledChatIds ? events.filter((event) => options.enabledChatIds!.has(String(event.chatId))) : events;
   const latestEventChat = [...allowedEvents].sort((left, right) => Number(right.at ?? 0) - Number(left.at ?? 0))[0]?.chatId;
   const latestChat = options.latestEnabledChatId && allowedEvents.some((event) => event.chatId === options.latestEnabledChatId)
     ? options.latestEnabledChatId : latestEventChat;
@@ -590,6 +619,7 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
       `- 클라이언트 준비 시간: ${turn.prepare.elapsedMs === undefined ? "미기록" : `${turn.prepare.elapsedMs.toFixed(2)}ms`} / ${latencyLabels[turn.prepare.latency]}`,
       `- 클라이언트 단계별 시간(ms): ${["setupMs", "serializeMs", "requestMs", "bodyMs", "parseMs", "schemaMs"].map((key) => `${key}=${typeof turn.prepare.clientTimings?.[key] === "number" ? turn.prepare.clientTimings[key]!.toFixed(2) : "미기록"}`).join(", ")}`,
       `- 클라이언트 단계: ${clientStageSummary([...turn.events].reverse().find((event) => event.kind === "automatic_injection"))}`,
+      ...injectionTimingSummary(turn.prepare.injectionTimings),
       `- 실제 주입 manifest: ${turn.manifestStatus}`,
       ...(turn.atomPreservation ? [
         `- 서버 focus 핵심 근거: ${turn.atomPreservation.focusDelivered}/${turn.atomPreservation.focusExpected}개 보존 / 보호 근거 강제 축소: ${turn.atomPreservation.forcedDrops}개`,
@@ -597,7 +627,9 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
         `- 역할별 서버 준비 본문 토큰(공유 XML·상태 제외): ${Object.entries(turn.atomPreservation.roleTokens).map(([role, tokens]) => `${role}=${tokens}`).join(", ")}`,
         `- 실제 주입 focus 핵심 근거: ${turn.atomPreservation.focusInjected ?? "미기록"} / 역할별 실제 주입 본문 토큰: ${turn.atomPreservation.injectedRoleTokens === undefined ? "미기록" : Object.entries(turn.atomPreservation.injectedRoleTokens).map(([role, tokens]) => `${role}=${tokens}`).join(", ") || "0"}`,
       ] : []),
-      `- 서버 단계별 시간(ms): ${["syncMs", "embeddingMs", "retrievalMs", "assemblyMs", "finalizeMs", "totalMs"].map((key) => `${key}=${typeof turn.timings?.[key] === "number" ? turn.timings[key]!.toFixed(2) : "미기록"}`).join(", ")}`,
+      `- 서버 단계별 시간(ms): ${["syncMs", "embeddingMs", "signalBuildingMs", "queryVectorMs", "stateSearchMs", "vectorSearchMs", "retrievalPreparationMs", "retrievalMs", "assemblyMs", "finalizeMs", "totalMs"].map((key) => `${key}=${typeof turn.timings?.[key] === "number" ? turn.timings[key]!.toFixed(2) : "미기록"}`).join(", ")}`,
+      `- 상태 수집 횟수(stateCollections): ${turn.timings?.stateCollections ?? "미기록"}`,
+      `- 쿼리 벡터 캐시: ${turn.timings?.queryVectorCacheHit === 1 ? "전체 적중" : turn.timings?.queryVectorCacheHit === 0 ? "전체 적중 아님" : "미기록"}; 요청 묶음 ${turn.timings?.queryVectorRequests ?? "미기록"}개. 벡터 요청 시간에는 겹쳐 실행한 서버 계산과 이벤트 루프 대기가 포함될 수 있으며 단계별 시간을 합산하지 않음.`,
       `- sync 세부 단계(ms): ${["requestBodyReadMs", "requestParseMs", "lineageMs", "snapshotMs", "calibrationMs", "inheritedEnqueueMs", "episodeMembershipMs", "ingestionMs", "extractionEnqueueMs", "projectionQueueMs", "workerWakeMs", "maintenanceMs"].map((key) => `${key}=${typeof turn.syncTimings?.[key] === "number" ? turn.syncTimings[key]!.toFixed(2) : "미기록"}`).join(", ")}`,
       `- 기본 예산 ${turn.targetTokens || "-"} / 허용 최대 ${turn.hardTokenCeiling || "-"}토큰`,
       ...assemblySummary(turn.budget),
@@ -608,7 +640,18 @@ export function renderMarkdown(analysis: DiagnosticAnalysis, detail = false): st
       `- 기억 도구: ${turn.toolSummary}`,
       ...turn.mcpTimings.map(timing => `- ${escapeCell(timing.toolName ?? "MCP")} (${escapeCell(timing.requestId ?? "검색 ID 미기록")}): ${timing.origin === "server" ? "서버 거절 관측 (클라이언트 반환 미기록)" : "반환 결과"} ${escapeCell(timing.outcome ?? "미기록")}${timing.reason ? ` · 사유 ${escapeCell(timing.reason)}` : ""}${timing.ref ? ` · ref ${escapeCell(timing.ref)}` : ""} / ${latencyLabels[timing.latency]}`),
       ...turn.mcpTimings.map(({selector:s,server,cacheHit}) => `- MCP 보조모델: ${cacheHit ? "동일 요청 캐시 · 추가 호출 없음" : s ? `${escapeCell(s.provider)} / ${escapeCell(s.model)} · ${s.calls}회 · ${s.elapsedMs.toFixed(2)}ms · ${s.outcome}${s.failure?` (${escapeCell(s.failure)})`:""} · 후보 ${s.candidates}개 → 사용 근거 ${s.selectedIds.length}개 · 자연어 ${s.answerChars??"미보고"}자 · provider 입력 ${s.promptTokens??"미보고"} / 출력 ${s.completionTokens??"미보고"}토큰` : server?.selectorCalls===0 ? "호출 없음" : "미기록"}`),
-      ...turn.mcpTimings.map(timing => `- MCP ${timing.requestId ?? "검색 ID 미기록"}: ${timing.cacheHit ? "동일 요청 캐시" : `서버 ${timing.server?.serverMs?.toFixed(2) ?? "미기록"}ms (임베딩 ${timing.server?.embeddingMs?.toFixed(2) ?? "미기록"}, 검색 ${timing.server?.retrievalMs?.toFixed(2) ?? "미기록"}, 로컬 후보 압축 ${timing.server?.rerankMs?.toFixed(2) ?? "미기록"}, 로컬 원문 발췌 ${timing.server?.spanRerankMs?.toFixed(2) ?? "미기록"}, 근거·예산 정리 ${timing.server?.finalizationMs?.toFixed(2) ?? "미기록"}), Voyage rerank ${timing.server?.rerankTotalTokens?.toLocaleString() ?? "미보고"}토큰 (${timing.server?.rerankUsageCalls?.toLocaleString() ?? "0"}회 + 원문 ${timing.server?.spanRerankUsageCalls?.toLocaleString() ?? "0"}회), 클라이언트 요청 왕복 ${timing.requestMs?.toFixed(2) ?? "미기록"}ms`}; 도구 반환까지 ${timing.elapsedMs?.toFixed(2) ?? "미기록"}ms. 반환 이후 provider 대기는 관측하지 않음; Gateway 원인은 해당 로그로만 판단.`),
+      ...turn.mcpTimings.flatMap(timing => {
+        const { server } = timing;
+        const stages = ["evidenceVersionReadMs", "recordRankingMs", "stateEvidenceMs", "sourceContextMs",
+          "selectorInputBuildMs", "selectorAwaitMs", "sourcePresentationMs", "assemblySetupMs",
+          "budgetFitMs", "finalAssemblyMs", "finalRenderMs", "referenceRenderMs", "namesMs", "responseSerializationMs"];
+        return [
+          `- MCP ${timing.requestId ?? "검색 ID 미기록"}: ${timing.cacheHit ? "동일 요청 캐시" : `서버 ${server?.serverMs?.toFixed(2) ?? "미기록"}ms (임베딩 ${server?.embeddingMs?.toFixed(2) ?? "미기록"}, 검색 ${server?.retrievalMs?.toFixed(2) ?? "미기록"}, 로컬 후보 압축 ${server?.rerankMs?.toFixed(2) ?? "미기록"}, 로컬 원문 발췌 ${server?.spanRerankMs?.toFixed(2) ?? "미기록"}, 근거·예산 정리 ${server?.finalizationMs?.toFixed(2) ?? "미기록"}), Voyage rerank ${server?.rerankTotalTokens?.toLocaleString() ?? "미보고"}토큰 (${server?.rerankUsageCalls?.toLocaleString() ?? "0"}회 + 원문 ${server?.spanRerankUsageCalls?.toLocaleString() ?? "0"}회), 클라이언트 호스트 조회 ${timing.hostReadMs?.toFixed(2) ?? "미기록"}ms, 요청 왕복 ${timing.requestMs?.toFixed(2) ?? "미기록"}ms`}. 도구 반환까지 ${timing.elapsedMs?.toFixed(2) ?? "미기록"}ms. 반환 이후 provider 대기는 관측하지 않음. Gateway 원인은 해당 로그로만 판단.`,
+          ...(server?.selectorInputBuildMs === undefined ? [] : [
+            `  - Recall 세부 단계(ms) ${stages.filter(key => typeof server[key] === "number").map(key => `${key}=${server[key]!.toFixed(2)}`).join(", ")}`,
+          ]),
+        ];
+      }),
       ...(turn.pathFates.length ? [`- typed path 운명: ${turn.pathFates.map((path) => `${path.perspective || "관점 미기록"}/${path.endpointId} ${path.retrievalOutcome}${path.finalRole ? ` → ${path.finalRole}` : ""}${path.atomOutcomes.length ? ` [${path.atomOutcomes.map((atom) => `${atom.atomKey}:${atom.outcome}${atom.delivered === undefined ? "" : atom.delivered ? ":전달" : ":미전달"}`).join(", ")}]` : " [최종 atom 미기록]"}`).join(" · ")}`] : []),
       ...turn.tools.registrations.map((entry) => {
         const info = entry.diagnostics as Record<string, unknown>;

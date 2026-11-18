@@ -13,6 +13,7 @@ import {
   type RelationshipProjectionResult,
 } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
+import { modelEntityContext } from './entities.js';
 import { now } from "./db.js";
 import { hasActiveBackfillBarrier } from "./backfill-barrier.js";
 import { canAutomaticallyChange, committedEditOrdinal, correctionView, isAutoLocked } from "./user-corrections.js";
@@ -176,8 +177,9 @@ const projectionCursor = (value: string | null | undefined): ProjectionCursor =>
 };
 
 export function projectionInput(db: RcmDatabase, chatId: string, pairs: ProjectionPairInput[]): Record<string, unknown> {
+  const {allowsName}=modelEntityContext(db,chatId);
   return {
-    pairs: pairs.map((pair) => {
+    pairs: pairs.filter(pair=>allowsName(pair.from)&&allowsName(pair.to)).map((pair) => {
       const previous = db.prepare(`SELECT *
         FROM relationship_projections WHERE chat_id=? AND from_entity=? AND to_entity=?`).get(chatId, pair.from, pair.to) as
         Record<string,any> | undefined;
@@ -232,6 +234,8 @@ export function projectionInput(db: RcmDatabase, chatId: string, pairs: Projecti
 export function planProjectionInput(db: RcmDatabase, chatId: string, pairs: ProjectionPairInput[], systemPrompt: string, maxInputTokens: number): {
   pairs: Array<Record<string, any>>; remainingPairs: ProjectionPairInput[]; omittedReferenceItems: number;
 } {
+  const {allowsName}=modelEntityContext(db,chatId);
+  pairs=pairs.filter(pair=>allowsName(pair.from)&&allowsName(pair.to));
   const prepared = projectionInput(db, chatId, pairs) as { pairs: Array<Record<string, any>> };
   const selected: Array<Record<string, any>> = [];
   const remainingPairs: ProjectionPairInput[] = [];

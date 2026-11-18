@@ -1,3 +1,4 @@
+import { albumTogetherCss } from "./together.js";
 /** Theme D: approved rough-paper hand variant, scoped to the album scroller. */
 const B = ".alb-album.alb-theme--film";
 export const PAPER_ALBUM_CSS = String.raw`
@@ -164,4 +165,4 @@ ${B} .rd-divider{border:0;border-top:1px solid var(--rule);margin:120px auto 0;w
  ${B} .rd-vignette{box-shadow:inset 0 0 60px #5a472340}
  ${B} .rd-divider{margin-top:84px}
 }
-`;
+` + albumTogetherCss("film", B);

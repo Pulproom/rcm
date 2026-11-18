@@ -12,7 +12,7 @@ export const ALBUM_SHELF_CSS = `
 .album-shelf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 30px 22px; }
 .album-card { position: relative; min-width: 0; content-visibility: auto; contain-intrinsic-block-size: auto 400px; }
 .album-card:has(details[open]),.album-card:focus-within { content-visibility: visible; }
-.album-shelf .album-shelf-thumb { position: relative; aspect-ratio: 4/5; border-radius: 4px; overflow: hidden; display: block; box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 16px 34px -18px rgba(0,0,0,.8); }
+.album-shelf .album-shelf-thumb { container-type: inline-size; position: relative; aspect-ratio: 4/5; border-radius: 4px; overflow: hidden; display: block; box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 16px 34px -18px rgba(0,0,0,.8); }
 :root[data-skin="phone"] .album-shelf .album-shelf-thumb { border-radius: 12px; box-shadow: 0 8px 22px -14px rgba(0,0,0,.35); }
 .album-shelf-meta { display: grid; grid-template-columns: minmax(0, 1fr) 36px; gap: 2px 6px; margin-top: 12px; }
 .album-shelf-meta b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -25,7 +25,7 @@ export const ALBUM_SHELF_CSS = `
 :root[data-skin="phone"] .album-shelf .album-shelf-new-card { border-radius: 12px; border-color: #c7c7cc; }
 .album-shelf-new-card .album-shelf-plus { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--screen-3, #fff); color: var(--tungsten); font-size: 24px; font-weight: 300; }
 
-.album-mini-stage { position:absolute;inset:0;width:200px;height:250px;transform:scale(calc(100cqi / 200px));transform-origin:top left; }
+.album-mini-stage { container-type:inline-size;position:absolute;inset:0;width:200px;height:250px;transform:scale(calc(100cqi / 200px));transform-origin:top left; }
 .album-shelf-mc .album-shelf-cover-line{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;font:400 11px/1.4 var(--display,"Eulyoo",serif);margin-bottom:6px;quotes:"“" "”"}
 /* Mini covers share the reading themes' surfaces, inks and display faces. */
 .album-shelf-mc { position:absolute;inset:0;overflow:hidden;padding:13%;display:flex;flex-direction:column;justify-content:space-between;text-align:left;isolation:isolate; }
@@ -52,7 +52,10 @@ export const ALBUM_SHELF_CSS = `
 .album-shelf-mc--program small { border-top:1px solid #ffffff59;padding-top:8px;color:#ffffffd1; }
 /* Text owns its rows; the poster photograph takes only the remaining space. */
 .album-shelf-mc--program:has(> img) { display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:8px;min-height:0; }
-.album-shelf-mc--program > img { min-height:0;height:100%; }
+/* A fixed poster frame: two title lines at most, so the photograph keeps one size on every card. */
+.album-shelf-mc--program:has(> img) .album-shelf-cover-title { font-size:clamp(16px,11cqi,24px);-webkit-line-clamp:2; }
+.album-shelf-mc--program:has(> img) .album-shelf-cover-line { -webkit-line-clamp:2; }
+.album-shelf-mc--program > img { align-self:center;min-height:0;max-height:100%;height:auto;aspect-ratio:16/9; }
 .album-shelf-mc--lp { --sleeve:#efb71d;--sleeve-ink:#17130c;--sleeve-ink-2:color-mix(in oklab,var(--sleeve-ink) 72%,var(--sleeve));--label:#d9482b;--sheet:#f6f3ec;--vinyl:#121110;background:var(--sleeve);color:var(--sleeve-ink); }
 .album-shelf-mc--lp[data-tint=tomato] { --sleeve:#c23e22;--sleeve-ink:#fff1dc;--label:#efb71d;--sleeve-ink-2:color-mix(in oklab,var(--sleeve-ink) 100%,var(--sleeve)); }
 .album-shelf-mc--lp[data-tint=sky] { --sleeve:#8fc1e3;--sleeve-ink:#111a24;--label:#e8553a; }
@@ -62,11 +65,14 @@ export const ALBUM_SHELF_CSS = `
 .album-shelf-mc--lp small { color:var(--sleeve-ink-2); }
 .album-shelf-record { position:absolute;z-index:-1;width:70%;aspect-ratio:1;right:-28%;bottom:12%;border-radius:50%;background:radial-gradient(circle,var(--sheet) 0 1.3%,#0000 1.4%),radial-gradient(circle,var(--label) 0 17.5%,#0000 17.7%),repeating-radial-gradient(circle,#ffffff12 0 1px,#0000 1px 5px),conic-gradient(from 20deg,#0000 0 8%,#ffffff24 12%,#0000 17% 50%,#ffffff1c 56%,#0000 62%),var(--vinyl); }
 .album-shelf-mc--lp[data-tint=black] .album-shelf-record { box-shadow:0 0 0 1px #ffffff26; }
-.album-shelf-mc--lp:has(.album-shelf-jacket) { justify-content:center;gap:18px; }
-.album-shelf-jacket { width:82%;aspect-ratio:1;min-height:0;flex-shrink:0;overflow:hidden;background:var(--sleeve);position:relative;z-index:1;border:1px solid color-mix(in srgb,var(--sleeve-ink) 60%,transparent);box-shadow:2px 3px 8px #0003;display:flex;align-items:flex-end;padding:10px; }
-.album-shelf-jacket .album-shelf-cover-title { max-height:100%; }
-.album-shelf-jacket img { position:absolute;inset:0;height:100%; }
-.album-shelf-mc--lp:has(.album-shelf-jacket) .album-shelf-record { width:64%;right:5%;top:24%;bottom:auto; }
+/* With a photo: title, then a fixed square sleeve whose disc slides out from behind it (as on the reading cover), then the people. */
+.album-shelf-mc--lp:has(.album-shelf-deck) .album-shelf-cover-title { font-size:clamp(17px,10cqi,22px);line-height:1.04;-webkit-line-clamp:2; }
+.album-shelf-mc--lp:has(.album-shelf-deck) .album-shelf-cover-line { -webkit-line-clamp:2; }
+.album-shelf-deck { position:relative;display:block;width:46cqi;aspect-ratio:1;flex-shrink:0;margin:4cqi 0; }
+.album-shelf-deck .album-shelf-jacket { position:absolute;inset:0;overflow:hidden;background:var(--sleeve);border:1px solid color-mix(in srgb,var(--sleeve-ink) 45%,transparent);box-shadow:0 8px 16px -9px #000a,0 1px 3px #0003; }
+.album-shelf-deck .album-shelf-jacket img { position:absolute;inset:0;width:100%;height:100%;object-fit:cover; }
+.album-shelf-deck .album-shelf-record { inset:0 auto auto 0;width:100%;right:auto;bottom:auto;transform:translateX(36%); }
+.album-shelf-thumb:has(> .album-shelf-tag) .album-shelf-deck { width:40cqi;margin:3cqi 0; }
 .album-shelf-mc--film { --paper:#d5cbb3;--display:"Song Myung","Gowun Batang",serif;--mini-ink-3:#5c5446;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='260'%3E%3Cfilter id='s'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 .16  0 0 0 0 .13  0 0 0 0 .09  0 0 0 1.5 -.86'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23s)'/%3E%3C/svg%3E"),
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='640'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.03 .16' numOctaves='4' seed='11'/%3E%3CfeColorMatrix values='0 0 0 0 .98  0 0 0 0 .95  0 0 0 0 .86  0 0 0 .5 -.2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)'/%3E%3C/svg%3E"), var(--paper);color:#2a2620;text-align:center;justify-content:center; }
 .album-shelf-mc--film[data-tint=gray] { --paper:#cdcbc4; }
@@ -103,7 +109,7 @@ export const ALBUM_SHELF_CSS = `
 :root[data-skin="phone"] .album-shelf { --album-accent-ink: #fff; }
 .album-shelf .album-shelf-thumb { width: 100%; border: 0; padding: 0; text-align: inherit; }
 .album-shelf-meta { grid-template-columns: minmax(0,1fr) 36px; }
-.album-shelf .album-shelf-title { grid-column: 1; text-align: left; font-size: 15px; font-weight: 600; color: var(--ink); padding: 0; }
+.album-shelf .album-shelf-title { grid-column: 1; text-align: left; font-size: 15px; font-weight: 600; color: var(--ink); padding: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .album-shelf-ttl b { font-weight: inherit; }
 .album-shelf-meta small { max-width: 100%; white-space: normal; }
 .album-shelf-meta small > span { white-space: nowrap; }

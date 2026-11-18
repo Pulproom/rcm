@@ -1,3 +1,4 @@
+import { albumTogetherCss } from "./together.js";
 /** LP skin of the shared reading skeleton. Values follow the approved C mockup. */
 const C = ".alb-album.alb-theme--lp";
 export const LP_READING_CSS = String.raw`
@@ -122,6 +123,7 @@ ${C} .rd-rec .rd-disc { position:absolute;inset:auto;top:0;left:27%;right:auto;b
 @container (max-width:860px) {
 ${C} .rd-plates.n5 { grid-template-columns:1fr 1fr }
 ${C} .rd-cover .rd-cover-foot { order:2 }
+${C} .rd-cover { min-height:0;align-content:start;gap:28px }
 ${C} .rd-rec { order:1;position:relative;right:auto;top:auto;transform:none;width:62%;margin:6px 0 }
 ${C} .rd-rec .rd-disc { left:30%;top:0;width:100% }
 }
@@ -175,4 +177,4 @@ ${C}[data-tint=pink]{--sleeve:#f2a9b6;--sleeve-ink:#2a1218;--label:#2b3f8f}
 ${C}[data-tint=black]{--sleeve:#1c1a19;--sleeve-ink:#efb71d;--label:#d9482b}
 ${C}[data-tint=black] .rd-disc{box-shadow:0 0 0 1px #ffffff26,0 24px 60px -24px #2a1e0299,0 4px 10px -4px #2a1e0266}
 @media (prefers-reduced-motion:reduce){${C} *{scroll-behavior:auto!important}}
-`;
+` + albumTogetherCss("lp", C);

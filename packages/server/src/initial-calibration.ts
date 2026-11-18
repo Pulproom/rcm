@@ -1,6 +1,6 @@
 import { assertUpgradeJobWritable } from './upgrade-lock.js';
 import { assertUpgradeJobSource, refreshUpgradeRun } from './upgrade-run.js';
-import { normalizeAndValidateSetupEvidence } from "@rcm/shared";
+import { CALIBRATION_PERSON_LINK_FIELDS, classifyEntityType, normalizeAndValidateSetupEvidence } from "@rcm/shared";
 export { normalizeAndValidateSetupEvidence } from "@rcm/shared";
 import { applyProgressDone, resetProgress, ensurePairProgress } from "./pair-progress.js";
 import { writePersonaHint } from "./view-preferences.js";
@@ -75,14 +75,14 @@ export function upsertInitialEntity(
   const birthday = input.birthday == null ? input.birthday : EntityBirthdaySchema.parse(input.birthday);
   return db.transaction(() => {
     const timestamp = now();
-    const existing = input.id ? db.prepare("SELECT id,name,display_name FROM entities WHERE id=? AND chat_id=?").get(input.id, chatId) as { id: string; name: string; display_name: string } | undefined : undefined;
+    const existing = input.id ? db.prepare("SELECT id,name,display_name,type FROM entities WHERE id=? AND chat_id=?").get(input.id, chatId) as { id: string; name: string; display_name: string; type:string } | undefined : undefined;
     if (input.id && !existing) throw new Error("Entity not found");
     const id = existing?.id ?? randomUUID();
     const internalName = existing?.name ?? displayName;
-    if (existing) db.prepare("UPDATE entities SET display_name=?,setup_prominence=?,user_managed=1 WHERE id=? AND chat_id=?")
-      .run(displayName, input.prominence ?? "supporting", id, chatId);
+    if (existing) db.prepare("UPDATE entities SET display_name=?,setup_prominence=?,user_managed=1,type=? WHERE id=? AND chat_id=?")
+      .run(displayName, input.prominence ?? "supporting", classifyEntityType(existing.type)==='place_object' ? 'character' : existing.type, id, chatId);
     else db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,user_managed,created_at)
-      VALUES(?,?,?,?,?,'person','manual',?,'[]',1,?)`).run(id, chatId, `manual_${id}`, internalName, displayName, input.prominence ?? "supporting", timestamp);
+      VALUES(?,?,?,?,?,'character','manual',?,'[]',1,?)`).run(id, chatId, `manual_${id}`, internalName, displayName, input.prominence ?? "supporting", timestamp);
     if (birthday !== undefined) db.prepare("UPDATE entities SET birthday_json=? WHERE id=? AND chat_id=?")
       .run(birthday === null ? null : JSON.stringify(birthday), id, chatId);
     const removed = aliasRemovalGuard(db, chatId);
@@ -312,12 +312,12 @@ export function completeInitialCalibrationJob(
       db.prepare(`INSERT INTO entities(id,chat_id,entity_key,name,display_name,type,origin,setup_prominence,source_json,birthday_json,user_managed,created_at)
         VALUES(?,?,?,?,?,?, 'setup',?,?,?,0,?) ON CONFLICT(chat_id,entity_key) DO UPDATE SET
         display_name=CASE WHEN entities.user_managed=1 OR entities.origin<>'setup' THEN entities.display_name ELSE excluded.display_name END,
-        type=CASE WHEN entities.user_managed=1 THEN entities.type ELSE excluded.type END,
+        type=entities.type,
         origin=entities.origin,
         setup_prominence=CASE WHEN entities.user_managed=1 THEN entities.setup_prominence ELSE excluded.setup_prominence END,
         birthday_json=CASE WHEN entities.user_managed=1 THEN entities.birthday_json ELSE COALESCE(excluded.birthday_json,entities.birthday_json) END,
         source_json=CASE WHEN entities.user_managed=1 THEN entities.source_json ELSE excluded.source_json END`).run(
-        id, job.chat_id, existing?.entity_key ?? entity.key, canonicalName, entity.displayName, entity.role === "npc" ? "person" : "character",
+        id, job.chat_id, existing?.entity_key ?? entity.key, canonicalName, entity.displayName, "character",
         entity.prominence, JSON.stringify(entity.evidence), entity.birthday ? JSON.stringify(EntityBirthdaySchema.parse(entity.birthday)) : null, timestamp,
       );
       const stored = { id, name: canonicalName };
@@ -326,8 +326,8 @@ export function completeInitialCalibrationJob(
       for (const alias of existing?.user_managed ? [] : [entity.displayName, ...entity.aliases]) if (!removedAlias(stored.id, alias) && !addressTerm(stored.name, alias, entity.displayName)) insertAlias.run(stored.id, alias, normalizeEntityName(alias));
     }
     for (const relationship of validatedResult.relationships) {
-      const from = byKey.get(relationship.fromKey);
-      const to = byKey.get(relationship.toKey);
+      const from = byKey.get(relationship[CALIBRATION_PERSON_LINK_FIELDS.relationship.from]);
+      const to = byKey.get(relationship[CALIBRATION_PERSON_LINK_FIELDS.relationship.to]);
       if (!from || !to || from.id === to.id) continue;
       const current = db.prepare("SELECT * FROM relationship_baselines WHERE chat_id=? AND from_entity=? AND to_entity=?").get(job.chat_id, from.name, to.name) as Record<string, any> | undefined;
       if (current && (current.user_managed === 1 || current.source !== "setup" || !canAutomaticallyChange(db, job.chat_id, current, []))) continue;
@@ -350,7 +350,7 @@ export function completeInitialCalibrationJob(
     writePersonaHint(db, job.chat_id, personaName);
     ensurePairProgress(db, job.chat_id);
     for (const patch of validatedResult.pairProgress ?? []) {
-      const persona=byKey.get(patch.personaKey), character=byKey.get(patch.characterKey);
+      const persona=byKey.get(patch[CALIBRATION_PERSON_LINK_FIELDS.progress.persona]), character=byKey.get(patch[CALIBRATION_PERSON_LINK_FIELDS.progress.character]);
       const text=payload.resolvedSetup!.messages[patch.evidence.sourceIndex]?.content;
       if (!persona || !character || !text?.includes(patch.evidence.quote)) continue;
       const side=patch.side==="mutual"?"mutual":byKey.get(patch.side)?.name;
@@ -358,7 +358,7 @@ export function completeInitialCalibrationJob(
     }
     const status = calibration?.confirmation_required === 1 ? "awaiting_confirmation" : "ready";
     updateSetupRecognition(db, job.chat_id, "delete");
-    storeSetupRecognition(db, job.chat_id, payload.resolvedSetup!.fingerprint, validatedResult.socialKnowledge.filter(item => byKey.has(item.holderKey) && byKey.has(item.subjectKey)), byKey, status === "ready");
+    storeSetupRecognition(db, job.chat_id, payload.resolvedSetup!.fingerprint, validatedResult.socialKnowledge.filter(item => byKey.has(item[CALIBRATION_PERSON_LINK_FIELDS.recognition.holder]) && byKey.has(item[CALIBRATION_PERSON_LINK_FIELDS.recognition.subject])), byKey, status === "ready");
     if (status === "ready") materializeInitialRelationshipProjections(db, job.chat_id);
     db.prepare("UPDATE initial_calibrations SET status=?,setup_fingerprint=?,setup_json=CASE WHEN ?='ready' THEN NULL ELSE setup_json END,last_error=NULL,updated_at=? WHERE chat_id=?")
       .run(status, payload.resolvedSetup!.fingerprint, status, timestamp, job.chat_id);

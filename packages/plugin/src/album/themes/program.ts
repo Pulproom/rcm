@@ -1,3 +1,4 @@
+import { albumTogetherCss } from "./together.js";
 /** Program book skin of the shared reading skeleton. Values follow the approved B mockup. */
 const B = ".alb-album.alb-theme--program";
 export const PROGRAM_ALBUM_CSS = String.raw`
@@ -233,4 +234,4 @@ ${B} .xp-slot{display:grid;place-items:center;width:100%;min-height:72px;margin-
  ${B} .rd-divider{margin-top:88px;width:min(640px,calc(100% - 48px))}
 }
 @media (prefers-reduced-motion:reduce){${B} *{scroll-behavior:auto!important;transition:none!important}}
-`;
+` + albumTogetherCss("program", B);

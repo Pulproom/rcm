@@ -1,3 +1,4 @@
+import { personIdentity } from "./entity-person-fields.js";
 import { z } from "zod";
 
 export const PAIR_PROGRESS_DEFAULTS = [
@@ -8,7 +9,7 @@ export const PAIR_PROGRESS_DEFAULTS = [
 ] as const;
 export const PairProgressModeSchema = z.enum(["each", "mutual"]);
 export const PairProgressCellSchema = z.object({
-  side: z.string().min(1),
+  side: personIdentity(z.string().min(1)),
   state: z.enum(["done", "not_yet", "unknown"]),
   source: z.enum(["scene", "setup", "user"]),
   memoryId: z.string().optional(),
@@ -44,10 +45,10 @@ export interface PairProgressResponse {
   unavailableReason: PairProgressUnavailableReason;
 }
 export const PairProgressPatchSchema = z.object({
-  persona: z.string().min(1),
-  character: z.string().min(1),
+  persona: personIdentity(z.string().min(1)),
+  character: personIdentity(z.string().min(1)),
   itemId: z.string().min(1),
-  side: z.string().min(1),
+  side: personIdentity(z.string().min(1)),
   memoryKey: z.string().min(1),
 });
 export type PairProgressPatch = z.infer<typeof PairProgressPatchSchema>;
@@ -57,9 +58,9 @@ export const PairProgressPatchesSchema = z.array(z.unknown()).transform(items =>
   return parsed.success ? [parsed.data] : [];
 })).optional().catch(undefined);
 export const SetupPairProgressSchema = z.array(z.object({
-  personaKey: z.string().min(1),
-  characterKey: z.string().min(1),
+  personaKey: personIdentity(z.string().min(1)),
+  characterKey: personIdentity(z.string().min(1)),
   itemId: z.string().min(1),
-  side: z.string().min(1),
+  side: personIdentity(z.string().min(1)),
   evidence: z.object({ sourceIndex: z.number().int().nonnegative(), quote: z.string().min(1) }),
 }).optional().catch(undefined)).transform(items => items.filter((item): item is NonNullable<typeof item> => !!item)).optional().catch(undefined);

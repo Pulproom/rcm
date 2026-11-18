@@ -11,5 +11,5 @@ export function sourceRecoverySummary(metadata: SourceRecoveryMetadata | undefin
   if (!ordinals.length) return "";
   const target = `메시지 ${ordinals.map(ordinal => ordinal + 1).join(", ")}`;
   const result = metadata.result;
-  return `${target} · ${result?.outcome === "failed" ? "발췌 보완 실패" : result?.outcome === "added" ? `발췌 ${result.passagesAdded}개 추가` : result?.outcome === "no_excerpt" ? "추가할 발췌 없음" : "발췌 확인 중"}`;
+  return `${target} · ${result?.outcome === "failed" ? "원문 발췌 보완 실패" : result?.outcome === "added" ? `원문 발췌 ${result.passagesAdded}개 추가` : result?.outcome === "no_excerpt" ? "더 붙일 원문 없음" : "원문 확인 중"}`;
 }

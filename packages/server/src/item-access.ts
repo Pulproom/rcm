@@ -93,8 +93,8 @@ export function pruneDetailAccessEdits(db: RcmDatabase, chatId: string): void {
 }
 
 /** Active grants own atom/lane access; memory headers use their stored canonical known_by_json before the first edit. */
-export function memoryDetailAccess(db: RcmDatabase, chatId: string, id: string, kind: ItemAccessKind = "detail"): MemoryDetailAccess {
-  const linked=kind === 'promise' ? promiseLinkedSupport(db,chatId,id) : undefined;
+export function memoryDetailAccess(db: RcmDatabase, chatId: string, id: string, kind: ItemAccessKind = "detail", reads?:ItemAccessReadContext): MemoryDetailAccess {
+  const linked=kind === 'promise' ? promiseLinkedSupport(db,chatId,id,undefined,reads) : undefined;
   if (linked) {
     const scope=publicKnowledgeScope(linked.holders);
     const grants=db.prepare("SELECT holder,basis FROM item_access WHERE chat_id=? AND item_kind='detail' AND active=1 AND item_id IN (SELECT value FROM json_each(?))")
@@ -124,10 +124,26 @@ export function syncDetailKnownBy(db: RcmDatabase, chatId: string, id: string): 
 }
 
 /** Presentation only. Raw holder names remain the authority for access checks. */
-export function knownByLabels(db: RcmDatabase, chatId: string, kind: ItemAccessKind, id: string, holders: string[]): string[] {
-  const linked=kind==='promise' ? promiseLinkedSupport(db,chatId,id) : undefined;
-  const rows=linked ? memoryDetailAccess(db,chatId,id,kind).holders.map(item=>({holder:item.name,basis:item.basis}))
+export function knownByLabels(db: RcmDatabase, chatId: string, kind: ItemAccessKind, id: string, holders: string[], reads?:ItemAccessReadContext): string[] {
+  const linked=kind==='promise' ? promiseLinkedSupport(db,chatId,id,undefined,reads) : undefined;
+  const rows=linked ? memoryDetailAccess(db,chatId,id,kind,reads).holders.map(item=>({holder:item.name,basis:item.basis}))
     : db.prepare("SELECT holder,basis FROM item_access WHERE chat_id=? AND item_kind=? AND item_id=? AND active=1").all(chatId,kind,id) as Array<{holder:string;basis?:string}>;
+  return formatKnownByLabels(holders,rows);
+}
+
+/** Batch presentation grants for a retrieval snapshot; linked promises retain
+ * their canonical contribution projection in knownByLabels. */
+export function loadKnownByLabels(db:RcmDatabase,chatId:string,items:Array<{kind:ItemAccessKind;id:string}>, reads?:ItemAccessReadContext) {
+  const byItem=new Map<string,Array<{holder:string;basis?:string}>>();
+  for (const rows of readItemAccessBatches(db,chatId,items)) for (const row of rows) {
+    const itemKey=key(row.item_kind,row.item_id), entries=byItem.get(itemKey) ?? [];
+    entries.push(row); byItem.set(itemKey,entries);
+  }
+  return (kind:ItemAccessKind,id:string,holders:string[]) => kind==='promise' && promiseLinkedSupport(db,chatId,id,undefined,reads) ? knownByLabels(db,chatId,kind,id,holders,reads)
+    : formatKnownByLabels(holders,byItem.get(key(kind,id)) ?? []);
+}
+
+function formatKnownByLabels(holders:string[],rows:Array<{holder:string;basis?:string}>):string[] {
   const annotations:Record<string,string>={told:"was told",heard:"indirect report or rumor",inferred:"a guess"};
   if (holders.includes(EVERYONE_HOLDER) || rows.some(row => row.holder === EVERYONE_HOLDER)) return ["everyone"];
   return holders.map(holder=>{
@@ -174,7 +190,7 @@ export interface ItemAccessScope {
 const key = (kind: ItemAccessKind, id: string): string => `${kind}:${id}`;
 const normalized = (value: string): string => value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
 
-export interface ItemAccessRow { item_kind: ItemAccessKind; item_id: string; holder: string; evidence_json: string }
+export interface ItemAccessRow { item_kind: ItemAccessKind; item_id: string; holder: string; basis: ItemAccessBasis; evidence_json: string }
 
 /** Keep kind and ID as index constraints; a long OR across pairs scans every
  * access row in the chat. Yield bounded batches so evidence validation can
@@ -191,7 +207,7 @@ export function* readItemAccessBatches(db: RcmDatabase, chatId: string,
     const unique = [...ids];
     for (let offset = 0; offset < unique.length; offset += 300) {
       const batch = unique.slice(offset, offset + 300);
-      yield db.prepare(`SELECT item_kind,item_id,holder,evidence_json FROM item_access
+      yield db.prepare(`SELECT item_kind,item_id,holder,basis,evidence_json FROM item_access
         WHERE chat_id=? AND item_kind=? AND item_id IN (${batch.map(() => "?").join(",")}) AND active=1`)
         .all(chatId, kind, ...batch) as ItemAccessRow[];
     }
@@ -202,6 +218,7 @@ export function loadItemAccess(
   db: RcmDatabase,
   chatId: string,
   items: Array<{ kind: ItemAccessKind; id: string }>,
+  reads?:ItemAccessReadContext,
 ): Map<string, string[]> {
   const result = new Map<string, string[]>();
   for (const rows of readItemAccessBatches(db, chatId, items)) {
@@ -211,7 +228,7 @@ export function loadItemAccess(
     }
   }
   for (const item of items) if (item.kind === 'promise') {
-    const linked=promiseLinkedSupport(db,chatId,item.id);
+    const linked=promiseLinkedSupport(db,chatId,item.id,undefined,reads);
     if (linked) result.set(key(item.kind,item.id),linked.holders.length ? linked.holders : [PENDING_ACCESS_HOLDER]);
   }
   return result;
@@ -224,6 +241,7 @@ export function loadItemAccessScopes(
   db: RcmDatabase,
   chatId: string,
   items: Array<{ kind: ItemAccessKind; id: string }>,
+  reads?:ItemAccessReadContext,
 ): Map<string, ItemAccessScope> {
   const result = new Map<string, ItemAccessScope>();
   const byKind = new Map<ItemAccessKind, Set<string>>();
@@ -251,7 +269,7 @@ export function loadItemAccessScopes(
     }
   }
   for (const item of items) if (item.kind === 'promise') {
-    const linked=promiseLinkedSupport(db,chatId,item.id);
+    const linked=promiseLinkedSupport(db,chatId,item.id,undefined,reads);
     if (linked) result.set(key(item.kind,item.id),{...resolveItemAccess(new Map([[key(item.kind,item.id),linked.holders.length ? linked.holders : [PENDING_ACCESS_HOLDER]]]),item.kind,item.id),explicit:true});
   }
   return result;
@@ -327,9 +345,42 @@ export function deactivateItemAccessByEvidence(db: RcmDatabase, chatId: string, 
   }
 }
 
+/** Read snapshot owned by one state collection, never retained across requests. */
+export interface ItemAccessReadContext {
+  promises: Array<Record<string,any>>;
+  promiseById: Map<string,Record<string,any>>;
+  events: PromiseEventRow[];
+  history: Map<string,PromiseEventRow[]>;
+  linkedHistory: Set<string>;
+  accessEdits: Map<string,string[]>;
+  detailKnowledge: Map<string,string[] | undefined>;
+  promiseSupport: Map<string,{holders:string[];ids:string[]} | undefined>;
+  contributions: Map<string,{events:PromiseEventRow[];rebuilt?:Record<string,any>}>;
+}
+
+export function createItemAccessReadContext(db:RcmDatabase,chatId:string):ItemAccessReadContext {
+  const promises=db.prepare("SELECT * FROM promises WHERE chat_id=? ORDER BY updated_revision DESC,id").all(chatId) as Array<Record<string,any>>;
+  const events=db.prepare("SELECT * FROM promise_events WHERE chat_id=? ORDER BY source_ordinal,created_revision,created_at,rowid").all(chatId) as PromiseEventRow[];
+  const history=new Map<string,PromiseEventRow[]>(),linkedHistory=new Set<string>();
+  for (const event of events) {
+    if (event.linked_detail_ids_json!=null) linkedHistory.add(event.promise_id);
+    if (event.status==='invalidated') continue;
+    const entries=history.get(event.promise_id) ?? []; entries.push(event);history.set(event.promise_id,entries);
+  }
+  return {promises,promiseById:new Map(promises.map(row=>[row.id,row])),events,history,linkedHistory,
+    accessEdits:readDetailAccessEdits(db,chatId),detailKnowledge:new Map(),promiseSupport:new Map(),contributions:new Map()};
+}
+
+function readCached<T>(cache:Map<string,T>|undefined,key:string,read:()=>T):T {
+  if (!cache) return read();
+  if (!cache.has(key)) cache.set(key,read());
+  return cache.get(key)!;
+}
+
 /** Canonical detail access, never the holder strings supplied to the model.
  * Missing/hidden/revised support is invalid; an empty intersection is narrator-only. */
-export function linkedDetailKnowledge(db: RcmDatabase, chatId: string, detailIds: readonly string[]): string[] | undefined {
+export function linkedDetailKnowledge(db: RcmDatabase, chatId: string, detailIds: readonly string[], reads?:ItemAccessReadContext): string[] | undefined {
+  return readCached(reads?.detailKnowledge,JSON.stringify(detailIds),()=>{
   if (!detailIds.length) return undefined;
   const scopes = loadItemAccessScopes(db, chatId, detailIds.map(id => ({kind:'detail', id})));
   let common: string[] | undefined;
@@ -341,9 +392,9 @@ export function linkedDetailKnowledge(db: RcmDatabase, chatId: string, detailIds
     const access = (db.prepare("SELECT evidence_json FROM item_access WHERE chat_id=? AND item_kind='detail' AND item_id=? AND active=1").all(chatId,id) as {evidence_json:string}[])
       .map(grant => ({evidence:JSON.parse(grant.evidence_json)}));
     const sourceIds = [...new Set([...evidence,...access.flatMap(grant => grant.evidence)].map(citation => citation.messageId))];
-    const sources = db.prepare(`SELECT message_id AS id,canonical_content AS content,canonical_hash AS canonicalHash FROM messages
-      WHERE chat_id=? AND memory_excluded=0 AND canonical_content IS NOT NULL AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')
-      AND message_id IN (SELECT value FROM json_each(?))`).all(chatId,JSON.stringify(sourceIds)) as Array<{id:string;content:string;canonicalHash:string}>;
+    const sources = db.prepare(`SELECT message_id AS id,canonical_content AS content,canonical_hash AS canonicalHash FROM json_each(?) requested
+      CROSS JOIN messages ON messages.chat_id=? AND messages.message_id=requested.value
+      WHERE memory_excluded=0 AND canonical_content IS NOT NULL AND lifecycle IN ('committed','client_pruned') AND host_visibility IN ('active','all_before')`).all(JSON.stringify(sourceIds),chatId) as Array<{id:string;content:string;canonicalHash:string}>;
     const hashes = new Map(sources.map(source => [source.id,source.canonicalHash]));
     if ([...evidence,...access.flatMap(grant => grant.evidence)].some(citation => citation.canonicalHash && hashes.get(citation.messageId) !== citation.canonicalHash
       || citation.transitionCanonicalHash && hashes.get(citation.messageId) !== citation.transitionCanonicalHash)) return undefined;
@@ -354,6 +405,7 @@ export function linkedDetailKnowledge(db: RcmDatabase, chatId: string, detailIds
     common = common === undefined ? holders : intersectAccessKnowledge(common, holders);
   }
   return common?.length ? common : [NARRATOR_ARCHIVE_HOLDER];
+  });
 }
 
 
@@ -372,8 +424,9 @@ function rebuiltPromiseSnapshots(events:PromiseEventRow[]): Record<string,any>[]
 
 /** Text and scope always use the same structural contributors. NULL deltas
  * cannot reconstruct old cumulative snapshots, so retain their inactive support. */
-export function promiseContributionState(db:RcmDatabase, chatId:string, promiseId:string, through?:string): {events:PromiseEventRow[]; rebuilt?:Record<string,any>} {
-  const history=db.prepare("SELECT * FROM promise_events WHERE chat_id=? AND promise_id=? AND status<>'invalidated' ORDER BY source_ordinal,created_revision,created_at,rowid")
+export function promiseContributionState(db:RcmDatabase, chatId:string, promiseId:string, through?:string, reads?:ItemAccessReadContext): {events:PromiseEventRow[]; rebuilt?:Record<string,any>} {
+  return readCached(reads?.contributions,JSON.stringify([promiseId,through]),()=>{
+  const history=reads ? reads.history.get(promiseId) ?? [] : db.prepare("SELECT * FROM promise_events WHERE chat_id=? AND promise_id=? AND status<>'invalidated' ORDER BY source_ordinal,created_revision,created_at,rowid")
     .all(chatId,promiseId) as PromiseEventRow[];
   const prefix=through ? history.slice(0,history.findIndex(event=>event.id===through)+1) : history;
   let boundary=-1;
@@ -382,6 +435,7 @@ export function promiseContributionState(db:RcmDatabase, chatId:string, promiseI
   if (boundary<0 || candidates.some(event=>event.amendment_text==null)) return {events:candidates};
   const events=candidates.filter(event=>event.active===1);
   return {events,rebuilt:rebuiltPromiseSnapshots(events).at(-1)!};
+  });
 }
 
 export function promiseContributionChain(db:RcmDatabase, chatId:string, promiseId:string, through?:string): PromiseEventRow[] {
@@ -389,10 +443,10 @@ export function promiseContributionChain(db:RcmDatabase, chatId:string, promiseI
 }
 
 /** Preserve identity/user metadata; only the derived display snapshot changes. */
-export function projectPromiseRow<T extends Record<string,any>>(db:RcmDatabase, chatId:string, row:T, through?:string): T {
-  const parent=through ? db.prepare('SELECT user_edit_ordinal FROM promises WHERE chat_id=? AND id=?').get(chatId,row.promise_id) as {user_edit_ordinal:number|null}|undefined : row;
+export function projectPromiseRow<T extends Record<string,any>>(db:RcmDatabase, chatId:string, row:T, through?:string, reads?:ItemAccessReadContext): T {
+  const parent=through ? reads ? reads.promiseById.get(row.promise_id) : db.prepare('SELECT user_edit_ordinal FROM promises WHERE chat_id=? AND id=?').get(chatId,row.promise_id) as {user_edit_ordinal:number|null}|undefined : row;
   if (parent?.user_edit_ordinal!=null) return row;
-  const rebuilt=promiseContributionState(db,chatId,through ? row.promise_id : row.id,through).rebuilt;
+  const rebuilt=promiseContributionState(db,chatId,through ? row.promise_id : row.id,through,reads).rebuilt;
   if (!rebuilt) return row;
   const fields=['content','status','scheduled_for','status_reason','source_memory_id','source_batch_id','ended_at_turn','recency_until_turn'];
   return {...row,...Object.fromEntries(fields.filter(field=>through || field!=='status').map(field=>[field,rebuilt[field]]))};
@@ -414,11 +468,12 @@ export function rebuildPromiseContent(db:RcmDatabase, chatId:string, promiseId:s
 
 /** A fresh baseline replaces earlier contributions. Legacy cumulative text
  * retains inactive support; reconstructed text uses only its active contributors. */
-export function promiseLinkedSupport(db:RcmDatabase, chatId:string, promiseId:string, through?:string): {holders:string[]; ids:string[]} | undefined {
-  const row=db.prepare('SELECT user_edit_ordinal FROM promises WHERE chat_id=? AND id=?').get(chatId,promiseId) as {user_edit_ordinal:number|null}|undefined;
-  if (!row || row.user_edit_ordinal != null || readDetailAccessEdits(db,chatId).has(promiseId)) return undefined;
-  const state=promiseContributionState(db,chatId,promiseId,through), prefix=state.events;
-  const linkedHistory=!!db.prepare('SELECT 1 FROM promise_events WHERE chat_id=? AND promise_id=? AND linked_detail_ids_json IS NOT NULL').get(chatId,promiseId);
+export function promiseLinkedSupport(db:RcmDatabase, chatId:string, promiseId:string, through?:string, reads?:ItemAccessReadContext): {holders:string[]; ids:string[]} | undefined {
+  return readCached(reads?.promiseSupport,JSON.stringify([promiseId,through]),()=>{
+  const row=reads ? reads.promiseById.get(promiseId) : db.prepare('SELECT user_edit_ordinal FROM promises WHERE chat_id=? AND id=?').get(chatId,promiseId) as {user_edit_ordinal:number|null}|undefined;
+  if (!row || row.user_edit_ordinal != null || (reads?.accessEdits ?? readDetailAccessEdits(db,chatId)).has(promiseId)) return undefined;
+  const state=promiseContributionState(db,chatId,promiseId,through,reads), prefix=state.events;
+  const linkedHistory=reads ? reads.linkedHistory.has(promiseId) : !!db.prepare('SELECT 1 FROM promise_events WHERE chat_id=? AND promise_id=? AND linked_detail_ids_json IS NOT NULL').get(chatId,promiseId);
   // Pure R9 keeps its full-record explicit-access contract. Unknown inactive
   // legacy deltas still require conservative support rather than widening it.
   if (!linkedHistory && (state.rebuilt || !prefix.some(event=>event.active!==1))) return undefined;
@@ -430,7 +485,7 @@ export function promiseLinkedSupport(db:RcmDatabase, chatId:string, promiseId:st
   let holders: string[] | undefined;
   for (const event of prefix) {
     const scope=scopes.get(key('promise_event',event.id)) ?? (event.active===1 ? savedScope : undefined);
-    const support=event.linked_detail_ids_json != null ? linkedDetailKnowledge(db,chatId,JSON.parse(event.linked_detail_ids_json))
+    const support=event.linked_detail_ids_json != null ? linkedDetailKnowledge(db,chatId,JSON.parse(event.linked_detail_ids_json),reads)
       : scope && validItemAccessScope(scope) ? scope.narratorOnly ? [NARRATOR_ARCHIVE_HOLDER] : itemAccessKnowledge(scope) : undefined;
     if (!support) return {holders:[],ids};
     holders=holders === undefined ? support : intersectAccessKnowledge(holders,support);
@@ -441,4 +496,5 @@ export function promiseLinkedSupport(db:RcmDatabase, chatId:string, promiseId:st
     holders=intersectAccessKnowledge(holders ?? [],savedScope.narratorOnly ? [NARRATOR_ARCHIVE_HOLDER] : itemAccessKnowledge(savedScope));
   }
   return {holders:holders?.length ? holders : [NARRATOR_ARCHIVE_HOLDER],ids};
+  });
 }

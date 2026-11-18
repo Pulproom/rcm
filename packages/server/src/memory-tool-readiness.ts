@@ -11,11 +11,25 @@ export interface MemoryToolReadiness {
 export function accessibleArchiveExists(db: RcmDatabase, chatId: string, holders: string[]): boolean {
   if (!holders.length) return false;
   const names = JSON.stringify([...holders, EVERYONE_HOLDER]);
-  return Boolean(db.prepare(`SELECT 1 FROM memories m WHERE m.chat_id=? AND m.active=1 AND (
-    (m.atom_access_version=0 AND EXISTS(SELECT 1 FROM json_each(m.known_by_json) k JOIN json_each(?) h ON k.value=h.value COLLATE NOCASE))
-    OR EXISTS(SELECT 1 FROM item_access a JOIN json_each(?) h ON a.holder=h.value COLLATE NOCASE WHERE a.chat_id=m.chat_id AND a.active=1
-      AND ((a.item_kind='detail' AND a.item_id IN (SELECT id FROM visible_memory_details WHERE chat_id=m.chat_id AND memory_id=m.id AND active=1))
-        OR (a.item_kind='dialogue' AND a.item_id IN (SELECT id FROM memory_dialogues WHERE memory_id=m.id))))) LIMIT 1`).get(chatId, names, names))
+  // Start with the chat's access rows, then use atom/parent primary keys.
+  // CROSS JOIN keeps SQLite from choosing the old memory x access x detail walk.
+  return Boolean(db.prepare(`SELECT 1 FROM item_access a
+      CROSS JOIN visible_memory_details d ON d.id=a.item_id
+      CROSS JOIN memories m ON m.id=d.memory_id
+      WHERE a.chat_id=? AND a.item_kind='detail' AND a.active=1
+        AND a.holder COLLATE NOCASE IN (SELECT value FROM json_each(?))
+        AND d.chat_id=a.chat_id AND d.active=1 AND m.chat_id=a.chat_id AND m.active=1
+      UNION ALL
+      SELECT 1 FROM item_access a
+      CROSS JOIN memory_dialogues d ON d.id=a.item_id
+      CROSS JOIN memories m ON m.id=d.memory_id
+      WHERE a.chat_id=? AND a.item_kind='dialogue' AND a.active=1
+        AND a.holder COLLATE NOCASE IN (SELECT value FROM json_each(?))
+        AND m.chat_id=a.chat_id AND m.active=1
+      UNION ALL
+      SELECT 1 FROM memories m WHERE m.chat_id=? AND m.active=1 AND m.atom_access_version=0
+        AND EXISTS(SELECT 1 FROM json_each(m.known_by_json) k JOIN json_each(?) h ON k.value=h.value COLLATE NOCASE)
+      LIMIT 1`).get(chatId, names, chatId, names, chatId, names))
     || Boolean(db.prepare(`SELECT 1 FROM source_passages p JOIN messages m ON m.chat_id=p.chat_id AND m.message_id=p.message_id AND m.canonical_hash=p.canonical_hash
       WHERE p.chat_id=? AND p.active=1 AND m.lifecycle IN ('committed','client_pruned') AND m.memory_excluded=0 AND m.host_visibility IN ('active','all_before')
       AND EXISTS(SELECT 1 FROM json_each(p.access_json) a JOIN json_each(?) h ON json_extract(a.value,'$.holder')=h.value COLLATE NOCASE) LIMIT 1`).get(chatId, names))

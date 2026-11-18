@@ -19,23 +19,43 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
   const valid=(item:any)=>{const source=sources.get(item.messageId);return source && (!item.canonicalHash || item.canonicalHash===source.canonical_hash) && (!item.quote || source.canonical_content.includes(item.quote));};
   const dated=[...memories.values()].map(memory=>({memory,refs:evidence(memory.evidence_json)}))
     .filter(({refs})=>refs.length && refs.every(valid))
-    .sort((a,b)=>Math.max(...b.refs.map(e=>sources.get(e.messageId).ordinal))-Math.max(...a.refs.map(e=>sources.get(e.messageId).ordinal)));
+    .map(item=>({...item,first:Math.min(...item.refs.map(e=>sources.get(e.messageId).ordinal)),last:Math.max(...item.refs.map(e=>sources.get(e.messageId).ordinal))}))
+    .sort((a,b)=>b.last-a.last);
   const current=dated[0]?.memory;
   const currentTime=structuredStoryTimeEnd(current?.story_time_normalized || current?.story_time);
   const resolve=buildEntityIdentityResolver(db,chatId);
-  const identity=(name:string)=>{const result=resolve(name);return result.ambiguous?undefined:normalizeEntityName(result.canonical);};
-  const pair=(names:string[])=>{const values=names.map(identity);return values.length===2 && values.every(Boolean) ? values.sort().join('\0') : undefined;};
-  const sameDay=(left:unknown,right:unknown)=>{
-    const a=parseStoryTime(left),b=parseStoryTime(right);
-    const oneDay=(raw:unknown,parsed:ReturnType<typeof parseStoryTime>)=>{
-      const end=structuredStoryTimeEnd(typeof raw==='string'?raw:undefined);
-      if(end!==undefined && parsed.normalized) return new Date(end).toISOString().slice(0,10)===parsed.normalized.slice(0,10);
-      // An unparsed range is not proof of one story day.
-      return typeof raw==='string' && !/[~–—]|\s+to\s+/iu.test(raw);
-    };
-    return a.calendarKey!==undefined && a.calendarKey===b.calendarKey && a.year!==undefined && a.month!==undefined && a.day!==undefined
-      && a.year===b.year && a.month===b.month && a.day===b.day && oneDay(left,a) && oneDay(right,b);
+  const identities=new Map<string,string|undefined>();
+  const identity=(name:string)=>{
+    if (!identities.has(name)) {const result=resolve(name);identities.set(name,result.ambiguous?undefined:normalizeEntityName(result.canonical));}
+    return identities.get(name);
   };
+  const pair=(names:string[])=>{const values=names.map(identity);return values.length===2 && values.every(Boolean) ? values.sort().join('\0') : undefined;};
+  // Index the same one-day predicate used by the previous per-event scan.
+  const dayKey=(raw:unknown):string|undefined=>{
+    const parsed=parseStoryTime(raw);
+    if (parsed.calendarKey===undefined || parsed.year===undefined || parsed.month===undefined || parsed.day===undefined) return undefined;
+    const end=structuredStoryTimeEnd(typeof raw==='string'?raw:undefined);
+    const oneDay=end!==undefined && parsed.normalized
+      ? new Date(end).toISOString().slice(0,10)===parsed.normalized.slice(0,10)
+      : typeof raw==='string' && !/[~–—]|\s+to\s+/iu.test(raw);
+    return oneDay ? JSON.stringify([parsed.calendarKey,parsed.year,parsed.month,parsed.day]) : undefined;
+  };
+  const landmarks=new Map<string,{byMemory:Map<string,StoredLandmarkKind>;byDay:Map<string,StoredLandmarkKind>}>();
+  // Stable source ordering is identical to dated.slice().sort in the old loop.
+  for (const {memory} of [...dated].sort((a,b)=>a.first-b.first)) {
+    const marks=parseLandmarkKinds(memory.landmark_kinds_json) as StoredLandmarkKind[];
+    if (!marks.length) continue;
+    const known=(plotHolders.get(memory.id) ?? JSON.parse(memory.known_by_json) as string[]).map(identity);
+    for (const mark of marks) {
+      const key=mark.pair && pair(mark.pair);
+      if (!key || !mark.pair!.every(name=>known.includes(identity(name))) || mark.evidence?.length && !mark.evidence.every(valid)) continue;
+      const index=landmarks.get(key) ?? {byMemory:new Map<string,StoredLandmarkKind>(),byDay:new Map<string,StoredLandmarkKind>()};
+      if (!index.byMemory.has(memory.id)) index.byMemory.set(memory.id,mark);
+      const day=dayKey(mark.storyTime || memory.story_time_normalized || memory.story_time);
+      if (day!==undefined && !index.byDay.has(day)) index.byDay.set(day,mark);
+      landmarks.set(key,index);
+    }
+  }
   const events=rows
     .map(row=>{
       const direct=evidence(row.evidence_json), memory=memories.get(row.source_memory_id);
@@ -50,15 +70,9 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
     const memory=memories.get(event.source_memory_id);
     const storyTime=memory?.story_time || memory?.story_time_normalized;
     const eventPair=pair([event.promisor,event.promisee]);
-    const landmark=dated.slice().sort((a,b)=>Number(b.memory.id===memory?.id)-Number(a.memory.id===memory?.id)
-      || Math.min(...a.refs.map(e=>sources.get(e.messageId).ordinal))-Math.min(...b.refs.map(e=>sources.get(e.messageId).ordinal)))
-      .flatMap(({memory:landmarkMemory})=>{
-        const known=(plotHolders.get(landmarkMemory.id) ?? JSON.parse(landmarkMemory.known_by_json) as string[]).map(identity);
-        if(![event.promisor,event.promisee].every(name=>known.includes(identity(name)))) return [];
-        return (parseLandmarkKinds(landmarkMemory.landmark_kinds_json) as StoredLandmarkKind[]).filter(mark=>eventPair && mark.pair && pair(mark.pair)===eventPair
-          && (!mark.evidence?.length || mark.evidence.every(valid))
-          && (landmarkMemory.id===memory?.id || sameDay(mark.storyTime || landmarkMemory.story_time_normalized || landmarkMemory.story_time,storyTime)));
-      })[0];
+    const index=eventPair ? landmarks.get(eventPair) : undefined;
+    const day=dayKey(storyTime);
+    const landmark=index?.byMemory.get(memory?.id) ?? (day===undefined ? undefined : index?.byDay.get(day));
     if(!storyTime && !landmark)continue;
     const firstTime=structuredStoryTimeEnd(memory?.story_time_normalized || storyTime);
     const daysAgo=firstTime!==undefined && currentTime!==undefined && currentTime>=firstTime ? Math.floor((currentTime-firstTime)/86400000) : undefined;

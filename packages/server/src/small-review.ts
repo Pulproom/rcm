@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ExtractionDraftResultSchema, ExtractionResultSchema, dialogueSourceMatches, resolveSourceQuote, sourceRangeIsVisible, normalizeRecognitionReferences, type ExtractionDraftResult } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { inspectDraftEvidence, rescueDraftDialogues } from "./evidence-review.js";
+import { inspectDraftEvidence, rescueDraftDialogues, preferAssistantDialogueSources } from "./evidence-review.js";
 import { recordExtractionAudit } from "./extraction-audit.js";
 import { fingerprintMatches, sourceFingerprint } from "./source-fingerprint.js";
 import { canonicalizeExtraction, buildEntityIdentityResolver } from "./entities.js";
@@ -39,9 +39,9 @@ export function readSmallReviews(draft: { smallReviews?: SmallReviewCandidate[] 
 }
 
 function eligibleSourceMessages(db: RcmDatabase, chatId: string, sources: string[]) {
-  return db.prepare(`SELECT message_id,canonical_hash,canonical_content FROM messages WHERE chat_id=?
+  return db.prepare(`SELECT message_id,role,canonical_hash,canonical_content FROM messages WHERE chat_id=?
     AND message_id IN (SELECT value FROM json_each(?)) AND memory_excluded=0 AND host_visibility IN ('active','all_before')
-    AND lifecycle IN ('committed','client_pruned') ORDER BY ordinal`).all(chatId, JSON.stringify(sources)) as Array<{message_id: string; canonical_hash: string; canonical_content: string}>;
+    AND lifecycle IN ('committed','client_pruned') ORDER BY ordinal`).all(chatId, JSON.stringify(sources)) as Array<{message_id: string; role: string; canonical_hash: string; canonical_content: string}>;
 }
 
 function exactEvidence(db: RcmDatabase, chatId: string, sources: string[], messageId: string | undefined, quote: string): ExactEvidence[] | undefined {
@@ -64,7 +64,7 @@ function exactEvidence(db: RcmDatabase, chatId: string, sources: string[], messa
 function dialogueSourceChoices(db: RcmDatabase, chatId: string, sources: string[], item: SmallReviewCandidate) {
   const text = item.dialogue?.text;
   if (!text?.trim()) return [];
-  return eligibleSourceMessages(db, chatId, sources).flatMap(row => {
+  const choices = eligibleSourceMessages(db, chatId, sources).flatMap(row => {
     const choices = [];
     for (let start = row.canonical_content.indexOf(text); start >= 0; start = row.canonical_content.indexOf(text, start + text.length)) {
       const end = start + text.length;
@@ -74,12 +74,13 @@ function dialogueSourceChoices(db: RcmDatabase, chatId: string, sources: string[
       let before = start, after = end;
       while (before > Math.max(0, start - 160) && sourceRangeIsVisible(row.canonical_content, before - 1, start)) before--;
       while (after < Math.min(row.canonical_content.length, end + 160) && sourceRangeIsVisible(row.canonical_content, end, after + 1)) after++;
-      choices.push({id: createHash('sha256').update(JSON.stringify(evidence)).digest('hex'), evidence,
+      choices.push({role: row.role, id: createHash('sha256').update(JSON.stringify(evidence)).digest('hex'), evidence,
         before: (before ? '…' : '') + row.canonical_content.slice(before, start), text,
         after: row.canonical_content.slice(end, after) + (after < row.canonical_content.length ? '…' : '')});
     }
     return choices;
   });
+  return preferAssistantDialogueSources(choices);
 }
 
 function verifiedCitations(rows: ReturnType<typeof eligibleSourceMessages>, evidence: ExactEvidence[]) {
@@ -218,8 +219,37 @@ function preparedCandidate(db: RcmDatabase, chatId: string, sources: string[], i
   return draft;
 }
 
+function authoredCandidate(db: RcmDatabase, chatId: string, sources: string[], item: SmallReviewCandidate): SmallReviewCandidate | undefined {
+  if (!item.dialogue && !item.passage) return;
+  const choices = dialogueSourceChoices(db, chatId, sources, item);
+  if (choices.length > 1) return;
+  if (choices.length === 1 && item.dialogue) {
+    const evidence = choices[0]!.evidence;
+    return {...item, verifiedEvidence:[evidence], dialogue:{...item.dialogue,messageId:evidence.messageId,evidence:[evidence]}};
+  }
+  const declared = item.dialogue?.evidence ?? (item.passage && sources.includes(item.passage.messageId)
+    ? exactEvidence(db,chatId,sources,item.passage.messageId,item.passage.quote) ?? [] : []);
+  const cited = verifiedCitations(eligibleSourceMessages(db,chatId,sources),
+    item.citedEvidence?.length ? item.citedEvidence : declared);
+  const ids = [...new Set(cited.map(span => span.messageId))];
+  const originalId = item.dialogue?.messageId ?? item.passage!.messageId;
+  let messageId = sources.includes(originalId) ? originalId : ids.length === 1 ? ids[0] : undefined;
+  // A missing model citation must not discard a uniquely located visible fragment.
+  // The user approves the authored wording; evidence still records the exact source.
+  const matched = dialogueMatches(db, chatId, sources, messageId, item.dialogue?.text ?? item.passage!.quote,
+    cited.length ? cited : undefined);
+  const evidence = matched.evidence.length ? matched.evidence : cited;
+  if (!messageId && new Set(evidence.map(span => span.messageId)).size === 1) messageId = evidence[0]!.messageId;
+  if (!messageId || !evidence.length || evidence.some(span => span.messageId !== messageId)) return;
+  return { ...item, verifiedEvidence: evidence,
+    ...(item.dialogue ? {dialogue: {...item.dialogue, messageId, evidence}} : {}),
+    ...(item.passage ? {passage: {...item.passage, messageId, quote:evidence[0]!.quote, startOffset:evidence[0]!.startOffset}} : {}) };
+}
+
 export function smallReviewView(db: RcmDatabase, chatId: string, sources: string[], item: SmallReviewCandidate) {
   const prepared = preparedCandidate(db, chatId, sources, item);
+  const authored = item.status === "pending" ? authoredCandidate(db, chatId, sources, item) : undefined;
+  const canKeepAsWritten = Boolean(authored && preparedCandidate(db, chatId, sources, authored));
   const recognition = item.recognition;
   const additions = recognition && recognitionNameAdditions(db, chatId, recognition);
   const canKeep = item.status === "pending" && Boolean(prepared);
@@ -235,12 +265,22 @@ export function smallReviewView(db: RcmDatabase, chatId: string, sources: string
     ...(item.kind === "recognition" ? { level: recognition?.level, knownAs: additions?.knownAs ?? [], addressTerms: additions?.addressTerms ?? [],
       canKeepNames: item.status === "pending" && !canKeep && Boolean(additions && (additions.knownAs.length || additions.addressTerms.length)
         && nameOnlyEvidence(db, chatId, sources, recognition!).length) } : {}),
-    canKeep, canRetry: item.status === "pending" && item.kind !== "recognition" && !item.retryJobId };
+    canKeep, canKeepAsWritten, canRetry: item.status === "pending" && item.kind !== "recognition" && !item.retryJobId };
 }
 
 export function visibleSmallReviews(db: RcmDatabase, chatId: string, sources: string[], candidates: SmallReviewCandidate[]) {
   return candidates.map(candidate => smallReviewView(db, chatId, sources, candidate))
     .filter(item => item.kind !== "recognition" || item.status !== "pending" || item.canKeep || item.canKeepNames);
+}
+
+export function countPendingSmallReviews(db: RcmDatabase, chatId: string): number {
+  const rows = db.prepare(`SELECT source_message_ids_json AS sources,json_extract(draft_json,'$.smallReviews') AS candidates
+    FROM extraction_audits WHERE chat_id=? AND json_array_length(draft_json,'$.smallReviews')>0`)
+    .all(chatId) as Array<{ sources: string; candidates: string }>;
+  return rows.reduce((count, row) => {
+    const pending = (JSON.parse(row.candidates) as SmallReviewCandidate[]).filter(item => item.status === "pending");
+    return count + visibleSmallReviews(db, chatId, JSON.parse(row.sources), pending).length;
+  }, 0);
 }
 
 /** Same evidence, canonicalization and access path as source-recovery ingestion. */
@@ -312,20 +352,9 @@ export function resolveSmallReviews(db: RcmDatabase, chatId: string, selections:
         candidate = {...item, verifiedEvidence: [selected.evidence], dialogue: {...item.dialogue,
           messageId: selected.evidence.messageId, evidence: [selected.evidence]}};
       } else if (keepAsWritten && (item.dialogue || item.passage)) {
-        const declared = item.dialogue?.evidence ?? (item.passage && sources.includes(item.passage.messageId)
-          ? exactEvidence(db,chatId,sources,item.passage.messageId,item.passage.quote) ?? [] : []);
-        const cited = verifiedCitations(eligibleSourceMessages(db,chatId,sources),
-          item.citedEvidence?.length ? item.citedEvidence : declared);
-        const ids = [...new Set(cited.map(span => span.messageId))];
-        const originalId = item.dialogue?.messageId ?? item.passage!.messageId;
-        const messageId = sources.includes(originalId) ? originalId : ids.length === 1 ? ids[0] : undefined;
-        if (!messageId || !cited.length) return {id:item.id,status:item.status,message:"원문 위치가 없어 남겨 뒀어요.",reason:"source_location_missing"};
-        const matched = dialogueMatches(db, chatId, sources, messageId, item.dialogue?.text ?? item.passage!.quote, cited);
-        const evidence = matched.evidence.length ? matched.evidence : cited;
-        if (!evidence.length || evidence.some(span => span.messageId !== messageId)) return {id:item.id,status:item.status,message:"원문 위치가 없어 남겨 뒀어요.",reason:"source_location_missing"};
-        candidate = { ...item, verifiedEvidence: evidence,
-          ...(item.dialogue ? {dialogue: {...item.dialogue, messageId, evidence}} : {}),
-          ...(item.passage ? {passage: {...item.passage, messageId, quote:evidence[0]!.quote, startOffset:evidence[0]!.startOffset}} : {}) };
+        const authored = authoredCandidate(db, chatId, sources, item);
+        if (!authored) return {id:item.id,status:item.status,message:"원문 위치가 없어 남겨 뒀어요.",reason:"source_location_missing"};
+        candidate = authored;
       }
       if (action === "keep_edited") {
         if (item.kind === "recognition" || !editedText?.trim()) throw new Error("대사나 발췌를 입력해 주세요.");

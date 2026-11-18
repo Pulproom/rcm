@@ -120,6 +120,17 @@ export const ALBUM_EDIT_CSS = ALBUM_LINE_PICKER_CSS + ALBUM_CONFIRM_CSS + `
 .ae-more-sheet footer small{color:var(--ae-pop-muted);font-size:12px}
 .album-edit .ae-more-sheet footer button{height:36px;min-height:36px;padding:0 16px;border-radius:8px;background:var(--ae-pop-accent);color:var(--ae-pop-accent-ink);font-weight:600;flex:none}
 .album-edit .ae-more-sheet footer button:disabled{opacity:.4;cursor:default}
+.ae-cards{width:360px}
+.ae-cards-scrim{background:#0003}
+.album-edit:has(.ae-cards) .ae-tools{z-index:51}
+.album-edit:has(.ae-cards) .ae-tools [data-edit-action=cards]{background:var(--ae-pop-hover)}
+.album-edit:has(.alb-block--together.alb-editor-selected) .ae-tools .ae-danger{color:#e5806f}
+.ae-cards ul{max-height:min(560px,calc(100cqh - 140px))}
+.ae-cards li label{padding:9px 10px;font-weight:400}
+.ae-cards input{color-scheme:light}
+.ae-cards li.off span{color:var(--ae-pop-muted)}
+.ae-cards li.off label,.ae-cards li.off input{cursor:default}
+.ae-cards li.off label:hover{background:transparent}
 @container(max-width:767px){
 .ae-base,.ae-base.ae-has-panel{grid-template-columns:minmax(0,1fr);grid-template-rows:56px minmax(0,1fr) auto}
 .ae-head{padding:0 8px 0 4px}.ae-title{justify-content:center;text-align:center;gap:0;flex-direction:column;align-items:center;flex-wrap:nowrap}
@@ -132,6 +143,7 @@ export const ALBUM_EDIT_CSS = ALBUM_LINE_PICKER_CSS + ALBUM_CONFIRM_CSS + `
 .album-edit .ae-block-sheet{left:0;right:0;bottom:0;top:auto;transform:none;width:auto;border-radius:16px 16px 0 0;padding-bottom:max(18px,env(safe-area-inset-bottom))}
 .ae-sheet::before{content:'';width:36px;height:5px;flex:none;border-radius:3px;background:var(--rule-2);margin:8px auto 2px}
 .ae-more-sheet.ae-sheet{max-width:none}.ae-more-sheet.ae-sheet::before{background:var(--ae-pop-rule)}
+.ae-cards.ae-sheet ul{max-height:calc(86cqh - 70px)}
 .album-edit[data-skin=phone] .ae-block-sheet{background:var(--house)}
 .ae-block-actions .ae-pair{margin-bottom:0}
 .ae-sheet-body .ae-psec{padding-left:0;padding-right:0}
@@ -178,6 +190,7 @@ export const ALBUM_EDIT_CONTENT_CSS = ALBUM_PHOTO_TOOLS_CSS + `
 .alb-album.alb-mode--edit [data-album-block]::before{content:"";position:absolute;inset:0;border:1.5px solid transparent;border-radius:8px;pointer-events:none;transition:border-color .12s;z-index:2}
 .alb-album.alb-mode--edit [data-album-block]:hover::before{border-color:#2f6fd633}
 .alb-album.alb-mode--edit [data-album-block].alb-editor-selected::before{border-color:var(--editor-accent)}
+.alb-album.alb-mode--edit .alb-block--together.alb-editor-selected::before{inset:-14px;border:2px solid #dba35a;border-radius:16px}
 .alb-album.alb-mode--edit [data-album-field]{cursor:text;border-radius:3px;min-height:1em;white-space:pre-wrap;outline:1.5px solid transparent;outline-offset:3px;transition:outline-color .12s,background-color .12s}
 .alb-album.alb-mode--edit [data-album-field]:hover{outline-color:var(--editor-soft);background:var(--editor-soft)}
 .alb-album.alb-mode--edit [data-album-field]:focus{outline:1.5px solid var(--editor-accent);background:transparent}

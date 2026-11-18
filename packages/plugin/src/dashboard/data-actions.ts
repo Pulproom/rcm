@@ -515,6 +515,9 @@ export function createDataController(state: RuntimeState, view: DataViewState, r
       if (!view.confirmation) return;
       if (view.cleanupRunning) return;
       const { action: operation, chatId } = view.confirmation;
+      if (operation === "rebuild" && state.current?.chatId !== chatId) {
+        throw new Error("다시 만들 채팅을 Risu에서 먼저 열어 주세요. 해당 채팅의 설정 재료를 다시 골라야 해요.");
+      }
       if (operation === "rebuild") requireChatMemoryEnabled(state, chatId, getData().adminChats.find(chat => chat.id === chatId)?.characterId);
       const extractionReviewOverride = operation === "rebuild"
         ? await chooseExtractionReviewOverride(

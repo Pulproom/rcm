@@ -5,7 +5,7 @@ import { build } from "esbuild";
 import { buildMaskToolSources } from "./build-mask-tools.mjs";
 import { pluginBanner, PLUGIN_VERSION } from "./build-banner.mjs";
 
-const banner = pluginBanner();
+const banner = pluginBanner({ updateUrl: process.env.RCM_DEV_UPDATE_URL, dev: true });
 const testArtifact = process.argv[2] === "--test-artifact";
 if (process.argv.length > (testArtifact ? 3 : 2)) throw new Error("Usage: node build.mjs [--test-artifact]");
 const packageDir = dirname(fileURLToPath(import.meta.url));

@@ -103,6 +103,7 @@ export function pendingAttentionCount(data: Partial<Pick<DashboardData, "pending
   const reported = Number(data.pendingReviews);
   if (Number.isFinite(reported)) return Math.max(0, reported);
   return (data.extractionAudits ?? []).filter((item: any) => (item?.status === "pending_review" || item?.status === "failed") && item?.evidenceReview?.blocking !== false).length
+    + (data.extractionAudits ?? []).reduce((count: number, audit: any) => count + (audit.smallReviews ?? []).filter((item: any) => item.status === "pending").length, 0)
     + (data.reconciliationReviews ?? []).filter((item: any) => item?.status === "pending").length
     + (data.conflicts ?? []).filter((item: any) => item?.status === "pending").length;
 }

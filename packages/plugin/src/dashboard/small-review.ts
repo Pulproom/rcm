@@ -99,7 +99,7 @@ export function smallReviewDetail(item: any, back: string): string {
     </form>` : "";
   const discard = btn("빼기", { kind: "danger", action: "resolve-small-review", data: { ...data, resolution: "discard" } });
   const actions = item.canKeep ? `${discard}${keep}`
-    : `${discard}${btn("고쳐서 남기기", { kind: "secondary", action: "edit-small-review" })}${btn("그대로 남기기", { kind: "primary", action: "resolve-small-review", data: { ...data, resolution: "keep_as_written" } })}`;
+    : `${discard}${btn("고쳐서 남기기", { kind: "secondary", action: "edit-small-review" })}${item.canKeepAsWritten ? btn("그대로 남기기", { kind: "primary", action: "resolve-small-review", data: { ...data, resolution: "keep_as_written" } }) : ""}`;
   return `<article class="reader review-small">${back}
     <h2 class="reader__title">${item.canKeep ? meta.title : `원문과 글자가 조금 다른 ${meta.subject}예요`}</h2>
     <p class="review-small__why">${item.canKeep ? escapeHtml(item.reason) : `보조 모델이 나레이션을 건너뛰고 이었거나 말을 조금 다듬었을 수 있어요. 기억은 저장됐어요.`}</p>

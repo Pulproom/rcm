@@ -1,4 +1,5 @@
 import { createEntityIdentityResolver, normalizeEntityName } from "./entity-identity.js";
+import { STATE_PERSON_WRITING_FIELDS } from "./entity-person-fields.js";
 import { parseStructuredModelJson } from "./structured-json.js";
 import type { ReconciliationResult } from "./index.js";
 import type { SourceUnit } from "./source-references.js";
@@ -68,7 +69,7 @@ export function stateWritingContext(userPrompt: string): StateWritingContext {
     const priorLedger: StateWritingContext["priorLedger"] = [];
     for (const row of Array.isArray(input.priorLedger) ? input.priorLedger : []) {
       if (!record(row) || typeof row.id !== 'string' || typeof row.kind !== 'string') continue;
-      const value = stateContract === 'r11' ? {...row, holder:row.believer, promise_key:row.promiseKey, retention_scope:row.scope, scheduled_for:row.scheduledFor} : row.value;
+      const value = stateContract === 'r11' ? {...row, [STATE_PERSON_WRITING_FIELDS.believer.canonical]:row[STATE_PERSON_WRITING_FIELDS.believer.authored], promise_key:row.promiseKey, retention_scope:row.scope, scheduled_for:row.scheduledFor} : row.value;
       if (record(value)) priorLedger.push({id:row.id,kind:row.kind,value});
     }
     return {...(stateContract ? {stateContract} : {}), ...(Array.isArray(input.recognition) ? {recognition:input.recognition as NonNullable<StateWritingContext["recognition"]>} : {}), ...(record(input.eventDraft) && Array.isArray(input.eventDraft.memories) ? {eventDraft:input.eventDraft as StateWritingContext["eventDraft"]} : {}), priorLedger};
@@ -85,7 +86,8 @@ export function expandStateWritingFormat(raw: unknown, context?: StateWritingCon
   const decisions: unknown[] = [];
   const observations = items("stateObservations");
   if(context?.stateContract==='r11') {
-    for(const item of observations)if(item.kind==='character_belief' && item.believer!==undefined){item.holder=item.believer;delete item.believer;}
+    const {authored,canonical}=STATE_PERSON_WRITING_FIELDS.believer;
+    for(const item of observations)if(item.kind==='character_belief' && item[authored]!==undefined){item[canonical]=item[authored];delete item[authored];}
   }
   const keys = new Set(observations.map(o => o.key));
   observations.forEach((item, index) => {
@@ -152,9 +154,10 @@ export function expandStateWritingFormat(raw: unknown, context?: StateWritingCon
         let key=base,n=2;
         while(used.get(support.memoryKey)?.has(key))key=`${base}#${n++}`;
         reserve(support.memoryKey,key);
-        for(const grant of Array.isArray(support.knownBy) ? support.knownBy : [])if(record(grant)&&typeof grant.who==='string') {
-          const resolved=identity(grant.who);
-          if(!resolved.known||resolved.ambiguous)diagnostic(`R11:inline_name item ${item.key ?? item.detailId} has an unresolved or ambiguous knower ${JSON.stringify(grant.who)}; kept`);
+        for(const grant of Array.isArray(support.knownBy) ? support.knownBy : [])if(record(grant)&&typeof grant[STATE_PERSON_WRITING_FIELDS.knower.authored]==='string') {
+          const name=grant[STATE_PERSON_WRITING_FIELDS.knower.authored] as string;
+          const resolved=identity(name);
+          if(!resolved.known||resolved.ambiguous)diagnostic(`R11:inline_name item ${item.key ?? item.detailId} has an unresolved or ambiguous knower ${JSON.stringify(name)}; kept`);
         }
         const owners=item.kind==='character_belief' ? [item.holder,item.subject] : item.kind==='promise_event' ? [item.promisor,item.promisee] : item.kind==='world_fact' ? [item.subject] : [];
         const detail={text:support.text,key,kind:'character_state',role:'core',epistemic:'observed',salience:.5,retention:item.retention ?? 'arc',
@@ -204,7 +207,8 @@ export function expandStateWritingFormat(raw: unknown, context?: StateWritingCon
       if(Array.isArray(value)){value.forEach(expandKnowers);return;}
       if(!record(value))return;
       if(Array.isArray(value.knownBy)&&value.knownBy.some(record)) {
-        value.access=value.knownBy.map(grant=>record(grant) ? {holder:grant.who,basis:grant.basis,confidence:grant.confidence ?? value.confidence ?? 1,...(grant.evidence===undefined ? {} : {evidence:grant.evidence})} : grant);
+        const {authored,canonical}=STATE_PERSON_WRITING_FIELDS.knower;
+        value.access=value.knownBy.map(grant=>record(grant) ? {[canonical]:grant[authored],basis:grant.basis,confidence:grant.confidence ?? value.confidence ?? 1,...(grant.evidence===undefined ? {} : {evidence:grant.evidence})} : grant);
         delete value.knownBy;
       }
       // An empty explicit knower list is narrator-only, including inline support.
