@@ -14,10 +14,17 @@ const batchKinds=new Set<string>(PROCESSING_BATCH_TYPES);
 const batchTypes=PROCESSING_BATCH_TYPES.map(type=>`'${type}'`).join(',');
 // Resolve queued shadow jobs before they acquire a lease/snapshot. The scalar
 // uses the same explicit regeneration-id priority as recording and migration.
-const unitCte = `WITH source_jobs AS MATERIALIZED (
+function unitCte(scoped: boolean): string {
+ return `WITH ${scoped ? `owner_chats AS (
+  SELECT @chatId id UNION SELECT shadow_chat_id FROM regeneration_runs WHERE chat_id=@chatId AND shadow_chat_id IS NOT NULL
+), owned_job_ids AS (
+  SELECT id FROM jobs WHERE chat_id IN (SELECT id FROM owner_chats)
+  UNION SELECT id FROM processing_jobs WHERE chat_id=@chatId
+),` : ''} source_jobs AS MATERIALIZED (
   SELECT j.id,j.chat_id,j.type,j.status,j.payload_json,j.attempts,j.created_at,j.updated_at,j.last_error,p.chat_id snapshot_chat,p.status snapshot_status,p.id snapshot_id,p.payload_json snapshot_payload FROM jobs j LEFT JOIN processing_jobs p ON p.id=j.id
+  ${scoped ? 'WHERE j.id IN (SELECT id FROM owned_job_ids)' : ''}
   UNION ALL SELECT p.id,p.chat_id,p.type,p.status,p.payload_json,p.attempts,p.created_at,p.updated_at,NULL,p.chat_id,p.status,p.id,p.payload_json
-  FROM processing_jobs p WHERE NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=p.id)
+  FROM processing_jobs p WHERE ${scoped ? 'p.chat_id IN (SELECT id FROM owner_chats) AND ' : ''}NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id=p.id)
 ), base AS MATERIALIZED (
   SELECT j.id,COALESCE(r.chat_id,j.snapshot_chat,j.chat_id) chat_id,j.type,j.status,j.created_at,j.updated_at,j.attempts,
     processing_run_id(j.payload_json) run_id,
@@ -35,6 +42,7 @@ const unitCte = `WITH source_jobs AS MATERIALIZED (
   JOIN chats c ON c.id=COALESCE(r.chat_id,j.snapshot_chat,j.chat_id)
   LEFT JOIN extraction_batches b ON b.job_id=j.id
   WHERE c.is_internal=0 AND COALESCE(j.snapshot_status,'')<>'archived' AND j.status<>'archived'
+    ${scoped ? 'AND c.id=@chatId' : ''}
     AND COALESCE(json_extract(j.payload_json,'$.inheritedReview'),0)=0
 ), preceding AS (
  SELECT b.*,CASE WHEN b.type='relationship_projection' AND b.run_id IS NULL AND b.started_at IS NOT NULL THEN (
@@ -46,6 +54,7 @@ const unitCte = `WITH source_jobs AS MATERIALIZED (
    CASE WHEN p.run_id IS NULL AND b.started_at<=p.updated_at+${PROCESSING_COMPLETION_WINDOW_MS} THEN p.id END,b.id) END unit_id
  FROM preceding b LEFT JOIN base p ON p.id=b.preceding_id
 )`;
+}
 const aggregate=`COUNT(*) calls,SUM(input_tokens) input,SUM(output_tokens) output,SUM(duration_ms) duration,
  SUM(input_tokens IS NULL OR output_tokens IS NULL) missing_tokens`;
 const total=(row:Row|undefined):ProcessingTotals=>({calls:row?.calls??0,input:row?.input??null,output:row?.output??null,duration:row?.duration??null,missingTokens:row?.missing_tokens??0});
@@ -185,7 +194,7 @@ function loadUnits(db:RcmDatabase,groups:Group[],details:boolean,offset=-1):Proc
  });
 }
 export function readProcessingUnit(db:RcmDatabase,chatId:string,key:string,offset=-1):ProcessingUnit|null {
- const group=db.prepare(`${unitCte} SELECT chat_id,unit_id,MAX(updated_at) at,${memberJson} FROM units WHERE chat_id=? AND unit_id=? GROUP BY chat_id,unit_id`).get(chatId,key) as Group|undefined;
+ const group=db.prepare(`${unitCte(true)} SELECT chat_id,unit_id,MAX(updated_at) at,${memberJson} FROM units WHERE unit_id=? GROUP BY chat_id,unit_id`).get({chatId},key) as Group|undefined;
  return group?loadUnits(db,[group],true,offset)[0]!:null;
 }
 export function processingDayBounds(timezoneMinutes:number,at=Date.now()):{since:number;day:string}{
@@ -205,7 +214,7 @@ export function readTranslationCalls(db:RcmDatabase,chatId:string|undefined,day:
 export function readProcessingHistory(db:RcmDatabase,options:{chatId?:string;offset?:number;translationOffset?:number;timezoneMinutes?:number}={}):ProcessingHistory{
  const {chatId,offset=0,translationOffset=0,timezoneMinutes=0}=options;
  pruneProcessingHistoryPeriodically(db);
- const groups=db.prepare(`${unitCte} SELECT chat_id,unit_id,MAX(updated_at) at,${memberJson} FROM units ${chatId?'WHERE chat_id=?':''} GROUP BY chat_id,unit_id ORDER BY at DESC,chat_id,unit_id LIMIT ? OFFSET ?`).all(...(chatId?[chatId]:[]),PROCESSING_PAGE_SIZE+1,offset) as Group[];
+ const groups=db.prepare(`${unitCte(Boolean(chatId))} SELECT chat_id,unit_id,MAX(updated_at) at,${memberJson} FROM units GROUP BY chat_id,unit_id ORDER BY at DESC,chat_id,unit_id LIMIT ? OFFSET ?`).all(...(chatId?[{chatId}]:[]),PROCESSING_PAGE_SIZE+1,offset) as Group[];
  const items=loadUnits(db,groups.slice(0,PROCESSING_PAGE_SIZE),Boolean(chatId));
  const dayExpr=`strftime('%Y-%m-%d',started_at/1000+${timezoneMinutes*60},'unixepoch')`;
  const days=db.prepare(`SELECT ${dayExpr} day,SUM(completed_items) items,${aggregate},AVG(duration_ms) average FROM processing_calls WHERE purpose='translation' AND chat_id IN (SELECT id FROM chats WHERE is_internal=0${chatId?' AND id=?':''}) GROUP BY day ORDER BY day DESC LIMIT 8 OFFSET ?`).all(...(chatId?[chatId]:[]),translationOffset) as Row[];

@@ -16,7 +16,7 @@ import { projectMemoryScene, extractionDraftSchema } from "@rcm/shared";
 import { chatPacketPricing, chargedCardTokens, chargedPacketTokens, chargedSectionTokens } from "./charged-cost.js";
 import { availableMemoryKey, scopeMemoryKey } from './extraction-memory-keys.js';
 import { emitsMemoryPlot, narrationLine } from "@rcm/shared";
-import { buildEmissionPlan, omitStateLinkedDetails, buildManifest, emittedMemoryItems, emittedMemoryRecords, memoryCardHasContent, prependAlwaysCards, traceEmissionPlan, type EmissionPlan } from "./emission-plan.js";
+import { buildEmissionPlan, factReasonsFor, omitStateLinkedDetails, buildManifest, emittedMemoryItems, emittedMemoryRecords, memoryCardHasContent, prependAlwaysCards, traceEmissionPlan, type EmissionPlan } from "./emission-plan.js";
 import { markChatEngaged, recordOpenChat, deleteUnengagedChats, recentChatCleanup } from "./chat-engagement.js";
 import { sourceSnapshotStatus, withSourceSnapshot, assertSourceSnapshotAccepted } from './source-snapshot.js';
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
@@ -1051,7 +1051,10 @@ export function createApp(dependencies: Dependencies): Hono {
     const deliveredPerspectives = [...new Set([...perspectiveSections.map(item => item.name), ...selectedState.flatMap(row => row.perspectives)])]
       .map(name => name === "__shared__" ? "shared" : name);
     const finalManifest = { ...injectionManifest(packet, emittedManifest, deliveredPerspectives, finalStory.nodeIds), sourceEvidenceIds: deliveredSources.map((item) => item.id),
-      longtermMemoryIds: [...finalSelectedIds].filter(id=>selectedRoles.get(id)==="longterm") };
+      longtermMemoryIds: [...finalSelectedIds].filter(id=>selectedRoles.get(id)==="longterm"),
+      seedAtomKeys: [...new Set(emissionPlan!.cards.flatMap(card => card.item.details
+        .filter(detail => factReasonsFor(card.item).get(detail.id)?.includes("open_seed"))
+        .map(memoryDetailAtomKey).filter(key => emittedAtomKeys.has(key))))] };
     if(sceneNames.text)finalManifest.atomKeys=[...new Set([...finalManifest.atomKeys,...sceneNames.atomKeys])];
     if (parsed.memoryGeneration) memoryReferences.deliver(parsed.chatId, parsed.memoryGeneration, [...packet.matchAll(/ref="(m[0-9]+)"/g)].map(match => match[1]!));
     const deliveredActivationAtoms = new Set(finalManifest.atomKeys);
@@ -1899,8 +1902,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const followableMemoryIds = result.mcpFollowableMemoryIds ?? [];
     const { emissionPlan: _emissionPlan, standaloneScopes: _standaloneScopes, diagnostics: _diagnostics, eligibleCandidates: _eligible, mcpSearchEnvelopes: _envelopes,
       mcpFollowableMemoryIds: _followable, directAtomKeys: _direct, structuredManifest: _structured, ...publicResult } = result;
-    const opportunityError = !opportunityCurrent && (result.deliveredAtomKeys?.length ?? 0) === 0 ? "stale_turn" : undefined;
-    const response = context.json({ ...publicResult, selected: result.selected.map(publicMemoryContext), answers: publicMcpAnswers(result.answers ?? []), timings, followableMemoryIds, deliverySource, newAtomCount: result.deliveredAtomKeys.filter(key => ![...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])].includes(key)).length, ...(opportunityError ? { opportunityError } : {}) });
+    const response = context.json({ ...publicResult, selected: result.selected.map(publicMemoryContext), answers: publicMcpAnswers(result.answers ?? []), timings, followableMemoryIds, deliverySource, newAtomCount: result.deliveredAtomKeys.filter(key => ![...(body.alreadyPresentAtomKeys ?? []), ...(body.excludeAtomKeys ?? [])].includes(key)).length });
     const responseSerializationMs = performance.now() - serializationStarted;
     const traceStarted = performance.now();
     const traceRequestId = body.traceContext?.requestId ?? randomUUID();
@@ -2016,7 +2018,7 @@ export function createApp(dependencies: Dependencies): Hono {
   });
 
   app.post("/v1/turn/delivery", async (context) => {
-    const body = await context.req.json().catch(() => undefined) as { chatId?: unknown; memoryIds?: unknown; atomKeys?: unknown; receiptId?: unknown; longtermMemoryIds?: unknown } | undefined;
+    const body = await context.req.json().catch(() => undefined) as { chatId?: unknown; memoryIds?: unknown; atomKeys?: unknown; receiptId?: unknown; longtermMemoryIds?: unknown; seedAtomKeys?: unknown } | undefined;
     if (!body || typeof body.chatId !== "string" || !Array.isArray(body.memoryIds)
       || body.memoryIds.length > 512 || !body.memoryIds.every(id => typeof id === "string")) {
       return context.json({ error: "Invalid memory delivery receipt" }, 400);
@@ -2026,8 +2028,12 @@ export function createApp(dependencies: Dependencies): Hono {
     if (body.longtermMemoryIds !== undefined && (!Array.isArray(body.longtermMemoryIds)
       || body.longtermMemoryIds.length > 512 || !body.longtermMemoryIds.every(id=>typeof id === "string" && (body.memoryIds as string[]).includes(id))))
       return context.json({error:"Invalid long-term delivery receipt"},400);
+    if (body.seedAtomKeys !== undefined && (!Array.isArray(body.seedAtomKeys)
+      || body.seedAtomKeys.length > 4096 || !Array.isArray(body.atomKeys)
+      || !body.seedAtomKeys.every(key => typeof key === "string" && (body.atomKeys as string[]).includes(key))))
+      return context.json({error:"Invalid seed delivery receipt"},400);
     recordAutomaticDelivery(db, body.chatId, body.memoryIds,body.longtermMemoryIds as string[]|undefined);
-    if (Array.isArray(body.atomKeys)) recordSeedDelivery(db,body.chatId,body.atomKeys,body.receiptId as string);
+    if (Array.isArray(body.seedAtomKeys)) recordSeedDelivery(db,body.chatId,body.seedAtomKeys,body.receiptId as string);
     // Risu plugin API v3 rebuilds responses as new Response(body, init); a 204 with any body throws there.
     return context.json({ ok: true });
   });
@@ -2469,19 +2475,32 @@ export function createApp(dependencies: Dependencies): Hono {
     }
   });
 
-  app.get("/v1/chats/:id/extraction-audits", (context) => {
-    const items = db.prepare(`SELECT id,job_id AS jobId,status,source_message_ids_json AS sourceMessageIds,source_fingerprint_json AS sourceFingerprint,source_revision AS sourceRevision,
-      draft_json AS draft,patch_json AS patch,error,usage_json AS usage,attempts,created_at AS createdAt,updated_at AS updatedAt
-      FROM extraction_audits WHERE chat_id=? ORDER BY updated_at DESC`).all(context.req.param("id")) as Array<Record<string, any>>;
-    return context.json({ items: items.map((item) => {
+  function readExtractionAudits(chatId: string, list = false, auditId?: string) {
+    const items = db.prepare(`SELECT id,job_id AS jobId,status,source_message_ids_json AS sourceMessageIds,${list ? 'NULL' : 'source_fingerprint_json'} AS sourceFingerprint,source_revision AS sourceRevision,
+      ${list ? "CASE WHEN status IN ('pending_review','failed') THEN draft_json ELSE json_object('smallReviews',json(json_extract(draft_json,'$.smallReviews'))) END" : "draft_json"} AS draft,
+      ${list ? "NULL" : "patch_json"} AS patch,error,${list ? "NULL" : "usage_json"} AS usage,attempts,created_at AS createdAt,updated_at AS updatedAt
+      FROM extraction_audits WHERE chat_id=?${auditId ? ' AND id=?' : ''} ORDER BY updated_at DESC`).all(chatId,...(auditId ? [auditId] : [])) as Array<Record<string, any>>;
+    return items.map((item) => {
       const sourceMessageIds = JSON.parse(item.sourceMessageIds || "[]");
       const draft = JSON.parse(item.draft);
       const smallReviews = readSmallReviews(draft);
+      const visible = visibleSmallReviews(db, chatId, sourceMessageIds, list ? smallReviews.filter(candidate => candidate.status === 'pending') : smallReviews);
+      const evidenceReview = ["pending_review", "failed"].includes(item.status) ? describeEvidenceReview(db, chatId, item.jobId, draft, sourceMessageIds) : undefined;
+      if (list) return { id:item.id,jobId:item.jobId,status:item.status,updatedAt:item.updatedAt,detailsLoaded:false,
+        ...(evidenceReview ? {evidenceReview:{blocking:evidenceReview.blocking,appliedMemories:evidenceReview.appliedMemories,issueCount:evidenceReview.issues.length}} : {}),
+        smallReviews:visible.map(candidate => ({id:candidate.id,kind:candidate.kind,status:candidate.status,text:candidate.text,holder:candidate.holder,subject:candidate.subject,
+          memoryTitle:candidate.memoryTitle,knownAs:candidate.knownAs,addressTerms:candidate.addressTerms,canKeep:candidate.canKeep,canKeepAsWritten:candidate.canKeepAsWritten,
+          sourceChoiceCount:candidate.sourceChoices.length,detailsLoaded:false})) };
       return { ...item, sourceMessageIds, sourceFingerprint: JSON.parse(item.sourceFingerprint || "[]"), draft,
-        smallReviews: visibleSmallReviews(db, context.req.param("id"), sourceMessageIds, smallReviews),
+        smallReviews: visible,
         patch: item.patch ? JSON.parse(item.patch) : undefined, usage: JSON.parse(item.usage || "{}"),
-        ...(["pending_review", "failed"].includes(item.status) ? { evidenceReview: describeEvidenceReview(db, context.req.param("id"), item.jobId, draft, sourceMessageIds) } : {}) };
-    }) });
+        ...(evidenceReview ? { evidenceReview } : {}) };
+    }).filter(item => !list || item.smallReviews.length > 0 || item.evidenceReview && item.evidenceReview.blocking !== false);
+  }
+  app.get("/v1/chats/:id/extraction-audits", (context) => context.json({items:readExtractionAudits(context.req.param('id'),context.req.query('view') === 'list')}));
+  app.get("/v1/chats/:id/extraction-audits/:auditId", (context) => {
+    const item=readExtractionAudits(context.req.param('id'),false,context.req.param('auditId'))[0];
+    return item ? context.json(item) : context.json({error:'Extraction audit not found'},404);
   });
   app.post("/v1/chats/:id/small-reviews/resolve", async context => {
     const body = await context.req.json().catch(() => null);
@@ -3458,7 +3477,16 @@ export function createApp(dependencies: Dependencies): Hono {
       }
     });
   });
-  app.get("/v1/chats/:id/reconciliation-reviews", (context) => context.json({ items: listReconciliationReviews(db, context.req.param("id")) }));
+  app.get("/v1/chats/:id/reconciliation-reviews", (context) => {
+    const items=listReconciliationReviews(db,context.req.param('id'),{pendingOnly:context.req.query('status') === 'pending'});
+    return context.json({items:context.req.query('view') === 'list' ? items.map(item => ({id:item.id,itemRef:item.itemRef,itemKind:item.itemKind,status:item.status,createdAt:item.createdAt,
+      incoming:{content:'content' in item.incoming ? item.incoming.content : undefined,value:'value' in item.incoming ? item.incoming.value : undefined},
+      decision:{reason:(item.decision as {reason?:string}|undefined)?.reason},error:item.error,detailsLoaded:false})) : items});
+  });
+  app.get("/v1/chats/:id/reconciliation-reviews/:reviewId", (context) => {
+    const item=listReconciliationReviews(db,context.req.param('id'),{reviewId:context.req.param('reviewId')})[0];
+    return item ? context.json(item) : context.json({error:'Reconciliation review not found'},404);
+  });
   app.patch("/v1/chats/:id/reconciliation-reviews/:reviewId", async (context) => {
     const body = ReconciliationReviewResolutionSchema.parse(await context.req.json());
     return withChatWrite(db, context.req.param('id'), () => {
@@ -3620,10 +3648,19 @@ export function createApp(dependencies: Dependencies): Hono {
     const calibration = initialCalibrationView(db, chatId);
     const lastJob = db.prepare("SELECT json_extract(payload_json,'$.sourceRecoveryMetadata') metadata FROM jobs WHERE chat_id=? AND type<>'quiz' AND status IN ('done','failed') ORDER BY updated_at DESC,rowid DESC LIMIT 1").get(chatId) as { metadata: string | null } | undefined;
     const calibrationPending = ["unseeded", "awaiting_setup", "queued", "awaiting_confirmation"].includes(calibration.status);
-    const chat = db.prepare("SELECT revision,memory_language FROM chats WHERE id=?").get(chatId) as { revision: number; memory_language: MemoryLanguage } | undefined;
+    const chat = db.prepare(`SELECT id,character_id AS characterId,profile,revision,memory_language,pending_memory_language AS pendingMemoryLanguage,
+      (SELECT COUNT(*) FROM messages WHERE chat_id=c.id) messages,
+      (SELECT COUNT(*) FROM messages WHERE chat_id=c.id AND source_kind<>'archive' AND host_visibility='active' AND lifecycle IN ('committed','pending')) activeMessages,
+      EXISTS(SELECT 1 FROM messages WHERE chat_id=c.id AND source_kind='archive') hasImportedMemory,
+      EXISTS(SELECT 1 FROM memories WHERE chat_id=c.id) OR EXISTS(SELECT 1 FROM relationship_projections WHERE chat_id=c.id)
+        OR EXISTS(SELECT 1 FROM assertions WHERE chat_id=c.id) OR EXISTS(SELECT 1 FROM beliefs WHERE chat_id=c.id) OR EXISTS(SELECT 1 FROM promises WHERE chat_id=c.id) hasDerived
+      FROM chats c WHERE id=?`).get(chatId) as {id:string;characterId:string;profile:string;revision:number;memory_language:MemoryLanguage;pendingMemoryLanguage:MemoryLanguage|null;messages:number;activeMessages:number;hasImportedMemory:number;hasDerived:number} | undefined;
     const memoryUpdatedAt = (db.prepare("SELECT MAX(updated_at) value FROM memories WHERE chat_id=? AND active=1").get(chatId) as { value: number | null }).value;
     return {
       serverInstanceId, memoryLanguage: chat?.memory_language,
+      chat:chat ? {id:chat.id,characterId:chat.characterId,profile:chat.profile,memoryLanguage:chat.memory_language,pendingMemoryLanguage:chat.pendingMemoryLanguage ?? undefined,
+        messages:chat.messages,activeMessages:chat.activeMessages,hasImportedMemory:Boolean(chat.hasImportedMemory),hasDerived:Boolean(chat.hasDerived),
+        ingestionState:ingestion.ingestionState,historicalBackfillMessages:ingestion.historicalBackfillMessages} : null,
       translationRevision: JSON.stringify([chat?.revision, memoryUpdatedAt, derivedCounts.memories, derivedCounts.details, jobs.completed, jobs.lastCompleted]),
       queuedJobs: worker.queuedJobs ?? Number(jobs.queued ?? 0), failedJobs: Number(jobs.failed ?? 0), blockingFailedJobs: Number(jobs.blockingFailed ?? 0), advisoryFailedJobs: Number(jobs.advisoryFailed ?? 0), pendingReviews: pendingReconciliations + pendingExtractionAudits + pendingConflicts + pendingSmallReviews,
       pendingReconciliations,

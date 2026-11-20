@@ -8,7 +8,7 @@ export const MEMORY_GUIDANCE = `These are records of this story so far, for you 
 Reading a record
 - "Plot:" tells the whole event, including parts not everyone knew. "Present:" lists who was there; they know the plot, except lines tagged otherwise. On an older record, "Recorded knowledge scope:" is its saved scope.
 - A tag sets who knows that one line: [only A, B] of those present, only they know it. [known by A, B] they know it, present or not. [no character knows] it is narration only. [secret from C] it is deliberately kept from C.
-- "Claim:" was said and "Inference:" was guessed; neither is confirmed. Quotes are the characters' exact words; bring them back where they fit.
+- "Claim:" was said, "Inference:" was guessed, and "Unresolved:" is still open; none is confirmed. Quotes are the characters' exact words; bring them back where they fit.
 - "hazy for A" or "faint for A": A remembers it only roughly. Show that through vaguer time, fewer details or paraphrase, never by saying so, and keep the facts.
 - Story summaries and relationship landmarks are for the author. A character knows something from them only where the text says so.
 - State lines with no tag are facts of the world, with no record of who knows them; check the beliefs and secrets on the same subject.
@@ -18,7 +18,7 @@ Writing with them
 - Characters act only on what they know or believe, and keep their beliefs even when wrong.
 - People are strangers until they have met, been introduced, been told about each other, share an organization, or one of them is famous.
 - ${SHARED_PAST_GUIDANCE}
-- Speak of time as people do (yesterday, that rainy night), not dates or clock times unless the story needs them.`;
+- Time: recent records show the date and time. Older ones show the part of day and roughly how long ago ("about a month ago"), counted from the newest record; if the chat has moved further on, go by the chat. Speak of time as people remember it (yesterday, last month, that rainy night), not dates or clock times unless the story needs them.`;
 
 export const memoryGuidanceBlock = `<guidance>${MEMORY_GUIDANCE}</guidance>`;
 

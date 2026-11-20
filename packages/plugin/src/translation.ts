@@ -1,5 +1,4 @@
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage, auxiliaryUsageMetadata } from "@rcm/shared";
-import { CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { risuModelSlot, runRisuModel } from "./worker.js";
 import { withAuxiliaryStoryFraming, planTranslation, translationSystemPrompt, validateTranslation, translationTimeoutMs, TranslationError, sanitizeDiagnosticText, prepareAuxiliaryText } from "@rcm/shared";
 import type { RuntimeState, TranslationDisplay, TranslationProvider } from "./types.js";
@@ -20,8 +19,11 @@ async function translationCurrent(state: RuntimeState, chatIds: string[], curren
   if (state.current) characters.set(state.current.chatId, state.current.characterId);
   if (chatIds.some(id => !characters.get(id))) {
     try {
-      const inventory = await clientFor(state).request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats");
-      for (const chat of inventory.items) characters.set(chat.id, chat.characterId);
+      await Promise.all(chatIds.filter(id => !characters.has(id)).map(async id => {
+        const status = await clientFor(state).request<{chat:{characterId:string}|null}>(`/v1/chats/${encodeURIComponent(id)}/status`);
+        if (!status.chat) throw new Error('Chat not found');
+        characters.set(id,status.chat.characterId);
+      }));
     } catch {
       addLog(state.logs, "warn", "번역할 채팅의 캐릭터를 확인하지 못했어요.", "TRANSLATION_CONTEXT_MISSING");
       return () => false;
@@ -124,6 +126,8 @@ function checkCooldown(): void {
   cooldownUntil = 0;
 }
 function translationFailure(state: RuntimeState, error: unknown, label = "Reference translation failed"): string {
+  // A chat switch or reset cancels queued work; that is not a provider failure.
+  if ((error as { code?: string })?.code === "CANCELLED") return (error as Error).message;
   if (settingsFailureCode(error) === "RATE_LIMITED") {
     // A locally blocked request must not extend the provider's cooldown.
     if (!translationCooldownMs()) cooldownUntil = Date.now() + ((error as { retryAfterMs?: number })?.retryAfterMs ?? TRANSLATION_COOLDOWN_MS);
@@ -291,9 +295,9 @@ export async function callTranslationBatch(state: RuntimeState, batch: Translati
     state.publishActivity?.(); state.refreshStatusWidget?.();
   }
 }
-async function translateRisuBatch(state: RuntimeState, records: Array<Pick<TranslationSource, "text"> & Partial<TranslationSource>>, provider: TranslationProvider, isCurrent: () => boolean, background: boolean, completed: (index: number, text: string, model: string) => Promise<void>, chatId = state.current?.chatId, finalRetry=false): Promise<{ translated: Map<string, string>; model: string; failures: Map<string, unknown> }> {
+async function translateRisuBatch(state: RuntimeState, records: Array<Pick<TranslationSource, "text"> & Partial<TranslationSource>>, provider: TranslationProvider, isCurrent: () => boolean, background: boolean, completed: (index: number, text: string, model: string) => Promise<void>, chatId = state.current?.chatId, finalRetry=false, canStore: () => boolean = isCurrent): Promise<{ translated: Map<string, string>; model: string; failures: Map<string, unknown> }> {
   return withRisuSlot(async () => {
-    if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
+    if (!isCurrent()) throw new TranslationError("CANCELLED", "Translation cancelled");
     checkCooldown();
     if(provider === "server") {
       const {config}=await clientFor(state).request<{config:import("@rcm/shared").TranslationConnectionPublicConfig}>("/v1/admin/translation/initialize", {
@@ -335,17 +339,22 @@ async function translateRisuBatch(state: RuntimeState, records: Array<Pick<Trans
     const failures = new Map<string, unknown>();
     const stored = new Set<string>();
     const translateAndStore = async (batch: TranslationBatch) => {
-      if (!isCurrent()) throw new TranslationError("ABORTED_OR_TIMEOUT", "Translation cancelled");
+      if (!isCurrent()) throw new TranslationError("CANCELLED", "Translation cancelled");
       const items = translationParts(batch);
       const response = await callTranslationBatch(state, batch, provider, background, chatId);
       // The server provider guards its own response; Risu retries here, once, without scene headers.
       const retry = provider === "risu" ? untranslatedParts(items, response.items) : [];
-      if (retry.length) {
-        if (!isCurrent()) throw new TranslationError("CHAT_WORK_HELD", CHAT_WORK_HELD_MESSAGE);
+      if (retry.length && !isCurrent()) {
+        // Moved away before the retry: keep the paid Korean results, leave the untranslated sources for later.
+        const skipped = new Set(retry.map(part => part.id));
+        response.items = response.items.filter(item => !skipped.has(item.id));
+      } else if (retry.length) {
         const second = await callTranslationBatch(state, { scenes: [], other: retry.map(({ speaker: _speaker, ...part }) => part) }, provider, background, chatId,true);
         response.items = response.items.map(item => second.items.find(row => row.id === item.id && row.partIndex === item.partIndex) ?? item);
       }
-      if (!isCurrent()) throw new TranslationError("CHAT_WORK_HELD", CHAT_WORK_HELD_MESSAGE);
+      // A response already paid for stays usable after a chat switch: rows are keyed by chat and source.
+      // Only an RCM-off or reset for that chat discards it.
+      if (!canStore()) throw new TranslationError("CANCELLED", "Translation cancelled");
       model = response.model;
       for (const item of response.items) {
         if (failures.has(item.id)) continue; // A later part cannot complete a source whose earlier batch failed.
@@ -447,7 +456,9 @@ export const shownAsWritten = (record: Pick<TranslationSource, "kind" | "text" |
 
 async function translateRecordsUnlocked(state: RuntimeState, records: TranslationSource[], provider = state.settings.translationProvider, isCurrent: () => boolean = () => true, background = false, replaceGoogle = false): Promise<TranslationResult[]> {
   if (!records.length) return [];
-  isCurrent = await translationCurrent(state, [...new Set(records.map(record => record.chatId))], isCurrent);
+  const canStore = await translationCurrent(state, [...new Set(records.map(record => record.chatId))], () => true);
+  const requested = isCurrent;
+  isCurrent = () => requested() && canStore();
   if (records.every(shownAsWritten)) return records.map((source) => ({ ...source, translated: source.text, cached: true }));
   let pendingStarted = 0;
   try {
@@ -501,7 +512,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
           await clientFor(state).request("/v1/translations/cache/upsert", { method: "POST", body: JSON.stringify({ items: [{ key: item.key, ...source, sourceHash: item.sourceHash, provider, model, targetLanguage: "ko", translated: text }] }) }, 8000);
           fresh.set(item.key, text);
           backgroundRetries.get(state)?.get(item.source.chatId)?.delete(sourceIdentity(item.source));
-        }, records[0]!.chatId);
+        }, records[0]!.chatId, false, canStore);
         const translated = response.translated; model = response.model;
         for (const [index, item] of missing.entries()) {
           const value = translated.get(String(index));

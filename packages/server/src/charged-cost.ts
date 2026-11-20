@@ -44,7 +44,7 @@ export function chargedSectionTokens(omniscientXml: string, pricing: PacketPrici
     .replace(/<relationship_landmarks>[\s\S]*?<\/relationship_landmarks>/g, "")
     .replace(/<guidance>[\s\S]*?<\/guidance>/g, "")
     // Names rows describe a direction, never a knowledge/POV claim.
-    .replace(/^Names \(who knows whom, by what name\)\n(?:- [^\n]*(?:\n|$))*/gm, "");
+    .replace(/^Names \(who knows whom, by what name; terms used so far, new ones may come\)\n(?:- [^\n]*(?:\n|$))*/gm, "");
   const slots = (lanes.match(/^\s*- (?:\[(?:[Kk]nown by|[Nn]o character knows)[^\n]*\] |[^\n]* \[(?:[Kk]nown by|[Nn]o character knows)[^\n]*\]: )/gm)?.length ?? 0)
     + (lanes.match(/<(?:occasion|open_commitment|first)\b[^>]*>\[(?:[Kk]nown by|[Nn]o character knows)/g)?.length ?? 0);
   return estimateTokens(omniscientXml) + slots * pricing.tagTokens;

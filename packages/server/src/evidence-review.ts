@@ -1,4 +1,4 @@
-import { inspectSourceReferences, rescueDialogueEvidence, sourceRangeIsVisible, normalizeRecognitionReferences, type ExtractionDraftResult, type SourceReferenceIssue } from "@rcm/shared";
+import { inspectSourceReferences, rescueDialogueEvidence, sourceRangeIsVisible, dialogueMessageMatches, normalizeRecognitionReferences, type ExtractionDraftResult, type SourceReferenceIssue } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 export type EvidenceIssue = SourceReferenceIssue;
 
@@ -46,34 +46,29 @@ function sourceMessages(db: RcmDatabase, chatId: string, sourceIds: string[]) {
     AND memory_excluded=0 AND host_visibility IN ('active','all_before')`).all(chatId, JSON.stringify(sourceIds)) as Array<{ id: string; role: string; content: string; canonicalHash: string }>;
 }
 
-/** When dialogue occurs in both sides of a turn, prefer the model response. */
-export function preferAssistantDialogueSources<T extends {role:string}>(matches:T[]):T[] {
-  const responses = matches.filter(match => match.role === "assistant");
-  return responses.length ? responses : matches;
-}
-
 export function rescueDraftDialogues(db: RcmDatabase, chatId: string, sourceIds: string[], draft: ExtractionDraftResult): ExtractionDraftResult {
   const messages = sourceMessages(db, chatId, sourceIds);
-  const exact = (quote: string, preferResponse = false) => {
+  const exact = (quote: string) => {
     if (!quote.trim()) return;
     const matches = messages.flatMap(message => {
       const spans = [];
       for (let startOffset = message.content.indexOf(quote); startOffset >= 0; startOffset = message.content.indexOf(quote, startOffset + 1)) {
         const endOffset = startOffset + quote.length;
-        if (sourceRangeIsVisible(message.content, startOffset, endOffset)) spans.push({role:message.role,
+        if (sourceRangeIsVisible(message.content, startOffset, endOffset)) spans.push({
           messageId:message.id,canonicalHash:message.canonicalHash,startOffset,endOffset,quote});
       }
       return spans;
     });
-    const eligible = preferResponse ? preferAssistantDialogueSources(matches) : matches;
-    if (eligible.length !== 1) return;
-    const {role, ...span} = eligible[0]!;
-    return span;
+    if (matches.length === 1) return matches[0];
   };
   const rescued = structuredClone(draft);
   for (const memory of rescued.memories) for (const dialogue of memory.keyDialogues ?? []) {
-    const span = exact(dialogue.text, true);
-    if (span) { dialogue.messageId = span.messageId; dialogue.evidence = [span]; }
+    const matches = dialogueMessageMatches(dialogue.text, messages).filter(match => match.complete);
+    if (matches.length !== 1) continue;
+    const {message,segments} = matches[0]!;
+    dialogue.messageId = message.id;
+    dialogue.evidence = segments.map(({startOffset,endOffset,quote}) => ({
+      messageId:message.id,canonicalHash:message.canonicalHash,startOffset,endOffset,quote}));
   }
   for (const passage of rescued.sourcePassages ?? []) {
     const span = exact(passage.quote);

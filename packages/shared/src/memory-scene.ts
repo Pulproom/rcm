@@ -2,7 +2,7 @@ import { escapeMemoryText as escape, escapeMemoryAttribute } from "./memory-esca
 import type { MemoryContextItem } from "./index.js";
 import { memoryEvidenceLabel, sameMemoryLabels } from "./memory-presentation.js";
 import { formatTagNames, headerScopeText, includesPerson, isException, lineScopeTag, viewpointUnknownTag, scopeOf, scopeRelation, secretTargets, type KnowledgeScope } from "./knowledge-scope.js";
-import { structuredStoryTimeEnd } from "./story-time.js";
+import { coarseStoryTime, structuredStoryTimeEnd } from "./story-time.js";
 
 /** A stored record, not a claim that all siblings describe one occurrence.
  * Access must already be resolved. Keep identity, provenance and qualifiers
@@ -85,10 +85,13 @@ export function renderMemoryScene(scene: MemoryScene, options: CardRenderOptions
   const end = structuredStoryTimeEnd(scene.storyTime);
   const days = latestStoryTime !== undefined && Number.isFinite(latestStoryTime) && end !== undefined && latestStoryTime >= end
     ? Math.floor(latestStoryTime / 86_400_000) - Math.floor(end / 86_400_000) : undefined;
-  const distance = days === undefined ? undefined : days > 365 ? "over a year"
-    : days >= 60 ? `about ${Math.round(days / 30)} months` : days >= 14 ? `about ${Math.round(days / 7)} weeks` : `${days} ${days === 1 ? "day" : "days"}`;
-  const when = scene.storyTime ? ` when="${escapeMemoryAttribute(scene.storyTime)}"` : "";
-  const beforeLatest = days === 0 ? " (same day as the last recorded day)" : distance ? ` (${distance} before the last recorded day)` : "";
+  // Recent records keep their exact date and time; the newest record may lag
+  // the chat, so they get no relative label. Older ones read as people recall.
+  const ago = days === undefined || days < 7 ? undefined : days < 14 ? "about a week ago" : days < 30 ? "a few weeks ago"
+    : days < 60 ? "about a month ago" : days < 365 ? "a few months ago" : days < 730 ? "about a year ago" : "years ago";
+  const shownTime = scene.storyTime && ago ? coarseStoryTime(scene.storyTime) : scene.storyTime;
+  const when = shownTime ? ` when="${escapeMemoryAttribute(shownTime)}"` : "";
+  const beforeLatest = ago ? ` (${ago})` : "";
   const place = headerLocations.length ? ` place="${escapeMemoryAttribute(headerLocations.sort().join("; "))}"` : "";
   const tags = (scope: KnowledgeScope, hiddenFrom?: readonly string[], exception = false, labels?: readonly string[]): string => {
     // Labels annotate acquisition basis only; raw scopes still decide knowledge and POV.

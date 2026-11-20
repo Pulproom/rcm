@@ -86,7 +86,7 @@ import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-group
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
 export { auxiliaryInputBudgetMessage, auxiliaryRepairTooLargeError, AUXILIARY_REPAIR_TOO_LARGE_MESSAGE, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
-export { buildSourceUnits, findAtomicDisplaySpans, joinSplitEmphasisQuote, resolveSourceQuote, sourceRangeIsVisible, dialogueSourceMatches, rescueDialogueEvidence, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
+export { buildSourceUnits, findAtomicDisplaySpans, joinSplitEmphasisQuote, resolveSourceQuote, sourceRangeIsVisible, dialogueSourceMatches, dialogueMessageMatches, preferAssistantDialogueSources, rescueDialogueEvidence, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
 export { segmentSentences, type SentenceSegment } from "./sentence-segmentation.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";
 export { applySourceAccessPatch, validateSourceRecoveryPatch } from "./source-access-patch.js";
@@ -664,6 +664,7 @@ export const TurnPrepareResponseSchema = z.object({
     memoryIds: z.array(z.string()).default([]),
     alwaysInjectMemoryIds: z.array(z.string()).optional(),
     longtermMemoryIds: z.array(z.string()).optional(),
+    seedAtomKeys: z.array(z.string()).optional(),
     detailIds: z.array(z.string()).default([]),
     sourceEvidenceIds: z.array(z.string()).optional(),
     stateEvidenceIds: z.array(z.string()).optional(),
@@ -862,7 +863,7 @@ export const KeyDialogueSchema = z.object({
 
 export const StorySeedSchema = SeedMarkerSchema.extend({
   closureEvidence: z.array(DialogueEvidenceSchema).min(1).optional(),
-  delivery: z.object({ count: z.number().int().nonnegative(), lastTurn: z.number().int().nonnegative(), receipt: z.string() }).optional(),
+  delivery: z.object({ lane: z.literal("seed").optional(), count: z.number().int().nonnegative(), lastTurn: z.number().int().nonnegative(), receipt: z.string() }).optional(),
 }).superRefine((seed, context) => {
   // Legacy abandoned rows exist both with and without evidence. A new user close
   // uses a distinct JSON status, so old backups need no in-place migration.

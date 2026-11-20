@@ -2,7 +2,8 @@ import { MemoryBudgetPresetSchema, MAX_MEMORY_BUDGET, RCM_API_REVISION, type Mem
 import { ServerClient, ServerRequestError } from "../api-client.js";
 import type { DashboardData } from "../dashboard.js";
 import type { PluginSettings, RuntimeState } from "../types.js";
-import { isChatMemoryEnabled } from "../settings.js";
+import { syncCurrentPocketSlot } from "../context.js";
+import { isChatMemoryEnabled, saveSettings } from "../settings.js";
 import { invalidateChatTranslations } from "../translation.js";
 type FormValues = Record<string, FormDataEntryValue>;
 type ChatSettingsPatch = Pick<PluginSettings, "characterEnabled" | "chatEnabled" | "chatCatchUpPending" | "includeUserMessages" | "pairProgress" | "upcomingOccasions" | "memoryOnlyInjection">;
@@ -146,6 +147,15 @@ export async function applyChatWorkSettings(state: RuntimeState, change: ChatSet
       invalidateChatTranslations(state.current.chatId);
       clearVisibleTranslations();
     }
+  }
+}
+
+export async function saveChatEnableSettings(state: RuntimeState, chatId: string | undefined, enabled: boolean): Promise<void> {
+  await saveSettings(state.settings);
+  if (chatId && state.current?.hostIdentity?.kind !== "position" && risuai.setChatToIndex) {
+    if (state.current?.chatId !== chatId) throw new Error("채팅이 바뀌었어요. 설정을 다시 열어 주세요.");
+    try { await syncCurrentPocketSlot(state, chatId, state.current.characterId); }
+    catch (cause) { throw new Error(`RCM 사용 설정은 저장했어요. 슬롯 ${enabled ? "연결" : "정리"}를 확인하려면 해당 채팅에서 설정을 다시 저장해 주세요.`, { cause }); }
   }
 }
 

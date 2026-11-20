@@ -258,7 +258,7 @@ export async function executeMemoryTool(
       traceDelivery(response, false, [], traceContext.requestId, "transport_error", 0);
       return response;
     }
-    if (result.opportunityError === "stale_turn" && !result.newAtomCount) {
+    if (result.opportunityError === "stale_turn" && !result.packet?.trim()) {
       const response = '<rp_memory_result>These memories were prepared for an earlier reply. Continue from the current chat.</rp_memory_result>';
       traceDelivery(response, false, [], traceContext.requestId, result.deliverySource, 0, result.opportunityError, "earlier_generation");
       return response;

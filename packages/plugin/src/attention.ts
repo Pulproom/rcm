@@ -395,6 +395,8 @@ export function widgetState(state: RuntimeState): FloatingWidgetState {
     kind: "review", label: `부가 정리 확인 ${summary.advisoryFailedJobs}`,
     detail: "기억 추출은 계속 완료됐어요. 관계·줄거리·최종 대조 실패는 처리 상태에서 확인할 수 있어요.",
   };
+  // Translation is background work, but a failure must not stay silent; the next successful translation clears it.
+  if (state.translationActivity?.error) return { kind: "error", label: "참고 번역 실패", detail: state.translationActivity.error };
   // Inheritance finished: a done notice (ok tone), not a warning.
   if (lineage?.status === "inherited" && !lineage.acknowledgedAt) return {
     kind: "inherited",
@@ -431,6 +433,7 @@ function statusWidgetVisual(current: FloatingWidgetState, skin: ChipSkin) {
 }
 
 export const statusWidgetStyleText = (skin: ChipSkin) => `
+.risu-chat[data-chat-id="supaMemory"]:has(.italic) { display: none !important; }
 [x-rcm-status-widget] button:focus-visible{outline:1.5px solid ${skin.accent};outline-offset:-3px}
 [x-rcm-status-widget] button:not([aria-disabled="true"]):not([data-rcm-quiz-scene]):hover{background:${skin.hover}!important}
 [x-rcm-status-widget] button:is([data-rcm-open]:not([data-quiet]),[data-rcm-quiz-start],[data-rcm-quiz-next]):hover{background:${skin.accentHover}!important;color:${skin.accentInk}!important}

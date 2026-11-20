@@ -8,6 +8,8 @@ export function readStorySeed(value: unknown) {
   // Reading old rows/backups must never take down retrieval or the dashboard.
   try {
     const parsed = StorySeedSchema.safeParse(typeof value === "string" ? JSON.parse(value) : value);
+    // Legacy counts included every automatic lane and repeated receipts per turn.
+    if (parsed.success && parsed.data.delivery?.lane !== "seed") delete parsed.data.delivery;
     return parsed.success ? parsed.data : undefined;
   } catch { return undefined; }
 }
@@ -142,22 +144,22 @@ export function editStorySeed(db: RcmDatabase, chatId: string, detailId: string,
   return editStorySeeds(db,chatId,[detailId],action)[0]!.ok;
 }
 
-/** Any actual automatic delivery of the detail counts, regardless of its selection lane.
- * The old receipt held only memory IDs: never infer detail delivery from a prepared card.
+/** Count only actual open-seed lane deliveries, once per completed turn.
+ * Old receipts have no lane provenance: never infer it from ordinary atom delivery.
  * Store the small receipt summary on the marker so normal backup/keep/fork copying preserves it.
  */
-export function recordSeedDelivery(db: RcmDatabase, chatId: string, atomKeys: string[], receipt: string) {
+export function recordSeedDelivery(db: RcmDatabase, chatId: string, seedAtomKeys: string[], receipt: string) {
   assertChatUnlocked(db,chatId);
   const turn = (db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(chatId) as {completed_turn_count:number}|undefined)?.completed_turn_count;
   if (turn === undefined) return;
-  const delivered = new Set(atomKeys);
+  const delivered = new Set(seedAtomKeys);
   db.transaction(() => {
     const edits:SeedEdit[]=[];
     for (const row of db.prepare(`SELECT d.id,d.text,d.seed_json FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND d.seed_json IS NOT NULL`).all(chatId) as Array<{id:string;text:string;seed_json:string}>) {
       const seed = readStorySeed(row.seed_json);
-      if (!seed || !delivered.has(memoryDetailAtomKey(row)) || seed.delivery?.receipt === receipt) continue;
-      seed.delivery = {count:(seed.delivery?.count ?? 0)+1,lastTurn:turn,receipt};
+      if (!seed || !delivered.has(memoryDetailAtomKey(row)) || seed.delivery?.receipt === receipt || seed.delivery?.lastTurn === turn) continue;
+      seed.delivery = {lane:"seed",count:(seed.delivery?.count ?? 0)+1,lastTurn:turn,receipt};
       db.prepare("UPDATE memory_details SET seed_json=? WHERE id=? AND chat_id=?").run(JSON.stringify(seed),row.id,chatId);
       edits.push({detailId:row.id,seed});
     }

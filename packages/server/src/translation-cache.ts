@@ -17,6 +17,21 @@ export interface TranslationCacheRecord {
   translated: string;
 }
 
+/** Item IDs used by the readers embed a story group or a landmark's memory ID and ordinal. */
+export function remapReaderTranslationId(kind: string, itemId: string, ids: Map<string,string>, stories: Map<string,string>): string | undefined {
+  if (kind === "landmark-label") {
+    const match = /^landmark:(.+)#(\d+):label$/.exec(itemId);
+    const id = match && ids.get(match[1]!);
+    if (id) return `landmark:${id}#${match![2]}:label`;
+  }
+  if (kind.startsWith("story-")) {
+    const match = /^story:(.+):(title|summary|(?:beat|transition):\d+)$/.exec(itemId);
+    const group = match && stories.get(match[1]!);
+    if (group) return `story:${group}:${match![2]}`;
+  }
+  return undefined;
+}
+
 export function translationCacheKey(record: Pick<TranslationCacheRecord,
   "serverInstanceId" | "chatId" | "kind" | "itemId" | "sourceHash" | "provider" | "sourceLanguage" | "targetLanguage">): string {
   return [record.serverInstanceId, record.chatId, record.kind, record.itemId, record.sourceHash,

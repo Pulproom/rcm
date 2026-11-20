@@ -2,7 +2,7 @@ import { automaticPacketBudget } from "./packet-budget.js";
 import { assertUpgradeJobWritable, chatUpgradeLock } from './upgrade-lock.js';
 import { modelEntityContext } from './entities.js';
 import { refreshChatUpgrade } from './upgrade-run.js';
-import { escapeMemoryText as xml } from "@rcm/shared";
+import { escapeMemoryText as xml, storyReaderGroupKey } from "@rcm/shared";
 import { chatPacketPricing, type PacketPricing, chargedSectionTokens } from "./charged-cost.js";
 import { isUserOwnedMemoryDetail, preservedLegacyParentIds } from "./memory-group-search.js";
 import type { RetrievalAudience } from "./retrieval.js";
@@ -1066,7 +1066,7 @@ interface StoryRow extends Record<string, any> {
   source_fingerprint: string;
 }
 
-const storyGroupKey = (row: StoryRow): string => `${row.level}:${row.start_ordinal}:${row.end_ordinal}:${row.source_fingerprint}`;
+const storyGroupKey = (row: Record<string, any>): string => `${row.level}:${row.start_ordinal}:${row.end_ordinal}:${row.source_fingerprint}`;
 const storyGroupId = (key: string): string => `sg_${createHash("sha256").update(key).digest("hex").slice(0, 20)}`;
 
 function storyRows(db: RcmDatabase, chatId: string): StoryRow[] {
@@ -1076,9 +1076,48 @@ function storyRows(db: RcmDatabase, chatId: string): StoryRow[] {
     ORDER BY start_ordinal,end_ordinal,scope,holder`).all(chatId) as StoryRow[];
 }
 
+function storyGroupMembers<T extends Record<string, any>>(rows: T[]) {
+  const shared = rows.find(row => row.scope === "shared") ?? rows.find(row => normalized(String(row.holder ?? "")) === "narrator") ?? rows[0]!;
+  return { shared, perspectives: rows.filter(row => row !== shared && row.scope === "perspective") };
+}
+
+function storyReaderKeys(rows: Record<string, any>[]): Map<string, string> {
+  const groups = new Map<string, Record<string, any>[]>();
+  for (const row of rows) {
+    if (row.generation_id !== "active" || row.status !== "active") continue;
+    const key = storyGroupKey(row);
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+  const keys = new Map<string, string>();
+  for (const [key, group] of groups) {
+    // Match the SQLite binary ordering used by storyRows, including when a fork drops one perspective.
+    group.sort((a,b) => Buffer.compare(Buffer.from(String(a.scope)), Buffer.from(String(b.scope)))
+      || Buffer.compare(Buffer.from(String(a.holder ?? "")), Buffer.from(String(b.holder ?? ""))));
+    const { shared, perspectives } = storyGroupMembers(group);
+    const groupId = storyGroupId(key);
+    keys.set(shared.id, groupId);
+    perspectives.forEach((row,index) => keys.set(row.id, storyReaderGroupKey(undefined, `${groupId}:flow-${index}`)));
+  }
+  return keys;
+}
+
+export function storyTranslationKeyMap(source: Record<string, any>[], destination: Record<string, any>[], nodeIds: Map<string,string>): Map<string,string> {
+  const originals = storyReaderKeys(source);
+  const copies = storyReaderKeys(destination);
+  const result = new Map<string,string>();
+  for (const [id,key] of originals) {
+    const copyId = nodeIds.get(id);
+    const copy = copyId && copies.get(copyId);
+    if (copy && copy.startsWith("sg_") === key.startsWith("sg_")) result.set(key,copy);
+  }
+  return result;
+}
+
 function publicStoryGroup(rows: StoryRow[], linkedMemoryIds: string[] = []): Record<string, unknown> {
-  const shared = rows.find((row) => row.scope === "shared") ?? rows.find((row) => normalized(String(row.holder ?? "")) === "narrator") ?? rows[0]!;
-  const flows = rows.filter((row) => row !== shared && row.scope === "perspective").map((row) => ({
+  const { shared, perspectives } = storyGroupMembers(rows);
+  const flows = perspectives.map((row) => ({
     holder: row.holder, title: row.title, summary: row.summary,
     beats: JSON.parse(row.beats_json || "[]").map((beat: { text: string }) => beat.text),
     activeTransitions: JSON.parse(row.active_transitions_json || "[]"),

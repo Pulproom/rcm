@@ -6,7 +6,8 @@ declare const __RCM_DISTRIBUTION__: boolean;
 import { sharedPastPacket, withMemoryGuidance } from "@rcm/shared";
 import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
 import { cachedSourceReceipt, ServerClient, UpgradeBlockedError, type UpgradeLock, type PrepareClientTimings } from "./api-client.js";
-import { assertHostSelection, confirmCurrentChatScope, injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readContextMetadata, readCurrentChatScope, readCurrentContext, readHostSelection, readMessageSourceInputs, resolvedSetupProjection, sameMessageSourceInputs, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
+import { hasRecentPocketSlot, confirmPocketSlotSource, requestPocketSlot, hasUnroutedPocketSlot, maintainPocketSlot, missingPocketSlotReason, pocketSlotEnabled, resolvePocketSlot, stripDisabledPocketSlot } from "./pocket-memory-slot.js";
+import { MEMORY_MARKER, assertHostSelection, confirmCurrentChatScope, injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readContextMetadata, readCurrentChatScope, readCurrentContext, readHostSelection, readMessageSourceInputs, resolvedSetupProjection, sameMessageSourceInputs, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
 import { CACHE_KEY, addLog, isChatMemoryEnabled, loadSettings, loadStoredJson, saveSettings, saveStoredJson } from "./settings.js";
 import type { AutomaticInjectionTimings, ChatScopeTiming, CachedChatState, RuntimeState } from "./types.js";
 import { beginMainGeneration, clearMainGeneration, endMainGeneration, isInternalModelRequest, scheduleWorker } from "./worker.js";
@@ -71,13 +72,13 @@ async function persistCache(state: RuntimeState): Promise<void> {
   }
 }
 
-export const MISSING_RCM_MARKER_MESSAGE = "RCM이 이 채팅에서 켜져 있지만 최종 프롬프트에서 [[RCM]] 위치 표식을 찾지 못했어요. 프리셋·카드·로어북에 [[RCM]]을 추가하거나 이 채팅의 RCM을 끈 뒤 다시 보내 주세요.";
+export const MISSING_RCM_MARKER_MESSAGE = "RCM이 이 채팅에서 켜져 있지만 최종 프롬프트에서 [[RCM]] 위치 표식을 찾지 못했어요. 프리셋에 장기기억 블록이 있는지 확인해 주세요. 수동 프리셋은 [[RCM]] 위치를 확인해 주세요.";
 export const MEMORY_INJECTION_BLOCKED_MESSAGE = "RCM 기억을 준비하거나 최종 프롬프트에 넣지 못해 모델 요청을 차단했어요. 메인 모델 요청은 전송하지 않았어요. 서버 연결과 RCM 상태를 확인한 뒤 다시 보내 주세요.";
 export const RCM_INITIALIZING_MESSAGE = "RCM이 아직 초기화 중이어서 모델 요청을 차단했어요. 잠시 후 다시 보내 주세요.";
 
 export class MissingRcmMarkerError extends Error {
-  constructor() {
-    super(MISSING_RCM_MARKER_MESSAGE);
+  constructor(message = MISSING_RCM_MARKER_MESSAGE) {
+    super(message);
     this.name = "MissingRcmMarkerError";
   }
 }
@@ -90,7 +91,7 @@ function traceAutomaticInjection(state: RuntimeState, client: ServerClient, late
     if (!injection.blocked && !injection.omitted && ["fresh", "reused"].includes(injection.prepareOutcome ?? "")) {
       void client.traceRetrieval({ id: crypto.randomUUID(), kind: "automatic_injection",
         chatId: injection.chatId, receiptOnly: true, prepareOutcome: injection.prepareOutcome, blocked: false, omitted: false,
-        manifest: { memoryIds: injection.manifest.memoryIds, atomKeys: injection.manifest.atomKeys, longtermMemoryIds: injection.manifest.longtermMemoryIds } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`, "DELIVERY_RECEIPT_FAILED"));
+        manifest: { memoryIds: injection.manifest.memoryIds, atomKeys: injection.manifest.atomKeys, longtermMemoryIds: injection.manifest.longtermMemoryIds, seedAtomKeys: injection.manifest.seedAtomKeys } }).catch(error => addLog(state.logs, "warn", `Memory delivery receipt failed: [오류 원문 제외]`, "DELIVERY_RECEIPT_FAILED"));
     }
     if (typeof __RCM_DISTRIBUTION__ !== "undefined" && __RCM_DISTRIBUTION__) return;
   }
@@ -377,6 +378,8 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
       if (type !== "model") return messages;
       if (state.unloaded) throw new MemoryInjectionBlockedError("plugin unloaded");
       if (isInternalModelRequest(state, messages)) return messages;
+      const originalPrompt = messages;
+
       state.mainRequest?.cancel();
       if (state.postResponseTimer) { clearTimeout(state.postResponseTimer); state.postResponseTimer = undefined; }
       state.pendingOutputSyncChatId = undefined;
@@ -428,10 +431,13 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         return head;
       };
       try {
-        const existing = inspectMemoryPrompt(messages);
+        const formatted = requestPocketSlot(originalPrompt, MEMORY_MARKER);
+        // Provisional until the normal source snapshot proves this token belongs to the chat.
+        messages = resolvePocketSlot(originalPrompt, MEMORY_MARKER, formatted);
+        let existing = inspectMemoryPrompt(messages);
         // Release idle discovery before reading the loaded slot. Yumi can finish
         // writing its source record while the host is handling unregistration.
-        const freshPrompt = existing.hasMarker && existing.contexts.length === 0;
+        let freshPrompt = existing.hasMarker && existing.contexts.length === 0;
         const known = state.hostChatIdentity;
         const preflightSelection = freshPrompt && (state.syncMemoryToolRegistration || known) ? await readHostSelection() : undefined;
         assertRequestOwner();
@@ -447,8 +453,9 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         const configured = isServerConfigured(state.settings);
         const currentCharacterId = current?.chatId === knownChatId ? current?.characterId : undefined;
         const enabled = !knownChatId || !currentCharacterId || isChatMemoryEnabled(state.settings, knownChatId, currentCharacterId);
-        const preflightHead = knownChatId && currentCharacterId && configured && enabled && needsSourceHead(knownChatId)
-          ? await readSourceHead(knownChatId) : undefined;
+        const preflight = knownChatId && currentCharacterId && configured && enabled && needsSourceHead(knownChatId)
+          ? await readSourceHead(knownChatId).then(head => ({ head }), error => ({ error })) : undefined;
+        assertRequestOwner();
         let metadata: Awaited<ReturnType<typeof readContextMetadata>> | undefined;
         if (freshPrompt && configured && enabled) {
           const startedAt = performance.now();
@@ -463,14 +470,37 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           .map(chatId => [chatId, cachedSourceReceipt(state.settings, chatId)] as const));
         const { chatId: currentChatId, characterId, hostSnapshot } = await readCurrentChatScope(undefined, scopeTiming("initial"));
         assertRequestOwner();
-        if (serverUrl !== state.settings.serverUrl || (preflightHead && knownChatId !== currentChatId)) {
+        // A branch can take its parent's list index before the cached identity is refreshed.
+        // Only a token owned by the live chat can disambiguate that from an in-flight switch.
+        const liveEnabled = isChatMemoryEnabled(state.settings, currentChatId, characterId);
+        const staleLookup = !!preflight && knownChatId !== currentChatId;
+        const confirmedSlot = formatted && confirmPocketSlotSource(hostSnapshot.rawChat, formatted, staleLookup);
+        if (formatted && !confirmedSlot) {
+          messages = resolvePocketSlot(originalPrompt, MEMORY_MARKER, null);
+          existing = inspectMemoryPrompt(messages);
+          freshPrompt = existing.hasMarker && existing.contexts.length === 0;
+        }
+        if (liveEnabled && (serverUrl !== state.settings.serverUrl || (staleLookup && !confirmedSlot))) {
           throw new MemoryInjectionBlockedError("source scope changed during preflight");
         }
         if (preflightSelection && (hostSnapshot.characterIndex !== preflightSelection[0] || hostSnapshot.chatIndex !== preflightSelection[1])) {
           throw new MemoryInjectionBlockedError("host selection changed during preflight");
         }
+        if (staleLookup) metadata = undefined;
+        else if (liveEnabled && preflight && "error" in preflight) throw preflight.error;
         const generation = state.mainGeneration;
         generation?.observe(currentChatId, hostSnapshot.chat);
+        if (!liveEnabled) {
+          state.lastPromptValidation = { chatId: currentChatId, status: "disabled", at: Date.now() };
+          state.activeModelRequest = undefined;
+          state.automaticTurnPacket = undefined;
+          state.memoryToolOpportunity = undefined;
+          await discardSetupCapture(state, currentChatId);
+          beginMemoryReferenceTurn(state, crypto.randomUUID());
+          if (!freshPrompt) await removeMemoryTools();
+          const cleaned = stripDisabledPocketSlot(originalPrompt, hostSnapshot.rawChat);
+          return stripRcmPromptContent(cleaned);
+        }
         let sourceInputs: ReturnType<typeof readMessageSourceInputs>;
         let sourceHashes: NonNullable<RuntimeState["automaticTurnPacket"]>["sourceHashes"];
         let tailStart = 0;
@@ -519,16 +549,6 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             if (stage === "prepare_error" || stage === "before_apply") injectionTimings.postResponseChecksMs += elapsedMs;
           }
         };
-        if (!isChatMemoryEnabled(state.settings, currentChatId, characterId)) {
-          state.lastPromptValidation = { chatId: currentChatId, status: "disabled", at: Date.now() };
-          state.activeModelRequest = undefined;
-          state.automaticTurnPacket = undefined;
-          state.memoryToolOpportunity = undefined;
-          await discardSetupCapture(state, currentChatId);
-          beginMemoryReferenceTurn(state, crypto.randomUUID());
-          if (!freshPrompt) await removeMemoryTools();
-          return stripRcmPromptContent(messages);
-        }
         if (!isServerConfigured(state.settings)) {
           state.activeModelRequest = undefined;
           if (!freshPrompt) await removeMemoryTools();
@@ -538,7 +558,8 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         const repairSources = fullSourceNextPrepare.has(currentChatId);
         // Without a known slot, a fresh request uses prepare itself to check
         // the live lock. Retry-only prompts cannot send a source snapshot.
-        const head = preflightHead ?? (!freshPrompt && needsSourceHead(currentChatId) ? await readSourceHead(currentChatId) : undefined);
+        const head = !staleLookup && preflight && "head" in preflight ? preflight.head
+          : ((staleLookup || !freshPrompt) && needsSourceHead(currentChatId) ? await readSourceHead(currentChatId) : undefined);
         if (head) {
           if (head.upgradeLock) {
             state.upgradeBlocked = {chatId:currentChatId,lock:head.upgradeLock};
@@ -626,6 +647,12 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           state.lastPromptValidation = { chatId: currentChatId, status: "marker_missing", at: Date.now() };
           state.activeModelRequest = undefined;
           addLog(state.logs, "warn", "Blocked model request because the enabled chat has no [[RCM]] marker", "MEMORY_MARKER_MISSING");
+          if (hostSnapshot.rawChat?.id && risuai.setChatToIndex) {
+            if (hasUnroutedPocketSlot(originalPrompt)) throw new MissingRcmMarkerError("현재 프리셋에 사용할 장기기억 블록이 없어요. 장기기억 블록이 있는 프리셋을 선택해 주세요.");
+            const reason = missingPocketSlotReason(originalPrompt);
+            const moved = await maintainPocketSlot(hostSnapshot.characterIndex, hostSnapshot.chatIndex, currentChatId, () => !controller.signal.aborted && !state.unloaded && state.mainRequest === request && isChatMemoryEnabled(state.settings, currentChatId, characterId), true);
+            throw new MissingRcmMarkerError(moved ? `${reason} 채팅에 슬롯을 다시 배치하고 저장을 확인했어요. 현재 입력으로 다시 시도해 주세요.` : reason);
+          }
           throw new MissingRcmMarkerError();
         }
         const memoryPreparationStartedAt = Date.now();
@@ -1095,15 +1122,21 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
       return content;
     }),
     ...(hasCommittedOutputListener ? [
-      risuai.addRisuChatListener!("output", ({ chat, messageIndex }) => {
+      risuai.addRisuChatListener!("output", ({ char, chat, messageIndex, characterIndex, chatIndex }) => {
         if (state.unloaded) return;
         const chatId = String(chat?.id ?? "");
-        if (!chatId || (state.pendingOutputSyncChatId !== chatId && state.mainGeneration?.chatId !== chatId)) return;
+        const characterId = String(char?.chaId ?? char?.id ?? characterIndex);
+        const maintenance = chatId && chat.message?.[messageIndex] && pocketSlotEnabled(chat) && !hasRecentPocketSlot(chat)
+          && isChatMemoryEnabled(state.settings, chatId, characterId)
+          ? maintainPocketSlot(characterIndex, chatIndex, chatId, () => !state.unloaded && !state.mainRequest?.preparing && isChatMemoryEnabled(state.settings, chatId, characterId))
+            .then(() => {}, () => addLog(state.logs, "warn", "PocketRisu memory slot maintenance failed"))
+          : undefined;
+        if (!chatId || (state.pendingOutputSyncChatId !== chatId && state.mainGeneration?.chatId !== chatId)) return maintenance;
         const generation = state.mainGeneration;
-        if (generation && state.mainRequest?.id === generation.id && state.mainRequest.preparing) return;
+        if (generation && state.mainRequest?.id === generation.id && state.mainRequest.preparing) return maintenance;
         const requestId = generation?.id ?? state.pendingOutputSyncRequestId;
         const output = chat.message?.[messageIndex];
-        if (generation && (!generation.sources || !output)) return;
+        if (generation && (!generation.sources || !output)) return maintenance;
         const outputId = output?.chatId ?? output?.id;
         const outputGeneration = output?.generationInfo?.generationId;
         const source = generation?.sources?.get(String(outputId));
@@ -1144,6 +1177,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           // the background so RCM never delays rendering or later output hooks.
           void syncCommittedOutput(state, client, chatId, requestId);
         })().catch(() => addLog(state.logs, "warn", "Committed-output observation could not be confirmed", "OUTPUT_OBSERVATION_FAILED"));
+        return maintenance;
       }),
     ] : []),
   ]);

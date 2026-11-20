@@ -33,7 +33,8 @@ import { PENDING_ACCESS_HOLDER, EVERYONE_HOLDER, readDetailAccessEdits, writeDet
 import { isOrdinalFallbackMessageId, sourceFingerprint } from './source-fingerprint.js';
 import { lineageSources, matchLineageSources, matchesCapturedYumiDisplay } from './lineage-matching.js';
 import { remapInheritedSources, lineageSceneEnd } from './lineage-sources.js';
-import { pruneTranslationCache, translationCacheKey } from './translation-cache.js';
+import { storyTranslationKeyMap } from './story-spine.js';
+import { pruneTranslationCache, remapReaderTranslationId, translationCacheKey } from './translation-cache.js';
 import { inheritQuizzes } from './quiz.js';
 import { memoryTransferQueuedJobs, cancelQueuedMemoryTransferJobs } from './jobs.js';
 import { personaHintKey, readPersonaName, readViewPreferences, writeViewPreferences } from './view-preferences.js';
@@ -336,6 +337,7 @@ function cloneLineage(
   const ordinalOffset = Math.max(0, ...sourcePairs.map(pair => pair.parent.ordinal - pair.child.ordinal));
   const memoryMap = new Map<string, string>();
   const detailMap = new Map<string, string>();
+  const dialogueReaderIds = new Map<string, string>();
   const dialogueMap = new Map<string, string>();
   const atomRelationMap = new Map<string, string>();
   const assertionMap = new Map<string, string>();
@@ -484,11 +486,14 @@ function cloneLineage(
       prepare("UPDATE memories SET user_managed=? WHERE id=?").run(row.user_managed,id);
       prepare('UPDATE memories SET always_inject=? WHERE id=?').run(row.always_inject ?? 0,id);
       prepare('UPDATE memories SET replacement_memory_key=? WHERE id=?').run(row.replacement_memory_key ?? null,id);
-      for (const dialogue of prepare("SELECT * FROM memory_dialogues WHERE memory_id=?").all(row.id) as any[]) {
+      const dialogues = prepare("SELECT * FROM memory_dialogues WHERE memory_id=? ORDER BY ordinal,rowid").all(row.id) as any[];
+      let childDialogueIndex = 0;
+      for (const [index,dialogue] of dialogues.entries()) {
         const sourceOrdinal = sourceOrdinals.get(dialogue.message_id)?.ordinal;
         if (sourceOrdinal === undefined || sourceOrdinal > fork) {
           continue;
         }
+        dialogueReaderIds.set(`${row.id}:dialogue:${index}`, `${id}:dialogue:${childDialogueIndex++}`);
         const dialogueId = randomUUID(); dialogueMap.set(dialogue.id, dialogueId);
         const dialogueEvidence = json<Array<{messageId:string;canonicalHash:string;startOffset:number;endOffset:number;quote:string}>>(dialogue.evidence_json, [])
           .map(evidence => ({...evidence,messageId:messageMap.get(evidence.messageId) ?? evidence.messageId}));
@@ -1104,13 +1109,42 @@ function cloneLineage(
 
     const lineageIds = new Map((prepare("SELECT parent_item_id,child_item_id FROM chat_lineage_items WHERE child_chat_id=?").all(child) as Array<{ parent_item_id: string; child_item_id: string }>)
       .map((item) => [item.parent_item_id, item.child_item_id]));
+    const translations = prepare("SELECT * FROM translation_cache WHERE chat_id=? ORDER BY created_at").all(parent) as any[];
+    const stories = translations.some(row => row.item_kind.startsWith("story-"))
+      ? storyTranslationKeyMap(parentStoryNodes, prepare("SELECT id,generation_id,status,scope,holder,level,start_ordinal,end_ordinal,source_fingerprint FROM story_spine_nodes WHERE chat_id=? AND generation_id='active' AND status='active'").all(child) as any[], storyNodeMap)
+      : new Map<string,string>();
+    // Pair-keyed text has no row ID. Only reuse keys backed by a relationship in this fork.
+    const namedKeys = new Set<string>();
+    if (translations.some(row => row.item_kind === "relationship-label")) {
+      const assertions = prepare("SELECT subject,social_relation_json FROM assertions WHERE chat_id=? AND valid_to_revision IS NULL AND social_relation_json IS NOT NULL").all(child) as any[];
+      for (const row of assertions) {
+        const relation = parseSocialRelation(row.social_relation_json);
+        if (relation?.kind === "interpersonal" && relation.label) namedKeys.add(`relationship-label:${[row.subject.trim(),relation.target.trim()].sort().join("|")}`);
+      }
+    }
+    if (translations.some(row => row.item_kind === "initial-social")) {
+      const social = prepare(`SELECT s.holder,s.subject FROM social_knowledge_events s JOIN memories m ON m.id=s.source_memory_id
+        WHERE s.chat_id=? AND is_initial_calibration_memory(m.memory_key)`).all(child) as any[];
+      for (const row of social) namedKeys.add(`initial-social:${row.holder}|${row.subject}`);
+    }
     const translationKinds = new Set([
       "memory-title", "memory-content", "memory-detail", "dialogue", "evidence",
       "relationship", "relationship-tension", "relationship-event", "initial-relationship", "physical-intimacy",
-      "assertion", "assertion-history", "belief", "belief-history", "promise", "promise-history",
+      "assertion", "assertion-history", "assertion-predicate", "belief", "belief-history", "belief-predicate", "promise", "promise-history", "promise-reason",
+      "social-cognition", "reconciliation", "story-flow-transition",
       "story-title", "story-summary", "story-beat", "story-transition", "story-flow-title", "story-flow-summary", "story-flow-beat",
     ]);
     const remapTranslationItemId = (kindName: string, itemId: string): string | undefined => {
+      if (kindName === "relationship-label" || kindName === "initial-social") return namedKeys.has(itemId) ? itemId : undefined;
+      if (kindName === "dialogue") return dialogueReaderIds.get(itemId);
+      if (kindName === "memory-detail") {
+        const match = /^(.+):detail:(.+)$/.exec(itemId);
+        const memory = match && memoryMap.get(match[1]!);
+        const detail = match && detailMap.get(match[2]!);
+        return memory && detail ? `${memory}:detail:${detail}` : undefined;
+      }
+      const readerKey = remapReaderTranslationId(kindName, itemId, memoryMap, stories);
+      if (readerKey) return readerKey;
       if (!translationKinds.has(kindName)) return undefined;
       if (kindName === "relationship" || kindName === "relationship-tension") {
         const match = /^relationship:(.+)\|(.+?):(?:summary|tension:\d+)$/.exec(itemId);
@@ -1122,7 +1156,7 @@ function cloneLineage(
     const serverInstanceId = String((prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value?: string } | undefined)?.value ?? "");
     const insertTranslation = prepare(`INSERT OR IGNORE INTO translation_cache(cache_key,server_instance_id,chat_id,item_kind,item_id,source_hash,provider,source_language,target_language,translated,used_at,created_at,model)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-    for (const row of prepare("SELECT * FROM translation_cache WHERE chat_id=? ORDER BY created_at").all(parent) as any[]) {
+    for (const row of translations) {
       const itemId = remapTranslationItemId(row.item_kind, row.item_id);
       if (!itemId) continue;
       const cacheKey = translationCacheKey({ serverInstanceId, chatId: child, kind: row.item_kind, itemId,

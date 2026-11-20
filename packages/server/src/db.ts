@@ -256,6 +256,7 @@ CREATE TABLE IF NOT EXISTS evidence_spans (
   FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_spans_chat_message_memory ON evidence_spans(chat_id,message_id,memory_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_spans_memory_chat_message ON evidence_spans(memory_id,chat_id,message_id);
 
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,

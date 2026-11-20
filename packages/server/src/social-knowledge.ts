@@ -466,7 +466,7 @@ export function recognitionNaming(subject: string, knownAs: readonly string[], o
     + names.map(name => JSON.stringify(name)).join(", ") : "";
 }
 
-const sceneNamesHeading = "Names (who knows whom, by what name)";
+const sceneNamesHeading = "Names (who knows whom, by what name; terms used so far, new ones may come)";
 const sceneNamesText = (lines: string[]): string => lines.length ? sceneNamesHeading + "\n" + lines.join("\n") : "";
 
 /** Model lists use newest stored evidence; manual directional snapshots keep order.
@@ -518,7 +518,7 @@ export function renderSceneNames(db: RcmDatabase, chatId: string, holders: strin
     const label = item.subject;
     const addressTerms = recentAddressTerms(item.addressTerms, item.userEdited);
     const line = () => "- " + item.holder + " → " + label + ": " + [recognitionNaming(item.subject,item.knownAs),
-      addressTerms.length ? "calls " + addressTerms.map(quote).join(", ") : ""].filter(Boolean).join("; ")
+      addressTerms.length ? "has called them " + addressTerms.map(quote).join(", ") : ""].filter(Boolean).join("; ")
       + (item.level === "aware_of" ? ` (${socialKnowledgeLevelLabel[item.level]})` : "");
     const key = () => memoryAtomKey("names", JSON.stringify([canonical(item.holder),canonical(item.subject)]), escapeMemoryText(line()));
     // Skip a delivered full line before it can consume budget or be shortened.

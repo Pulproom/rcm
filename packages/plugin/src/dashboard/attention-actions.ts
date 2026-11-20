@@ -13,6 +13,20 @@ export function reconciliationTarget(
 export type AttentionFilter = "all" | "duplicate" | "conflict" | "audit" | "small";
 export type AttentionViewState = { selectedId: string; query: string; filter: AttentionFilter; mobileDetail: boolean };
 type AttentionData = Pick<DashboardData, "reconciliationReviews" | "extractionAudits">;
+
+/** Hydrate only the record whose reader is open; list candidates stay compact. */
+export async function loadAttentionDetail(client: Pick<ServerClient, 'request'>, chatId: string, data: AttentionData, selectedId: string): Promise<void> {
+  const review = data.reconciliationReviews.find(item => `duplicate:${item.id}` === selectedId);
+  const audit = data.extractionAudits.find(item => `audit:${item.id}` === selectedId || (item.smallReviews ?? []).some((candidate: any) => `small:${item.id}:${candidate.id}` === selectedId));
+  const item = review ?? audit;
+  if (!item || item.detailsLoaded !== false || item.detailLoading || item.detailError) return;
+  item.detailLoading = true;
+  try {
+    const detail = await client.request<any>(`/v1/chats/${encodeURIComponent(chatId)}/${review ? 'reconciliation-reviews' : 'extraction-audits'}/${encodeURIComponent(item.id)}`);
+    Object.assign(item,detail,{detailsLoaded:true});
+  } catch (error) { item.detailError = String(error); }
+  finally { item.detailLoading = false; }
+}
 type AttentionMutationAction = "resolve-reconciliation" | "resolve-small-review" | "resolve-small-review-bulk" | "retry-extraction-audit" | "resolve-conflict" | "delete-conflict";
 type ReconciliationResolution = "merge" | "distinct" | "update" | "discard";
 type MutationResult = { kind: "reconciliation"; reviewId: string; resolution: ReconciliationResolution }

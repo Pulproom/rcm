@@ -231,12 +231,12 @@ export function validateDialogueEvidence(
   sourceMessageIds: string[],
   source: ExtractionResult,
 ): ExtractionResult {
-  const rows = sourceMessageIds.length ? db.prepare(`SELECT message_id,canonical_content,canonical_hash FROM messages
+  const rows = sourceMessageIds.length ? db.prepare(`SELECT message_id,role,canonical_content,canonical_hash FROM messages
     WHERE chat_id=? AND memory_excluded=0 AND message_id IN (${sourceMessageIds.map(() => "?").join(",")})`).all(chatId, ...sourceMessageIds)
     : [];
-  const messages = new Map((rows as Array<{ message_id: string; canonical_content: string | null; canonical_hash: string }>)
+  const messages = new Map((rows as Array<{ message_id: string; role: string; canonical_content: string | null; canonical_hash: string }>)
     .map((row) => [row.message_id, row]));
-  const result = rescueDialogueEvidence(source, [...messages.values()].map(row => ({ id: row.message_id, content: row.canonical_content ?? "", canonicalHash: row.canonical_hash })));
+  const result = rescueDialogueEvidence(source, [...messages.values()].map(row => ({ id: row.message_id, role: row.role, content: row.canonical_content ?? "", canonicalHash: row.canonical_hash })));
   for (const memory of result.memories) {
     for (const dialogue of memory.keyDialogues ?? []) {
       const message = messages.get(dialogue.messageId);

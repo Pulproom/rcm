@@ -52,6 +52,7 @@ interface RisuPluginApi {
   getCurrentCharacterIndex(): Promise<number>;
   getCurrentChatIndex(): Promise<number>;
   getChatFromIndex(characterIndex: number, chatIndex: number): Promise<any | null>;
+  setChatToIndex?(characterIndex: number, chatIndex: number, chat: any): Promise<void>;
   getTranslationCache?(key: string): Promise<string | null>;
   searchTranslationCache?(partialKey: string): Promise<Array<{key: string; value: string}>>;
   getCurrentLorebookEntries?(): Promise<any[]>;

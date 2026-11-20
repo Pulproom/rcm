@@ -410,6 +410,7 @@ export class ServerClient {
         chatId: event.chatId, memoryIds: (event.manifest as { memoryIds?: unknown } | undefined)?.memoryIds,
         atomKeys: (event.manifest as { atomKeys?: unknown } | undefined)?.atomKeys, receiptId: event.id,
         longtermMemoryIds: (event.manifest as { longtermMemoryIds?: unknown } | undefined)?.longtermMemoryIds,
+        seedAtomKeys: (event.manifest as { seedAtomKeys?: unknown } | undefined)?.seedAtomKeys,
       }) }, 2_000);
     }
     if (event.receiptOnly === true) return;

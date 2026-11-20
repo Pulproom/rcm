@@ -18,7 +18,7 @@ import { setToastDashboard } from './toasts.js';
 import { estimateBackfillCalls } from '@rcm/shared';
 import { createMemoryEvidenceLoader, groupMemoryEvidence, memoryEvidence } from './dashboard/memory-evidence.js';
 import { cachedSourceReceipt } from './api-client.js';
-import { MAX_MEMORY_BUDGET } from "@rcm/shared";
+import { MAX_MEMORY_BUDGET, storyReaderGroupKey as storyGroupKey } from "@rcm/shared";
 import { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage } from "@rcm/shared";
 import { errorMessage, formatServerError, upgradeErrorReason, ServerConnectionError, ServerRequestError } from "./server-errors.js";
 import { createSetupController, createSetupView, isInitialSetupAction, setupPendingIn } from "./dashboard/setup-actions.js";
@@ -26,10 +26,10 @@ export { filterTimelineMemories, timelineDefaultMemoryId, type TimelineViewState
 import { beginRetryMemorySelection, deleteRetryMemorySelection, createOrganizationController, createTimelineController, createTimelineView, timelineMemoryView, timelineDefaultMemoryId, type TimelineViewState } from "./dashboard/organization-actions.js";
 import { createPeopleController, createPeopleView, isPeopleManagementAction, type PeopleViewState, type PeopleManagementState, type SocialEditor } from "./dashboard/people-actions.js";
 import { createPairController, createPairView, isAnniversaryAction } from "./dashboard/pair-actions.js";
-import { readChatSettingsChange, readChatTurnLimits, readChatMemorySettings, assertChatMemoryLanguageSupported, applyChatWorkSettings, applyCurrentChatSettings, syncChatEnabledControl, syncMemoryBudgetControls } from "./dashboard/chat-settings-actions.js";
+import { saveChatEnableSettings, readChatSettingsChange, readChatTurnLimits, readChatMemorySettings, assertChatMemoryLanguageSupported, applyChatWorkSettings, applyCurrentChatSettings, syncChatEnabledControl, syncMemoryBudgetControls } from "./dashboard/chat-settings-actions.js";
 import { createDataController, createDataView, type DataConfirmation, type DataViewState, withExtractionReviewOverride, syncCompleteSourceLedger, syncCurrentSourceLedger, requireChatMemoryEnabled, clearDeletedChatState, invalidateRestoredChatState, deletedHostChats, setRetrievalDiagnostics, transferCountSummary } from "./dashboard/data-actions.js";
 export { type HostChatInventoryItem, withExtractionReviewOverride, syncCompleteSourceLedger, requestBackupArchive, type MemoryTransferMode, type MemoryTransferConfirmation, manualMemoryLineageRequest, isMissingLineageIdentityError, type MemoryTransferPreviewResult, previewMemoryTransfer, memoryTransferConfirmation, triggerBackupDownload, clearDeletedChatState, readHostChatInventory, deletedHostChats, scanDeletedHostChats, deleteServerChatRecords, cleanupDeletedHostChats, setRetrievalDiagnostics } from "./dashboard/data-actions.js";
-import { createAttentionController, createAttentionView, isAttentionMutationAction, reconciliationTarget, type AttentionFilter, type AttentionViewState } from "./dashboard/attention-actions.js";
+import { createAttentionController, createAttentionView, loadAttentionDetail, isAttentionMutationAction, reconciliationTarget, type AttentionFilter, type AttentionViewState } from "./dashboard/attention-actions.js";
 import { smallReviewDetail, smallReviewMark } from "./dashboard/small-review.js";
 import { birthdayMonthDays, CHAT_WORK_HELD_MESSAGE } from "@rcm/shared";
 import { googleTranslationRecords, retranslateGoogleRecords, invalidateChatTranslations, retranslateChatRecords } from "./translation.js";
@@ -380,6 +380,8 @@ export interface DashboardData {
   ingestionState?: "historical_pending" | "managed" | "cleared";
   recallLogs: any[];
   adminChats: any[];
+  currentChat?: any | null;
+  currentChatError?: string;
   recentChatCleanup?: { at: number; count: number };
   lineage?: ChatLineageStatus;
   initialCalibration?: any;
@@ -440,7 +442,7 @@ const ALL_DASHBOARD_DATASETS: DashboardChatDataset[] = [
 
 export function dashboardDatasetsForTab(tab: Tab): DashboardChatDataset[] {
   const byTab: Record<Tab, DashboardChatDataset[]> = {
-    albums: [],
+    albums: ["status"],
     overview: ["gapRecovery", "memories", "relationships", "entities", "viewPreferences", "world", "conflicts", "jobs", "lineage", "status", "initialCalibration", "storySpine", "socialKnowledge"],
     initial: ["memories", "relationships", "entities", "world", "socialKnowledge", "physicalIntimacy", "viewPreferences", "initialCalibration", "status"],
     story: ["memories", "storySpine", "entities", "relationships", "viewPreferences", "status"],
@@ -878,7 +880,7 @@ export function estimateBackfillAuxiliaryCalls(state: RuntimeState, data: Pick<D
   const context = state.current;
   if (!context) return { initialCalls: 0, storyCalls: 0, extractionGroups: 0, groupTurns: 4, reviewIncluded: false };
   const visibleAssistantTurns = context.messageVisibility?.filter((message) => message.visibility === "active" && message.role === "assistant").length;
-  const managed = data.adminChats?.some((chat) => chat.id === context.chatId && chat.ingestionState === "managed");
+  const managed = dashboardChat(data,context.chatId)?.ingestionState === 'managed';
   const remaining = managed ? managedBackfillSource(state, data as DashboardData) : undefined;
   const completedTurns = remaining ? remaining.turns : visibleAssistantTurns === undefined
     ? Math.ceil(Math.max(0, context.sourceActiveMessageCount) / 2)
@@ -891,8 +893,8 @@ export function estimateBackfillAuxiliaryCalls(state: RuntimeState, data: Pick<D
 export function shouldOfferBackfill(state: RuntimeState, data: DashboardData): boolean {
   const context = state.current;
   if (!context || data.connectionIssue || !isChatMemoryEnabled(state.settings, context.chatId, context.characterId) || context.sourceActiveMessageCount === 0) return false;
-  const serverInventoryKnown = Boolean(data.health?.ok) && !data.adminError;
-  const serverChat = data.adminChats.find((chat) => chat.id === context.chatId);
+  const serverInventoryKnown = Boolean(data.health?.ok) && !data.currentChatError && (data.currentChat !== undefined || !data.adminError);
+  const serverChat = dashboardChat(data,context.chatId);
   if ([data.lineage?.status, serverChat?.lineage?.status, state.lineageProbe?.result?.status].some(status => status === "choice_required" || status === "ambiguous")) return false;
   if (serverChat?.ingestionState === "managed") {
     if (!serverInventoryKnown || data.connectionIssue || data.jobsError) return false;
@@ -909,7 +911,7 @@ export function shouldOfferBackfill(state: RuntimeState, data: DashboardData): b
 }
 
 function managedBackfillSource(state: RuntimeState, data: DashboardData): { count: number; unsynced: number; turns: number } {
-  const chat = data.adminChats.find((chat) => chat.id === state.current?.chatId);
+  const chat = dashboardChat(data,state.current?.chatId);
   const unsynced = chat?.activeMessages === undefined ? 0
     : Math.max(0, (state.current?.sourceActiveMessageCount ?? 0) - Number(chat.activeMessages));
   return { count: Number(data.backfillMessages ?? 0) + unsynced, unsynced,
@@ -1022,8 +1024,8 @@ export function backfillNotice(state: RuntimeState, data: DashboardData): string
     bodyHtml: "<p>기억과 대기 작업은 그대로예요. 다시 켜면 이어서 처리해요.</p>",
   });
   if (!context || !shouldOfferBackfill(state, data)) return "";
-  const serverMissing = Boolean(data.health?.ok) && !data.adminError && !data.adminChats.some((chat) => chat.id === context.chatId);
-  const serverChat = data.adminChats.find((chat) => chat.id === context.chatId);
+  const serverMissing = Boolean(data.health?.ok) && !data.currentChatError && !dashboardChat(data,context.chatId);
+  const serverChat = dashboardChat(data,context.chatId);
   const pocketCount = Number(context.sourceMessageCount);
   const syncedCount = Number(serverChat?.messages ?? 0);
   const managed = serverChat?.ingestionState === "managed";
@@ -2206,7 +2208,6 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
   return `<div class="timeline${view.mobileDetail ? " is-detail" : ""}"><div class="split">${list}<div class="readercol" data-preserve-scroll="reader:timeline:${escapeHtml(view.creating ? "new" : selected?.id ?? "")}"><div data-timeline-reader-empty style="display:none">${empty("선택된 기억이 없어요", "목록에서 기억을 고르거나 필터를 바꿔 봐 주세요.")}</div>${reader}</div></div></div>`;
 }
 
-const storyGroupKey = (group: any, fallback: string): string => String(group?.groupId ?? `${group?.level ?? "story"}:${group?.startOrdinal ?? fallback}:${group?.endOrdinal ?? fallback}`);
 const storyTranslationKey = (groupKey: string, field: string, index?: number): string => `story:${groupKey}:${field}${index == null ? "" : `:${index}`}`;
 
 const storyStartOrder = (left: any, right: any): number => {
@@ -2998,7 +2999,7 @@ export function attentionPage(data: DashboardData, translations: TranslationView
     .filter((item) => (item.status === "pending_review" || item.status === "failed") && item.evidenceReview?.blocking !== false)
     .map((item) => ({
       id: `audit:${item.id}`, type: "audit", title: item.evidenceReview?.blocking === false ? "일부 발췌 보류 · 기억 처리 계속" : "상태 확인 필요 · 후속 기억 처리 보류",
-      summary: `저장된 기억 ${Number(item.evidenceReview?.appliedMemories ?? 0)}개 · 확인할 근거 ${item.evidenceReview?.issues?.length ?? 0}개`,
+      summary: `저장된 기억 ${Number(item.evidenceReview?.appliedMemories ?? 0)}개 · 확인할 근거 ${item.evidenceReview?.issueCount ?? item.evidenceReview?.issues?.length ?? 0}개`,
       time: item.updatedAt, value: item,
     }));
   const duplicates: AttentionItem[] = data.reconciliationReviews.filter((item) => item.status === "pending").map((item) => ({
@@ -3012,7 +3013,7 @@ export function attentionPage(data: DashboardData, translations: TranslationView
   });
   const small: AttentionItem[] = data.extractionAudits.flatMap(audit => (audit.smallReviews ?? []).filter((item: any) => item.status === "pending").map((item: any) => ({
     id: `small:${audit.id}:${item.id}`, type: "small" as const, title: item.kind === "recognition" ? `${item.holder} → ${item.subject}` : item.text,
-    summary: item.kind === "recognition" ? recognitionNameSummary(item) : item.sourceChoices?.length > 1 ? "같은 대사의 원문이 여러 곳에 있어요" : item.canKeep ? "확인된 원문이 있어요" : "원문과 글자가 조금 달라요", time: audit.updatedAt,
+    summary: item.kind === "recognition" ? recognitionNameSummary(item) : (item.sourceChoiceCount ?? item.sourceChoices?.length) > 1 ? "같은 대사의 원문이 여러 곳에 있어요" : item.canKeep ? "확인된 원문이 있어요" : "원문과 글자가 조금 달라요", time: audit.updatedAt,
     category: item.kind === "recognition" ? "이름·호칭" : item.kind === "dialogue" ? "대사" : "발췌", value: {...item, auditId: audit.id},
   })));
   const all = [...audits, ...duplicates, ...conflictsPending, ...small].sort((left, right) => Number(right.time ?? 0) - Number(left.time ?? 0));
@@ -3031,7 +3032,10 @@ export function attentionPage(data: DashboardData, translations: TranslationView
   const back = `<div class="reader__bar"><button type="button" class="back hit" data-action="attention-back">${icon("back")}<span>목록</span></button></div>`;
   const technical = (key: string, body: string) => fold("기술 세부정보", `<pre class="packet">${body}</pre>`, { role: "section", preserveKey: `attention-technical:${key}` });
   let detail = empty("확인이 필요한 항목이 없어요", "RCM이 스스로 판단하지 못한 기록이 생기면 여기에 모여요.");
-  if (selected?.type === "small") {
+  const detailOwner = selected?.type === 'small' ? data.extractionAudits.find(audit => audit.id === selected.value.auditId) : selected?.value;
+  if (detailOwner?.detailsLoaded === false) {
+    detail = detailOwner.detailError ? notice(detailOwner.detailError,{tone:'cut'}) + btn('다시 시도',{action:'retry-attention-detail',data:{id:selected!.id}}) : empty('불러오는 중이에요','');
+  } else if (selected?.type === "small") {
     detail = smallReviewDetail(selected.value, back);
   } else if (selected?.type === "audit") {
     const item = selected.value, draft = item.draft ?? {};
@@ -3063,7 +3067,7 @@ export function attentionPage(data: DashboardData, translations: TranslationView
     detail = `<article class="reader">${back}<div class="frame__slug"><b>${escapeHtml(conflictCategory(item.kind))}</b></div><h2 class="reader__title">${escapeHtml(presentation.title)}</h2><p class="sub">${escapeHtml(presentation.explanation)}</p>${presentation.changes.length ? `<h3 class="sec">달라진 내용</h3><ul class="beats">${presentation.changes.map((change) => `<li>${escapeHtml(change)}</li>`).join("")}</ul>` : ""}${technical(id, `existing: ${escapeHtml(item.existing_json)}\nincoming: ${escapeHtml(item.incoming_json)}`)}<div class="decide">${actions}</div></article>`;
   }
   const list = `<div class="listcol"><div class="tl-tools"><label class="search">${icon("search")}<span class="sr-only">확인 항목 검색</span><input class="input" type="search" data-action="attention-search" value="${escapeHtml(view.query)}" placeholder="제목과 내용 검색"></label></div>${filterBar}<p class="sub">${visible.length}개</p><div class="tl-rows" data-preserve-scroll="attention-list">${rows || (view.filter === "all" ? empty("확인할 기록이 없어요", "새로 확인이 필요한 기록이 생기면 여기에 모여요.") : empty("이 필터에는 확인할 항목이 없어요", "다른 필터를 골라 봐 주세요."))}<div data-attention-search-empty hidden>${empty("검색 결과가 없어요", "다른 단어로 찾아봐 주세요.")}</div></div></div>`;
-  return `<div class="attention${view.mobileDetail && selected ? " is-detail" : ""}">${pageHeader("상태 확인", "RCM이 자동으로 바꾸지 않은 상태와 충돌만 모았어요.")}<div class="split">${list}<div class="readercol" data-preserve-scroll="reader:attention:${escapeHtml(selected?.id ?? "")}">${detail}</div></div></div>`;
+  return `<div class="attention${view.mobileDetail && selected ? " is-detail" : ""}">${pageHeader("상태 확인", "RCM이 자동으로 바꾸지 않은 상태와 충돌만 모았어요.")}<div class="split">${list}<div class="readercol" data-attention-detail="${escapeHtml(selected?.id ?? '')}" data-preserve-scroll="reader:attention:${escapeHtml(selected?.id ?? "")}">${detail}</div></div></div>`;
 }
 
 const memoryToolRegistrationLabels = {
@@ -3466,7 +3470,7 @@ export function settingsV2(
   const desiredMemoryLanguage = state.current ? (settings.memoryLanguages[state.current.chatId] ?? "en") : "en";
   const currentMemoryBudget = state.current ? settings.memoryBudgets[state.current.chatId] : undefined;
   const currentProfile = state.current?.profile ?? "companion";
-  const currentServerChat = state.current ? data.adminChats.find((chat) => chat.id === state.current!.chatId) : undefined;
+  const currentServerChat = dashboardChat(data,state.current?.chatId);
   const activeMemoryLanguage = state.lastPrepare?.memoryLanguage ?? currentServerChat?.memoryLanguage ?? desiredMemoryLanguage;
   const pendingMemoryLanguage = state.lastPrepare?.pendingMemoryLanguage ?? currentServerChat?.pendingMemoryLanguage;
   const embedding = data.health?.embedding;
@@ -3516,7 +3520,7 @@ export function settingsV2(
       ${budgetControl("defaultMemoryBudget", "공통 기억 주입량", settings.defaultMemoryBudget)}
       ${check("memoryToolsEnabled", "메인 모델에 기억 도구 제공", settings.memoryToolsEnabled, "끄면 자동 주입만 사용해요.")}
       <label class="field"><span>도구 호출당 최대 반환량</span><input name="mcpCap" type="number" min="1500" max="4000" step="100" value="${settings.mcpCap}"></label>
-      <div class="field"><span>주입 위치</span><p class="sub">프리셋·캐릭터 설명·로어북 중 한 곳에 <code>[[RCM]]</code>을 넣어 주세요.</p></div>
+      <div class="field"><span>주입 위치</span><p class="sub">프리셋의 장기기억 블록을 그대로 쓸 수 있어요. 기존 <code>[[RCM]]</code> 위치가 있으면 그곳이 우선이에요.</p></div>
     </div>`)}
     ${group("최근 대화 보호", `<div class="form__row">
       <label class="field"><span>원문 보호 · 턴</span><input name="sourceProtectionTurns" type="number" min="1" max="20" step="1" value="${settings.sourceProtectionTurns}">${hint("최근 N턴과 겹치는 기억은 덜 넣어요.")}</label>
@@ -3614,8 +3618,6 @@ export function settingsV2(
 }
 
 export function memoryTranslationRecords(memory: any, data: Pick<DashboardData, "messages" | "relationshipEvents" | "physicalIntimacy"> & Partial<Pick<DashboardData, "memories" | "relationships">>): StructuredTranslationRecord[] {
-    const evidence = memoryEvidence(memory);
-    const messages = new Map(data.messages.map((message) => [message.message_id, message]));
     const relationshipEvents = data.relationshipEvents.filter((item) => item.sourceMemoryId === memory.id);
     const intimacyMilestones = data.physicalIntimacy.filter((item) => item.sourceMemoryId === memory.id);
     return withSceneTranslationContext([
@@ -3719,9 +3721,13 @@ export function backgroundTranslationRecords(state: RuntimeState, data: Dashboar
   return [...new Map(records.map(record => [JSON.stringify([record.kind, record.itemId, record.text]), record])).values()];
 }
 
-function dashboardCanonicalLanguage(state: RuntimeState, chatId: string | undefined, adminChats: any[]): MemoryLanguage {
+function dashboardChat(data: Partial<DashboardData>, chatId: string | undefined): any | undefined {
+  return data.chatId === chatId && data.currentChat !== undefined ? data.currentChat : data.adminChats?.find(chat => chat.id === chatId);
+}
+
+function dashboardCanonicalLanguage(state: RuntimeState, chatId: string | undefined, data: DashboardData): MemoryLanguage {
   if (!chatId) return "en";
-  return (adminChats.find(chat => chat.id === chatId)?.memoryLanguage as MemoryLanguage | undefined)
+  return (dashboardChat(data,chatId)?.memoryLanguage as MemoryLanguage | undefined)
     ?? state.activeMemoryLanguages?.[chatId]
     ?? state.settings.memoryLanguages[chatId] ?? "en";
 }
@@ -3805,26 +3811,23 @@ export async function loadDashboardData(
       connectionIssue: describeServerConnectionIssue(state.settings, new ServerCompatibilityError(Number(health?.apiRevision))),
     };
   }
-  const [adminCall] = await Promise.allSettled([client.request<any>("/v1/admin/chats")]);
-  const adminChats = adminCall.status === "fulfilled" ? adminCall.value.items ?? [] : previous.adminChats;
-  const serverHasCurrent = Boolean(context && adminChats.some((chat: any) => chat.id === context.chatId));
-  // A successful inventory confirms deletion. Only an unavailable inventory
-  // may keep cached chat data while the connection recovers.
-  if (context && adminCall.status === "fulfilled" && !serverHasCurrent) previous = emptyData();
+  const adminPromise = !options.tab || options.tab === 'data'
+    ? Promise.allSettled([client.request<any>('/v1/admin/chats')]).then(([result]) => result)
+    : Promise.resolve(undefined);
   const endpoint = (dataset: DashboardChatDataset): string => {
     const chat = encodeURIComponent(context!.chatId);
     const paths: Record<DashboardChatDataset, string> = {
       gapRecovery: "gap-recovery", memories: "memories", messages: "messages", relationships: "relationships", world: "world-state?includeHistory=true",
-      conflicts: "conflicts", jobs: "jobs", recallLogs: "recall-logs", entities: "entities", reviews: "reconciliation-reviews",
+      conflicts: "conflicts", jobs: "jobs", recallLogs: "recall-logs", entities: "entities", reviews: "reconciliation-reviews?status=pending&view=list",
       lineage: "lineage", socialKnowledge: "social-knowledge", physicalIntimacy: "physical-intimacy", status: "status",
-      pairProgress: "pair-progress", viewPreferences: "view-preferences", audits: "extraction-audits", initialCalibration: "initial-calibration", storySpine: "story-spine",
+      pairProgress: "pair-progress", viewPreferences: "view-preferences", audits: "extraction-audits?view=list", initialCalibration: "initial-calibration", storySpine: "story-spine",
     };
     const personaHint = context?.identityHints.userPersonaName?.trim();
     const query = dataset === "pairProgress" && personaHint ? `?userPersonaName=${encodeURIComponent(personaHint)}` : "";
     return `/v1/chats/${chat}/${paths[dataset]}${query}`;
   };
   const chatCalls = new Map<DashboardChatDataset, PromiseSettledResult<any>>();
-  if (context && (serverHasCurrent || !options.tab || options.tab === 'overview' || options.tab === 'initial') && !optionalContext.error && healthCall.status === "fulfilled" && adminCall.status === "fulfilled") {
+  if (context && !optionalContext.error && healthCall.status === "fulfilled") {
     if (options.tab === "overview") {
       try {
         const batch = await client.request<{ datasets: Record<string, { ok: true; value: unknown } | { ok: false; error: string }> }>(
@@ -3846,6 +3849,18 @@ export async function loadDashboardData(
       chatCalls.set(dataset, result);
     }));
   }
+  const adminCall = await adminPromise;
+  let adminChats = adminCall?.status === 'fulfilled' ? adminCall.value.items ?? [] : previous.adminChats;
+  const statusCall = chatCalls.get('status');
+  const currentChat = statusCall?.status === 'fulfilled' && statusCall.value.chat !== undefined ? statusCall.value.chat : previous.currentChat;
+  const serverHasCurrent = Boolean(context && currentChat !== null && (currentChat || adminChats.some((chat:any) => chat.id === context.chatId)));
+  // Only a successful current-chat response confirms deletion; failures retain the cache.
+  if (statusCall?.status === 'fulfilled' && statusCall.value.chat === null) {
+    previous = emptyData();
+    adminChats = adminChats.filter((chat:any) => chat.id !== context?.chatId);
+    chatCalls.clear();
+    chatCalls.set('status',statusCall);
+  }
   let quizStatus = previous.quizStatus;
   if (options.tab === "settings" && context && serverHasCurrent && healthCall.status === "fulfilled" && healthCall.value?.capabilities?.quizManagement) {
     try { quizStatus = await client.quizStatus(context.chatId); } catch { quizStatus = undefined; }
@@ -3861,11 +3876,11 @@ export async function loadDashboardData(
   };
   const failedDataset = [...chatCalls].find((entry): entry is [DashboardChatDataset, PromiseRejectedResult] => entry[1].status === "rejected");
   const failure = healthCall.status === "rejected" ? { label: "서버 상태", reason: healthCall.reason }
-    : adminCall.status === "rejected" ? { label: "채팅 목록", reason: adminCall.reason }
+    : adminCall?.status === "rejected" ? { label: "채팅 목록", reason: adminCall.reason }
     : failedDataset ? { label: datasetLabels[failedDataset[0]], reason: failedDataset[1].reason } : undefined;
   const loadedDatasets = new Set(previous.loadedDatasets ?? []);
   failedDatasets.forEach((dataset) => loadedDatasets.delete(dataset));
-  if (context && adminCall.status === "fulfilled" && !serverHasCurrent) requested.forEach((dataset) => loadedDatasets.add(dataset));
+  if (context && statusCall?.status === 'fulfilled' && currentChat === null) requested.forEach((dataset) => loadedDatasets.add(dataset));
   for (const [dataset, result] of chatCalls) if (result.status === "fulfilled") loadedDatasets.add(dataset);
   const value = (dataset: DashboardChatDataset, fallback: any) => chatCalls.get(dataset)?.status === "fulfilled"
     ? (chatCalls.get(dataset) as PromiseFulfilledResult<any>).value
@@ -3902,14 +3917,14 @@ export async function loadDashboardData(
   assertCurrent();
   if (!lineageFresh && requested.has('lineage')) state.statusStale = true;
   if ((!options.tab || options.tab === "overview" || options.tab === "initial")
-    && context && healthCall.status === "fulfilled" && adminCall.status === "fulfilled" && isChatMemoryEnabled(state.settings, context.chatId, context.characterId)
+    && context && healthCall.status === "fulfilled" && isChatMemoryEnabled(state.settings, context.chatId, context.characterId)
     && lineageFresh && chatCalls.get('initialCalibration')?.status === 'fulfilled'
     && needsOpenedChatResolution(state, calibration, lineage)) {
     void resolveOpenedChat(state, client).catch(() => undefined); // operation owns visible errors
   }
   if (context && lineageFresh) syncLineageActivity(state, context.chatId, lineage, calibration);
-  const currentAdmin = context ? adminChats.find((chat: any) => chat.id === context.chatId) : undefined;
-  const currentHasDerived = currentAdmin && ["memories", "relationships", "assertions", "beliefs", "promises"].some((key) => Number(currentAdmin[key] ?? 0) > 0);
+  const currentAdmin = currentChat !== undefined ? currentChat : context ? adminChats.find((chat:any) => chat.id === context.chatId) : undefined;
+  const currentHasDerived = currentAdmin?.hasDerived ?? (currentAdmin && ["memories", "relationships", "assertions", "beliefs", "promises"].some((key) => Number(currentAdmin[key] ?? 0) > 0));
   if (lineageFresh && requested.has("lineage") && context && healthCall.status === "fulfilled" && healthCall.value?.capabilities?.readOnlyLineageProbe && lineage.status === "none" && !context.hostIdentity && !currentHasDerived) {
     void probeDashboardLineage(state, client, context);
   } else if (requested.has("lineage") && (!lineageFresh || !context || context.hostIdentity || lineage.status !== "none" || currentHasDerived)) {
@@ -3972,12 +3987,14 @@ export async function loadDashboardData(
     ingestionState: jobsState.ingestionState,
     recallLogs: value("recallLogs", { items: previous.recallLogs }).items,
     adminChats,
-    recentChatCleanup: adminCall.status === "fulfilled" ? adminCall.value.recentCleanup : previous.recentChatCleanup,
+    currentChat,
+    currentChatError: statusCall?.status === 'rejected' ? String(statusCall.reason) : undefined,
+    recentChatCleanup: adminCall?.status === "fulfilled" ? adminCall.value.recentCleanup : previous.recentChatCleanup,
     lineage,
     jobsError: requested.has("jobs")
       ? chatCalls.get("jobs")?.status === "rejected" ? String((chatCalls.get("jobs") as PromiseRejectedResult).reason) : undefined
       : previous.jobsError,
-    adminError: adminCall.status === "rejected" ? String(adminCall.reason) : undefined,
+    adminError: adminCall?.status === "rejected" ? String(adminCall.reason) : undefined,
     contextError: optionalContext.error,
     error: failure ? `${failure.label}를 불러오지 못했어요. ${errorMessage(failure.reason)}` : undefined,
     errorReport: formatServerError(failure?.reason),
@@ -4174,8 +4191,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const loadProcessingReview=async(chatId:string,title:string)=>{
     const server=state.settings.serverUrl,fromChat=state.current?.chatId,chat=encodeURIComponent(chatId);
     const [audits,reviews,conflicts]=await Promise.all([
-      client.request<{items:any[]}>(`/v1/chats/${chat}/extraction-audits`),
-      client.request<{items:any[]}>(`/v1/chats/${chat}/reconciliation-reviews`),
+      client.request<{items:any[]}>(`/v1/chats/${chat}/extraction-audits?view=list`),
+      client.request<{items:any[]}>(`/v1/chats/${chat}/reconciliation-reviews?status=pending&view=list`),
       client.request<{items:any[]}>(`/v1/chats/${chat}/conflicts`),
     ]);
     if(server!==state.settings.serverUrl||fromChat!==state.current?.chatId)return;
@@ -4200,8 +4217,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     current.dashboardEvidence = evidenceLoader.read(current, scope);
     // Read existing per-index translations even when automatic translation is off.
     if (state.settings.translationDisplay !== 'en' && data.health?.instanceId) {
-      const records = memoryTranslationRecords(current, data).filter(record => record.kind === 'evidence').map(record => ({ ...record,
-        serverInstanceId: data.health!.instanceId, chatId, sourceLanguage: activeCanonicalLanguage() }));
+      const messages = new Map(data.messages.map(message => [message.message_id, message]));
+      const records = memoryEvidence(current).map((item,index) => {
+        const message = messages.get(item.messageId ?? "");
+        return { kind: "evidence", itemId: `${current.id}:evidence:${index}`, text: String(item.quote ?? message?.canonical_content ?? message?.content ?? ""),
+          serverInstanceId: data.health!.instanceId, chatId, sourceLanguage: activeCanonicalLanguage() };
+      }).filter(record => record.text);
       const cached = await readCachedTranslations(state, records, state.settings.translationProvider).catch(() => []);
       if (!dashboardOpen || scope !== evidenceScope() || data.memories.find(item => item.id === id) !== current) return;
       for (const item of cached) translations.set(item.itemId, item.translated);
@@ -4261,7 +4282,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const chatId = state.current!.chatId;
     try {
       const sources = await loadCurrentChatTranslationSources(state, client, chatId, {
-        serverInstanceId: data.health!.instanceId, memoryLanguage: dashboardCanonicalLanguage(state, chatId, data.adminChats),
+        serverInstanceId: data.health!.instanceId, memoryLanguage: dashboardCanonicalLanguage(state, chatId, data),
       }, current);
       const records = current() ? await googleTranslationRecords(state, sources) : [];
       if (current()) { googleSettingsRecords = records; googleSettingsScope = scope; }
@@ -4280,7 +4301,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const pendingTranslationPatches = new Set<string>();
   let translationObserver: IntersectionObserver | undefined;
   let unsubscribeActivity: (() => void) | undefined;
-  const activeCanonicalLanguage = (chatId = state.current?.chatId): MemoryLanguage => dashboardCanonicalLanguage(state, chatId, data.adminChats);
+  const activeCanonicalLanguage = (chatId = state.current?.chatId): MemoryLanguage => dashboardCanonicalLanguage(state, chatId, data);
 
 
   const applyStorySearch = () => {
@@ -4380,13 +4401,14 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   };
 
   const persistSettingsForm = async (form: HTMLFormElement) => {
+    const chatId = state.current?.chatId;
     if (currentUpgradeLock()) {
       const change = readChatSettingsChange(state,form,new FormData(form));
       await applyChatWorkSettings(state,change,state.settings,() => { translations.clear(); memoryTranslationErrors.clear(); translationRequested.clear(); },confirmUpgradeOff);
       state.settings.characterEnabled = change.settings.characterEnabled;
       state.settings.chatEnabled = change.settings.chatEnabled;
       state.settings.chatCatchUpPending = change.settings.chatCatchUpPending;
-      await saveSettings(state.settings);
+      await saveChatEnableSettings(state, chatId, change.effectiveEnabled);
       if (!change.effectiveEnabled && state.current) {
         await discardSetupCapture(state,state.current.chatId);
         state.activeModelRequest = undefined;
@@ -4462,7 +4484,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       state.automaticTurnPacket = undefined;
       state.activeModelRequest = undefined;
     }
-    await saveSettings(state.settings);
+    await saveChatEnableSettings(state, chatId, chatSettings.effectiveEnabled);
     if (verifiedHealth?.ok) data.health = verifiedHealth;
     const serverConfigured = isServerConfigured(state.settings);
     state.serverConnectionIssue = serverConfigured ? undefined : describeServerConnectionIssue(state.settings);
@@ -4531,7 +4553,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (translationOutputSettingsChanged(previousTranslation, { settings: state.settings, extraction: nextServerLlm, connection: data.health?.translationConnection ?? nextTranslation }) && state.current && data.health?.instanceId) {
       const chatId = state.current.chatId;
       const queued = translationRequested.size > 0 || (state.translationActivity?.pending ?? 0) > 0;
-      const records = await loadCurrentChatTranslationSources(state, client, chatId, { serverInstanceId: data.health.instanceId, memoryLanguage: dashboardCanonicalLanguage(state, chatId, data.adminChats) }, () => state.current?.chatId === chatId);
+      const records = await loadCurrentChatTranslationSources(state, client, chatId, { serverInstanceId: data.health.instanceId, memoryLanguage: dashboardCanonicalLanguage(state, chatId, data) }, () => state.current?.chatId === chatId);
       try { await applyTranslationSettingsChange(state, records, queued); }
       finally { translations.clear(); memoryTranslationErrors.clear(); translationRequested.clear(); }
     }
@@ -4567,7 +4589,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const transplantChatBackup = async (bytes: ArrayBuffer, sourceChatId: string) => {
     if (!state.current) throw new Error("현재 채팅을 찾지 못했어요.");
     const targetChatId = state.current.chatId;
-    if (!data.adminChats.some((chat) => chat.id === targetChatId)) await syncCompleteSourceLedger(client, await readCurrentContext(state, { snapshotMode: "full" }));
+    if (!dashboardChat(data,targetChatId)) await syncCompleteSourceLedger(client, await readCurrentContext(state, { snapshotMode: "full" }));
     const path = `/v1/import/transplant?sourceChatId=${encodeURIComponent(sourceChatId)}&targetChatId=${encodeURIComponent(targetChatId)}`;
     const response = await client.raw(path, { method: "POST", headers: { "Content-Type": "application/zip" }, body: backupRequestBody(bytes) }, 180_000);
     const result = await response.json() as any;
@@ -4663,8 +4685,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const hydrateCachedMemoryTranslations = async (next: DashboardData) => {
     const sourceLanguage = activeCanonicalLanguage();
     if (!state.current || !next.health?.instanceId || state.settings.translationDisplay === "en" || sourceLanguage === "ko") return;
-    const records = (activeTab === "overview"
-      ? structuredTranslationRecords(state, next, "overview").map(record => ({ ...record,
+    const records = (["overview", "world", "initial", "relationships"].includes(activeTab)
+      ? structuredTranslationRecords(state, next, activeTab, storyView, selectedRelationship, sentView.open, dailyMemoryView).map(record => ({ ...record,
         serverInstanceId: next.health!.instanceId, chatId: state.current!.chatId, sourceLanguage }))
       : [...next.memories.flatMap((memory) => [
       { serverInstanceId: next.health!.instanceId, chatId: state.current!.chatId, sourceLanguage, kind: "memory-title", itemId: `${memory.id}:title`, text: String(memory.title ?? "") },
@@ -5008,7 +5030,16 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (activeTab === "story") presentSceneSheet();
     if (activeTab === "initial") peopleActions.applySearch();
     if (activeTab === "relationships" && relationshipSection !== "acquaintances") applyRelationshipSearch();
-    if (activeTab === "reviews") attention.applySearch();
+    if (activeTab === "reviews") {
+      attention.applySearch();
+      const scope = scopedProcessingReview()?.data ?? data;
+      const selectedId = root.querySelector<HTMLElement>('[data-attention-detail]')?.dataset.attentionDetail;
+      const pending = scope.reconciliationReviews.find(item => `duplicate:${item.id}` === selectedId)
+        ?? scope.extractionAudits.find(item => `audit:${item.id}` === selectedId || (item.smallReviews ?? []).some((candidate:any) => `small:${item.id}:${candidate.id}` === selectedId));
+      if (scope.chatId && selectedId && pending?.detailsLoaded === false && !pending.detailLoading && !pending.detailError) {
+        void loadAttentionDetail(client,scope.chatId,scope,selectedId).then(() => { if ((scopedProcessingReview()?.data ?? data) === scope && dashboardOpen) render(false); });
+      }
+    }
     if (replacedPage) setEditorBaselines(page);
     root.setAttribute("aria-busy", "false");
     // Move only each horizontal control, preserving the page and reader positions.
@@ -5278,8 +5309,8 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       ? await chooseSimulationBackfill(sourceContext.estimatedSourceTokens)
       : false;
     if (backfill === undefined) return false;
-    const serverHasChat = data.adminChats.some((item) => item.id === state.current?.chatId);
-    if (!data.adminError && data.health?.ok && !serverHasChat) {
+    const serverHasChat = Boolean(dashboardChat(data,state.current?.chatId));
+    if (!data.currentChatError && data.health?.ok && !serverHasChat) {
       if (backfill) {
         await alertDashboard("과거 기록을 다시 추출하려면 먼저 이 채팅의 RCM 서버 연결을 완료해 주세요.");
         return false;
@@ -5720,6 +5751,11 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       root.querySelector(".settingspage")?.classList.remove("is-open");
       documentScroller(root)?.scrollTo({ top: 0 });
       return;
+    }
+    if (action === 'retry-attention-detail') {
+      const scope = scopedProcessingReview()?.data ?? data;
+      for (const item of [...scope.extractionAudits,...scope.reconciliationReviews]) item.detailError = undefined;
+      render(false); return;
     }
     if (attention.handleViewAction(action, target)) return;
     if (action === "load-data-inventory") {

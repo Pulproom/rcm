@@ -1,3 +1,4 @@
+import { storyChat } from "../pocket-memory-slot.js";
 import { formatServerError } from "../server-errors.js";
 import { sanitizeDiagnosticText, type ChatLineageStatus, type ManualLineagePreview, type ManualLineagePreviewRequest } from "@rcm/shared";
 import type { ServerClient } from "../api-client.js";
@@ -64,7 +65,7 @@ export async function requestBackupArchive(
     await syncCurrentSourceLedger(client,state,chatId,contextReader);
   }
   const characterId = !chatId ? undefined : state.current?.chatId === chatId ? state.current.characterId
-    : (await client.request<{ items: Array<{ id: string; characterId: string }> }>("/v1/admin/chats")).items.find(chat => chat.id === chatId)?.characterId;
+    : (await client.request<{chat:{characterId:string}|null}>(`/v1/chats/${encodeURIComponent(chatId)}/status`)).chat?.characterId;
   if (chatId && !characterId) throw new Error("백업할 채팅의 캐릭터를 찾지 못했어요.");
   return client.raw("/v1/export", { method: "POST", body: JSON.stringify(
     chatId ? { chatId, chatSettings: exportChatSettings(state.settings, chatId, characterId!) }
@@ -268,12 +269,12 @@ export async function readHostChatInventory(): Promise<HostChatInventory> {
       const chatId = String(chat.id || `${characterId}:${chatIndex}`);
       if (chatIds.has(chatId)) { complete = false; continue; }
       chatIds.add(chatId);
-      let messageCount = Array.isArray((chat as any).message) ? (chat as any).message.length : 0;
+      let messageCount = Array.isArray((chat as any).message) ? storyChat(chat).message.length : 0;
       if (!messageCount) {
         try {
           const full = await risuai.getChatFromIndex(index, chatIndex);
           if (!full || full.id !== chat.id || !Array.isArray(full.message)) complete = false;
-          messageCount = Array.isArray(full?.message) ? full.message.length : 0;
+          messageCount = Array.isArray(full?.message) ? storyChat(full).message.length : 0;
         } catch { complete = false; /* Keep counts already read, but never infer deletion from this character. */ }
       }
       items.push({ characterId, characterName, chatId, chatTitle: String(chat.name ?? chat.title ?? "").trim() || `채팅 ${chatIndex + 1}`, messageCount });

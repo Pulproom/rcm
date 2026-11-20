@@ -4,10 +4,11 @@ import { splitAuxiliarySource } from "./auxiliary-budget.js";
 import { settingsFailureMessage } from "./support-diagnostics.js";
 import { isStructuredOutputTruncated, parseStructuredModelJson } from "./structured-json.js";
 import { z } from "zod";
-export const translationTimeoutMs = (maxOutput: number): number => Math.max(120_000, maxOutput * 8);
+// Requested and background translations are not on the reply path; a slow provider must finish rather than fail.
+export const translationTimeoutMs = (maxOutput: number): number => Math.max(600_000, maxOutput * 30);
 export const TRANSLATION_DEFAULT_OUTPUT = 16000;
 export class TranslationError extends Error {
-  constructor(readonly code: string, detail: string) { super(code === "CHAT_WORK_HELD" ? detail : settingsFailureMessage({ code }, "translation")); this.name = "TranslationError"; }
+  constructor(readonly code: string, detail: string) { super(code === "CHAT_WORK_HELD" || code === "CANCELLED" ? detail : settingsFailureMessage({ code }, "translation")); this.name = "TranslationError"; }
 }
 export const TRANSLATION_CONTEXT_LIMITS = { speaker: 256, relationship: 768 } as const;
 const TranslationItemSchema = z.object({
@@ -137,4 +138,9 @@ export function validateTranslation(content: string, expected: TranslationPart[]
     if (matches.length !== 1 || typeof matches[0].ko !== "string" || !matches[0].ko.trim()) throw new TranslationError("INVALID_RESPONSE", "번역 응답에 누락되거나 중복된 구간이 있어요.");
     return { id: part.id, partIndex: part.partIndex, ko: matches[0].ko };
   });
+}
+
+/** The persisted reader key for a story group or one of its perspective flows. */
+export function storyReaderGroupKey(group: { groupId?: string; level?: string; startOrdinal?: number; endOrdinal?: number } | undefined, fallback: string): string {
+  return String(group?.groupId ?? `${group?.level ?? "story"}:${group?.startOrdinal ?? fallback}:${group?.endOrdinal ?? fallback}`);
 }

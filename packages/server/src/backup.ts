@@ -24,7 +24,8 @@ import { mkdirSync, writeFileSync, renameSync, readdirSync, unlinkSync } from 'n
 import { dirname, join, resolve } from 'node:path';
 import { deleteDerivedRows, renewMemoryEpoch } from "./derived-state.js";
 import { memoryTransferQueuedJobs, cancelQueuedMemoryTransferJobs } from "./jobs.js";
-import { migrateTranslationKeys, pruneTranslationCache, translationCacheKey } from "./translation-cache.js";
+import { storyTranslationKeyMap } from "./story-spine.js";
+import { migrateTranslationKeys, pruneTranslationCache, remapReaderTranslationId, translationCacheKey } from "./translation-cache.js";
 import { ledgerEditOriginsKey, readRemovedAliases, readUserDeletions, removedAliasesKey, userDeletionsKey, type Deletion, type RemovedAliases } from "./user-deletions.js";
 import { dialogueAccessIdentityKey, detailAccessEditsKey } from "./item-access.js";
 
@@ -527,6 +528,15 @@ export function restoreCompleteArchive(db: RcmDatabase, archive: Uint8Array, pho
   return { inspection: { manifest: parsed.manifest, privateData: { serverUrl: parsed.privateData.serverUrl, serverToken: parsed.privateData.serverToken } }, vectorsRestored, privateData: parsed.privateData };
 }
 
+function rekeyArchivedTranslation(row: Row, instanceId: string, chatId: string): string {
+  row.server_instance_id = instanceId;
+  row.chat_id = chatId;
+  const key = translationCacheKey({ serverInstanceId: instanceId, chatId, kind: String(row.item_kind), itemId: String(row.item_id),
+    sourceHash: String(row.source_hash), provider: String(row.provider), sourceLanguage: String(row.source_language), targetLanguage: String(row.target_language) });
+  row.cache_key = key;
+  return key;
+}
+
 /** Restores the original chat identity without touching other chats or secrets. */
 export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array, photoStore?: AlbumPhotoStore): {chatId:string;characterId:string;chatSettings:ChatBackupSettings;vectorsRestored:number} {
   const parsed=readCompleteArchive(archive);
@@ -555,6 +565,20 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array, photoSt
   try {
     db.transaction(()=>{
       assertChatUnlocked(db,chatId);
+      if (tables.translation_cache?.length) {
+        const instanceId = String((db.prepare("SELECT value FROM server_meta WHERE key='instance_id'").get() as { value?: string } | undefined)?.value ?? "");
+        const translations = new Map<string, Row>();
+        // Older backups can contain separate providers or previous server IDs for the same translation.
+        for (const row of tables.translation_cache) {
+          const key = rekeyArchivedTranslation(row, instanceId, chatId);
+          const previous = translations.get(key);
+          if (!previous || Number(row.used_at) > Number(previous.used_at)
+            || (row.used_at === previous.used_at && Number(row.created_at) > Number(previous.created_at))) {
+            translations.set(key, row);
+          }
+        }
+        tables.translation_cache = [...translations.values()];
+      }
       // Chat restore merges keepsakes: only incoming IDs replace local albums.
       for (const id of albumIds) {
         db.prepare("DELETE FROM album_versions WHERE album_id=?").run(id);
@@ -582,7 +606,6 @@ export function restoreChatArchive(db: RcmDatabase, archive: Uint8Array, photoSt
       for (const row of tables.chats ?? []) renewMemoryEpoch(db,String(row.id));
       if ((db.pragma("foreign_key_check") as unknown[]).length) throw new Error("Chat backup failed foreign key validation");
       vectorsRestored=restoreVectors(db,parsed.files);
-      migrateTranslationKeys(db);
       if (parsed.manifest.schemaVersion < 62) { backfillLegacyParticipantAccess(db, chatId); }
       db.prepare("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)").run(DATABASE_SCHEMA_VERSION, Date.now());
       if(parsed.manifest.schemaVersion<68)migrateLegacyProcessingRecords(db,chatId);
@@ -704,6 +727,7 @@ export function transplantCompleteArchive(db: RcmDatabase, archive: Uint8Array, 
   const promiseHistory = [...(selected.promise_events ?? [])].sort((a,b)=>Number(a.created_revision)-Number(b.created_revision) || Number(a.created_at)-Number(b.created_at));
   const promiseRevisions = new Map(promiseHistory.map((row,index)=>[row.id,index-promiseHistory.length]));
   for (const [table, rows] of Object.entries(selected)) remapped[table] = rows.map((row) => {
+    if (table === "translation_cache") return { ...row };
     const next: Row = {};
     for (const [column, value] of Object.entries(row)) {
       if (table === "embedding_items" && column === "rowid") continue;
@@ -729,14 +753,17 @@ export function transplantCompleteArchive(db: RcmDatabase, archive: Uint8Array, 
     }
     if (table === "message_revisions") next.lifecycle = "committed";
     if (table === "promise_events") next.created_revision = promiseRevisions.get(row.id)!;
-    if (table === "translation_cache") {
-      next.server_instance_id = instanceId;
-      next.chat_id = targetChatId;
-      next.cache_key = translationCacheKey({ serverInstanceId: instanceId, chatId: targetChatId, kind: String(next.item_kind), itemId: String(next.item_id),
-        sourceHash: String(next.source_hash), provider: String(next.provider), sourceLanguage: String(next.source_language), targetLanguage: String(next.target_language) });
-    }
     return next;
   });
+  const translations = remapped.translation_cache ?? [];
+  const stories = translations.some(row => String(row.item_kind).startsWith("story-"))
+    ? storyTranslationKeyMap(selected.story_spine_nodes ?? [], remapped.story_spine_nodes ?? [], ids)
+    : new Map<string,string>();
+  for (const row of translations) {
+    const kind = String(row.item_kind), original = String(row.item_id);
+    row.item_id = remapReaderTranslationId(kind, original, ids, stories) ?? rewriteIdentifier(original, ids);
+    rekeyArchivedTranslation(row, instanceId, targetChatId);
+  }
   let vectorsRestored = 0;
   db.pragma("defer_foreign_keys = ON");
   db.transaction(() => {

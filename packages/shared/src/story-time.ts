@@ -136,7 +136,7 @@ export const normalizeStoryTime = (value: unknown): string | undefined => parseS
 /** Only the product-owned STORY_TIME_GUIDANCE grammar: YYYY-MM-DD[ HH:mm],
  * optionally followed by ` ~ HH:mm` or a full end date/time. Never parse RP
  * prose or normalize natural-language dates for automatic relative labels. */
-export function structuredStoryTimeEnd(value: string | undefined): number | undefined {
+function structuredStoryTimeParts(value: string | undefined) {
   const match = value?.trim().match(/^(\d{4}-\d{2}-\d{2})(?: ([0-2]\d:[0-5]\d))?(?: ~ (?:(\d{4}-\d{2}-\d{2})(?: ([0-2]\d:[0-5]\d))?|([0-2]\d:[0-5]\d)))?$/u);
   if (!match) return undefined;
   const timestamp = (date: string, clock = "00:00"): number | undefined => {
@@ -144,10 +144,32 @@ export function structuredStoryTimeEnd(value: string | undefined): number | unde
     if (!validDate(year, month, day) || Number(clock.slice(0, 2)) > 23) return undefined;
     return Date.parse(`${date}T${clock}:00Z`);
   };
-  const start = timestamp(match[1]!, match[2]);
-  const end = timestamp(match[3] ?? match[1]!, match[3] ? match[4] : match[5] ?? match[2]);
+  const startDate = match[1]!, startClock = match[2];
+  const endDate = match[3] ?? startDate, endClock = match[3] ? match[4] : match[5] ?? match[2];
+  const start = timestamp(startDate, startClock), end = timestamp(endDate, endClock);
   // A short end clock is same-day by contract; do not infer an overnight span.
-  return start !== undefined && end !== undefined && end >= start ? end : undefined;
+  return start !== undefined && end !== undefined && end >= start ? { startDate, startClock, endDate, endClock, end } : undefined;
+}
+
+export function structuredStoryTimeEnd(value: string | undefined): number | undefined {
+  return structuredStoryTimeParts(value)?.end;
+}
+
+const partOfDay = (clock: string | undefined): string | undefined => {
+  if (!clock) return undefined;
+  const hour = Number(clock.slice(0, 2));
+  return hour >= 5 && hour < 12 ? "morning" : hour >= 12 && hour < 18 ? "afternoon" : hour >= 18 && hour < 22 ? "evening" : "night";
+};
+
+/** Older records keep the date but trade clock times for the part of day,
+ * as people remember them. Unstructured values are returned unchanged. */
+export function coarseStoryTime(value: string): string {
+  const parts = structuredStoryTimeParts(value);
+  if (!parts) return value;
+  const dates = parts.endDate === parts.startDate ? parts.startDate : `${parts.startDate} ~ ${parts.endDate}`;
+  const from = partOfDay(parts.startClock), to = partOfDay(parts.endClock);
+  const day = from && to && from !== to ? `${from} to ${to}` : from ?? to;
+  return day ? `${dates}, ${day}` : dates;
 }
 
 /** Returns null when two calendar systems cannot be compared safely. */

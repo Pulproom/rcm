@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ExtractionDraftResultSchema, ExtractionResultSchema, dialogueSourceMatches, resolveSourceQuote, sourceRangeIsVisible, normalizeRecognitionReferences, type ExtractionDraftResult } from "@rcm/shared";
+import { ExtractionDraftResultSchema, ExtractionResultSchema, dialogueMessageMatches, resolveSourceQuote, sourceRangeIsVisible, normalizeRecognitionReferences, type ExtractionDraftResult } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { inspectDraftEvidence, rescueDraftDialogues, preferAssistantDialogueSources } from "./evidence-review.js";
+import { inspectDraftEvidence, rescueDraftDialogues } from "./evidence-review.js";
 import { recordExtractionAudit } from "./extraction-audit.js";
 import { fingerprintMatches, sourceFingerprint } from "./source-fingerprint.js";
 import { canonicalizeExtraction, buildEntityIdentityResolver } from "./entities.js";
@@ -47,7 +47,7 @@ function eligibleSourceMessages(db: RcmDatabase, chatId: string, sources: string
 function exactEvidence(db: RcmDatabase, chatId: string, sources: string[], messageId: string | undefined, quote: string): ExactEvidence[] | undefined {
   const rows = eligibleSourceMessages(db, chatId, sources);
   const eligible = messageId && sources.includes(messageId) ? rows.filter(row => row.message_id === messageId) : rows;
-  // An ambiguous occurrence in any eligible message disqualifies the choice.
+  // Passages and recognition evidence retain exact, globally unique selection.
   if (!resolveSourceQuote(eligible.map(row => row.canonical_content).join("\0"), quote)) return undefined;
   const matches = eligible.flatMap(row => {
     const selected = resolveSourceQuote(row.canonical_content, quote);
@@ -60,27 +60,25 @@ function exactEvidence(db: RcmDatabase, chatId: string, sources: string[], messa
   return matches;
 }
 
-/** Exact occurrences only; a choice identifies a range, not an inferred speaker. */
+/** A choice identifies exact source ranges, never an inferred speaker. */
 function dialogueSourceChoices(db: RcmDatabase, chatId: string, sources: string[], item: SmallReviewCandidate) {
   const text = item.dialogue?.text;
   if (!text?.trim()) return [];
-  const choices = eligibleSourceMessages(db, chatId, sources).flatMap(row => {
-    const choices = [];
-    for (let start = row.canonical_content.indexOf(text); start >= 0; start = row.canonical_content.indexOf(text, start + text.length)) {
-      const end = start + text.length;
-      if (!sourceRangeIsVisible(row.canonical_content, start, end)) continue;
-      const evidence = {messageId: row.message_id, canonicalHash: row.canonical_hash, startOffset: start, endOffset: end, quote: text};
+  const rows = eligibleSourceMessages(db, chatId, sources);
+  return dialogueMessageMatches(text, rows.map(row => ({id:row.message_id,role:row.role,content:row.canonical_content,
+    canonicalHash:row.canonical_hash}))).filter(match => match.complete).map(matched => {
+      const row = matched.message;
+      const evidence = matched.segments.map(({startOffset,endOffset,quote}) => ({
+        messageId:row.id,canonicalHash:row.canonicalHash,startOffset,endOffset,quote}));
+      const start = evidence[0]!.startOffset, end = evidence.at(-1)!.endOffset;
       // Hidden reasoning/images must not leak through the context preview.
       let before = start, after = end;
-      while (before > Math.max(0, start - 160) && sourceRangeIsVisible(row.canonical_content, before - 1, start)) before--;
-      while (after < Math.min(row.canonical_content.length, end + 160) && sourceRangeIsVisible(row.canonical_content, end, after + 1)) after++;
-      choices.push({role: row.role, id: createHash('sha256').update(JSON.stringify(evidence)).digest('hex'), evidence,
-        before: (before ? '…' : '') + row.canonical_content.slice(before, start), text,
-        after: row.canonical_content.slice(end, after) + (after < row.canonical_content.length ? '…' : '')});
-    }
-    return choices;
-  });
-  return preferAssistantDialogueSources(choices);
+      while (before > Math.max(0, start - 160) && sourceRangeIsVisible(row.content, before - 1, start)) before--;
+      while (after < Math.min(row.content.length, end + 160) && sourceRangeIsVisible(row.content, end, after + 1)) after++;
+      return {role: row.role, id: createHash('sha256').update(JSON.stringify(evidence)).digest('hex'), evidence,
+        before: (before ? '…' : '') + row.content.slice(before, start), text,
+        after: row.content.slice(end, after) + (after < row.content.length ? '…' : '')};
+    });
 }
 
 function verifiedCitations(rows: ReturnType<typeof eligibleSourceMessages>, evidence: ExactEvidence[]) {
@@ -91,26 +89,17 @@ function verifiedCitations(rows: ReturnType<typeof eligibleSourceMessages>, evid
     && sourceRangeIsVisible(row.canonical_content,span.startOffset,span.endOffset)));
 }
 
-function dialogueMatches(db: RcmDatabase, chatId: string, sources: string[], messageId: string | undefined, text: string, cited?: ExactEvidence[]) {
-  const rows = eligibleSourceMessages(db, chatId, sources).filter(row => !messageId || !sources.includes(messageId) || row.message_id === messageId);
-  let offset = 0;
-  const messages = rows.map(row => {
-    const start = offset;
-    offset += row.canonical_content.length + 1;
-    return { ...row, start, end: offset - 1 };
-  });
-  const allowed = cited === undefined ? undefined : verifiedCitations(rows,cited).flatMap(span => {
-    const row = messages.find(row => row.message_id === span.messageId)!;
-    return [{start:row.start + span.startOffset,end:row.start + span.endOffset}];
-  });
-  const matched = dialogueSourceMatches(text, rows.map(row => row.canonical_content).join("\0"), allowed);
-  const evidence = matched.segments.flatMap(segment => {
-    const row = messages.find(row => segment.startOffset >= row.start && segment.endOffset <= row.end);
-    return row ? [{ messageId: row.message_id, canonicalHash: row.canonical_hash, quote: segment.quote,
-      startOffset: segment.startOffset - row.start, endOffset: segment.endOffset - row.start }] : [];
-  });
-  if (new Set(evidence.map(item => item.messageId)).size > 1 || evidence.length !== matched.segments.length) return { complete: false, segments: [], evidence: [] };
-  return { ...matched, evidence };
+function dialogueMatches(db: RcmDatabase, chatId: string, sources: string[], messageId: string | undefined, text: string, cited?: ExactEvidence[], preferResponse = true) {
+  const eligible = eligibleSourceMessages(db, chatId, sources);
+  const rows = eligible.filter(row => !eligible.some(candidate => candidate.message_id === messageId) || row.message_id === messageId);
+  const allowed = cited === undefined ? undefined : verifiedCitations(rows,cited)
+    .map(span => ({messageId:span.messageId,start:span.startOffset,end:span.endOffset}));
+  const matches = dialogueMessageMatches(text, rows.map(row => ({id:row.message_id,role:preferResponse ? row.role : undefined,
+    content:row.canonical_content,canonicalHash:row.canonical_hash})), allowed);
+  if (matches.length !== 1) return { complete: false, segments: [], evidence: [] };
+  const matched = matches[0]!;
+  return { complete:matched.complete, segments:matched.segments, evidence:matched.segments.map(({startOffset,endOffset,quote}) => ({
+    messageId:matched.message.id,canonicalHash:matched.message.canonicalHash,startOffset,endOffset,quote})) };
 }
 
 function nameOnlyEvidence(db: RcmDatabase, chatId: string, sources: string[], recognition: Recognition): Recognition["evidence"] {
@@ -160,7 +149,10 @@ export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: strin
     try {
       validateDialogueEvidence(db, chatId, sources, ExtractionResultSchema.parse({memories: [{...memory, keyDialogues: [dialogue]}]}));
       verifiedEvidence = dialogue.evidence;
-    } catch { verifiedEvidence = exactEvidence(db, chatId, sources, dialogue.messageId, dialogue.text); }
+    } catch {
+      const matched = dialogueMatches(db, chatId, sources, dialogue.messageId, dialogue.text);
+      verifiedEvidence = matched.complete ? matched.evidence : undefined;
+    }
     add(ref, { kind: "dialogue", memory, dialogue, parentMemoryId: parent(memory), verifiedEvidence,
       citedEvidence: citedEvidence([dialogue.messageId, ...dialogue.evidence.map(span => span.messageId)], dialogue.evidence),
       reason: "대사 후보의 원문 위치를 확인하지 못했어요." });
@@ -225,7 +217,7 @@ function authoredCandidate(db: RcmDatabase, chatId: string, sources: string[], i
   if (choices.length > 1) return;
   if (choices.length === 1 && item.dialogue) {
     const evidence = choices[0]!.evidence;
-    return {...item, verifiedEvidence:[evidence], dialogue:{...item.dialogue,messageId:evidence.messageId,evidence:[evidence]}};
+    return {...item, verifiedEvidence:evidence, dialogue:{...item.dialogue,messageId:evidence[0]!.messageId,evidence}};
   }
   const declared = item.dialogue?.evidence ?? (item.passage && sources.includes(item.passage.messageId)
     ? exactEvidence(db,chatId,sources,item.passage.messageId,item.passage.quote) ?? [] : []);
@@ -237,7 +229,7 @@ function authoredCandidate(db: RcmDatabase, chatId: string, sources: string[], i
   // A missing model citation must not discard a uniquely located visible fragment.
   // The user approves the authored wording; evidence still records the exact source.
   const matched = dialogueMatches(db, chatId, sources, messageId, item.dialogue?.text ?? item.passage!.quote,
-    cited.length ? cited : undefined);
+    cited.length ? cited : undefined, Boolean(item.dialogue));
   const evidence = matched.evidence.length ? matched.evidence : cited;
   if (!messageId && new Set(evidence.map(span => span.messageId)).size === 1) messageId = evidence[0]!.messageId;
   if (!messageId || !evidence.length || evidence.some(span => span.messageId !== messageId)) return;
@@ -254,7 +246,7 @@ export function smallReviewView(db: RcmDatabase, chatId: string, sources: string
   const additions = recognition && recognitionNameAdditions(db, chatId, recognition);
   const canKeep = item.status === "pending" && Boolean(prepared);
   const sourceMatches = item.dialogue || item.passage ? dialogueMatches(db, chatId, sources,
-    item.dialogue?.messageId ?? item.passage?.messageId, item.dialogue?.text ?? item.passage!.quote) : undefined;
+    item.dialogue?.messageId ?? item.passage?.messageId, item.dialogue?.text ?? item.passage!.quote, undefined, Boolean(item.dialogue)) : undefined;
   const sourceChoices = !canKeep ? dialogueSourceChoices(db, chatId, sources, item) : [];
   return { sourceChoices: sourceChoices.length > 1 ? sourceChoices.map(({evidence, ...choice}) => choice) : [], id: item.id, kind: item.kind, status: item.status, reason: item.reason, retryJobId: item.retryJobId,
     text: item.dialogue?.text ?? item.passage?.quote ?? (recognition?.cognitionDetailKeys ?? [])
@@ -349,8 +341,8 @@ export function resolveSmallReviews(db: RcmDatabase, chatId: string, selections:
       if (keepAsWritten && selection.sourceChoiceId) {
         const selected = choices.find(choice => choice.id === selection.sourceChoiceId);
         if (!selected || !item.dialogue) throw new Error("선택한 원문이 바뀌었어요. 다시 확인해 주세요.");
-        candidate = {...item, verifiedEvidence: [selected.evidence], dialogue: {...item.dialogue,
-          messageId: selected.evidence.messageId, evidence: [selected.evidence]}};
+        candidate = {...item, verifiedEvidence: selected.evidence, dialogue: {...item.dialogue,
+          messageId: selected.evidence[0]!.messageId, evidence: selected.evidence}};
       } else if (keepAsWritten && (item.dialogue || item.passage)) {
         const authored = authoredCandidate(db, chatId, sources, item);
         if (!authored) return {id:item.id,status:item.status,message:"원문 위치가 없어 남겨 뒀어요.",reason:"source_location_missing"};

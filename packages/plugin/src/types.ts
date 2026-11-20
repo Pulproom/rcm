@@ -139,6 +139,7 @@ export interface RuntimeLog {
 export type { TimingEvent } from "./timing.js";
 
 export interface CurrentContext {
+  pocketSlotEnabled?: boolean;
   chatId: string;
   chatTitle: string;
   chatTitles?: Record<string, string>;

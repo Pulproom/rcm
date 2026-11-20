@@ -1,8 +1,10 @@
 import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPolicy, imageComparisonText, sourceComparisonText, estimateTokens, selectTailStart, selectGigaTransTranslation, type CanonicalizationPolicy, type LineageProbeRequest, type MessageHostVisibility, type ResolvedSetupProjection, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
 import type { ChatScopeTiming, ContextReadTimings, CurrentContext, DashboardContext, RuntimeState } from "./types.js";
-import { serverScopeKey } from "./settings.js";
+import { addLog, isChatMemoryEnabled, serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
 import { cachedSourceReceipt, ServerRequestError, type ServerClient } from './api-client.js';
+
+import { hasRecentPocketSlot, pocketSlotEnabled, slotWriteConfirmed, storyChat, updatePocketSlot, withPocketSlotWrite } from "./pocket-memory-slot.js";
 
 const encoder = new TextEncoder();
 export const MEMORY_MARKER = "[[RCM]]";
@@ -74,7 +76,7 @@ export async function readHostSourceLedgers(onlyChatIds?: ReadonlySet<string>): 
       if (!descriptor || typeof descriptor !== "object") continue;
       const chatId = String(descriptor.id || `${characterId}:${chatIndex}`);
       if (onlyChatIds && !onlyChatIds.has(chatId)) continue;
-      const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+      const chat = storyChat(await risuai.getChatFromIndex(characterIndex, chatIndex));
       if (!chat) throw new Error(`Risu 원문을 불러오지 못했어요: ${String(descriptor.name ?? descriptor.title ?? chatId)}`);
       assertCompleteHostChat(chat);
       if (String(chat.id || `${characterId}:${chatIndex}`) !== chatId) throw new Error('HOST_SOURCE_CHANGED');
@@ -188,7 +190,7 @@ export function readContextMetadata() {
 }
 
 /** Host descriptors are JSON data. Compare their fields without serializing chat text. */
-function sameHostFields(left: unknown, right: unknown): boolean {
+export function sameHostFields(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (!left || !right || typeof left !== "object" || typeof right !== "object"
     || Array.isArray(left) !== Array.isArray(right)) return false;
@@ -369,6 +371,7 @@ interface HostChatSnapshot {
   characterIndex: number;
   character: any;
   chatIndex: number;
+  rawChat?: any;
   chat: any;
   chatId: string;
 }
@@ -385,17 +388,18 @@ async function readCurrentChatIdentity(preferDescriptor = false, timing?: ChatSc
   // Both supported V3 implementations snapshot the same loaded chat slot in
   // getCharacter and getChatFromIndex. Only a stable, complete loaded slot can
   // supply the initial baseline; placeholders/legacy descriptors still fetch.
-  let chat = descriptor;
+  let rawChat = descriptor;
   if (!preferDescriptor || !descriptor?.id || descriptor._placeholder || !Array.isArray(descriptor.message)) {
     if (timing) timing.fullHostChatReads += 1;
-    chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    rawChat = await risuai.getChatFromIndex(characterIndex, chatIndex);
   }
+  const chat = storyChat(rawChat);
   if (!chat) throw new NoActiveChatError();
   const characterId = String(character?.chaId ?? character?.id ?? characterIndex);
   await assertHostSelection(characterIndex, chatIndex);
   if (!chat.id && character?.chats?.[chatIndex]?.id) throw new Error('HOST_CHAT_ID_LOADING');
   const chatId = String(chat.id || `${characterId}:${chatIndex}`);
-  return { characterIndex, character, chatIndex, chat, chatId };
+  return { characterIndex, character, chatIndex, chat, chatId, rawChat };
 }
 
 function chatIdentityFields(characterIndex: number, character: any, chatIndex: number, chat: any) {
@@ -453,7 +457,7 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
   const messages = chat.message;
   const sources = await Promise.all(messages.map((message: any) => resolveMessageSource(chat, message)));
   const messageVisibility = (await sourceMessageProjection(chatId, messages, sources, context.canonicalizationPolicy)).map(source => source.visibility);
-  const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
+  const latest = storyChat(await risuai.getChatFromIndex(characterIndex, chatIndex));
   if (!sameHostFields(latest?.message, messages)
     || sources.some((source: ResolvedMessageSource) => source.sourceRecordId && yumiSourceRecord(chat, source.sourceRecordId) !== yumiSourceRecord(latest, source.sourceRecordId))) throw new Error('HOST_SOURCE_CHANGED');
   await assertHostSelection(characterIndex, chatIndex);
@@ -465,10 +469,32 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
   };
 }
 
+export async function syncCurrentPocketSlot(state: RuntimeState, chatId: string, characterId: string): Promise<boolean> {
+  return withPocketSlotWrite(chatId, async () => {
+    if (!risuai.setChatToIndex) throw new Error("이 호스트에서는 채팅 슬롯을 설정할 수 없어요.");
+    const [characterIndex, chatIndex] = await readHostSelection();
+    const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    if (!chat?.id || chat.id !== chatId) throw new Error("채팅이 바뀌었어요. 설정을 다시 열어 주세요.");
+    const install = isChatMemoryEnabled(state.settings, chatId, characterId);
+    const next = updatePocketSlot(chat, install);
+    if (next !== chat) {
+      await assertHostSelection(characterIndex, chatIndex);
+      const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
+      if (state.unloaded || state.mainRequest?.preparing || state.activeModelRequest || install !== isChatMemoryEnabled(state.settings, chatId, characterId) || !sameHostFields(chat, latest)) throw new Error("채팅이 변경 중이에요. 전송이 끝난 뒤 다시 시도해 주세요.");
+      await risuai.setChatToIndex(characterIndex, chatIndex, next);
+    }
+    const saved = next === chat ? chat : await risuai.getChatFromIndex(characterIndex, chatIndex);
+    if (!slotWriteConfirmed(saved, chat.id, install)) throw new Error("PocketRisu에서 슬롯 저장을 확인하지 못했어요. 채팅을 다시 열어 상태를 확인해 주세요.");
+    await assertHostSelection(characterIndex, chatIndex);
+    if (state.current?.chatId === chat.id) state.current!.pocketSlotEnabled = install;
+    return install;
+  });
+}
+
 /** Dashboard/status identity: no source decoding, hashing, lore or all-bot database read. */
 export async function readDashboardContext(state: RuntimeState): Promise<DashboardContext> {
   const generation = state.mainGeneration;
-  const { characterIndex, character, chatIndex, chat, chatId } = await readCurrentChatIdentity();
+  const { characterIndex, character, chatIndex, chat, chatId, rawChat } = await readCurrentChatIdentity();
   const database = await risuai.getDatabase(["personas", "selectedPersona"]);
   await assertHostSelection(characterIndex, chatIndex);
   if (state.current?.chatId !== chatId) {
@@ -481,6 +507,14 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
   state.hostChatIdentity = { characterIndex, chatIndex, chatId };
   generation?.observe(chatId, chat);
   const identity = chatIdentityFields(characterIndex, character, chatIndex, chat);
+  let installed = pocketSlotEnabled(chat);
+  const enabled = isChatMemoryEnabled(state.settings, chatId, identity.characterId);
+  if (rawChat?.id && risuai.setChatToIndex && !state.mainRequest?.preparing && !state.activeModelRequest
+    && (!slotWriteConfirmed(rawChat, chatId, enabled) || (enabled && !hasRecentPocketSlot(rawChat)))) {
+    try { installed = await syncCurrentPocketSlot(state, chatId, identity.characterId); }
+    catch { addLog(state.logs, "warn", "Could not reconcile the active chat's memory slot"); }
+    await assertHostSelection(characterIndex, chatIndex);
+  }
   const characterName = String(character?.name ?? "Character");
   const messages = Array.isArray(chat.message) ? chat.message : [];
   const allBefore = messages.reduce((last: number, message: any, index: number) => message?.disabled === "allBefore" ? index : last, -1);
@@ -490,6 +524,7 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
   }));
   const scopeKey = serverScopeKey(state.settings, chatId);
   const context: DashboardContext = {
+    pocketSlotEnabled: installed,
     ...identity, chatId, characterName, hostIdentity: !chat.id ? { kind: 'position', listFingerprint: '' } : undefined,
     identityHints: { userPersonaName: resolveUserPersonaName(database, chat), hostCharacterName: characterName, recentSpeakerNames: [], cachedPerspectives: [] },
     narrationViewpoint: state.settings.narrationViewpoint[chatId] || undefined,
@@ -552,10 +587,11 @@ export async function readCurrentChatScope(state?: RuntimeState, timing?: ChatSc
   if (expected?.chat.id) {
     await assertHostSelection(expected.characterIndex, expected.chatIndex);
     if (timing) timing.fullHostChatReads += 1;
-    const chat = await risuai.getChatFromIndex(expected.characterIndex, expected.chatIndex);
+    const rawChat = await risuai.getChatFromIndex(expected.characterIndex, expected.chatIndex);
+    const chat = storyChat(rawChat);
     if (!chat) throw new NoActiveChatError();
     if (!chat.id) throw new Error('HOST_CHAT_ID_LOADING');
-    hostSnapshot = { ...expected, chat, chatId: String(chat.id) };
+    hostSnapshot = { ...expected, rawChat, chat, chatId: String(chat.id) };
   } else hostSnapshot = await readCurrentChatIdentity(!expected, timing);
   const { chatId, chat, character, characterIndex, chatIndex } = hostSnapshot;
   if (timing) timing.hostChatReadMs += performance.now() - startedAt;
@@ -582,10 +618,11 @@ export async function confirmCurrentChatScope(expected: HostChatSnapshot, timing
     if (!expected.chat.id) return await readCurrentChatIdentity(false, timing);
     const { characterIndex, chatIndex } = expected;
     timing.fullHostChatReads += 1;
-    const chat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    const rawChat = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    const chat = storyChat(rawChat);
     await assertHostSelection(characterIndex, chatIndex);
     if (!chat?.id) throw new Error("HOST_SOURCE_CHANGED");
-    return { ...expected, chat, chatId: String(chat.id) };
+    return { ...expected, rawChat, chat, chatId: String(chat.id) };
   } finally {
     timing.hostChatReadMs += performance.now() - startedAt;
   }
@@ -658,8 +695,8 @@ export async function readCurrentContext(
   assertCompleteHostChat(chat);
   const descriptor = character?.chats?.[chatIndex];
   const comparisonStartedAt = timing ? performance.now() : 0;
-  if (descriptor && !descriptor._placeholder && Array.isArray(descriptor.message) && descriptor.message !== chat.message
-    && !sameHostFields(descriptor.message, chat.message)) throw new Error('HOST_SOURCE_CHANGED');
+  if (descriptor && descriptor !== options.hostSnapshot?.rawChat && !descriptor._placeholder && Array.isArray(descriptor.message) && descriptor.message !== chat.message
+    && !sameHostFields(storyChat(descriptor).message, chat.message)) throw new Error('HOST_SOURCE_CHANGED');
   if (timing) timing.descriptorComparisonMs += performance.now() - comparisonStartedAt;
   const loreDatabaseStartedAt = timing ? performance.now() : 0;
   const [lore, database] = options.metadata ?? await readContextMetadata();
@@ -770,6 +807,7 @@ export async function readCurrentContext(
   const query = "continue";
   const querySourceHash = await sha256(JSON.stringify(querySources.map(message => [message.id, message.role, message.content])));
   const context: CurrentContext = {
+    pocketSlotEnabled: pocketSlotEnabled(chat),
     hostIdentity: !chat.id ? { kind: 'position', listFingerprint: '' } : undefined,
     chatId,
     chatTitle,
@@ -807,7 +845,7 @@ export async function readCurrentContext(
   // A destructive re-check uses another full read; normal turns use the host's full-read contract.
   if (options.snapshotMode === 'full' && !options.hostSnapshot) {
     const recheckStartedAt = timing ? performance.now() : 0;
-    const latest = await risuai.getChatFromIndex(characterIndex, chatIndex);
+    const latest = storyChat(await risuai.getChatFromIndex(characterIndex, chatIndex));
     if (timing) timing.hostChatReadMs += performance.now() - recheckStartedAt;
     assertCompleteHostChat(latest);
     const recheckComparisonStartedAt = timing ? performance.now() : 0;
@@ -943,10 +981,12 @@ export function inspectMemoryPrompt(messages: OpenAIChat[]): { hasMarker: boolea
 }
 
 export function stripRcmPromptContent(messages: OpenAIChat[]): OpenAIChat[] {
-  return messages.map((message) => ({
-    ...message,
-    content: message.content.replace(MEMORY_CONTEXT_PATTERN, "").replaceAll(MEMORY_MARKER, ""),
-  }));
+  return messages.map(message => {
+    // Native Hypa summaries may quote old prompt text verbatim.
+    if (message.memo === "supaMemory" || message.memo === "hypaMemory") return message;
+    const content = message.content.replace(MEMORY_CONTEXT_PATTERN, "").replaceAll(MEMORY_MARKER, "");
+    return content === message.content ? message : { ...message, content };
+  });
 }
 
 export function injectMemory(messages: OpenAIChat[], rawPacket: string, requestedBudget: number, hardCeiling = requestedBudget): InjectionResult {
@@ -1000,7 +1040,7 @@ export function injectMemory(messages: OpenAIChat[], rawPacket: string, requeste
   if (outputMarker >= 0) {
     output[outputMarker] = {
       ...output[outputMarker]!,
-      content: output[outputMarker]!.content.replace(MEMORY_MARKER, memoryMessage.content).replaceAll(MEMORY_MARKER, ""),
+      content: output[outputMarker]!.content.replace(MEMORY_MARKER, () => memoryMessage.content).replaceAll(MEMORY_MARKER, ""),
     };
     for (let index = 0; index < output.length; index += 1) {
       if (index !== outputMarker && output[index]!.content.includes(MEMORY_MARKER)) {

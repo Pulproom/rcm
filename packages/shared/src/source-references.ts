@@ -238,9 +238,7 @@ function sourceExcludedRanges(content: string) {
 }
 
 /** Exact excerpt joins only. Punctuation locates possible joins, never speakers or meaning. */
-export function dialogueSourceMatches(text: string, content: string, allowed = [{ start: 0, end: content.length }]): {
-  complete: boolean; segments: Array<{ textStart: number; textEnd: number; startOffset: number; endOffset: number; quote: string }>;
-} {
+function matchDialogueSource(text: string, content: string, allowed = [{ start: 0, end: content.length }]) {
   const hidden = sourceExcludedRanges(content);
   const runs: Array<{ text: string; starts: number[]; ends: number[] }> = [];
   let cursor = 0;
@@ -256,12 +254,15 @@ export function dialogueSourceMatches(text: string, content: string, allowed = [
   const boundaries = [0, ...[...text.matchAll(/[,.!?;:。！？、，；：]["“”]*(?:\s+|$)|["“”]\s+|\r?\n+/gu)].map(match => match.index! + match[0].length), text.length];
   const points = [...new Set(boundaries)].sort((a, b) => a - b);
   const cache = new Map<string, ReturnType<typeof matchSegment>>();
+  const wholeChoices: Array<{ textStart: number; textEnd: number; startOffset: number; endOffset: number; quote: string }> = [];
   function matchSegment(from: number, to: number) {
     const raw = text.slice(from, to);
     const trimmed = raw.trim().replace(/^["“”]+|["“”]+$/gu, "").trim();
     if (!trimmed) return;
     const target = trimmed.replace(/\s+/gu, " ");
-    const variants = new Set([target, target.replace(/[,.]$/u, mark => mark === "," ? "." : ",")]);
+    // Only segment-final punctuation may differ; words and internal marks stay exact.
+    const variants = new Set(/[,.!?]$/u.test(target)
+      ? [",", ".", "!", "?"].map(mark => target.slice(0, -1) + mark) : [target]);
     const matches = new Map<string, { startOffset: number; endOffset: number }>();
     for (const run of runs) for (const variant of variants) {
       for (let at = run.text.indexOf(variant); at >= 0; at = run.text.indexOf(variant, at + 1)) {
@@ -269,9 +270,10 @@ export function dialogueSourceMatches(text: string, content: string, allowed = [
         if (/[\p{L}\p{N}\p{M}]$/u.test(content.slice(0, startOffset))
           || /^[\p{L}\p{N}\p{M}]/u.test(content.slice(endOffset))) continue;
         matches.set(`${startOffset}:${endOffset}`, { startOffset, endOffset });
-        if (matches.size > 1) return;
       }
     }
+    if (from === 0 && to === text.length) wholeChoices.push(...[...matches.values()].map(span => ({
+      ...span, textStart: from, textEnd: to, quote: content.slice(span.startOffset, span.endOffset) })));
     if (matches.size !== 1) return;
     const span = [...matches.values()][0]!;
     return { ...span, textStart: from, textEnd: to, quote: content.slice(span.startOffset, span.endOffset) };
@@ -297,17 +299,41 @@ export function dialogueSourceMatches(text: string, content: string, allowed = [
     return;
   };
   const full = text.trim() ? search(0, 0) : undefined;
-  if (full?.length) return { complete: true, segments: full };
+  if (full?.length) return { complete: true, segments: full, choices: [full] };
   const partial: Segment[] = [];
   for (let i = 0; i < points.length - 1; i++) {
     const span = match(points[i]!, points[i + 1]!);
     if (span && span.startOffset >= (partial.at(-1)?.endOffset ?? 0)) partial.push(span);
   }
-  return { complete: false, segments: partial };
+  return { complete: false, segments: partial, choices: wholeChoices.map(span => [span]) };
 }
 
-/** Fill missing citations only within model-selected units; verified ranges stay intact. */
-export function rescueDialogueEvidence<T>(draft: T, messages: Array<{ id: string; content: string; canonicalHash?: string }>, units: SourceUnit[] = []): T {
+export function dialogueSourceMatches(text: string, content: string, allowed?: Array<{ start: number; end: number }>) {
+  const {complete, segments} = matchDialogueSource(text, content, allowed);
+  return {complete, segments};
+}
+
+/** A user-message copy never makes response dialogue ambiguous. */
+export function preferAssistantDialogueSources<T extends { role?: string }>(matches: T[]): T[] {
+  const responses = matches.filter(match => match.role === "assistant");
+  return responses.length ? responses : matches;
+}
+
+/** Match each message independently: one dialogue must never join evidence across messages. */
+export function dialogueMessageMatches<T extends { id: string; role?: string; content: string }>(
+  text: string, messages: T[], allowed?: Array<{ messageId: string; start: number; end: number }>,
+) {
+  const matches = messages.flatMap(message => {
+    const matched = matchDialogueSource(text, message.content, allowed?.filter(span => span.messageId === message.id));
+    return matched.choices.length ? matched.choices.map(segments => ({message,role:message.role,complete:true,segments}))
+      : [{message,role:message.role,complete:false,segments:matched.segments}];
+  });
+  const complete = matches.filter(match => match.complete);
+  return preferAssistantDialogueSources(complete.length ? complete : matches.filter(match => match.segments.length));
+}
+
+/** Fill missing citations within selected units (or eligible messages on server rescue); verified ranges stay intact. */
+export function rescueDialogueEvidence<T>(draft: T, messages: Array<{ id: string; role?: string; content: string; canonicalHash?: string }>, units: SourceUnit[] = []): T {
   const result = structuredClone(draft);
   let rescued = false;
   for (const memory of (result as any)?.memories ?? []) for (const dialogue of memory.keyDialogues ?? []) {
@@ -330,27 +356,32 @@ export function rescueDialogueEvidence<T>(draft: T, messages: Array<{ id: string
         return Array.from({ length: end - start + 1 }, (_, index) => `s${start + index}`);
       });
     const selected = [...new Set(refs)].map(ref => units.find(unit => unit.ref === ref));
-    if (!selected.length || selected.some(unit => !unit) || selected.some((unit, i) => i > 0 && unit!.start <= selected[i - 1]!.start)
-      || new Set(selected.map(unit => `${unit!.messageId}:${unit!.canonicalHash}`)).size !== 1) continue;
-    let messageId = dialogue.messageId;
-    if (typeof messageId !== "string") continue;
-    if (messageId.startsWith("unresolved:")) {
-      messageId = selected[0]!.messageId;
+    if (typeof dialogue.messageId !== "string" || typeof dialogue.text !== "string") continue;
+    if (units.length && (!selected.length || selected.some(unit => !unit))) continue;
+    if (!units.length && !dialogue.messageId.startsWith("unresolved:")) continue;
+    const eligible = messages.filter(message => !messages.some(candidate => candidate.id === dialogue.messageId)
+      || message.id === dialogue.messageId);
+    const ranges: Array<{ messageId: string; start: number; end: number }> = [];
+    let invalid = false;
+    for (const message of eligible) {
+      const selectedUnits = selected.filter(unit => unit?.messageId === message.id);
+      const hash = message.canonicalHash ?? selectedUnits[0]?.canonicalHash;
+      if (selectedUnits.some((unit, i) => unit!.canonicalHash !== hash || i > 0 && unit!.start <= selectedUnits[i - 1]!.start)) { invalid = true; break; }
+      const allowed = [...selectedUnits.map(unit => ({ start: unit!.start, end: unit!.end })),
+        ...verified.filter((item: any) => item.messageId === message.id).map((item: any) => ({ start: item.startOffset, end: item.endOffset }))]
+        .sort((a, b) => a.start - b.start);
+      for (const span of allowed) {
+        const last = ranges.at(-1);
+        if (last?.messageId === message.id && span.start <= last.end) last.end = Math.max(last.end, span.end);
+        else ranges.push({ messageId: message.id, ...span });
+      }
     }
-    const message = messages.find(message => message.id === messageId);
-    const canonicalHash = message?.canonicalHash ?? units.find(unit => unit.messageId === messageId)?.canonicalHash;
-    if (!message || !canonicalHash || typeof dialogue.text !== "string") continue;
-    if (selected.some(unit => unit!.messageId !== messageId || unit!.canonicalHash !== canonicalHash)) continue;
-    const allowed = [...selected.map(unit => ({ start: unit!.start, end: unit!.end })),
-      ...verified.map((item: any) => ({ start: item.startOffset, end: item.endOffset }))].sort((a, b) => a.start - b.start);
-    const ranges: typeof allowed = [];
-    for (const span of allowed) {
-      const last = ranges.at(-1);
-      if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
-      else ranges.push({ ...span });
-    }
-    const matched = dialogueSourceMatches(dialogue.text, message.content, ranges);
-    if (!matched.complete) continue;
+    if (invalid) continue;
+    const matches = dialogueMessageMatches(dialogue.text, eligible, units.length ? ranges : undefined).filter(match => match.complete);
+    if (matches.length !== 1) continue;
+    const matched = matches[0]!, messageId = matched.message.id;
+    const canonicalHash = matched.message.canonicalHash ?? units.find(unit => unit.messageId === messageId)?.canonicalHash;
+    if (!canonicalHash || verified.some((item: any) => item.messageId !== messageId)) continue;
     const missing = matched.segments.filter(segment => !verified.some((item: any) => item.startOffset <= segment.startOffset && item.endOffset >= segment.endOffset));
     if (missing.some(segment => verified.some((item: any) => segment.startOffset < item.endOffset && segment.endOffset > item.startOffset))) continue;
     rescued = true;

@@ -118,9 +118,7 @@ export function renderShell(opts: {
   const brand = `<div class="brand"><span class="credit">RCM</span>${opts.chatTitle ? `<small>${escapeHtml(opts.chatTitle)}</small>` : ""}</div>`;
   const nav = `${brand}${shellTabs.map((item) => {
     const current = item.tab === selectedTab ? ' aria-current="page"' : "";
-    const badge = item.tab === "world" && opts.pencilCount > 0
-      ? `<span class="badge" aria-label="대조 필요 ${opts.pencilCount}개">${opts.pencilCount}</span>`
-      : item.tab === "reviews" && opts.pencilCount > 0
+    const badge = item.tab === "reviews" && opts.pencilCount > 0
         ? `<span class="badge" aria-label="확인할 기록 ${opts.pencilCount}개">${opts.pencilCount}</span>`
       : item.tab === "initial" && opts.setupPending
         ? '<span class="badge" aria-label="설정 재료 선택 필요">1</span>' : "";

@@ -388,8 +388,8 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
 }
 
 export interface ReconciliationReviewItem { id: string; itemRef: string; itemKind: ObservationKind; incoming: StateObservation; candidates: Candidate[]; decision?: unknown; error?: string; status: string; createdAt: number; resolvedAt?: number }
-export function listReconciliationReviews(db: RcmDatabase, chatId: string): ReconciliationReviewItem[] {
-  const rows = db.prepare("SELECT * FROM reconciliation_items WHERE chat_id=? ORDER BY status='pending' DESC,created_at DESC LIMIT 100").all(chatId) as Array<Record<string, any>>;
+export function listReconciliationReviews(db: RcmDatabase, chatId: string, options: { pendingOnly?: boolean; reviewId?: string } = {}): ReconciliationReviewItem[] {
+  const rows = db.prepare(`SELECT * FROM reconciliation_items WHERE chat_id=?${options.pendingOnly ? " AND status='pending'" : ""}${options.reviewId ? " AND id=?" : ""} ORDER BY status='pending' DESC,created_at DESC LIMIT 100`).all(chatId,...(options.reviewId ? [options.reviewId] : [])) as Array<Record<string, any>>;
   return rows.map((row) => ({ id: row.id, itemRef: row.item_ref, itemKind: row.item_kind, incoming: JSON.parse(row.incoming_json).item, candidates: JSON.parse(row.candidates_json), decision: row.model_decision_json ? JSON.parse(row.model_decision_json) : undefined, error: row.model_error ?? undefined, status: row.status, createdAt: row.created_at, resolvedAt: row.resolved_at ?? undefined }));
 }
 
