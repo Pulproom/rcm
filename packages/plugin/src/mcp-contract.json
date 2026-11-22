@@ -21,7 +21,7 @@
     {
       "id": "expand_rp_memory",
       "name": "expand_rp_memory",
-      "description": "Open one supplied memory ref to get its details, dialogue and source evidence. It pays off when the reply will quote or build on that record: the exact lines spoken, a detail the summary leaves out, or who was there. Optional focus narrows the result to matching evidence inside this memory and may return nothing; it never searches other memories. Refs from earlier responses in this chat stay valid. If you are not sure which record holds it, use recall_rp_memory.",
+      "description": "Open one supplied memory ref to get its details, dialogue and source evidence. It pays off when the reply will quote or build on that record: the exact lines spoken, a detail the summary leaves out, or who was there. Optional focus narrows the result to matching evidence inside this memory and may return nothing; it never searches other memories. Refs from earlier responses in this chat stay valid. If you are not sure which record holds it, use recall_rp_memory. Records without a \"Plot:\" line are folded: they show only the lines that brought them up. Expand one by its ref to read the whole event.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

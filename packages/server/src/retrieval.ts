@@ -5,7 +5,7 @@ import { backfillLegacyParticipantAccess } from "./access-migration.js";
 import { standaloneViewpoint } from "./standalone-lanes.js";
 import { chatPacketPricing, type PacketPricing, chargedCardTokens, chargedMemorySectionTokens, chargedPacketTokens, chargedSectionTokens } from "./charged-cost.js";
 import { fitAutomaticCard, plotBundleDetailIds } from "./automatic-packet.js";
-import { buildEmissionPlan, buildManifest, emittedMemoryItems, emittedMemoryRecords, memoryCardHasContent, memoryFactReasons, prependAlwaysCards, renderEmissionCards, type EmissionPlan, type FactReason } from "./emission-plan.js";
+import { foldMemoryCard, isFoldedMemory, buildEmissionPlan, buildManifest, emittedMemoryItems, emittedMemoryRecords, memoryCardHasContent, memoryFactReasons, prependAlwaysCards, renderEmissionCards, type EmissionPlan, type FactReason } from "./emission-plan.js";
 import { clipLandmarkDisplayText } from "@rcm/shared";
 import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { StateOutcomeCapture } from "./state-outcomes.js";
@@ -2266,8 +2266,8 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const orderedCandidates = laneCandidates.filter((item, index, items) => items.findIndex(candidate => candidate.id === item.id) === index);
   if (recentContinuity && !mcpAnswerMode) recentContinuity.candidateClass = "continuity";
   const selectionRoleFor = (item: Ranked): RetrievalSelectionRole => focusLeaderIdSet.has(item.id) ? "focus"
-    : item.id === serendipityCandidate?.id ? "serendipity"
-      : item.id === recentContinuity?.id ? "continuity"
+    : item.id === recentContinuity?.id ? "continuity"
+      : item.id === serendipityCandidate?.id ? "serendipity"
         : item.candidateClass === "core" ? "core"
           : item.candidateClass === "associative" ? "association" : "filler";
   const hardTokenCeiling = mcpAnswerMode
@@ -2332,6 +2332,14 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const selectedRoles = new Map<string, RetrievalSelectionRole>();
   for (const item of orderedCandidates) {
     let atomFilteredItem = mcpAnswerMode || author ? filterMemoryAtoms(item, excludedAtomKeys) as Ranked : item;
+    // The independent automatic path has no later portfolio. Keep its typed
+    // endpoint selection and charge the folded card before applying lane caps.
+    if (author && !mcpAnswerMode && !options.deferAutomaticBudget && isAuthorCard(atomFilteredItem)
+      && ["association", "serendipity", "longterm"].includes(selectionRoleFor(item))) {
+      const endpoints = new Set((pathsByMemory.get(item.id) ?? []).map(path=>path.atomIds.at(-1)!));
+      atomFilteredItem = {...atomFilteredItem,...foldMemoryCard({...atomFilteredItem,
+        details:atomFilteredItem.details.filter(detail=>endpoints.has(detail.id)).slice(0,2),keyDialogues:[]})};
+    }
     if (mcpAnswerMode) {
       const matches = aspects.flatMap(aspect => (aspectMatches.get(aspect) ?? []).filter(match => match.item.id === item.id));
       const details = new Set(matches.flatMap(match => match.detailIds));
@@ -2348,7 +2356,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
     const reservedFocus = !mcpAnswerMode && focusLeaderIdSet.has(item.id);
     const reservedContinuity = !mcpAnswerMode && recentContinuity?.id === item.id;
     const reserved = reservedFocus || reservedContinuity;
-    if (!mcpAnswerMode && !options.deferAutomaticBudget && item.candidateClass === "associative" && selectedAssociativeTokens + itemCharge(item) > associativeTokenBudget) {
+    if (!mcpAnswerMode && !options.deferAutomaticBudget && item.candidateClass === "associative" && selectedAssociativeTokens + itemCharge(isFoldedMemory(atomFilteredItem) ? atomFilteredItem : item) > associativeTokenBudget) {
       selectionOutcomes.set(item.id, "association_cap");
       continue;
     }

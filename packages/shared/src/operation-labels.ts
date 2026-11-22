@@ -1,10 +1,10 @@
-export const JOB_KIND_VALUES = ["extract", "audit_retry", "episode", "memory_group", "social_backfill", "initial_calibration", "relationship_projection", "story_consolidation", "ledger_consistency", "quiz"] as const;
+export const JOB_KIND_VALUES = ["extract", "audit_retry", "episode", "memory_group", "canonical_translation", "social_backfill", "initial_calibration", "relationship_projection", "story_consolidation", "ledger_consistency", "quiz"] as const;
 export type JobKind = typeof JOB_KIND_VALUES[number];
 export const JOB_PIPELINE_STAGE_VALUES = ["queued", "retrying", "first_extraction", "post_extraction_audit", "state_reconciliation", "ledger_consistency", "relationship_projection", "story_consolidation", "storing", "complete", "failed"] as const;
 export type JobPipelineStage = typeof JOB_PIPELINE_STAGE_VALUES[number];
 export const WORKER_PHASE_VALUES = ["idle", "first_extraction", "initial_calibration", "relationship_projection", "story_consolidation", "social_backfill", "capsule", "post_extraction_audit", "state_reconciliation", "ledger_consistency", "storing", "faulted", "paused"] as const;
 export type WorkerPhase = typeof WORKER_PHASE_VALUES[number];
-export const AUXILIARY_PURPOSE_VALUES = ["quiz", "quiz_repair", "memory_group", "memory_group_repair", "extraction", "extraction_repair", "initial_calibration", "initial_calibration_repair", "audit", "audit_repair", "reconciliation", "reconciliation_repair", "state_response_repair", "state_field_repair", "ledger_consistency", "ledger_consistency_repair", "relationship_projection", "relationship_projection_repair", "story_consolidation", "story_consolidation_repair", "episode_draft", "episode_draft_repair", "episode_finalize", "episode_finalize_repair"] as const;
+export const AUXILIARY_PURPOSE_VALUES = ["canonical_translation", "canonical_translation_repair", "quiz", "quiz_repair", "memory_group", "memory_group_repair", "extraction", "extraction_repair", "initial_calibration", "initial_calibration_repair", "audit", "audit_repair", "reconciliation", "reconciliation_repair", "state_response_repair", "state_field_repair", "ledger_consistency", "ledger_consistency_repair", "relationship_projection", "relationship_projection_repair", "story_consolidation", "story_consolidation_repair", "episode_draft", "episode_draft_repair", "episode_finalize", "episode_finalize_repair"] as const;
 export type AuxiliaryPurpose = typeof AUXILIARY_PURPOSE_VALUES[number];
 export const JOB_TRIGGER_VALUES = ["memory_addition", "extraction", "regeneration", "source_recovery", "rebuild", "retry", "source_change", "support_change"] as const;
 export type JobTrigger = typeof JOB_TRIGGER_VALUES[number];
@@ -17,6 +17,7 @@ export const JOB_TRIGGER_LABELS: Record<JobTrigger,string> = {
 /** One vocabulary for job, phase and call surfaces; identifiers stay in diagnostics. */
 export const OPERATION_LABELS = {
   extract: "대화 기억 정리", extract_episode: "대화 기억 정리", episode: "에피소드 정리",
+  canonical_translation: "정본 언어로 바꾸기", canonical_translation_repair: "정본 번역 형식 보완",
   memory_addition: "기억 추가", memory_group: "대화 묶음 나누기", memory_group_repair: "묶음 응답 형식 보완",
   extraction: "대화에서 기억 찾기", extraction_repair: "응답 형식 보완",
   initial_calibration: "초기 인물 설정", initial_calibration_repair: "초기 설정 응답 보완",

@@ -3,12 +3,14 @@ import type { ChatScopeTiming, ContextReadTimings, CurrentContext, DashboardCont
 import { addLog, isChatMemoryEnabled, serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
 import { cachedSourceReceipt, ServerRequestError, type ServerClient } from './api-client.js';
+import { messageDisplay, resolveMessageSource, resolveSourceInput, yumiSourceRecord, yumiSourceRecordId, type ResolvedMessageSource } from "./message-source.js";
 
 import { hasRecentPocketSlot, pocketSlotEnabled, slotWriteConfirmed, storyChat, updatePocketSlot, withPocketSlotWrite } from "./pocket-memory-slot.js";
 
 const encoder = new TextEncoder();
 export const MEMORY_MARKER = "[[RCM]]";
 export { composeQuerySignals, RISU_CONTINUATION_MARKER } from "@rcm/shared";
+export { resolveMessageContent } from "./message-source.js";
 
 export async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
@@ -23,33 +25,6 @@ export function messageRole(message: any): "user" | "assistant" | "system" {
 
 function loreContent(entry: any): string {
   return String(entry?.content ?? entry?.data ?? entry?.text ?? entry?.comment ?? "");
-}
-
-interface YumiTranslationRecord {
-  v?: number;
-  model?: string;
-  segments?: Array<{ source?: string }>;
-}
-
-async function decodeYumiRecord(raw: unknown): Promise<YumiTranslationRecord | undefined> {
-  if (typeof raw !== "string" || !raw.trim()) return undefined;
-  try {
-    if (raw.startsWith("u:")) return JSON.parse(raw.slice(2)) as YumiTranslationRecord;
-    if (raw.startsWith("z:")) {
-      const bytes = Uint8Array.from(atob(raw.slice(2)), (character) => character.charCodeAt(0));
-      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-      return JSON.parse(await new Response(stream).text()) as YumiTranslationRecord;
-    }
-    return JSON.parse(raw) as YumiTranslationRecord;
-  } catch {
-    return undefined;
-  }
-}
-
-interface ResolvedMessageSource {
-  content: string;
-  sourceKind: "risu_display" | "yumi_model";
-  sourceRecordId?: string;
 }
 
 export interface HostSourceLedgerSnapshot {
@@ -120,23 +95,6 @@ export async function readHostSourceLedgers(onlyChatIds?: ReadonlySet<string>): 
   return result;
 }
 
-function messageDisplay(message: any): string {
-  return String(message?.data ?? message?.content ?? "");
-}
-
-function yumiSourceRecordId(message: any, display: string): string {
-  // Yumi's transport marker can precede its message metadata (including after
-  // a tail replacement). The displayed record ID owns this representation;
-  // never use a stale metadata ID to resolve a different response's original.
-  return display.match(/<!--\s*yumi-tr:v1:([A-Za-z0-9_-]+):start\s*-->/)?.[1]
-    ?? (typeof message?.__yumi_tr === "string" ? message.__yumi_tr : "");
-}
-
-function yumiSourceRecord(chat: any, id: string): string | undefined {
-  const raw = id ? chat?.scriptstate?.[`$__yumi_tr.${id}`] : undefined;
-  return typeof raw === "string" ? raw : undefined;
-}
-
 export function readMessageSourceInputs(chat: any) {
   assertCompleteHostChat(chat);
   return (chat.message as any[]).map(message => {
@@ -200,31 +158,6 @@ export function sameHostFields(left: unknown, right: unknown): boolean {
   const keys = Object.keys(previous).filter(key => previous[key] !== undefined);
   return keys.length === Object.keys(current).filter(key => current[key] !== undefined).length
     && keys.every(key => Object.hasOwn(current, key) && sameHostFields(previous[key], current[key]));
-}
-
-async function resolveMessageSource(chat: any, message: any): Promise<ResolvedMessageSource> {
-  const display = messageDisplay(message);
-  const markerId = yumiSourceRecordId(message, display);
-  return resolveSourceInput(display, markerId, yumiSourceRecord(chat, markerId));
-}
-
-async function resolveSourceInput(display: string, markerId: string, raw?: string): Promise<ResolvedMessageSource> {
-  if (markerId) {
-    const record = await decodeYumiRecord(raw);
-    const model = typeof record?.model === "string" ? record.model : "";
-    if (model.trim()) return { content: model, sourceKind: "yumi_model", sourceRecordId: markerId };
-    const segmented = record?.segments?.map((segment) => segment.source ?? "").join("") ?? "";
-    if (segmented.trim()) return { content: segmented, sourceKind: "yumi_model", sourceRecordId: markerId };
-  }
-  return {
-    content: display,
-    sourceKind: "risu_display",
-    ...(markerId ? { sourceRecordId: markerId } : {}),
-  };
-}
-
-export async function resolveMessageContent(chat: any, message: any): Promise<string> {
-  return (await resolveMessageSource(chat, message)).content;
 }
 
 /** Parse Yumi's owned display envelope once for all reader-translation consumers. */

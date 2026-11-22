@@ -2,7 +2,7 @@ import { escapeMemoryText as escape, escapeMemoryAttribute } from "./memory-esca
 import type { MemoryContextItem } from "./index.js";
 import { memoryEvidenceLabel, sameMemoryLabels } from "./memory-presentation.js";
 import { formatTagNames, headerScopeText, includesPerson, isException, lineScopeTag, viewpointUnknownTag, scopeOf, scopeRelation, secretTargets, type KnowledgeScope } from "./knowledge-scope.js";
-import { coarseStoryTime, structuredStoryTimeEnd } from "./story-time.js";
+import { coarseStoryTime, storedStoryTimeEnd } from "./story-time.js";
 
 /** A stored record, not a claim that all siblings describe one occurrence.
  * Access must already be resolved. Keep identity, provenance and qualifiers
@@ -82,7 +82,7 @@ export function renderMemoryScene(scene: MemoryScene, options: CardRenderOptions
     ...(options.clarity ?? []).filter(entry => includesPerson(plotScope, entry.name)).map(entry => `${entry.level} for ${formatTagNames([entry.name])}`),
     viewpoint && !includesPerson(plotScope, viewpoint) ? viewpointUnknownTag(viewpoint, includesPerson(card, viewpoint)) : "",
   ].filter(Boolean).map(escape).join(" · ");
-  const end = structuredStoryTimeEnd(scene.storyTime);
+  const end = storedStoryTimeEnd(scene.storyTime);
   const days = latestStoryTime !== undefined && Number.isFinite(latestStoryTime) && end !== undefined && latestStoryTime >= end
     ? Math.floor(latestStoryTime / 86_400_000) - Math.floor(end / 86_400_000) : undefined;
   // Recent records keep their exact date and time; the newest record may lag

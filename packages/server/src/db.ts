@@ -16,7 +16,7 @@ import { cleanupUnsupportedEntities } from "./entity-cleanup.js";
 import { processingSchema, migrateLegacyProcessingRecords, repairProcessingOwnership } from "./processing-records.js";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 69 as const;
+export const DATABASE_SCHEMA_VERSION = 70 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -427,6 +427,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_recall_events_chat_holder ON memory_recall
 
 CREATE TABLE IF NOT EXISTS assertions (
   id TEXT PRIMARY KEY,
+  always_inject INTEGER NOT NULL DEFAULT 0 CHECK(always_inject IN (0,1)),
   chat_id TEXT NOT NULL,
   subject TEXT NOT NULL,
   predicate TEXT NOT NULL,
@@ -452,6 +453,7 @@ CREATE INDEX IF NOT EXISTS idx_assertions_current ON assertions(chat_id, subject
 
 CREATE TABLE IF NOT EXISTS beliefs (
   id TEXT PRIMARY KEY,
+  always_inject INTEGER NOT NULL DEFAULT 0 CHECK(always_inject IN (0,1)),
   chat_id TEXT NOT NULL,
   holder TEXT NOT NULL,
   subject TEXT NOT NULL,
@@ -1090,7 +1092,7 @@ export function openDatabase(path: string): DatabaseHandle {
       db.close();
       throw Object.assign(new Error("Unreleased album schema 59 cannot be upgraded in place: it conflicts with released 1.0.25 schema 59. Preserve this development database and start with a fresh schema 62, or use a released schema 58/59 database."), { code: "ALBUM_SCHEMA_59_RESET_REQUIRED" });
     }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
@@ -1268,6 +1270,10 @@ export function openDatabase(path: string): DatabaseHandle {
     // Delivery views keep user omission separate from source lifecycle and axis calculation.
     db.exec(`CREATE VIEW IF NOT EXISTS visible_memory_details AS SELECT rowid AS rowid,* FROM memory_details WHERE user_hidden=0;
       CREATE VIEW IF NOT EXISTS visible_relationship_events AS SELECT * FROM relationship_events WHERE user_hidden=0;`);
+    for (const table of ['assertions','beliefs']) {
+      if (!(db.pragma(`table_info(${table})`) as Array<{name:string}>).some(row=>row.name==='always_inject'))
+        db.exec(`ALTER TABLE ${table} ADD COLUMN always_inject INTEGER NOT NULL DEFAULT 0 CHECK(always_inject IN (0,1))`);
+    }
     installSetupStorageGuards(db);
     installStateCorpusTracking(db);
     if (hasSchemaLedger && version < 53) migrateSetupStorage(db);

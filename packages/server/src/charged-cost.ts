@@ -2,7 +2,7 @@ import { isMainCharacterEntity, escapeMemoryText as escape } from "@rcm/shared";
 import { modelEntityContext } from "./entities.js";
 import type { RcmDatabase } from "./db.js";
 import { estimateTokens, narrationLine, viewpointUnknownTag, NARRATION_NAME_MAX_CHARACTERS, povSlots, projectMemoryScene, renderMemoryScene, type CardRenderOptions, type MemoryScene } from "@rcm/shared";
-import { buildEmissionPlan, emittedMemoryItems, type EmissionPlan } from "./emission-plan.js";
+import { buildEmissionPlan, emittedMemoryItems, isFoldedMemory, memoryCardSource, type EmissionPlan } from "./emission-plan.js";
 
 export interface PacketPricing { tagTokens: number; narrationTokens: number }
 
@@ -25,7 +25,8 @@ export const POV_TAG_RESERVE_TOKENS = fallbackPricing.tagTokens;
 export const NARRATION_RESERVE_TOKENS = fallbackPricing.narrationTokens;
 
 export function chargedCardTokens(scene: MemoryScene, options: Omit<CardRenderOptions, "viewpoint">, pricing: PacketPricing = fallbackPricing): number {
-  if (!options.compact) scene = projectMemoryScene(emittedMemoryItems(buildEmissionPlan([scene.record]))[0]!);
+  if (!options.compact) scene = projectMemoryScene(memoryCardSource(emittedMemoryItems(buildEmissionPlan([scene.record]))[0]!));
+  if (isFoldedMemory(scene.record)) options = {...options,plot:"omit"};
   return estimateTokens(renderMemoryScene(scene, { ...options, viewpoint: undefined })) + povSlots(scene) * pricing.tagTokens;
 }
 
@@ -55,7 +56,7 @@ export function chargedSectionTokens(omniscientXml: string, pricing: PacketPrici
 export function chargedMemorySectionTokens(omniscientXml: string, plan: EmissionPlan, pricing: PacketPricing = fallbackPricing): number {
   return chargedSectionTokens(omniscientXml, pricing) + emittedMemoryItems(plan).reduce((sum, item, index) => {
     const card = plan.cards[index]!;
-    const scene = projectMemoryScene({...item,content:card.item.content});
+    const scene = projectMemoryScene(memoryCardSource({...item,content:card.item.content}));
     const options = { plot: card.plot, clarity: item.clarity,
       compact:card.alwaysInject && card.shape === 0 };
     return sum + chargedCardTokens(scene, options, pricing) - estimateTokens(renderMemoryScene(scene, options));

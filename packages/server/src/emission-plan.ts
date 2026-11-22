@@ -2,7 +2,17 @@ import { emitsMemoryPlot, isAuthorCard, isException, scopeOf, scopeRelation, sam
 import { memoryDetailAtomKey, memoryDialogueAtomKey, memorySummaryAtomKey } from "./memory-atoms.js";
 import { emptyPacketManifest, type PacketManifest } from "./packet-manifest.js";
 
-export type PlotOmitReason = "covered" | "delta";
+export type PlotOmitReason = "covered" | "delta" | "folded";
+/** Automatic role selection only; spreads preserve this without changing the stored card or MCP. */
+export const foldedMemory = Symbol("foldedMemory");
+export function foldMemoryCard(item: MemoryContextItem): FoldedMemory {
+  return isAuthorCard(item) ? { ...item, content: "", [foldedMemory]: item.content } : item;
+}
+type FoldedMemory = MemoryContextItem & { [foldedMemory]?: string };
+export const isFoldedMemory = (item: MemoryContextItem): boolean => Boolean((item as FoldedMemory)[foldedMemory]);
+/** Restore author-card identity for the shared renderer, while the plan still omits Plot. */
+export const memoryCardSource = (item: MemoryContextItem): MemoryContextItem => isFoldedMemory(item)
+  ? {...item,content:(item as FoldedMemory)[foldedMemory]!} : item;
 export type FactReason = "direct" | "open_seed" | "atom_path" | "mcp_atom_ref";
 /** Request-local selection provenance survives object spreads, never JSON/DTO serialization. */
 export const memoryFactReasons = Symbol("memoryFactReasons");
@@ -43,7 +53,7 @@ export function traceEmissionPlan(plan: EmissionPlan): CardEmissionTrace[] {
     memoryId: card.memoryId, shape: card.shape, plot: card.plot,
     plotReason: card.plot === "emit" ? "emitted" : card.plotOmitReason
       ?? (card.item.content.trim() ? "legacy" : "empty"),
-    requiredExceptionIds: card.minimumUnitIds.filter(id => card.item.details.some(detail => detail.id === id)),
+    requiredExceptionIds: card.plotOmitReason === "folded" ? [] : card.minimumUnitIds.filter(id => card.item.details.some(detail => detail.id === id)),
     hitFacts: [...card.factReasons].filter(([id]) => card.detailIds.includes(id)).map(([id, reasons]) => ({ id, reasons })),
   }));
 }
@@ -51,15 +61,18 @@ export function traceEmissionPlan(plan: EmissionPlan): CardEmissionTrace[] {
 /** Structural card plan for an already authorized/materialized item.
  * Prompt coverage and delivery delta are applied by buildEmissionPlan. */
 export function planMemoryCard(item: MemoryContextItem): EmissionPlan["cards"][number] {
-  const shape = isAuthorCard(item) ? 1 : 0;
-  const exceptions = shape === 1 ? item.details.filter(detail=>isException(detail,item.knownBy)).map(detail=>detail.id) : [];
+  const shape = isAuthorCard(item) || isFoldedMemory(item) ? 1 : 0;
+  const folded = shape === 1 && isFoldedMemory(item);
+  const exceptions = shape === 1 && !folded ? item.details.filter(detail=>isException(detail,item.knownBy)).map(detail=>detail.id) : [];
   const factReasons = new Map([...factReasonsFor(item)].filter(([id,reasons])=>reasons.length
     && !exceptions.includes(id) && item.details.some(detail=>detail.id === id)));
-  const plot = emitsMemoryPlot(item) ? "emit" : "omit";
+  const plot = !folded && emitsMemoryPlot(item) ? "emit" : "omit";
   const summary = memorySummaryAtomKey(item);
-  return {memoryId:item.id,item,shape,factReasons,plot,
-    minimumUnitIds:shape === 1 ? [...(plot === "emit" && summary ? [summary] : []),...exceptions] : [],
-    detailIds:item.details.filter(detail=>shape === 0 || exceptions.includes(detail.id) || factReasons.get(detail.id)?.length).map(detail=>detail.id),
+  return {memoryId:item.id,item,shape,factReasons,plot, ...(folded ? {plotOmitReason:"folded" as const} : {}),
+    minimumUnitIds:folded ? item.details.length ? [item.details[0]!.id]
+      : item.keyDialogues.slice(0,1).map(line=>line.id ?? memoryDialogueAtomKey(item.id,line))
+      : shape === 1 ? [...(plot === "emit" && summary ? [summary] : []),...exceptions] : [],
+    detailIds:item.details.filter(detail=>folded || shape === 0 || exceptions.includes(detail.id) || factReasons.get(detail.id)?.length).map(detail=>detail.id),
     dialogueIds:item.keyDialogues.map(dialogue=>dialogue.id ?? memoryDialogueAtomKey(item.id,dialogue))};
 }
 
@@ -80,9 +93,9 @@ export function buildEmissionPlan(items: MemoryContextItem[], options: {
     cards: items.flatMap(item => {
       const evidence = item.summaryEvidence ?? item.evidence;
       const summaryKey = memorySummaryAtomKey(item);
-      const plotOmitReason: PlotOmitReason | undefined = evidence.length > 0 && evidence.every(span => covered.has(span.messageId)) ? "covered"
-        : summaryKey && options.excludedAtomKeys?.has(summaryKey) ? "delta" : undefined;
       const base = planMemoryCard(item);
+      const plotOmitReason: PlotOmitReason | undefined = base.plotOmitReason ?? (evidence.length > 0 && evidence.every(span => covered.has(span.messageId)) ? "covered"
+        : summaryKey && options.excludedAtomKeys?.has(summaryKey) ? "delta" : undefined);
       if (base.shape === 1 && plotOmitReason === "covered") return [];
       const card: EmissionPlan["cards"][number] = { ...base, ...(plotOmitReason ? {plot:"omit" as const} : {}),
         ...(plotOmitReason ? { plotOmitReason } : {}),
@@ -103,7 +116,7 @@ export function buildEmissionPlan(items: MemoryContextItem[], options: {
  * dialogue or knowledge/concealment exception. Candidates remain available later. */
 export function omitStateLinkedDetails(plan: EmissionPlan, detailIds: ReadonlySet<string>): void {
   for (const card of plan.cards) card.detailIds = card.detailIds.filter(id => !detailIds.has(id)
-    || card.item.details.some(detail => {
+    || card.plotOmitReason === "folded" && card.minimumUnitIds.includes(id) || card.item.details.some(detail => {
       if (detail.id !== id) return false;
       const scope = scopeOf(detail);
       return isException(detail,card.item.knownBy) || scopeRelation(scope,scopeOf(card.item)) !== "equal"
@@ -152,7 +165,7 @@ export function renderEmissionCards(plan: EmissionPlan, memoryIds?: ReadonlySet<
   return plan.cards.map((card,index)=>({card,item:items[index]!})).filter(({item}) => !memoryIds || memoryIds.has(item.id))
     .sort(({item:left},{item:right})=>(left.sourceOrdinal ?? Number.MAX_SAFE_INTEGER)-(right.sourceOrdinal ?? Number.MAX_SAFE_INTEGER)
       || String(left.storyTime ?? "").localeCompare(String(right.storyTime ?? "")) || right.score-left.score).map(({card,item}) =>
-    renderMemoryScene(projectMemoryScene({...item,content:card.item.content}), { plot: card.plot, latestStoryTime, clarity: item.clarity, viewpoint,
+    renderMemoryScene(projectMemoryScene(memoryCardSource({...item,content:card.item.content})), { plot: card.plot, latestStoryTime, clarity: item.clarity, viewpoint,
       compact:card.alwaysInject && card.shape === 0 })).filter(Boolean).join("\n");
 }
 

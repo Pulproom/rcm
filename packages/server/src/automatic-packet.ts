@@ -1,5 +1,5 @@
 import { packetFloorUsage, type automaticPacketBudget } from "./packet-budget.js";
-import { emittedMemoryItems, buildEmissionPlan, factReasonsFor, memoryFactReasons, memoryCardHasContent, planMemoryCard, type FactSelectedMemory } from "./emission-plan.js";
+import { foldMemoryCard, isFoldedMemory, emittedMemoryItems, buildEmissionPlan, factReasonsFor, memoryFactReasons, memoryCardHasContent, planMemoryCard, type FactSelectedMemory } from "./emission-plan.js";
 import { emitsMemoryPlot, estimateTokens, isAuthorCard, isException, projectMemoryScene, type MemoryContextItem } from "@rcm/shared";
 import { chargedCardTokens } from "./charged-cost.js";
 import { publicKnowledgeScope } from "./item-access.js";
@@ -7,7 +7,7 @@ import { memoryDetailAtomKey, memoryDialogueAtomKey } from "./memory-atoms.js";
 import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { selectFactReasons, type RetrievalSelectionRole } from "./retrieval.js";
 
-export const AUTOMATIC_ROLE_SHARES = { scene: .50, continuity: .15, association: .20, longterm: .15 } as const;
+export const AUTOMATIC_ROLE_SHARES = { scene: .62, continuity: .15, association: .13, longterm: .10 } as const;
 
 /** Retain the released <=12k independent retrieval count caps. Above it, grow capacity without
  * changing eligibility, access, role shares or the final 115% ceiling.
@@ -123,7 +123,7 @@ export function selectAutomaticPortfolio(options: {
     const exceptions = plotBundleDetailIds(planned);
     const keys = new Set(planAutomaticAtoms([planned],direct,policy)
       .filter(atom => protectedCard && (atom.bundle || policy.cueAnchorKeys?.has(atom.atomKey))).map(atom=>atom.atomKey));
-    // Plot-less legacy cards still need a readable evidence unit.
+    // Folded and legacy cards need a readable evidence unit in place of Plot.
     if (!emitsMemoryPlot(planned) && !keys.size && !exceptions.size) {
       const first=planAutomaticAtoms([planned],direct,policy).sort((a,b)=>a.localRank-b.localRank)[0];
       if (first) keys.add(first.atomKey);
@@ -182,8 +182,35 @@ export function selectAutomaticPortfolio(options: {
     ? item.details.filter(detail => detail.seed?.status === "open")
       .sort((a,b) => Number(b.seed!.noticedBy.some(name => actors.has(normalize(name)))) - Number(a.seed!.noticedBy.some(name => actors.has(normalize(name))))
         || (a.sourceOrdinal ?? Infinity) - (b.sourceOrdinal ?? Infinity) || a.id.localeCompare(b.id))[0] : undefined;
+  const compact = (item: MemoryContextItem, role: "continuity" | "association" | "longterm", seedDetail?: MemoryContextItem["details"][number]): MemoryContextItem => {
+    if (role !== "continuity") item = foldMemoryCard(item);
+    const bundleIds = plotBundleDetailIds(item);
+    if (seedDetail) {
+      const selected: FactSelectedMemory = { ...item, evidence: [], details: item.details.filter(detail => detail === seedDetail || bundleIds.has(detail.id)), keyDialogues: [],
+        [memoryFactReasons]:new Map(factReasonsFor(item)).set(seedDetail.id,[...new Set([...factReasonsFor(item).get(seedDetail.id) ?? [],...selectFactReasons({openSeed:true})])]) };
+      return selected;
+    }
+    const meta = metadata.get(item.id)!;
+    const detailIds = role === "association" ? meta.typedDetailIds.length ? meta.typedDetailIds : [meta.resemblance!.detailId] : undefined;
+    const storyOnly = role === "continuity" && options.storySupportIds.has(item.id) && !policy.continuityIds.has(item.id);
+    const details = (detailIds ? item.details.filter(detail => detailIds.includes(detail.id)) : item.details)
+      .filter(detail => (!storyOnly || !options.storySupportAtomIds.has(`detail:${detail.id}`))
+        && (role !== "longterm" || !detail.seed));
+    if (detailIds) details.sort((a,b) => detailIds.indexOf(a.id) - detailIds.indexOf(b.id));
+    if (role === "longterm") details.sort((a,b) => Number(b.kind === "concrete_detail") - Number(a.kind === "concrete_detail"));
+    const detail = details[0];
+    const sources = new Set(detail ? policy.priorities.get(memoryDetailAtomKey(detail))?.sourceMessageIds ?? [] : []);
+    // Typed paths authorize endpoints only. Semantic resemblance may carry its own source dialogue.
+    const dialogues = (role === "association" ? meta.typedDetailIds.length ? [] : item.keyDialogues.filter(dialogue =>
+      [dialogue.messageId, ...dialogue.evidence.map(evidence => evidence.messageId)].some(id => sources.has(id))) : item.keyDialogues)
+      .filter(dialogue => !storyOnly || !options.storySupportAtomIds.has(`dialogue:${dialogue.id}`));
+    const selectedDetails = details.slice(0, role === "continuity" ? dialogues.length ? 2 : 3 : dialogues.length ? 1 : 2);
+    return { ...item, evidence: [],
+      details: isFoldedMemory(item) ? selectedDetails : item.details.filter(detail => selectedDetails.includes(detail) || bundleIds.has(detail.id)), keyDialogues: emitsMemoryPlot(item) ? [] : rankedDialogues(item,dialogues,selectedDetails).slice(0, selectedDetails.length ? 1 : 2) };
+  };
   const longtermUnit = (item: MemoryContextItem) => {
-    const selected=minimum(item), seed=openSeed(item);
+    const seed=openSeed(item);
+    const selected=minimum(isAuthorCard(item) ? compact(item,"longterm",seed) : item);
     if (!seed || selected.details.some(detail=>detail.id===seed.id)) return selected;
     const unit:FactSelectedMemory={...selected,details:[...selected.details,seed],
       [memoryFactReasons]:new Map(factReasonsFor(item)).set(seed.id,selectFactReasons({openSeed:true}))};
@@ -287,31 +314,6 @@ export function selectAutomaticPortfolio(options: {
     });
     return distances.length ? Math.min(...distances) : 0;
   };
-  const compact = (item: MemoryContextItem, role: "continuity" | "association" | "longterm", seedDetail?: MemoryContextItem["details"][number]): MemoryContextItem => {
-    const bundleIds = plotBundleDetailIds(item);
-    if (seedDetail) {
-      const selected: FactSelectedMemory = { ...item, evidence: [], details: item.details.filter(detail => detail === seedDetail || bundleIds.has(detail.id)), keyDialogues: [],
-        [memoryFactReasons]:new Map(factReasonsFor(item)).set(seedDetail.id,[...new Set([...factReasonsFor(item).get(seedDetail.id) ?? [],...selectFactReasons({openSeed:true})])]) };
-      return selected;
-    }
-    const meta = metadata.get(item.id)!;
-    const detailIds = role === "association" ? meta.typedDetailIds.length ? meta.typedDetailIds : [meta.resemblance!.detailId] : undefined;
-    const storyOnly = role === "continuity" && options.storySupportIds.has(item.id) && !policy.continuityIds.has(item.id);
-    const details = (detailIds ? item.details.filter(detail => detailIds.includes(detail.id)) : item.details)
-      .filter(detail => (!storyOnly || !options.storySupportAtomIds.has(`detail:${detail.id}`))
-        && (role !== "longterm" || !detail.seed));
-    if (detailIds) details.sort((a,b) => detailIds.indexOf(a.id) - detailIds.indexOf(b.id));
-    if (role === "longterm") details.sort((a,b) => Number(b.kind === "concrete_detail") - Number(a.kind === "concrete_detail"));
-    const detail = details[0];
-    const sources = new Set(detail ? policy.priorities.get(memoryDetailAtomKey(detail))?.sourceMessageIds ?? [] : []);
-    // Typed paths authorize endpoints only. Semantic resemblance may carry its own source dialogue.
-    const dialogues = (role === "association" ? meta.typedDetailIds.length ? [] : item.keyDialogues.filter(dialogue =>
-      [dialogue.messageId, ...dialogue.evidence.map(evidence => evidence.messageId)].some(id => sources.has(id))) : item.keyDialogues)
-      .filter(dialogue => !storyOnly || !options.storySupportAtomIds.has(`dialogue:${dialogue.id}`));
-    const selectedDetails = details.slice(0, role === "continuity" ? dialogues.length ? 2 : 3 : dialogues.length ? 1 : 2);
-    return { ...item, evidence: [],
-      details: item.details.filter(detail => selectedDetails.includes(detail) || bundleIds.has(detail.id)), keyDialogues: emitsMemoryPlot(item) ? [] : rankedDialogues(item,dialogues,selectedDetails).slice(0, selectedDetails.length ? 1 : 2) };
-  };
   let carry = Math.max(0, budgets.scene - used);
   for (const role of ["continuity", "association", "longterm"] as const) {
     if (role === "longterm") longtermHeld=0;
@@ -382,7 +384,8 @@ export function selectAutomaticPortfolio(options: {
     || (metadata.get(b.id)?.baseDirect ?? 0)-(metadata.get(a.id)?.baseDirect ?? 0) || a.id.localeCompare(b.id));
   const dialogueQueues = priority.map(item => {
     const full = candidates.find(candidate => candidate.id === item.id)!;
-    return { id:item.id, lines:rankedDialogues(full,full.keyDialogues,item.details) };
+    const source=isFoldedMemory(item) ? depths.get(item.id)! : full;
+    return { id:item.id, lines:rankedDialogues(source,source.keyDialogues,item.details) };
   });
   const addDialogue = (id: string, line: MemoryContextItem["keyDialogues"][number]) => {
     const index = items.findIndex(item => item.id === id), previous = items[index]!;
@@ -408,14 +411,15 @@ export function selectAutomaticPortfolio(options: {
   // before any other card receives an additional line.
   for (const item of [...items].sort(scenePriority)) if (!item.keyDialogues.length) {
     const full=candidates.find(candidate=>candidate.id===item.id)!;
-    const line=rankedDialogues(full,full.keyDialogues,item.details)[0];
+    const source=isFoldedMemory(item) ? depths.get(item.id)! : full;
+    const line=rankedDialogues(source,source.keyDialogues,item.details)[0];
     if (line) addDialogue(item.id,line);
   }
   // Optional depth now shares the remainder
   // in rounds; each attempt prices only a charged card delta, never the packet.
   const queues=[...items].sort(scenePriority).map(item=>{
     const depth=depths.get(item.id)!;
-    const full={...depth,keyDialogues:candidates.find(candidate=>candidate.id===item.id)!.keyDialogues};
+    const full=isFoldedMemory(item) ? depth : {...depth,keyDialogues:candidates.find(candidate=>candidate.id===item.id)!.keyDialogues};
     const ranks=new Map(planAutomaticAtoms([full],direct,policy).map(atom=>[atom.atomKey,atom.localRank]));
     const units=[...full.keyDialogues.filter(line=>!item.keyDialogues.includes(line)).map(line=>({key:memoryDialogueAtomKey(item.id,line),line})),
       ...full.details.filter(detail=>!item.details.includes(detail)).map(detail=>({key:memoryDetailAtomKey(detail),detail}))];
@@ -642,6 +646,9 @@ export function fitAutomaticCard(item: MemoryContextItem, fits: (item: MemoryCon
 }
 
 function removable(item: MemoryContextItem, key: string): boolean {
+  const card = planMemoryCard(item);
+  if (isFoldedMemory(item) && (item.details.some(detail=>card.minimumUnitIds.includes(detail.id) && memoryDetailAtomKey(detail) === key)
+    || item.keyDialogues.some(line=>card.minimumUnitIds.includes(line.id ?? memoryDialogueAtomKey(item.id,line)) && memoryDialogueAtomKey(item.id,line) === key))) return false;
   const plotBundle = plotBundleDetailIds(item);
   if (item.details.some(detail => plotBundle.has(detail.id) && memoryDetailAtomKey(detail) === key)) return false;
   if (planMemoryCard(item).plot === "emit") return true;

@@ -1,11 +1,13 @@
 import { assertChatUnlocked, chatUpgradeLock } from './upgrade-lock.js';
-import { finishReviewedBatches } from './source-coverage.js';
+import { stateCandidateValue } from './now-delivery.js';
+import { finishReviewedBatches, coverageRetryFamilies } from './source-coverage.js';
 import { stateDetailSupport } from "@rcm/shared";
 import { type StateItemDrop } from "@rcm/shared";
 import { appendJobStateDrops } from "./jobs.js";
 import { ModelContentValidationError } from "@rcm/shared";
 import { ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
-import { parseSocialRelation, sameSocialRelationScope, resolveSocialRelation, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
+import { parseSocialRelation, sameSocialRelationScope, resolveSocialRelation, resolveStateDetailLinks, UNSUPPORTED_SOCIAL_RELATION } from "./social-relations.js";
+import { remapStateMemoryKeys, scopeMemoryKey } from './extraction-memory-keys.js';
 import { transitionEvidenceJson, compatibleIndependentAssertion, canAutomaticallyChange, committedEditOrdinal, USER_CORRECTION_GUIDANCE } from "./user-corrections.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -67,7 +69,7 @@ function candidatesFor(db: RcmDatabase, chatId: string, observation: StateObserv
     return (db.prepare(`SELECT *
       FROM assertions WHERE chat_id=? AND subject COLLATE NOCASE IN (${placeholders(subjects)}) AND valid_to_revision IS NULL
       ORDER BY valid_from_revision,created_at`).all(chatId, ...subjects) as Array<Record<string, unknown>>).filter(row => sameSocialRelationScope(row.social_relation_json, observation.socialRelation, resolve)).map((row) => ({
-        id: String(row.id), kind: observation.kind, value: { ...row, evidence: parseEvidence(row.evidence_json) },
+        id: String(row.id), kind: observation.kind, value: { ...stateCandidateValue(row), evidence: parseEvidence(row.evidence_json) },
         immutable: !canAutomaticallyChange(db,chatId,row,observation.evidence),
       }));
   }
@@ -77,7 +79,7 @@ function candidatesFor(db: RcmDatabase, chatId: string, observation: StateObserv
     return (db.prepare(`SELECT *
       FROM beliefs WHERE chat_id=? AND holder COLLATE NOCASE IN (${placeholders(holders)}) AND subject COLLATE NOCASE IN (${placeholders(subjects)}) AND active=1 AND status='active'
       ORDER BY created_revision,created_at`).all(chatId, ...holders, ...subjects) as Array<Record<string, unknown>>).map((row) => ({
-        id: String(row.id), kind: observation.kind, value: { ...row, evidence: parseEvidence(row.evidence_json) }, immutable: !canAutomaticallyChange(db,chatId,row,observation.evidence),
+        id: String(row.id), kind: observation.kind, value: { ...stateCandidateValue(row), evidence: parseEvidence(row.evidence_json) }, immutable: !canAutomaticallyChange(db,chatId,row,observation.evidence),
       }));
   }
   const promisors = resolve(observation.promisor).variants;
@@ -85,7 +87,7 @@ function candidatesFor(db: RcmDatabase, chatId: string, observation: StateObserv
   return (db.prepare(`SELECT *
     FROM promises WHERE chat_id=? AND promisor COLLATE NOCASE IN (${placeholders(promisors)}) AND promisee COLLATE NOCASE IN (${placeholders(promisees)})
     ORDER BY updated_revision,created_at`).all(chatId, ...promisors, ...promisees) as Array<Record<string, unknown>>).map((row) => ({
-      id: String(row.id), kind: observation.kind, value: row, immutable: !canAutomaticallyChange(db,chatId,row,observation.evidence),
+      id: String(row.id), kind: observation.kind, value: stateCandidateValue(row), immutable: !canAutomaticallyChange(db,chatId,row,observation.evidence),
     }));
 }
 
@@ -127,7 +129,7 @@ export function prepareReconciliation(db: RcmDatabase, chatId: string, draft: Ex
     });
     if (ambiguous || uncertain.length) {
       entry.reviewReason='Ambiguous social relation target; select an unambiguous entity before applying state';
-      entry.candidates=uncertain.map(row=>({id:String(row.id),kind:entry.observation.kind,value:{...row,evidence:parseEvidence(row.evidence_json)},immutable:!canAutomaticallyChange(db,chatId,row,entry.observation.evidence)}));
+      entry.candidates=uncertain.map(row=>({id:String(row.id),kind:entry.observation.kind,value:{...stateCandidateValue(row),evidence:parseEvidence(row.evidence_json)},immutable:!canAutomaticallyChange(db,chatId,row,entry.observation.evidence)}));
     }
   }
   const candidates = all.filter((entry) => entry.candidates.length > 0 || entry.reviewReason);
@@ -268,6 +270,82 @@ export function recordReconciliationReview(db: RcmDatabase, chatId: string, jobI
   if(error===UNSUPPLIED_STATE_REVIEW_REASON) db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateInput.reviewCount',COALESCE(json_extract(payload_json,'$.stateInput.reviewCount'),0)+1) WHERE id=? AND json_type(payload_json,'$.stateInput')='object'").run(jobId);
 }
 
+/** Completion shares the storage mapping, including reserved/deleted-key suffixes.
+ * Model decisions contain ledger IDs, not memory keys; do not rewrite their text. */
+export function remapReconciliationReviews(db: RcmDatabase, chatId: string, jobId: string, keys: ReadonlyMap<string,string>): void {
+  const rows = db.prepare("SELECT id,incoming_json,resolution_json FROM reconciliation_items WHERE chat_id=? AND job_id=? AND status='pending'")
+    .all(chatId,jobId) as Array<{id:string;incoming_json:string;resolution_json:string|null}>;
+  for (const row of rows) {
+    const incoming=JSON.parse(row.incoming_json);
+    const resolution=row.resolution_json ? JSON.parse(row.resolution_json) : null;
+    if (resolution?.editedItem) resolution.editedItem=remapStateMemoryKeys(resolution.editedItem,keys);
+    db.prepare('UPDATE reconciliation_items SET incoming_json=?,resolution_json=? WHERE id=?')
+      .run(JSON.stringify({...incoming,item:remapStateMemoryKeys(incoming.item,keys)}),resolution ? JSON.stringify(resolution) : null,row.id);
+  }
+}
+
+const missingReviewEvidence = () => Object.assign(new Error('근거 기억을 찾지 못해 적용하지 못했어요. 확인할 기록은 대기 상태로 남겨 두었어요.'),
+  {code:'RECONCILIATION_EVIDENCE_UNAVAILABLE'});
+
+/** Restore old draft-local links only within this producer's namespace. Old
+ * inherited jobs have no original scope; their own copied batch snapshots and
+ * memory ownership supply it without consulting a possibly deleted parent. */
+function resolveReviewMemoryKeys(db:RcmDatabase,chatId:string,jobId:string,observation:StateObservation):StateObservation {
+  const job=db.prepare('SELECT type,payload_json FROM jobs WHERE id=? AND chat_id=?').get(jobId,chatId) as {type:string;payload_json:string}|undefined;
+  const payload=JSON.parse(job?.payload_json ?? '{}');
+  const scope=job?.type==='memory_addition' ? `addition:${jobId}` : payload.batchId ?? payload.retryOfJobId ?? jobId;
+  const batches=db.prepare('SELECT id,final_json FROM extraction_batches WHERE chat_id=? AND job_id=?').all(chatId,jobId) as Array<{id:string;final_json:string|null}>;
+  const inheritedKeys=new Map<string,string>(batches.flatMap(batch=>(JSON.parse(batch.final_json ?? '{}').memories ?? [])
+    .map((memory:{key:string})=>[memory.key,batch.id] as const)));
+  const families=payload.inheritedReview ? coverageRetryFamilies(db,chatId) : new Map<string,string>();
+  const remap=new Map<string,string>();
+  const resolve=(key:string):string=>{
+    if (remap.has(key)) return remap.get(key)!;
+    const base=payload.episodeId && key===`episode:${payload.episodeId}` ? key : scopeMemoryKey(key,scope);
+    const matchesBase=(candidate:string,expected:string)=>candidate===expected
+      || candidate.startsWith(`${expected}#`) && /^#[1-9]\d*$/.test(candidate.slice(expected.length)) && Number(candidate.slice(expected.length+1))>=2;
+    const candidates=db.prepare('SELECT memory_key,source_batch_id FROM memories WHERE chat_id=? AND active=1 AND (memory_key=? OR substr(memory_key,1,length(?)+1)=?||\'#\' OR memory_key IN (SELECT value FROM json_each(?)))')
+      .all(chatId,base,base,base,JSON.stringify(payload.inheritedReview ? [...inheritedKeys.keys()] : [])) as Array<{memory_key:string;source_batch_id:string|null}>;
+    const found=candidates.filter(candidate=> {
+      if (payload.inheritedReview) {
+        if (payload.retryOfJobId && matchesBase(candidate.memory_key,base)) return true;
+        const owner=inheritedKeys.get(candidate.memory_key);
+        if (!owner || candidate.source_batch_id!==(families.get(owner) ?? owner)) return false;
+        if (key.startsWith('episode:') && matchesBase(candidate.memory_key,key)) return true;
+        // Parse only the product-owned canonical key envelope; never prose.
+        const match=/^batch:(.+):([a-f0-9]{64})(?:#[1-9]\d*)?$/.exec(candidate.memory_key);
+        return matchesBase(candidate.memory_key,base) || !!match && matchesBase(candidate.memory_key,scopeMemoryKey(key,match[1]!));
+      }
+      // Source coverage may fold a retry into its owner batch. The canonical
+      // namespace still records the exact producer scope after that transfer.
+      return matchesBase(candidate.memory_key,base);
+    });
+    // A legacy local key can collide with an unrelated saved row. Resolve the
+    // producer namespace first; exact canonical links require batch ownership.
+    if (!found.length) {
+      const direct=db.prepare('SELECT memory_key,source_batch_id FROM memories WHERE chat_id=? AND memory_key=? AND active=1').get(chatId,key) as {memory_key:string;source_batch_id:string|null}|undefined;
+      const canonicalScope=/^batch:(.+):[a-f0-9]{64}(?:#[1-9]\d*)?$/.exec(key)?.[1];
+      if (direct && (batches.some(batch=>direct.source_batch_id===(families.get(batch.id) ?? batch.id))
+        || canonicalScope===scope
+        || !batches.length && !direct.source_batch_id && !key.startsWith('batch:'))) found.push(direct);
+    }
+    if (found.length!==1) throw missingReviewEvidence();
+    remap.set(key,found[0]!.memory_key);
+    return found[0]!.memory_key;
+  };
+  const collect=(item:{memoryKey?:string;validFromMemoryKey?:string;support?:Array<{memoryKey:string}>})=>{
+    if(item.memoryKey) resolve(item.memoryKey);
+    if(item.validFromMemoryKey) resolve(item.validFromMemoryKey);
+    for(const ref of item.support ?? []) resolve(ref.memoryKey);
+  };
+  collect(observation);
+  if(observation.kind==='world_fact' && observation.socialRelation) collect(observation.socialRelation);
+  const mapped=remapStateMemoryKeys(observation,remap);
+  if (stateDetailSupport(mapped)!==undefined && !resolveStateDetailLinks(db,chatId,mapped,new Map())?.length
+    || mapped.kind==='world_fact' && mapped.socialRelation && !resolveSocialRelation(db,chatId,mapped.socialRelation,new Map())) throw missingReviewEvidence();
+  return mapped;
+}
+
 /** Convert new state without writing reconciliation decisions or closing rows. */
 export function additiveReconciliationResult(draft: ExtractionDraftResult, submission?: ReconciliationSubmission, drops: StateItemDrop[] = []): ExtractionResult {
   const result = emptyFinal({...draft, seedResolutions: []});
@@ -380,7 +458,8 @@ export function applyReconciliation(db: RcmDatabase, chatId: string, jobId: stri
         if (entry.observation.kind === "world_fact") db.prepare("UPDATE assertions SET valid_to_revision=(SELECT revision FROM chats WHERE id=?),valid_to_ordinal=?,automatic_closure_evidence_json=? WHERE id=? AND chat_id=? AND valid_to_revision IS NULL").run(chatId, ordinal, transitionEvidenceJson(db,chatId,entry.observation.evidence), target.id, chatId);
         else db.prepare("UPDATE beliefs SET active=0,status='superseded',valid_to_ordinal=?,automatic_closure_evidence_json=? WHERE id=? AND chat_id=? AND active=1").run(ordinal, transitionEvidenceJson(db,chatId,entry.observation.evidence), target.id, chatId);
       }
-    } else addObservation(result, entry.observation, decision.action, decision.targetIds, canonical, decision.compatibleWithIds);
+    } else addObservation(result, entry.observation, decision.action, decision.targetIds, canonical,
+      entry.observation.kind==='world_fact' && decision.action==='coexist' ? entry.candidates.map(candidate=>candidate.id) : decision.compatibleWithIds);
     recordAutomatic(db, chatId, jobId, sourceIds, entry, decision, decision.action);
     autoResolved += 1;
   }
@@ -394,24 +473,37 @@ export function listReconciliationReviews(db: RcmDatabase, chatId: string, optio
 }
 
 export function resolveReconciliationReview(db: RcmDatabase, chatId: string, reviewId: string, input: { action: "merge" | "distinct" | "update" | "discard"; targetId?: string; editedItem?: unknown; automatic?: true }): void {
+  db.transaction(() => {
   assertChatUnlocked(db,chatId);
   const row = db.prepare("SELECT * FROM reconciliation_items WHERE id=? AND chat_id=? AND status='pending'").get(reviewId, chatId) as Record<string, any> | undefined;
   if (!row) throw Object.assign(new Error("Reconciliation review is no longer pending"), { code: "RECONCILIATION_REVIEW_NOT_PENDING" });
-  const observation = (input.editedItem ?? JSON.parse(row.incoming_json).item) as StateObservation;
+  let observation = (input.editedItem ?? JSON.parse(row.incoming_json).item) as StateObservation;
   const candidates = JSON.parse(row.candidates_json) as Candidate[];
   if (input.action !== "discard") {
+    observation=resolveReviewMemoryKeys(db,chatId,row.job_id,observation);
     const result = ExtractionResultSchema.parse({ language: "en" });
-    const target = candidates.find((candidate) => candidate.id === input.targetId);
+    const target = input.action==='merge' || input.action==='update' ? candidates.find((candidate) => candidate.id === input.targetId) : undefined;
     if ((input.action === "merge" || input.action === "update") && !target) throw new Error("Review target is unavailable; review remains pending");
     if (target && observation.kind === "promise_event" && (input.action === "merge" || input.action === "update")) {
       const savedDecision = ReconciliationDecisionSchema.safeParse(JSON.parse(row.model_decision_json ?? "null"));
       const ids = savedDecision.success ? savedDecision.data.targetIds : [];
       if (ids.length && (ids.length !== 1 || ids[0] !== target.id)) throw new Error("다른 약속이 선택됐어요. 플러그인을 업데이트하고 다시 확인해 주세요.");
     }
-    const action = input.action === "merge" ? "reinforce" : input.action === "update" ? "supersede" : "create";
-    const canonical = observation.kind === "promise_event" ? String(target?.value.promise_key ?? observation.promiseKeyHint) : String(target?.value.predicate ?? observation.predicateHint);
-    addObservation(result, observation, action, target ? [target.id] : [], canonical);
-    db.transaction(() => {
+    const action = input.action === "merge" ? "reinforce" : input.action === "update" ? "supersede" : "coexist";
+    let canonical = observation.kind === "promise_event" ? String(target?.value.promise_key ?? observation.promiseKeyHint) : String(target?.value.predicate ?? observation.predicateHint);
+    // A user's separate-record decision covers the live typed property scope,
+    // including rows absent from the saved review. Automatic repair is still
+    // limited to its recorded candidates; it is not a new user confirmation.
+    const coexistCandidates = input.action === 'distinct' && !input.automatic
+      ? candidatesFor(db,chatId,observation,buildEntityIdentityResolver(db,chatId)).filter(candidate =>
+        normalizePredicate(String(candidate.value.predicate ?? candidate.value.promise_key)) === normalizePredicate(canonical))
+      : candidates;
+    // An explicit separate promise needs its own identity, not an upsert of
+    // the original promise when the model reused its key hint.
+    if(input.action==='distinct' && observation.kind==='promise_event'
+      && db.prepare('SELECT 1 FROM promises WHERE chat_id=? AND promise_key=?').get(chatId,canonical)) canonical=`review:${reviewId}`;
+    addObservation(result, observation, action, target ? [target.id] : [], canonical,input.action==='distinct' ? coexistCandidates.map(candidate=>candidate.id) : undefined);
+    {
       const conflicts = Number((db.prepare("SELECT COUNT(*) n FROM conflicts WHERE chat_id=?").get(chatId) as {n:number}).n);
       const table = observation.kind === "world_fact" ? "assertions" : observation.kind === "character_belief" ? "beliefs" : "promises";
       const currentClause=table==='assertions'?'valid_to_revision IS NULL':table==='beliefs'?"active=1 AND status='active'":"status<>'invalidated'";
@@ -434,10 +526,11 @@ export function resolveReconciliationReview(db: RcmDatabase, chatId: string, rev
       for(const item of changed.filter(item=>table==='assertions'?item.valid_to_revision==null:table==='beliefs'?item.active===1:item.status!=='invalidated')) {
         db.prepare(`UPDATE ${table} SET user_edit_ordinal=? WHERE id=? AND chat_id=?`).run(committedEditOrdinal(db,chatId),item.id,chatId);
       }
-    })();
+    }
   }
   db.prepare("UPDATE reconciliation_items SET status=?,resolution_json=?,resolved_at=? WHERE id=?").run(input.action === "discard" ? "discarded" : input.action === "distinct" ? "kept_separate" : input.action === "update" ? "updated" : "merged", JSON.stringify(input), Date.now(), reviewId);
   finishReviewedBatches(db,chatId);
+  })();
 }
 
 /** One-time startup repair of reviews blocked only by unrelated protected properties.

@@ -614,6 +614,7 @@ function cloneLineage(
     }
 
     const inheritStateLinks = (table: string, id: string, row: any) => {
+      if (table === 'assertions' || table === 'beliefs') prepare(`UPDATE ${table} SET always_inject=? WHERE id=?`).run(row.always_inject ?? 0,id);
       if (row.linked_detail_ids_json == null) return;
       const ids: string[] = JSON.parse(row.linked_detail_ids_json);
       const linked = ids.every(source => detailMap.has(source)) ? ids.map(source => detailMap.get(source)!) : [];
@@ -881,6 +882,14 @@ function cloneLineage(
       const previous=reviewJobs.get(key);
       if (previous) return previous;
       const id=createInheritedReviewJob(db,child,sources); reviewJobs.set(key,id);
+      if(key.startsWith('job:')) {
+        const originalId=key.slice(4);
+        const job=prepare('SELECT type,payload_json FROM jobs WHERE id=? AND chat_id=?').get(originalId,parent) as {type:string;payload_json:string}|undefined;
+        const payload=json<Record<string,any>>(job?.payload_json,{});
+        const scope=job?.type==='memory_addition' ? `addition:${originalId}` : payload.batchId ?? payload.retryOfJobId ?? originalId;
+        prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.retryOfJobId',?,'$.episodeId',?) WHERE id=?")
+          .run(scope,payload.episodeId ?? null,id);
+      }
       return id;
     };
     const batchMap = new Map<string, string>();

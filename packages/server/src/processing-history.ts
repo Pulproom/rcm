@@ -122,6 +122,10 @@ function projectJob(db: RcmDatabase, job: Row): ProcessingJob {
   const range = db.prepare(`SELECT MIN(ordinal) lo,MAX(ordinal) hi,SUM(role='assistant') turns FROM messages WHERE chat_id=? AND message_id IN (SELECT value FROM json_each(?))`).get(job.chat_id,JSON.stringify(payload.sourceMessageIds ?? [])) as Row;
   const batch = db.prepare('SELECT start_ordinal,end_ordinal FROM extraction_batches WHERE job_id=?').get(job.id) as Row | undefined;
   const notes: string[] = [];
+  if (job.type === 'canonical_translation') {
+    notes.push(String(payload.cursor ?? 0) + '/' + String(payload.chunks?.length ?? 0) + '묶음 · ' + String(payload.applied ?? 0) + '문장 반영');
+    if (payload.diagnostics?.length) notes.push(String(payload.diagnostics.length) + '개는 누락되거나 바뀌어 그대로 두었어요.');
+  }
   if (job.status==='failed') notes.push(settingsFailureMessage(job.last_error ?? payload.providerFailure));
   if (payload.sourceCoverage?.needsReview) notes.push(`원문 ${payload.sourceCoverage.needsReview}개 확인 필요`);
   else if (payload.sourceCoverage?.retried) notes.push(`원문 ${payload.sourceCoverage.total}개 중 ${payload.sourceCoverage.retried}개 다시 정리 요청`);

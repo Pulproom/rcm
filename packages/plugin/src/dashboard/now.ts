@@ -9,7 +9,7 @@ import { assertionChainKey, buildRecordChains, liveChainKey, renderRecordDetail,
 import { nameHtml } from "./film/names.js";
 import { lex } from "./lexicon.js";
 
-export type NowFilter = "all" | "seed" | "promise" | "belief" | "condition" | "goal" | "secret";
+export type NowFilter = "all" | "always" | "seed" | "promise" | "belief" | "condition" | "goal" | "secret";
 export type NowSort = "recent" | "stale";
 /** 현재 lists live records; 지난 기록 lists chains that ended. Both open one record's history beside the list. */
 export type NowMode = "now" | "past";
@@ -36,10 +36,12 @@ export type NowRow = {
   polarity?: string;
   promisor?: string;
   promisee?: string;
+  promiseStatus?: string;
   scheduledFor?: string;
   firstMade?: PromiseFirstMade;
   /** Promise kept in the main-model packet whatever its status ("계속 기억"). */
   pinned?: boolean;
+  alwaysInject?: boolean;
   lastMention: { ordinal: number | null; storyTime: string | null };
   overdue: boolean;
 };
@@ -64,7 +66,7 @@ export async function runPromiseStatusMutation(
 
 type OwnedNowRow = NowRow & { owner: string | null; ownerRank: number };
 
-const FILTERS: NowFilter[] = ["all", "seed", "promise", "belief", "condition", "goal", "secret"];
+const FILTERS: NowFilter[] = ["all", "always", "seed", "promise", "belief", "condition", "goal", "secret"];
 const normalizeName = (value: unknown): string => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
 const escapeHtml = (value: unknown): string => String(value ?? "")
   .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -151,17 +153,18 @@ export function buildNowPage(
         holder: String(item?.holder ?? ""), polarity: String(item?.polarity ?? ""), promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""),
         lastMention: { ordinal: ended, storyTime: null }, overdue: false, owner: owner.owner, ownerRank: owner.ownerRank,
         pinned: chain.kind === "promise" && pinnedPromises.has(String(item?.promise_id ?? item?.id ?? "")),
+        alwaysInject: chain.kind === "promise" && pinnedPromises.has(String(item?.promise_id ?? item?.id ?? "")),
       });
     }
   } else {
   for (const item of data.promises ?? []) {
-    if (item?.status !== "open") continue;
+    if (item?.status !== "open" && !(filter === "always" && item?.pinned && item?.status !== "invalidated")) continue;
     const owner = ownerFor(item?.promisor);
     rows.push({
       id: String(item?.id ?? item?.promise_key ?? ""), key: liveChainKey(chains, "promise", item), changes: changes(liveChainKey(chains, "promise", item)), type: "promise", text: String(item?.content ?? ""),
-      promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""),
-      firstMade:item.firstMade, scheduledFor: String(item?.scheduled_for ?? ""), pinned: Boolean(item?.pinned),
-      lastMention: lastMention(item), overdue: isPromiseOverdue(String(item?.scheduled_for ?? "").trim() || null, storyTime),
+      promisor: String(item?.promisor ?? ""), promisee: String(item?.promisee ?? ""), promiseStatus: item.status,
+      firstMade:item.firstMade, scheduledFor: String(item?.scheduled_for ?? ""), pinned: Boolean(item?.pinned), alwaysInject: Boolean(item?.alwaysInject ?? item?.pinned),
+      lastMention: lastMention(item), overdue: item.status === "open" && isPromiseOverdue(String(item?.scheduled_for ?? "").trim() || null, storyTime),
       owner: owner.owner, ownerRank: owner.ownerRank,
     });
   }
@@ -169,7 +172,7 @@ export function buildNowPage(
     const owner = ownerFor(item?.holder);
     rows.push({
       id: String(item?.id ?? ""), key: liveChainKey(chains, "belief", item), changes: changes(liveChainKey(chains, "belief", item)), type: "belief", text: String(item?.value ?? ""),
-      holder: String(item?.holder ?? ""), subject: String(item?.subject ?? ""), polarity: String(item?.polarity ?? "believes"),
+      alwaysInject: Boolean(item?.alwaysInject) && (!item?.status || item.status === "active"), holder: String(item?.holder ?? ""), subject: String(item?.subject ?? ""), polarity: String(item?.polarity ?? "believes"),
       lastMention: lastMention(item), overdue: false, owner: owner.owner, ownerRank: owner.ownerRank,
     });
   }
@@ -181,7 +184,7 @@ export function buildNowPage(
     rows.push({
       id: String(item?.id ?? ""), key: liveChainKey(chains, "assertion", item), changes: changes(liveChainKey(chains, "assertion", item)), type, text: String(item?.value ?? ""),
       subject: String(item?.subject ?? ""), predicate: String(item?.predicate ?? ""),
-      socialRelation: item?.socialRelation,
+      socialRelation: item?.socialRelation, alwaysInject: Boolean(item?.alwaysInject),
       lastMention: lastMention(item), overdue: false, owner: owner.owner, ownerRank: owner.ownerRank,
     });
   }
@@ -192,8 +195,8 @@ export function buildNowPage(
     rows.push({id:seed.id,key:`seed:${seed.id}`,type:'seed',seed,text:seed.text,textKey:`${seed.memoryId}:detail:${seed.id}`,changes:0,
       lastMention:seed.lastMention,overdue:false,owner:null,ownerRank:3});
   }
-  const counts = Object.fromEntries(FILTERS.map((value) => [value, value === "all" ? rows.filter(row=>row.type !== "seed").length : rows.filter((row) => row.type === value).length])) as Record<NowFilter, number>;
-  const selected = filter === "all" ? rows.filter(row=>row.type !== "seed") : rows.filter((row) => row.type === filter);
+  const counts = Object.fromEntries(FILTERS.map((value) => [value, value === "always" ? (data.nowAlwaysInjectCount ?? rows.filter(row=>row.alwaysInject).length) : value === "all" ? rows.filter(row=>row.type !== "seed" && (row.type !== "promise" || !row.promiseStatus || row.promiseStatus === "open")).length : rows.filter((row) => row.type === value).length])) as Record<NowFilter, number>;
+  const selected = filter === "always" ? rows.filter(row=>row.alwaysInject) : filter === "all" ? rows.filter(row=>row.type !== "seed") : rows.filter((row) => row.type === filter);
   const compareRows = (left: OwnedNowRow, right: OwnedNowRow): number => {
     const leftOrdinal = left.lastMention.ordinal;
     const rightOrdinal = right.lastMention.ordinal;
@@ -224,10 +227,10 @@ export function overduePromiseEntries(page: ReturnType<typeof buildNowPage>): Ar
 }
 
 const FILTER_ICONS: Record<NowFilter, string> = {
-  all: "clip", seed: "sprout", promise: "check", belief: "eye", condition: "pencil", goal: "landmark", secret: "inactive",
+  all: "clip", always: "arrow-right", seed: "sprout", promise: "check", belief: "eye", condition: "pencil", goal: "landmark", secret: "inactive",
 };
 const FILTER_LABELS: Record<NowFilter, string> = {
-  all: "전체", seed: "복선", promise: "약속", belief: "인식", condition: "상태", goal: "목표", secret: "비밀",
+  all: "전체", always: "항상 전달", seed: "복선", promise: "약속", belief: "인식", condition: "상태", goal: "목표", secret: "비밀",
 };
 const RANK_LABELS: Record<number, string> = { 0: "주요", 1: "보조", 2: "배경" };
 const TYPE_LABELS: Record<NowRow["type"], string> = {
@@ -297,7 +300,7 @@ const renderRow = (
     return `<div class="nr nr--seed${opts.selected ? ' is-selected' : ''}${selecting ? ' is-pickable' : ''}${opts.past ? ' is-closed' : ''}" data-kind="seed">${check}<span class="seed-ic" aria-hidden="true">${icon('sprout')}</span><button class="nr__what" type="button" data-action="select-now-record" data-key="${escapeHtml(row.key)}"${opts.selected ? ' aria-current="true"' : ''}><span class="nr__k"><b class="nr__kind">복선</b> · ${escapeHtml(seed.noticedBy.join(', '))}</span><span class="nr__t">${rowText(row,translations,display)}</span></button><span class="nr__m">${status}${seed.status === "fulfilled" ? "" : ` · ${renderMention(opts.sceneAt?.(seed.memoryId) ?? opts.sceneAt?.(seed.lastMention.ordinal) ?? null)}`}</span></div>`;
   }
   // A finished promise has nothing left to decide.
-  const promiseVerbs = row.type === "promise" && !opts.past && !selecting
+  const promiseVerbs = row.type === "promise" && (!row.promiseStatus || row.promiseStatus === "open") && !opts.past && !selecting
     ? [
       { label: "지켜짐", icon: "check", action: "edit-world", data: { kind: "promise", id, status: "kept" }, disabled: promiseStatusBusy },
       { label: "깨짐", icon: "close", action: "edit-world", data: { kind: "promise", id, status: "broken" }, disabled: promiseStatusBusy },
@@ -319,10 +322,10 @@ const renderRow = (
   const relation = !row.socialRelation ? "" : row.socialRelation.kind === "interpersonal"
     ? btn("관계", { kind: "quiet", action: "open-relationship", data: { key: pairKey(row.subject ?? "", row.socialRelation.target) } })
     : btn("관계", { kind: "quiet", action: "open-relationship-person", data: { personName: row.subject ?? "" } });
-  const meta = [polarity, made, row.scheduledFor && !opts.past ? `예정 · ${escapeHtml(formatStoryTime(row.scheduledFor))}` : "", opts.past ? escapeHtml(ended) : renderMention(opts.sceneAt?.(row.lastMention.ordinal) ?? null), row.overdue ? '<span class="is-due">예정 시각 지남</span>' : "", row.pinned ? `<span class="nr__pin">${icon("pin")}계속 기억</span>` : "", changed].filter(Boolean).join(" · ");
+  const meta = [polarity, made, row.scheduledFor && !opts.past ? `예정 · ${escapeHtml(formatStoryTime(row.scheduledFor))}` : "", opts.past ? escapeHtml(ended) : renderMention(opts.sceneAt?.(row.lastMention.ordinal) ?? null), row.overdue ? '<span class="is-due">예정 시각 지남</span>' : "", changed].filter(Boolean).join(" · ");
   // Every row reads the same: kind and who on a small line, then the text, then where it was seen.
   const lead = rowLead(row, owner, translations, display);
-  const head = `<span class="nr__k"><b class="nr__kind">${TYPE_LABELS[row.type]}</b>${lead ? ` · ${lead}` : ""}</span>`;
+  const head = `<span class="nr__k">${row.alwaysInject ? `<span class="mark nr__delivery">${icon("arrow-right")}항상 전달</span>` : ""}<b class="nr__kind">${TYPE_LABELS[row.type]}</b>${lead ? ` · ${lead}` : ""}</span>`;
   // A row opens its own record; selecting the open one again closes the reader.
   const what = `<button class="nr__what" type="button" data-action="select-now-record" data-key="${escapeHtml(row.key)}"${opts.selected ? ' aria-current="true"' : ""}>${head}<span class="nr__t">${rowText(row, translations, display)}</span></button>`;
   return `<div class="nr${selecting ? ` is-pickable${row.type === 'promise' ? ' is-locked' : ''}` : ''}${row.overdue ? " is-due" : ""}${opts.selected ? " is-selected" : ""}${ring ? " has-ring" : ""}" data-kind="${row.type}">${check}${ring}${what}${meta || relation ? `<span class="nr__m">${[relation, meta].filter(Boolean).join(" · ")}</span>` : ""}${verbs}</div>`;
@@ -355,7 +358,7 @@ export function renderNowPage(
   ] });
   const modes = `<div class="seg now-mode" role="group" aria-label="기록 범위">${([["now", "현재"], ["past", "지난 기록"]] as const).map(([value, label]) => `<button type="button" data-action="now-mode" data-value="${value}" aria-pressed="${view.mode === value}">${label}</button>`).join("")}</div>`;
   // One row of kinds, pinned with the range above the list; an empty kind stays, dimmed.
-  const chips = `<div class="now-chips" data-preserve-scroll="now-chips" role="group" aria-label="현재 기록 필터">${FILTERS.map((value) => `<button type="button" class="now-chip${page.counts[value] ? "" : " is-empty"}" data-kind="${value}" data-action="now-filter" data-value="${value}" aria-pressed="${filter === value}"><span class="now-chip__ic" aria-hidden="true">${icon(FILTER_ICONS[value])}</span>${FILTER_LABELS[value]}<span class="n">${page.counts[value]}</span></button>`).join("")}</div>`;
+  const chips = `<div class="now-chips" data-preserve-scroll="now-chips" role="group" aria-label="현재 기록 필터">${FILTERS.filter(value=>value !== "always" || page.counts.always > 0).map((value) => `<button type="button" class="now-chip${page.counts[value] ? "" : " is-empty"}" data-kind="${value}" data-action="now-filter" data-value="${value}" aria-pressed="${filter === value}"><span class="now-chip__ic" aria-hidden="true">${icon(FILTER_ICONS[value])}</span>${FILTER_LABELS[value]}<span class="n">${page.counts[value]}${value === "always" ? "/5" : ""}</span></button>`).join("")}</div>`;
   const sortLabels: Record<NowSort, string> = { recent: "최근 언급 순", stale: "오래 언급 안 된 순" };
   // The select sits invisibly over its label, so the bar shows a quiet link while the platform picker does the choosing.
   const sortControl = past ? "" : `<label class="now-sort">${icon("swap")}<span class="now-sort__t">${sortLabels[sort]}</span><select data-action="now-sort" aria-label="정렬">${(Object.keys(sortLabels) as NowSort[]).map((value) => `<option value="${value}" ${sort === value ? "selected" : ""}>${sortLabels[value]}</option>`).join("")}</select></label>`;
@@ -405,8 +408,17 @@ function detailActions(chain: RecordChain, data: DashboardData, busy: (row: NowR
   const kind = chain.kind;
   const recordData = { kind, id, ...((live ?? top?.item)?.socialRelation ? { social: "true" } : {}) };
   if (top?.deleted) return [];
+  const promise = kind === 'promise' ? data.promises.find((item:any)=>String(item.id)===id) : undefined;
+  const deliveryItem = live && (kind !== 'belief' || !live.status || live.status === 'active') ? live
+    : promise?.status !== 'invalidated' ? promise : undefined;
+  const delivery: Array<MenuItem | 'sep'> = deliveryItem ? [{
+    label: (deliveryItem.alwaysInject ?? deliveryItem.pinned) ? '항상 전달 해제' : '항상 전달', icon:'arrow-right',
+    action:'toggle-now-always-inject', data:{kind,id,value:String(!(deliveryItem.alwaysInject ?? deliveryItem.pinned))},
+    count:`${data.nowAlwaysInjectCount ?? 0}/5`,
+  }, 'sep'] : [];
   // A finished promise is still a row: it can be corrected or reopened.
   if (!live && kind === "promise" && (data.promises ?? []).some((promise: any) => String(promise?.id) === id)) return [
+    ...delivery,
     { label: "수정", icon: "edit", action: "edit-world", data: { kind, id } },
     "sep",
     { label: "삭제", icon: "delete", action: "delete-world", data: { kind, id }, danger: true },
@@ -414,6 +426,7 @@ function detailActions(chain: RecordChain, data: DashboardData, busy: (row: NowR
   if (!live) return [{ label: "삭제", icon: "delete", action: "delete-world", data: { kind, id }, danger: true }];
   const promiseBusy = kind === "promise" && busy({ id, type: "promise" } as NowRow);
   return [
+    ...delivery,
     ...(kind === "promise" ? [
       { label: "지켜짐", icon: "check", action: "edit-world", data: { kind, id, status: "kept" }, disabled: promiseBusy },
       { label: "깨짐", icon: "close", action: "edit-world", data: { kind, id, status: "broken" }, disabled: promiseBusy },

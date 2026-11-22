@@ -4,8 +4,21 @@ declare const __RCM_DISTRIBUTION__: boolean;
 import { CONNECTION_FAILURE_LABELS, connectionFailureReason, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, RISU_AUXILIARY_FAILURE_CODES, projectRisuAuxiliaryCallDiagnostic, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 // Typed metadata is allowlisted; log text is sanitized at insertion.
 const stages = ["settings_save", "voyage_save", "connection_test", "native_registration", "provider_manager_registration", "worker_queue", "worker_job", "auxiliary_call", "worker_heartbeat", "before_request", "dashboard_action"] as const;
-const codes = [...Object.keys(SETTINGS_FAILURE_GUIDANCE), ...Object.keys(CONNECTION_FAILURE_LABELS), ...RISU_AUXILIARY_FAILURE_CODES, "REQUEST_FAILED", "REPAIR_BUDGET_EXHAUSTED", "UNCHANGED_INVALID_REPAIR", "INVALID_REPAIR_SYNTAX", "CHAT_NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN", "API_REVISION_MISMATCH", "SERVER_SETUP_REQUIRED", "MODEL_CALL_BUDGET_EXHAUSTED", "MCP_REGISTRATION_TIMEOUT", "MCP_REGISTRATION_REJECTED", "MODEL_OUTPUT_TRUNCATED"] as const;
-const kinds = ["extract", "extract_episode", "episode", "relationship_projection", "project_relationship", "story_consolidation", "initial_calibration", "embed", "social_knowledge", "social_backfill", "quiz", "audit_retry", "ledger_consistency", "memory_group", "memory_addition"];
+const codes = [...Object.keys(SETTINGS_FAILURE_GUIDANCE), ...Object.keys(CONNECTION_FAILURE_LABELS), ...RISU_AUXILIARY_FAILURE_CODES, "REQUEST_FAILED", "REPAIR_BUDGET_EXHAUSTED", "UNCHANGED_INVALID_REPAIR", "INVALID_REPAIR_SYNTAX", "CHAT_NOT_FOUND", "UNAUTHORIZED", "FORBIDDEN", "API_REVISION_MISMATCH", "SERVER_SETUP_REQUIRED", "MODEL_CALL_BUDGET_EXHAUSTED", "MCP_REGISTRATION_TIMEOUT", "MCP_REGISTRATION_REJECTED", "MODEL_OUTPUT_TRUNCATED", "REPLAY_BLOCKED"] as const;
+const replayCheckLabels = {
+  other_chat: "다른 채팅",
+  epoch_changed: "기억 세대 변경",
+  no_source_head: "원문 상태 확인 없음",
+  source_repair: "전체 원문 보완 필요",
+  turn_changed: "요청 턴 변경",
+  source_changed: "원문 변경",
+  settings_changed: "전달 설정 변경",
+  packet_changed: "기억 패킷 불일치",
+  no_prepared: "직전 준비 결과 없음",
+  empty_unverified: "빈 기억 패킷 확인 실패",
+} as const;
+export type ReplayCheck = keyof typeof replayCheckLabels;
+const kinds = ["extract", "extract_episode", "episode", "relationship_projection", "project_relationship", "story_consolidation", "initial_calibration", "embed", "social_knowledge", "social_backfill", "quiz", "audit_retry", "ledger_consistency", "memory_group", "memory_addition", ...Object.keys(replayCheckLabels)];
 const purposes = ["extraction", "initial_calibration", "audit", "reconciliation", "state_response", "ledger_consistency", "relationship_projection", "story_consolidation", "episode_draft", "episode_finalize", "quiz", "memory_group"];
 export type SupportStage = typeof stages[number];
 export interface SupportDiagnostic { stage: SupportStage; code: string; httpStatus?: number; attempt?: number; kind?: string; target?: string; purpose?: string; risuCall?: RisuAuxiliaryCallDiagnostic; }
@@ -32,10 +45,12 @@ export function shareDiagnostic(value: unknown): SupportDiagnostic | undefined {
 export function diagnosticReason(diagnostic?: SupportDiagnostic): string {
   if (!diagnostic) return "";
   const targets: Record<string, string> = { server: "서버", risu: "Risu", mcp: "MCP", voyage: "Voyage" };
-  const labels: Record<string, string> = { REQUEST_FAILED: "요청 실패", AUXILIARY_AUTH_FAILED: RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, AUXILIARY_PROVIDER_REJECTED: "보조 모델 요청 거절", AUXILIARY_MODEL_TIMEOUT: "보조 모델 시간 초과", AUXILIARY_STREAM_UNREADABLE: "보조 모델 스트림 읽기 실패", REPAIR_BUDGET_EXHAUSTED: "보완 횟수 소진", UNCHANGED_INVALID_REPAIR: "보완 후에도 응답이 유효하지 않음", INVALID_REPAIR_SYNTAX: "보완 응답 형식 오류", CHAT_NOT_FOUND: "채팅을 찾을 수 없음", UNAUTHORIZED: "인증 실패", FORBIDDEN: "접근 권한 없음", API_REVISION_MISMATCH: "서버·플러그인 API 버전 불일치", SERVER_SETUP_REQUIRED: "서버 연결 설정 필요", MODEL_CALL_BUDGET_EXHAUSTED: "모델 호출 예산 소진", MODEL_CONNECTION_FAILED: "모델 연결 실패", MCP_REGISTRATION_TIMEOUT: "도구 등록 시간 초과", MCP_REGISTRATION_REJECTED: "도구 등록 거절", MODEL_OUTPUT_TRUNCATED: MODEL_OUTPUT_TRUNCATED_MESSAGE, ABORTED_OR_TIMEOUT: "중단 또는 시간 초과", VALIDATION_FAILED: "형식 검증 실패", UNKNOWN_ERROR: "분류되지 않은 오류" };
+  const labels: Record<string, string> = { REPLAY_BLOCKED: "다시 보낸 요청의 기억 확인 실패", REQUEST_FAILED: "요청 실패", AUXILIARY_AUTH_FAILED: RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, AUXILIARY_PROVIDER_REJECTED: "보조 모델 요청 거절", AUXILIARY_MODEL_TIMEOUT: "보조 모델 시간 초과", AUXILIARY_STREAM_UNREADABLE: "보조 모델 스트림 읽기 실패", REPAIR_BUDGET_EXHAUSTED: "보완 횟수 소진", UNCHANGED_INVALID_REPAIR: "보완 후에도 응답이 유효하지 않음", INVALID_REPAIR_SYNTAX: "보완 응답 형식 오류", CHAT_NOT_FOUND: "채팅을 찾을 수 없음", UNAUTHORIZED: "인증 실패", FORBIDDEN: "접근 권한 없음", API_REVISION_MISMATCH: "서버·플러그인 API 버전 불일치", SERVER_SETUP_REQUIRED: "서버 연결 설정 필요", MODEL_CALL_BUDGET_EXHAUSTED: "모델 호출 예산 소진", MODEL_CONNECTION_FAILED: "모델 연결 실패", MCP_REGISTRATION_TIMEOUT: "도구 등록 시간 초과", MCP_REGISTRATION_REJECTED: "도구 등록 거절", MODEL_OUTPUT_TRUNCATED: MODEL_OUTPUT_TRUNCATED_MESSAGE, ABORTED_OR_TIMEOUT: "중단 또는 시간 초과", VALIDATION_FAILED: "형식 검증 실패", UNKNOWN_ERROR: "분류되지 않은 오류" };
   const reason = diagnostic.code in CONNECTION_FAILURE_LABELS ? connectionFailureReason(diagnostic.code, diagnostic.httpStatus)
     : (settingsFailureCode({code: diagnostic.code}) ? settingsFailureMessage({code: diagnostic.code}) : labels[diagnostic.code] ?? labels.UNKNOWN_ERROR) + (diagnostic.httpStatus ? ` · HTTP ${diagnostic.httpStatus}` : "");
-  return [diagnostic.target ? targets[diagnostic.target] : "", reason, diagnostic.risuCall ? JSON.stringify(projectRisuAuxiliaryCallDiagnostic(diagnostic.risuCall)) : ""].filter(Boolean).join(" · ");
+  return [diagnostic.target ? targets[diagnostic.target] : "", reason,
+    diagnostic.code === "REPLAY_BLOCKED" && diagnostic.kind ? replayCheckLabels[diagnostic.kind as ReplayCheck] : "",
+    diagnostic.risuCall ? JSON.stringify(projectRisuAuxiliaryCallDiagnostic(diagnostic.risuCall)) : ""].filter(Boolean).join(" · ");
 }
 export const supportTime = (value: unknown) => integer(value, 0, 8_640_000_000_000_000);
 

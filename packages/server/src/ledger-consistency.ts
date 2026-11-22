@@ -1,3 +1,4 @@
+import { inheritNowDelivery } from './now-delivery.js';
 import { assertChatUnlocked } from './upgrade-lock.js';
 import { assertUpgradeJobWritable } from './upgrade-lock.js';
 import { assertUpgradeJobSource, refreshUpgradeRun } from './upgrade-run.js';
@@ -256,6 +257,7 @@ export function completeLedgerConsistencyJob(db: RcmDatabase, job: LeasedJob, wo
         if(!current || !canAutomaticallyChange(db,job.chatId,current,replacement.evidenceMessageIds.map(messageId=>({messageId})))) {
           warnings.push(`Skipped protected final ledger closure in ${decision.itemRef}`); continue;
         }
+        inheritNowDelivery(db,group.kind === 'world_fact' ? 'assertions' : 'beliefs',replacement.id,[current]);
         seen.add(target.id);
         const closureEvidence=transitionEvidenceJson(db,job.chatId,replacement.evidenceMessageIds.map(messageId=>({messageId})),{successorId:replacement.id});
         if (group.kind === "world_fact") db.prepare(`UPDATE assertions SET valid_to_revision=?,valid_to_ordinal=?,automatic_closure_evidence_json=?

@@ -437,7 +437,7 @@ export class ServerClient {
 
   async lease(workerId: string, modelSettingsFingerprint?:string): Promise<LeasedJob | null> {
     const result = await this.request<{ job: LeasedJob | null }>("/v1/jobs/lease", {
-      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled, capabilities:{stateExtractionV2:true,stateWritingFormat:true,eventWritingFormat:true,eventWritingFormatE1e:true,eventWritingFormatE1f:true,stateWritingFormatR10:true,stateWritingFormatR11:true} }),
+      method: "POST", body: JSON.stringify({ workerId, modelSettingsFingerprint, chatEnabled: this.settings().chatEnabled, characterEnabled: this.settings().characterEnabled, defaultChatEnabled: this.settings().defaultChatEnabled, capabilities:{stateExtractionV2:true,stateWritingFormat:true,eventWritingFormat:true,eventWritingFormatE1e:true,eventWritingFormatE1f:true,stateWritingFormatR10:true,stateWritingFormatR11:true,canonicalTranslation:true} }),
     }, JOB_LEASE_TIMEOUT_MS);
     return result.job;
   }

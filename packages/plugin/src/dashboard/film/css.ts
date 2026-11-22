@@ -1532,6 +1532,8 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .now-chips::-webkit-scrollbar { display: none; }
 .now-chip { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 30px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 15px; font-size: var(--t-small); color: var(--ink-2); }
 .now-chip__ic { display: none; }
+.now-chip[data-kind="always"] .now-chip__ic { display: inline-flex; }
+.now-chip[data-kind="always"] .now-chip__ic .i { width: 13px; height: 13px; }
 .now-chip .n { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .now-chip[aria-pressed="true"] { border-color: var(--tungsten); color: var(--ink); background: var(--tungsten-dim); }
 .now-chip.is-empty { opacity: .55; }
@@ -1549,6 +1551,7 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .nr__what { grid-column: 1; display: grid; gap: 2px; min-width: 0; text-align: left; color: inherit; }
 .nr__what:hover .nr__t { color: var(--accent-text); }
 .nr__k { font-size: var(--t-small); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nr__delivery { margin-right: 6px; color: var(--tungsten); }
 .nr__kind { font-weight: 600; color: var(--ink-2); }
 .nr__t { font-size: var(--t-ui); line-height: 1.55; color: var(--ink); max-width: 44em; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .nr__m { display: flex; flex-wrap: wrap; align-items: center; column-gap: .3em; grid-column: 1; font-size: var(--t-small); color: var(--ink-3); }
@@ -2191,4 +2194,10 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .retry-delete-list li:first-child { border-top: 0; }
 .retry-delete-list span { flex: none; color: var(--ink-3); font-size: var(--t-micro); }
 .retry-delete-list b { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 400; }
+
+/* Approved language warning shares cut tokens in both skins. */
+.row__slug:has(> .canonical-mixed) { flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: var(--s1) var(--s2); }
+.canonical-mixed { display: inline-flex; align-items: center; align-self: start; flex: none; width: max-content; justify-self: start; padding: 0 var(--s2); border-radius: 999px; background: var(--cut); color: var(--cut-ink); font-size: var(--t-micro); line-height: 1.5; font-weight: 600; white-space: nowrap; }
+.canonical-confirm { margin: var(--s4) 0; padding-left: var(--s5); color: var(--ink-2); line-height: 1.8; }
+.canonical-sel { background: var(--house); }
 `;

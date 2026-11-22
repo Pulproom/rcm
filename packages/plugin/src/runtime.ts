@@ -1,5 +1,5 @@
 import { consumeIncidentFeed } from './toasts.js';
-import { supportFailure } from "./support-diagnostics.js";
+import { supportFailure, type ReplayCheck } from "./support-diagnostics.js";
 import { loadPrepareFailures, recordPrepareFailure } from "./prepare-diagnostics.js";
 import { captureSetupRequest, discardSetupCapture, observeSetupAttention, completeSetupAttentionTurn } from "./setup-sources.js";
 declare const __RCM_DISTRIBUTION__: boolean;
@@ -18,6 +18,7 @@ import { observeProviderRequest } from "./provider-observation.js";
 import { finishTiming, startTiming } from "./timing.js";
 import { syncQuizEnabled } from "./quiz-sync.js";
 import { summarizeInjectedScenes } from "./turn-delivery.js";
+import { createBtwMemoryBridge } from "./btw-memory.js";
 
 const emptyInjectionManifest = (source: "fresh" | "reused" | "fallback" | "empty") => ({
   source, perspectives: [], memoryIds: [], detailIds: [], atomKeys: [], storySpineNodeIds: [], relationshipPairs: [], beliefIds: [], assertionIds: [], promiseIds: [], intimacyMilestoneIds: [],
@@ -74,6 +75,7 @@ async function persistCache(state: RuntimeState): Promise<void> {
 
 export const MISSING_RCM_MARKER_MESSAGE = "RCM이 이 채팅에서 켜져 있지만 최종 프롬프트에서 [[RCM]] 위치 표식을 찾지 못했어요. 프리셋에 장기기억 블록이 있는지 확인해 주세요. 수동 프리셋은 [[RCM]] 위치를 확인해 주세요.";
 export const MEMORY_INJECTION_BLOCKED_MESSAGE = "RCM 기억을 준비하거나 최종 프롬프트에 넣지 못해 모델 요청을 차단했어요. 메인 모델 요청은 전송하지 않았어요. 서버 연결과 RCM 상태를 확인한 뒤 다시 보내 주세요.";
+export const MEMORY_REPLAY_BLOCKED_MESSAGE = "앞선 모델 요청이 실패해서(예: 429 요청 한도) 리스가 같은 요청을 다시 보냈는데, 그 안의 기억을 다시 확인하지 못해 멈췄어요. 원래 오류는 모델 요청 로그에서 확인하고, 잠시 뒤 다시 보내 주세요.";
 export const RCM_INITIALIZING_MESSAGE = "RCM이 아직 초기화 중이어서 모델 요청을 차단했어요. 잠시 후 다시 보내 주세요.";
 
 export class MissingRcmMarkerError extends Error {
@@ -167,8 +169,8 @@ async function traceObservedProviderRequest(state: RuntimeState, client: ServerC
 }
 
 export class MemoryInjectionBlockedError extends Error {
-  constructor(detail?: string) {
-    super(detail ? `${MEMORY_INJECTION_BLOCKED_MESSAGE} (${detail})` : MEMORY_INJECTION_BLOCKED_MESSAGE);
+  constructor(detail?: string, message = MEMORY_INJECTION_BLOCKED_MESSAGE) {
+    super(detail ? `${message} (${detail})` : message);
     this.name = "MemoryInjectionBlockedError";
   }
 }
@@ -240,16 +242,22 @@ function isIntentionalEmptyPrepare(response: TurnPrepareResponse | undefined): b
     && (response.omissionReason === "no_memories" || response.omissionReason === "no_relevance");
 }
 
-function isPreparedContextRetry(state: RuntimeState, chatId: string, contexts: string[]): boolean {
+function preparedDeliverySettingsMatch(state: RuntimeState, prepared: NonNullable<RuntimeState["automaticTurnPacket"]>): boolean {
+  const chatId = prepared.chatId;
+  return (prepared.upcomingOccasions ?? true) === (state.settings.upcomingOccasions[chatId] ?? true)
+    && (prepared.pairProgress ?? false) === (state.settings.pairProgress[chatId] ?? false)
+    && (prepared.memoryOnlyInjection ?? false) === (state.settings.memoryOnlyInjection[chatId] ?? false)
+    && prepared.narrationViewpoint === (state.settings.narrationViewpoint[chatId] || undefined);
+}
+
+function preparedContextRetryFailure(state: RuntimeState, chatId: string, contexts: string[]): ReplayCheck | undefined {
   const prepared = state.automaticTurnPacket;
   const injection = state.lastInjection;
-  if (!prepared || prepared.chatId !== chatId || !injection || injection.chatId !== chatId
-    || (prepared.upcomingOccasions ?? true) !== (state.settings.upcomingOccasions[chatId] ?? true)
-    || (prepared.pairProgress ?? false) !== (state.settings.pairProgress[chatId] ?? false)
-    || (prepared.memoryOnlyInjection ?? false) !== (state.settings.memoryOnlyInjection[chatId] ?? false)
-    || prepared.narrationViewpoint !== (state.settings.narrationViewpoint[chatId] || undefined)
-    || injection.turnKey !== prepared.turnKey || injection.omitted || contexts.length !== 1) return false;
-  return contexts[0]!.trim() === injection.packet.trim();
+  if (!prepared || !injection) return "no_prepared";
+  if (prepared.chatId !== chatId || injection.chatId !== chatId) return "other_chat";
+  if (!preparedDeliverySettingsMatch(state, prepared)) return "settings_changed";
+  if (injection.turnKey !== prepared.turnKey) return "turn_changed";
+  if (injection.omitted || contexts.length !== 1 || contexts[0]!.trim() !== injection.packet.trim()) return "packet_changed";
 }
 
 function reuseExistingContext(state: RuntimeState, client: ServerClient, messages: OpenAIChat[], chatId: string, characterId: string): OpenAIChat[] {
@@ -352,9 +360,12 @@ export async function createRuntime(): Promise<{ state: RuntimeState; client: Se
 
 export function installRequestHooks(state: RuntimeState, client: ServerClient): Promise<void[]> {
   const hasCommittedOutputListener = typeof risuai.addRisuChatListener === "function";
+  const btw = (typeof __RCM_DISTRIBUTION__ === "undefined" || !__RCM_DISTRIBUTION__) && hasCommittedOutputListener
+    ? createBtwMemoryBridge(state) : undefined;
   // A tail prepare cannot repair an off-tail edit without its message body.
   const fullSourceNextPrepare = new Set<string>();
   return Promise.all([
+    ...(btw ? [btw.install()] : []),
     ...(typeof risuai.onUnload === "function" ? [risuai.onUnload(() => {
       state.unloaded = true;
       state.mainRequest?.cancel();
@@ -378,6 +389,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
       if (type !== "model") return messages;
       if (state.unloaded) throw new MemoryInjectionBlockedError("plugin unloaded");
       if (isInternalModelRequest(state, messages)) return messages;
+      if (btw?.ownsRequest(messages)) return messages;
       const originalPrompt = messages;
 
       state.mainRequest?.cancel();
@@ -560,6 +572,10 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         // the live lock. Retry-only prompts cannot send a source snapshot.
         const head = !staleLookup && preflight && "head" in preflight ? preflight.head
           : ((staleLookup || !freshPrompt) && needsSourceHead(currentChatId) ? await readSourceHead(currentChatId) : undefined);
+        // Keep the retry identity/cause before epoch invalidation clears its state.
+        const retryPrepared = state.automaticTurnPacket;
+        const retryInjection = state.lastInjection;
+        let epochChanged = false;
         if (head) {
           if (head.upgradeLock) {
             state.upgradeBlocked = {chatId:currentChatId,lock:head.upgradeLock};
@@ -570,6 +586,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           const prepared=state.automaticTurnPacket?.chatId===currentChatId ? state.automaticTurnPacket : undefined;
           if (prepared && (prepared.response.memoryEpoch ?? '')!==epoch
             || state.cache[currentChatId] && (state.cache[currentChatId]!.memoryEpoch ?? '')!==epoch) {
+            epochChanged = true;
             state.automaticTurnPacket=undefined;
             state.lastInjection=undefined;
             delete state.cache[currentChatId];
@@ -581,6 +598,13 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         const knownRetryChatId = prepared?.chatId;
         const verifiedRetry = head && !repairSources && prepared?.chatId === currentChatId && prepared.referenceTurnKey === state.mcpTurnKey && prepared.sourceInputs
           && sameMessageSourceInputs(prepared.sourceInputs, hostSnapshot.chat) ? prepared : undefined;
+        const retryFailure: ReplayCheck | undefined = retryPrepared && retryPrepared.chatId !== currentChatId ? "other_chat"
+          : epochChanged ? "epoch_changed" : !prepared ? "no_prepared" : !head ? "no_source_head" : repairSources ? "source_repair"
+          : prepared.referenceTurnKey !== state.mcpTurnKey ? "turn_changed" : !verifiedRetry ? "source_changed" : undefined;
+        const blockReplay: (check: ReplayCheck) => never = (check) => {
+          addLog(state.logs, "warn", `Blocked replayed memory request (${check})`, supportFailure("before_request", { code: "REPLAY_BLOCKED" }, { kind: check }));
+          throw new MemoryInjectionBlockedError(undefined, MEMORY_REPLAY_BLOCKED_MESSAGE);
+        };
         if (knownRetryChatId === currentChatId) {
           const projectionStartedAt = performance.now();
           const retrySetup = await resolvedSetupProjection(messages);
@@ -590,9 +614,10 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           captureSetupRequest(state, knownRetryChatId, retrySetup);
           injectionTimings.setupCaptureMs += performance.now() - captureStartedAt;
         }
+        const contextRetryFailure = retryFailure ?? preparedContextRetryFailure(state, currentChatId, existing.contexts);
         if (existing.contexts.length > 0 && knownRetryChatId) {
           if (verifiedRetry && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)
-            && isPreparedContextRetry(state, knownRetryChatId, existing.contexts)) {
+            && !contextRetryFailure) {
             sourceInputs = verifiedRetry.sourceInputs;
             sourceHashes = verifiedRetry.sourceHashes;
             expectedReferenceTurnKey = verifiedRetry.referenceTurnKey;
@@ -601,34 +626,24 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
             if (state.memoryToolOpportunity?.referenceTurnKey === verifiedRetry.referenceTurnKey) state.memoryToolOpportunity.requestId = generationId;
             return reuseExistingContext(state, client, messages, knownRetryChatId, characterId);
           }
-          if (currentChatId === knownRetryChatId && isChatMemoryEnabled(state.settings, knownRetryChatId, characterId)) {
-            throw new MemoryInjectionBlockedError("stale or unverified existing memory context");
-          }
-          throw new MemoryInjectionBlockedError("existing memory context belongs to another chat");
+          blockReplay(contextRetryFailure ?? "packet_changed");
         }
-        const preparedEmptyRetry = knownRetryChatId
+        const preparedEmptyRetry = retryPrepared
           && !existing.hasMarker
-          && state.lastInjection?.turnKey === state.automaticTurnPacket?.turnKey
-          && state.lastInjection?.omitted === true
-          && (state.automaticTurnPacket?.upcomingOccasions ?? true) === (state.settings.upcomingOccasions[knownRetryChatId] ?? true)
-          && (state.automaticTurnPacket?.pairProgress ?? false) === (state.settings.pairProgress[knownRetryChatId] ?? false)
-          && (state.automaticTurnPacket?.memoryOnlyInjection ?? false) === (state.settings.memoryOnlyInjection[knownRetryChatId] ?? false)
-          && state.automaticTurnPacket?.narrationViewpoint === (state.settings.narrationViewpoint[knownRetryChatId] || undefined)
-          && isIntentionalEmptyPrepare(state.automaticTurnPacket?.response);
+          && isIntentionalEmptyPrepare(retryPrepared.response);
         if (preparedEmptyRetry) {
-          if (currentChatId !== knownRetryChatId) {
-            throw new MemoryInjectionBlockedError("empty retry belongs to another chat");
-          }
-          if (!verifiedRetry) throw new MemoryInjectionBlockedError("stale or unverified empty packet");
+          if (retryFailure) blockReplay(retryFailure);
+          if (!preparedDeliverySettingsMatch(state, retryPrepared)) blockReplay("settings_changed");
+          if (!verifiedRetry || retryInjection?.turnKey !== retryPrepared.turnKey || retryInjection.omitted !== true) blockReplay("empty_unverified");
           sourceInputs = verifiedRetry.sourceInputs;
           sourceHashes = verifiedRetry.sourceHashes;
           expectedReferenceTurnKey = verifiedRetry.referenceTurnKey;
           await assertCurrentRequest("before_apply");
           assertDeliveryOwner();
           if (state.memoryToolOpportunity?.referenceTurnKey === verifiedRetry.referenceTurnKey) state.memoryToolOpportunity.requestId = generationId;
-          state.lastPromptValidation = { chatId: knownRetryChatId, status: "existing_context", at: Date.now() };
+          state.lastPromptValidation = { chatId: currentChatId, status: "existing_context", at: Date.now() };
           state.activeModelRequest = {
-            chatId: knownRetryChatId, characterId, requestId: generationId, turnKey: verifiedRetry.turnKey,
+            chatId: currentChatId, characterId, requestId: generationId, turnKey: verifiedRetry.turnKey,
             referenceTurnKey: verifiedRetry.referenceTurnKey, latestMessageId: verifiedRetry.latestMessageId,
             promptSourceMessageIds: verifiedRetry.promptSourceMessageIds, mcpRequestTimeoutMs: verifiedRetry.response.mcpRequestTimeoutMs,
           };
@@ -641,7 +656,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         // registers only the functions that have safe, unseen atoms this turn.
         if (!freshPrompt) await removeMemoryTools();
         if (existing.contexts.length > 0) {
-          throw new MemoryInjectionBlockedError("stale or unverified existing memory context");
+          blockReplay(contextRetryFailure ?? "packet_changed");
         }
         if (!existing.hasMarker) {
           state.lastPromptValidation = { chatId: currentChatId, status: "marker_missing", at: Date.now() };
@@ -1075,12 +1090,19 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         throw new MemoryInjectionBlockedError(String(error).replace(/\s+/g, " ").slice(0, 240));
       }
       };
-      try { return await Promise.race([execute(), cancelled]); }
+      try {
+        const prompt = await Promise.race([execute(), cancelled]);
+        if (state.mainRequest === request && !request.signal.aborted) btw?.record(generationId, request.signal);
+        return prompt;
+      }
       catch (error) { endMainGeneration(state, generationId); throw error; }
       finally { request.preparing = false; }
     }),
     risuai.addRisuReplacer("afterRequest", async (content, type) => {
       if (state.unloaded) return content;
+      // The host's afterRequest has no originating request ID. The committed
+      // chat output listener identifies RP replies while a BTW request is open.
+      if (type === "model" && btw?.hasModelRequest()) return content;
       if (type === "model" && !state.mainRequest?.preparing) {
         // Provider Manager marks a standard unregister as missing. Restore the
         // full discovery definition only after the request has finished; the
@@ -1161,6 +1183,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
           // Streaming hosts may emit only committed-output, without afterRequest.
           const activeRequest = state.activeModelRequest;
           if (activeRequest?.chatId === chatId && (!activeRequest.requestId || activeRequest.requestId === requestId)) {
+            btw?.commit(requestId, chatId, output, activeRequest.packet);
             state.activeModelRequest = undefined;
             void traceObservedProviderRequest(state, client, activeRequest, Date.now());
             state.retryCounts = {};

@@ -1,3 +1,4 @@
+import { inheritNowDelivery } from './now-delivery.js';
 import { assertChatUnlocked } from './upgrade-lock.js';
 import { readMemoryPreferenceFields } from './memory-bookmarks.js';
 import { appendJobStateDrops } from "./jobs.js";
@@ -547,6 +548,8 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
     const resolveIdentity = buildEntityIdentityResolver(db, chatId);
     const canonicalNames = new Set(listEntities(db, chatId).map(entity => entity.name));
     const memoryByKey = new Map<string, string>();
+    const stateMemoryId = (key:string|undefined):string|null => key ? memoryByKey.get(key)
+      ?? (db.prepare('SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1').get(chatId,key) as {id:string}|undefined)?.id ?? null : null;
     const detailByKey = new Map<string, string>();
     for (const memory of result.memories) {
       const sourceBatchId = batchFor([...memory.evidence, ...(memory.details ?? []).flatMap(detail => detail.evidence), ...(memory.keyDialogues ?? []).flatMap(dialogue => dialogue.evidence)]);
@@ -787,7 +790,10 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         .map((id) => activeAssertions.find((row) => row.id === id && sameSocialRelationScope(row.social_relation_json, assertion.socialRelation)))
         .filter((row): row is typeof activeAssertions[number] => Boolean(row));
       const protectedTargets = (requestedTargets.length ? requestedTargets : matchingCurrent).filter(row => !canAutomaticallyChange(db,chatId,row,assertion.evidence));
-      const compatible = compatibleIndependentAssertion({create:assertion.changeType==="initial",targetIds:assertion.targetAssertionIds ?? [],compatibleWithIds:assertion.compatibleWithIds,protectedIds:protectedTargets.map(row=>String(row.id)),candidateIds:activeAssertions.filter(row=>sameSocialRelationScope(row.social_relation_json,assertion.socialRelation)).map(row=>String(row.id))});
+      // Explicit keep-separate confirms coexistence with all current rows in
+      // this scope, including rows absent from the saved review candidates.
+      const coexistenceRequired=userInitiated ? matchingCurrent : protectedTargets;
+      const compatible = compatibleIndependentAssertion({create:assertion.changeType==="initial",targetIds:assertion.targetAssertionIds ?? [],compatibleWithIds:assertion.compatibleWithIds,protectedIds:coexistenceRequired.map(row=>String(row.id)),candidateIds:activeAssertions.filter(row=>sameSocialRelationScope(row.social_relation_json,assertion.socialRelation)).map(row=>String(row.id))});
       if (!userInitiated && protectedTargets.length && !compatible) {
         db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
           .run(randomUUID(),chatId,"assertion_auto_protected",JSON.stringify(protectedTargets),JSON.stringify(assertion),revision,timestamp);
@@ -798,8 +804,9 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       // with a paraphrase. Supersede maps to update and still creates a successor.
       const transitionTargets = requestedTargets.filter(row => assertion.changeType !== "initial" || !assertion.compatibleWithIds?.includes(row.id));
       const targetedReinforcement = assertion.changeType === "initial" && transitionTargets.length > 0;
+      const explicitSeparate = current && assertion.changeType==='initial' && !requestedTargets.length && assertion.compatibleWithIds?.includes(current.id);
       const reinforcementTargets = targetedReinforcement ? transitionTargets
-        : current && assertion.changeType === "initial" && current.state_kind === stateKind && normalizeLedgerText(current.value) === normalizeLedgerText(assertion.value) ? [current] : [];
+        : current && !explicitSeparate && assertion.changeType === "initial" && current.state_kind === stateKind && normalizeLedgerText(current.value) === normalizeLedgerText(assertion.value) ? [current] : [];
       if (reinforcementTargets.length) {
         for (const reinforced of reinforcementTargets) {
           if (compatible && !canAutomaticallyChange(db,chatId,reinforced,assertion.evidence)) continue;
@@ -812,7 +819,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       }
       const changeType = assertion.changeType;
       const allowsConcurrentValues = stateKind === "goal" || stateKind === "secret";
-      if (current && changeType === "initial" && !allowsConcurrentValues && !compatible) {
+      if (current && changeType === "initial" && !allowsConcurrentValues && !compatible && !explicitSeparate) {
         db.prepare(`
           INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at)
           VALUES(?,?,?,?,?,?,?)
@@ -840,7 +847,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         validFromOrdinal === null ? null : Math.max(0, validFromOrdinal - 1),
         userInitiated ? null : transitionEvidenceJson(db,chatId,assertion.evidence,{successorId:insertedAssertionId}), target.id,
       );
-      const sourceMemoryId = assertion.validFromMemoryKey ? memoryByKey.get(assertion.validFromMemoryKey) ?? null : null;
+      const sourceMemoryId = stateMemoryId(assertion.validFromMemoryKey);
       db.prepare(`
         INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,source_batch_id,created_at,social_relation_json,linked_detail_ids_json)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -848,6 +855,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         insertedAssertionId, chatId, assertion.subject, assertion.predicate, assertion.value, stateKind, assertion.confidence,
         revision, validFromOrdinal, sourceMemoryId, JSON.stringify(transitionSourceEvidence(db,chatId,assertion.evidence)), assertion.retention ?? "arc", sourceBatchId ?? null, timestamp, socialRelation, JSON.stringify(linkedDetailIds) ?? null,
       );
+      inheritNowDelivery(db,'assertions',insertedAssertionId,assertionsToClose);
       saveOwnerAccess(insertedAssertionId);
     }
 
@@ -883,7 +891,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
           .run(randomUUID(),chatId,"belief_auto_protected",JSON.stringify(protectedTargets),JSON.stringify(belief),revision,timestamp);
         continue;
       }
-      if (belief.action !== "reinforce" && existing && normalizeLedgerText(existing.value) === normalizeLedgerText(belief.value) && existing.polarity === belief.polarity) {
+      if (belief.action !== "reinforce" && belief.action !== "coexist" && existing && normalizeLedgerText(existing.value) === normalizeLedgerText(belief.value) && existing.polarity === belief.polarity) {
         const evidence = mergeStateEvidence(existing.evidence_json, belief.evidence);
         db.prepare("UPDATE beliefs SET predicate=?,confidence=MAX(confidence,?),evidence_json=?,linked_detail_ids_json=COALESCE(?,linked_detail_ids_json) WHERE id=?").run(belief.predicate, belief.confidence, JSON.stringify(evidence), JSON.stringify(linkedDetailIds) ?? null, existing.id);
         saveOwnerAccess(existing.id);
@@ -927,6 +935,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         insertedId, chatId, belief.holder, belief.subject, belief.predicate, belief.value, belief.polarity,
         belief.confidence, belief.source ?? null, JSON.stringify(belief.evidence), status, belief.retention ?? "arc", sourceBatchId ?? null, revision, beliefOrdinal, timestamp, JSON.stringify(linkedDetailIds) ?? null,
       );
+      if (belief.action === 'supersede' && target) inheritNowDelivery(db,'beliefs',insertedId,requestedTargets.length ? requestedTargets : [target]);
       saveOwnerAccess(insertedId);
     }
 
@@ -1054,7 +1063,7 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
         ? (previousSupport.holders.length ? previousSupport.holders : [PENDING_ACCESS_HOLDER]).map(holder=>({holder,basis:'internal',evidence:promise.evidence ?? [],confidence:1}))
         : existingPromise ? savedAccess
         : [promise.promisor,promise.promisee].map(holder=>({holder,basis:'experienced',evidence:promise.evidence ?? [],confidence:1})));
-      const sourceMemoryId = promise.memoryKey ? memoryByKey.get(promise.memoryKey) ?? null : null;
+      const sourceMemoryId = stateMemoryId(promise.memoryKey);
       // Revoked automatic content is not a baseline for a fresh establishment.
       // User corrections and locks remain protected by the gate above.
       const reestablishes = existingPromise?.status === "invalidated" && existingPromise.user_edit_ordinal == null && !existingPromise.auto_locked;

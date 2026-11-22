@@ -19,7 +19,7 @@ ${updateUrl ? `//@update-url ${updateUrl}\n` : ""}//@api 3.0
 //@arg server_url string Server URL
 //@arg hidden_server_token string
 //@arg default_profile string Default profile (companion or simulation)
-//@allowed-ipc provider-manager${distribution ? "" : " hush27_mask_local_tools"}
+//@allowed-ipc provider-manager${distribution ? "" : " hush27_mask_local_tools risu_btw_plugin"}
 //@permission replacer
 //@permission network
 //@permission llm

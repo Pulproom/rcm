@@ -4,6 +4,7 @@ import { ModelContentValidationError } from "@rcm/shared";
 import { prepareProgress, validateProgressPatches, type ProgressDrop } from "./pair-progress.js";
 import { ROLEPLAY_ARCHIVE_FRAMING, MEMORY_ADDITION_GUIDANCE, memoryAdditionUserNote } from "@rcm/shared";
 import { canAutomaticallyChange } from "./user-corrections.js";
+import { stateCandidateValue } from './now-delivery.js';
 import { createHash } from "node:crypto";
 import { estimateTokens, measureAuxiliaryPrompt, mergeStateExtraction,
   StateExtractionSchema, StateObservationSchema, ReconciliationDecisionSchema, ExtractedSocialRelationSchema,
@@ -43,10 +44,10 @@ export function prepareStateExtraction(db: RcmDatabase, chatId: string, sourceId
   for(const {subject} of ledgerSubjects)if(subject && sourceText.includes(subject.toLocaleLowerCase()))names.add(subject);
   const nameSet = new Set([...names].map(n => n.toLocaleLowerCase()));
   const relevant = (r: Record<string, any>) => [r.subject,r.holder,r.promisor,r.promisee,r.from_entity,r.to_entity].some(n => typeof n === "string" && nameSet.has(n.toLocaleLowerCase()));
-  const allFacts = db.prepare("SELECT * FROM assertions WHERE chat_id=? AND valid_to_revision IS NULL").all(chatId) as any[];
-  const allBeliefs = db.prepare("SELECT * FROM beliefs WHERE chat_id=? AND active=1 AND status='active'").all(chatId) as any[];
+  const allFacts = (db.prepare("SELECT * FROM assertions WHERE chat_id=? AND valid_to_revision IS NULL").all(chatId) as any[]).map(stateCandidateValue);
+  const allBeliefs = (db.prepare("SELECT * FROM beliefs WHERE chat_id=? AND active=1 AND status='active'").all(chatId) as any[]).map(stateCandidateValue);
   // Closed promises remain reconciliation candidates (e.g. a repeated old promise must not be recreated).
-  const allPromises = db.prepare("SELECT * FROM promises WHERE chat_id=?").all(chatId) as any[];
+  const allPromises = (db.prepare("SELECT * FROM promises WHERE chat_id=?").all(chatId) as any[]).map(stateCandidateValue);
   const facts=allFacts.filter(relevant),beliefs=allBeliefs.filter(r=>allowsName(r.holder)&&relevant(r)),promises=allPromises.filter(r=>allowsName(r.promisor)&&allowsName(r.promisee)&&relevant(r));
   const ledger = [...facts.map(value=>({id:value.id,kind:"world_fact",immutable:!canAutomaticallyChange(db,chatId,value,sourceIds.map(messageId=>({messageId}))),value})),
     ...beliefs.map(value=>({id:value.id,kind:"character_belief",immutable:!canAutomaticallyChange(db,chatId,value,sourceIds.map(messageId=>({messageId}))),value})),
@@ -202,7 +203,10 @@ function compactPriorEvidence(row: Record<string, any>, level: number, sourceIds
 
 // Owner-approved texts. The first lease fixes which contract is assembled.
 function stateSystemPrompt(language: string, addition: boolean, conditionalInputNotes: string[], contract?: "r10" | "r11"): string {
+  const names: Record<string, string> = { en: "English", ko: "Korean", ja: "Japanese", zh: "Chinese" };
   if (contract === "r10" || contract === "r11") return (contract === "r11" ? R11_SYSTEM : R10_SYSTEM)
+    .replaceAll("in English", `in ${names[language] ?? language}`)
+    .replace(`these fields in ${names[language] ?? language} anyway.`, `these fields in ${names[language] ?? language} anyway.${language === "zh" ? " Preserve the dominant Simplified or Traditional script when Chinese source exists; otherwise use Simplified Chinese." : ""}`)
     .replace("Write state descriptions in ko; keep proper names as in the source.", `Write state descriptions in ${language}; keep proper names as in the source.`)
     .replace("\n\nSTEPS", `${conditionalInputNotes.length ? `\n${conditionalInputNotes.join("\n")}` : ""}\n\nSTEPS`)
     + (addition ? "\nADDITION MODE: Only create/coexist and new commitments are allowed. Never target, change or close saved records or resolve prior seeds." : "");
@@ -795,6 +799,9 @@ You keep the CURRENT STATE of a roleplay story for an author who will continue i
 A state is something still true when the source ends that would make the next scene go wrong if the author did not know it. Missing a state costs more than recording one that later needs ending.
 The owner of a record is the subject of a condition, goal or secret, the believer of a belief, and the promisor and promisee of a promise.
 
+LANGUAGE
+Write every state field in English: values, descriptions, predicate and promise hints, promise content, reasons and notes. When the source is in another language, write these fields in English anyway. Only evidence quotes stay in the source language. Keep proper names as the source writes them.
+
 WHAT YOU RECEIVE
 You see only the fields below. Judge everything from them; nothing else about the story is available to you.
 - sources: the CURRENT SOURCE, as numbered messages split into units. Each unit has a source ref such as "s1". It is the only new evidence. Read all of it, including parts that eventDraft does not cover.
@@ -991,10 +998,13 @@ seedResolutions items:
 - salience: how much the detail will matter later, with 0.5 for ordinary. retention: scene matters only within this scene, arc for the current storyline, durable is likely to remain useful across later story arcs.
 
 9. STORY TIME
-For storyTime, scheduledFor and other story date or time fields:
-- When the source gives a calendar date or time, write YYYY-MM-DD HH:mm; date only: YYYY-MM-DD; a span: YYYY-MM-DD HH:mm ~ HH:mm, or a full end date and time if the day changes.
-- Otherwise keep the source's own wording (such as "late evening", "Year 123", an era or seasonal name).
-- Never invent a date.
+storyTime, scheduledFor and other story date/time fields use exactly one of these forms. Convert the source's format; do not copy it.
+- Date and clock time: YYYY-MM-DD HH:mm, 24-hour. "2026-06-16 (Tue) 06:27 PM" becomes "2026-06-16 18:27".
+- Date with only a part of day: YYYY-MM-DD, followed by a comma and the source's words. "June 7, 2026, in the afternoon" becomes "2026-06-07, afternoon".
+- Date only: YYYY-MM-DD.
+- A span: start ~ end, where the start is a full form above and the end is HH:mm on the same day, or a full date and time if the day changes. Never leave the start time out when the end has one.
+- No calendar date in the source: keep the source's own wording (such as "late evening", "Year 123", an era or seasonal name).
+Never invent a date.
 
-Write state descriptions in ko; keep proper names as in the source.
+
 `;

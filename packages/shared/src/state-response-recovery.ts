@@ -1,6 +1,7 @@
 import { normalizeAuxiliaryResponse } from "./auxiliary-response-shape.js";
 import { AuxiliaryShapeDiagnosticSchema, type AuxiliaryShapeDiagnostic } from "./auxiliary-shape.js";
 import { z } from "zod";
+import { CanonicalLanguageDiagnosticSchema } from './canonical-prose.js';
 import { ModelContentValidationError } from "./structured-repair.js";
 import { StateExtractionSchema } from "./index.js";
 import type { ReconciliationResult } from "./index.js";
@@ -97,8 +98,9 @@ export function stateItemIdentity(list:string,candidate:unknown):string {
   return JSON.stringify([list,canonical(candidate)]);
 }
 export interface StateItemDrop { identity?:string; disposition?:"withheld"|"omitted"; candidate?: unknown; point?: string; path: (string | number)[]; list: string; key?: string; reason: string; cascadeOf?: string }
-export interface StateRecoveryReport { normalizations?:AuxiliaryShapeDiagnostic[]; localFixes: string[]; fieldRepairCalls: number; correctedFields: number; drops: StateItemDrop[]; wholeRepair: boolean; regenerated: boolean }
+export interface StateRecoveryReport { canonicalLanguage?: import('./canonical-prose.js').CanonicalLanguageDiagnostic[]; normalizations?:AuxiliaryShapeDiagnostic[]; localFixes: string[]; fieldRepairCalls: number; correctedFields: number; drops: StateItemDrop[]; wholeRepair: boolean; regenerated: boolean }
 export const StateRecoveryReportSchema = z.object({
+  canonicalLanguage: z.array(CanonicalLanguageDiagnosticSchema).optional(),
   normalizations:z.array(AuxiliaryShapeDiagnosticSchema).optional(),
   localFixes: z.array(z.string()), fieldRepairCalls: z.number().int().min(0).max(1), correctedFields: z.number().int().nonnegative(),
   drops: z.array(z.object({ identity:z.string().optional(),disposition:z.enum(["withheld","omitted"]).optional(), candidate: z.unknown().optional(), point: z.string().optional(), path: z.array(z.union([z.string(), z.number().int().nonnegative()])), list: z.string(), key: z.string().optional(), reason: z.string(), cascadeOf: z.string().optional() })),

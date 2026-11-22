@@ -1,3 +1,4 @@
+import { validateCanonicalTranslation } from '@rcm/shared';
 import { consumeIncidentFeed, incidentCursorQuery, type IncidentFeed } from './toasts.js';
 import { noteHeartbeatResult } from './connection.js';
 import { normalizeAuxiliaryResponse, type AuxiliaryShapeDiagnostic } from "@rcm/shared";
@@ -215,6 +216,18 @@ async function generateQuiz(state: RuntimeState, job: LeasedJob): Promise<unknow
     const repaired = await runModel(state, buildAuxiliaryRepairMessages({ originalMessages: messages, invalidOutput: first, validationError: error, request: { kind: "quiz" } }), "quiz_repair");
     return validateStructuredRepairOrRegenerate({ original: first, repaired, purpose: "quiz", regenerate: () => runModel(state, messages, "quiz"),
       validate: (output, phase) => validate(output, phase === "repair" ? "quiz_repair" : "quiz") });
+  }
+}
+
+async function translateCanonical(state: RuntimeState, job: LeasedJob): Promise<unknown> {
+  const messages = [{ role: 'system', content: job.systemPrompt! }, { role: 'user', content: job.userPrompt! }];
+  const validate = (output: string, purpose: WorkerJsonPurpose) => validateCanonicalTranslation(parseWorkerJson(state, output, purpose), job.canonicalTranslation!.items);
+  const first = await runModel(state, messages, 'canonical_translation');
+  try { return validate(first, 'canonical_translation'); }
+  catch (error) {
+    const repaired = await runModel(state, buildAuxiliaryRepairMessages({ originalMessages: messages, invalidOutput: first,
+      validationError: error, request: { kind: 'canonical_translation' } }), 'canonical_translation_repair');
+    return validate(repaired, 'canonical_translation_repair');
   }
 }
 
@@ -1015,7 +1028,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         const checkpointInput=JSON.stringify([modelSettingsFingerprint,job.modelIdentityEntities,job.promptContract,job.profile,job.memoryLanguage,job.prompt,job.systemPrompt,job.userPrompt,job.sourceUnits,job.sourceMessageIds,job.memoryAddition,job.postExtractionReview,job.relaxAuxiliaryCensorship,job.sourceRecovery,job.sourceRecoveryContext]);
         const extractionHash=await sha256(checkpointInput);
         const cachedExtraction=job.risuStageCheckpoints?.extraction;
-        let result = job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : cachedExtraction?.inputHash===extractionHash ? extractionDraftSchema(job.promptContract).parse(cachedExtraction.result) : await extract(state, job);
+        let result = job.kind === 'canonical_translation' ? await translateCanonical(state, job) : job.kind === 'memory_group' ? await groupMemories(state, job) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode" ? await runEpisode(state, job) : job.kind === "initial_calibration" ? await calibrateInitialSetup(state, job) : job.kind === "relationship_projection" ? await projectRelationships(state, job) : job.kind === "story_consolidation" ? await consolidateStorySpine(state, job) : job.kind === "ledger_consistency" ? await checkLedgerConsistency(state, job) : job.kind === "quiz" ? await generateQuiz(state, job) : cachedExtraction?.inputHash===extractionHash ? extractionDraftSchema(job.promptContract).parse(cachedExtraction.result) : await extract(state, job);
         if(job.kind==='extract' && cachedExtraction?.inputHash!==extractionHash) await client.validatedStage?.(job.id,state.workerId,'extraction',extractionHash,result);
         if (job.kind === "extract" && job.continuationDraft) result = mergeExtractionPages(job.continuationDraft, result as any, job.promptContract);
         const recoveringDialogues = job.kind === "audit_retry" && job.sourceRecovery
@@ -1045,7 +1058,7 @@ export async function drainWorker(state: RuntimeState, client: ServerClient): Pr
         let audit = !incomplete && job.postExtractionReview && reviewable ? cachedAudit?.inputHash===auditHash ? cachedAudit.result as ExtractionAuditSubmission : await auditExtraction(state, job, result) : undefined;
         if(audit?.patch && cachedAudit?.inputHash!==auditHash) await client.validatedStage?.(job.id,state.workerId,'audit',auditHash,audit);
         let reconciliation: ReconciliationSubmission | undefined;
-        if (!incomplete && !emptyAddition && !recoveringDialogues && job.kind !== 'memory_group' && job.kind !== "initial_calibration" && job.kind !== "relationship_projection" && job.kind !== "story_consolidation" && job.kind !== "ledger_consistency" && job.kind !== "quiz") {
+        if (!incomplete && !emptyAddition && !recoveringDialogues && job.kind !== 'canonical_translation' && job.kind !== 'memory_group' && job.kind !== "initial_calibration" && job.kind !== "relationship_projection" && job.kind !== "story_consolidation" && job.kind !== "ledger_consistency" && job.kind !== "quiz") {
           const reconciliationDraft = job.kind === "episode" ? extractionAuditDraftForJob(job, result) : result;
           let prepared = await client.prepareReconciliation(job.id, state.workerId, reconciliationDraft, audit);
           const repairIssues = prepared.evidenceIssues?.filter((issue) => issue.reason !== "access_unverified") ?? [];

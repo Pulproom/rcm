@@ -1,3 +1,4 @@
+import { inheritNowDelivery } from './now-delivery.js';
 import { committedEditOrdinal } from "./user-corrections.js";
 import { randomUUID } from "node:crypto";
 import { ExtractionResultSchema } from "@rcm/shared";
@@ -92,9 +93,9 @@ export function resolveConflict(
     }
     const revision = chat.revision + 1;
     const currentRows = (db.prepare(`
-      SELECT id,predicate,value,state_kind,evidence_json,social_relation_json FROM assertions
+      SELECT id,predicate,value,state_kind,evidence_json,social_relation_json,always_inject FROM assertions
       WHERE chat_id=? AND subject=? AND valid_to_revision IS NULL ORDER BY created_at DESC
-    `).all(chatId, incoming.subject) as Array<{ id: string; predicate: string; value: string; state_kind: string; evidence_json: string; social_relation_json: string | null }>)
+    `).all(chatId, incoming.subject) as Array<{ id: string; predicate: string; value: string; state_kind: string; evidence_json: string; social_relation_json: string | null; always_inject: number }>)
       .filter((row) => normalizeLedgerPredicate(row.predicate) === normalizeLedgerPredicate(incoming.predicate)
         && sameSocialRelationScope(row.social_relation_json, incoming.socialRelation));
     const incomingStateKind = incoming.socialRelation ? "condition" : incoming.stateKind;
@@ -140,6 +141,7 @@ export function resolveConflict(
       `).run(assertionId, chatId, incoming.subject, normalizeLedgerPredicate(incoming.predicate), incoming.value,
         incomingStateKind, incoming.confidence, revision, validFromOrdinal, sourceMemoryId, JSON.stringify(incoming.evidence), incoming.retention ?? "arc", timestamp, socialRelation, JSON.stringify(linkedDetails) ?? null);
     }
+    inheritNowDelivery(db,'assertions',assertionId,[...(current ? [current] : []),...(replacementTarget ? [replacementTarget] : [])]);
     if (linkedDetails) replaceItemAccess(db,chatId,'assertion',assertionId,snapshotKnowledgeGrants(db,chatId,'assertion',assertionId,
       {ids:linkedDetails,holders:linkedDetailKnowledge(db,chatId,linkedDetails) ?? [PENDING_ACCESS_HOLDER]}),revision,timestamp);
     db.prepare("UPDATE assertions SET user_edit_ordinal=? WHERE id=? AND chat_id=?").run(committedEditOrdinal(db,chatId),assertionId,chatId);

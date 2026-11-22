@@ -10,7 +10,7 @@ import { segmentSentences, ROLEPLAY_ARCHIVE_FRAMING } from "@rcm/shared";
 import { EVERYONE_HOLDER, itemAccessKnowledge } from "./item-access.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  STORY_TIME_GUIDANCE, estimateTokens, structuredStoryTimeEnd,
+  STORY_TIME_GUIDANCE, estimateTokens, storedStoryTimeEnd,
   measureAuxiliaryPrompt,
   StorySpineConsolidationResultSchema,
   validateStorySpineConsolidation,
@@ -1497,13 +1497,13 @@ export function createStorySpineCompiler(
   const labelBySupport = new Map(labelRows.map(row => [row.item_id, row]));
   const supportStoryEnd = (supports: string[]): number | undefined => {
     const ends = supports.flatMap(id => {
-      const end = structuredStoryTimeEnd(labelBySupport.get(id)?.story_time ?? undefined);
+      const end = storedStoryTimeEnd(labelBySupport.get(id)?.story_time ?? undefined);
       return end === undefined ? [] : [end];
     });
     return ends.length ? Math.max(...ends) : undefined;
   };
   const recordedEnds = (db.prepare("SELECT story_time FROM memories WHERE chat_id=? AND active=1 AND story_time IS NOT NULL").all(chatId) as Array<{ story_time: string }>)
-    .flatMap(row => { const end = structuredStoryTimeEnd(row.story_time); return end === undefined ? [] : [end]; });
+    .flatMap(row => { const end = storedStoryTimeEnd(row.story_time); return end === undefined ? [] : [end]; });
   const latestRecordedDay = recordedEnds.length ? new Date(Math.max(...recordedEnds)).toISOString().slice(0, 10) : undefined;
   const beatLine = (beat: { text: string; leaves: string[] }): string => {
     const memories = [...new Map(beat.leaves.flatMap(id => {
@@ -1511,8 +1511,8 @@ export function createStorySpineCompiler(
       return row ? [[row.id, row] as const] : [];
     })).values()];
     const spans = memories.flatMap(memory => {
-      const end = structuredStoryTimeEnd(memory.story_time ?? undefined);
-      const start = structuredStoryTimeEnd(memory.story_time?.split(" ~ ")[0]);
+      const end = storedStoryTimeEnd(memory.story_time ?? undefined);
+      const start = storedStoryTimeEnd(memory.story_time?.split(" ~ ")[0]);
       return start === undefined || end === undefined ? [] : [{ start, end }];
     });
     let time = "";

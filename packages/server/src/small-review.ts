@@ -110,6 +110,16 @@ function nameOnlyEvidence(db: RcmDatabase, chatId: string, sources: string[], re
     : []);
 }
 
+/** Freeze exact storage identities rather than hashing again without collision reservations. */
+export function storedReviewParents(db:RcmDatabase,chatId:string,keys:ReadonlyMap<string,string>):Map<string,string> {
+  const parents=new Map<string,string>();
+  for(const [local,canonical] of keys) {
+    const row=db.prepare('SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1').get(chatId,canonical) as {id:string}|undefined;
+    if(row) parents.set(local,row.id);
+  }
+  return parents;
+}
+
 export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: string, sources: string[], draft: ExtractionDraftResult,
   scopeId: string, pendingRefs: string[] = [], explicitParents?: Map<string, string>): number {
   draft = rescueDraftDialogues(db, chatId, sources, draft);
@@ -137,7 +147,7 @@ export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: strin
     return [...new Map(verifiedCitations(rows,[...evidence, ...selected])
       .map(span => [`${span.messageId}:${span.startOffset}:${span.endOffset}`, span])).values()];
   };
-  const parent = (memory: Memory) => explicitParents?.get(memory.key) ?? (db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1")
+  const parent = (memory: Memory) => explicitParents ? explicitParents.get(memory.key) : (db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1")
     .get(chatId, `batch:${scopeId}:${createHash("sha256").update(memory.key).digest("hex")}`) as {id: string} | undefined)?.id;
   const add = (ref: string, candidate: Omit<SmallReviewCandidate, "id" | "status">) => candidates.push({ ...candidate,
     id: createHash("sha256").update(`${jobId}\0${ref}`).digest("hex"), status: "pending" });

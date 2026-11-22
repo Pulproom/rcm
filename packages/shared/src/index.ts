@@ -51,7 +51,7 @@ export { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage 
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 104;
+export const RCM_API_REVISION = 105;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -109,7 +109,7 @@ export {
 } from "./structured-contract-values.js";
 export { buildAuxiliaryRepairMessages, structuredJsonShapeDiagnostic, structuredValidationDiagnostic, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, structuredJsonErrorWindow, type AuxiliaryRepairMessage, type AuxiliaryRepairRequest } from "./structured-repair.js";
 export { canonicalizeSourceText, defaultCanonicalizationPolicy, imageComparisonText, isImageOnlySourceChange, sourceComparisonText, selectGigaTransTranslation, stripYumiTransportComments, validateCanonicalRemovalRule, type CanonicalizationPolicy, type CanonicalRemovalRule } from "./normalization.js";
-export { STORY_TIME_GUIDANCE, formatStoryTime, compareParsedStoryTimes, compareStoryTimes, normalizeStoryTime, parseStoryTime, structuredStoryTimeEnd, type ParsedStoryTime } from "./story-time.js";
+export { STORY_TIME_GUIDANCE, formatStoryTime, compareParsedStoryTimes, compareStoryTimes, normalizeStoryTime, parseStoryTime, structuredStoryTimeEnd, storedStoryTimeEnd, storedStoryTimeHasClock, type ParsedStoryTime } from "./story-time.js";
 export * from "./scene-order.js";
 export * from "./quiz.js";
 
@@ -1417,6 +1417,43 @@ export const ExtractionResultSchema = z.object({
 }).superRefine(extractionStructureRefinement);
 export type ExtractionResult = z.infer<typeof ExtractionResultSchema>;
 
+type MemoryLinks = { memoryKey?: string; support?:Array<{memoryKey:string;detailKey:string}>; validFromMemoryKey?: string; socialRelation?: MemoryLinks };
+
+/** Detail keys are local to their parent and stay unchanged; only memory keys move. */
+export function remapStateMemoryKeys<T extends MemoryLinks>(item: T, keys: ReadonlyMap<string,string>): T {
+  const remap = (key: string) => keys.get(key) ?? key;
+  return { ...item,
+    ...(item.memoryKey === undefined ? {} : {memoryKey:remap(item.memoryKey)}),
+    ...(item.support === undefined ? {} : {support:item.support.map(ref=>({...ref,memoryKey:remap(ref.memoryKey)}))}),
+    ...(item.validFromMemoryKey === undefined ? {} : {validFromMemoryKey:remap(item.validFromMemoryKey)}),
+    ...(item.socialRelation === undefined ? {} : {socialRelation:remapStateMemoryKeys(item.socialRelation,keys)}),
+  };
+}
+
+/** Every typed local link follows the same mapping in scoping and regeneration. */
+export function remapExtractionMemoryKeys(result: ExtractionResult, keys: ReadonlyMap<string,string>): ExtractionResult {
+  const remap = (key: string): string => keys.get(key) ?? key;
+  const withMemoryKey = <T extends MemoryLinks>(item: T): T => remapStateMemoryKeys(item,keys);
+  return {
+    ...result,
+    memories: result.memories.map(memory => ({ ...memory, key: remap(memory.key), associations: memory.associations.map(remap) })),
+    assertions: result.assertions.map(withMemoryKey),
+    pairProgress: result.pairProgress?.map(withMemoryKey),
+    seedResolutions: result.seedResolutions?.map(withMemoryKey),
+    promises: result.promises.map(withMemoryKey),
+    beliefs: result.beliefs.map(withMemoryKey),
+    socialKnowledge: result.socialKnowledge?.map(withMemoryKey),
+    relationshipEvents: result.relationshipEvents?.map(withMemoryKey),
+    physicalIntimacy: result.physicalIntimacy?.map(withMemoryKey),
+    atomRelations: result.atomRelations?.map(relation => ({ ...relation,
+      source: { ...relation.source, memoryKey: remap(relation.source.memoryKey) },
+      target: "atomRef" in relation.target ? relation.target
+        : { ...relation.target, memoryKey: remap(relation.target.memoryKey) },
+    })),
+  };
+}
+
+
 const ExtractionAuditRemovableRefSchema = z.string().min(1).regex(/^(memory|detail|dialogue|observation|physical|source|relation):/);
 
 const ExtractionAuditPatchObjectSchema = z.object({
@@ -1562,6 +1599,9 @@ export const SOURCE_PASSAGE_GUIDANCE = `SOURCE PASSAGES
 export const EXTRACTION_AUDIT_INSTRUCTION = `${ROLEPLAY_ARCHIVE_FRAMING}
 
 You check one roleplay-memory draft against its source transcript.
+
+LANGUAGE
+Write everything you add or replace in the draft's canonical language (canonicalLanguage in the input): titles, plots, detail text, state values and descriptions. Only dialogue text and evidence quotes stay in the source language. Keep proper names as the source writes them.
 
 Your only output is one JSON patch with exactly these thirteen keys:
 {"access":[],"epistemic":[],"relationKinds":[],"discardItemRefs":[],"keepPendingItemRefs":[],"detailAdditions":[],"dialogueAdditions":[],"memoryAdditions":[],"landmarkPatches":[],"observationPatches":[],"observationAdditions":[],"socialKnowledgePatches":[],"additions":{}}
@@ -1967,7 +2007,7 @@ export const ReconciliationReviewResolutionSchema = z.object({
 const ChatWorkSettingsSchema = z.record(z.string().min(1).max(500), z.boolean()).optional();
 const chatWorkPolicy = { chatEnabled: ChatWorkSettingsSchema, characterEnabled: ChatWorkSettingsSchema, defaultChatEnabled: z.boolean().optional(), cancelUpgrade: z.boolean().optional() };
 export const CharacterWorkRequestSchema = z.object({ ...chatWorkPolicy, enabled: z.boolean() });
-export const LeaseJobRequestSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional(), capabilities:z.object({stateExtractionV2:z.boolean().optional(),stateWritingFormat:z.boolean().optional(),eventWritingFormat:z.boolean().optional(),eventWritingFormatE1e:z.boolean().optional(),eventWritingFormatE1f:z.boolean().optional(),stateWritingFormatR10:z.boolean().optional(),stateWritingFormatR11:z.boolean().optional()}).optional() });
+export const LeaseJobRequestSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1), modelSettingsFingerprint:z.string().min(1).max(1024).optional(), capabilities:z.object({stateExtractionV2:z.boolean().optional(),stateWritingFormat:z.boolean().optional(),eventWritingFormat:z.boolean().optional(),eventWritingFormatE1e:z.boolean().optional(),eventWritingFormatE1f:z.boolean().optional(),stateWritingFormatR10:z.boolean().optional(),stateWritingFormatR11:z.boolean().optional(),canonicalTranslation:z.boolean().optional()}).optional() });
 export function usesStateExtraction(type:string,payload:Record<string,any>):boolean {
   return ["extract","audit_retry","memory_addition"].includes(type)&&!payload.memoryOnly&&!payload.regenerationRunId&&!payload.sourceRecovery&&!payload.dialogueRecovery;
 }
@@ -2150,6 +2190,7 @@ export interface LeasedJob {
   kind?: import("./operation-labels.js").JobKind;
   quiz?: import("./quiz.js").QuizJobMeta;
   memoryGrouping?: GroupInputStage;
+  canonicalTranslation?: { items: import("./canonical-prose.js").CanonicalTranslationItem[] };
   memoryOnly?: boolean;
   memoryAddition?: { userRequest: string; existingMemories: unknown[] };
   profile: RpProfile;
@@ -2224,16 +2265,21 @@ export interface OperationLlmCallStats {
 
 export function extractionAuditDraftForJob(job: Pick<LeasedJob, "kind" | "episode">, result: unknown): ExtractionDraftResult {
   if (job.kind !== "episode") return ExtractionAggregateSchema.parse(result);
-  const episode = EpisodeCapsuleResultSchema.parse(result);
+  const capsule = EpisodeCapsuleResultSchema.parse(result);
+  const episode = remapExtractionMemoryKeys(ExtractionResultSchema.parse({...capsule,memories:[capsule.capsule]}),
+    new Map([[capsule.capsule.key, `episode:${job.episode?.episodeId ?? capsule.capsule.key}`]]));
+  const memoryLinks = (item: {memoryKey?:string;validFromMemoryKey?:string;detailKeys?:string[];support?:Array<{memoryKey:string;detailKey:string}>}) => ({
+    memoryKey:item.memoryKey ?? item.validFromMemoryKey, detailKeys:item.detailKeys, support:item.support,
+  });
   return ExtractionDraftResultSchema.parse({
     language: episode.language,
     sourcePassages: episode.sourcePassages,
     entities: episode.entities,
-    memories: [{ ...episode.capsule, key: `episode:${job.episode?.episodeId ?? episode.capsule.key}`, type: "episode" }],
+    memories: episode.memories.map(memory=>({...memory,type:"episode"})),
     stateObservations: [
-      ...episode.assertions.map((item, index) => ({ kind: "world_fact" as const, key: `episode-world-${index}`, subject: item.subject, predicateHint: item.predicate, value: item.value, confidence: item.confidence, evidence: item.evidence, retention: item.retention ?? "arc", socialRelation: item.socialRelation })),
-      ...episode.beliefs.map((item, index) => ({ kind: "character_belief" as const, key: `episode-belief-${index}`, holder: item.holder, subject: item.subject, predicateHint: item.predicate, value: item.value, stance: item.polarity, confidence: item.confidence, source: item.source, evidence: item.evidence, retention: item.retention ?? "arc" })),
-      ...episode.promises.map((item, index) => ({ kind: "promise_event" as const, key: `episode-promise-${index}`, promisor: item.promisor, promisee: item.promisee, promiseKeyHint: item.key, content: item.content, event: item.status === "open" ? "established" as const : item.status === "offscreen" ? "scheduled_passed" as const : item.status, scheduledFor: item.scheduledFor, statusReason: item.statusReason, memoryKey: item.memoryKey, scope: item.scope ?? "future", evidence: item.evidence ?? [], access: item.access })),
+      ...episode.assertions.map((item, index) => ({ kind: "world_fact" as const, key: `episode-world-${index}`, ...memoryLinks(item), subject: item.subject, predicateHint: item.predicate, value: item.value, confidence: item.confidence, evidence: item.evidence, retention: item.retention ?? "arc", socialRelation: item.socialRelation })),
+      ...episode.beliefs.map((item, index) => ({ kind: "character_belief" as const, key: `episode-belief-${index}`, ...memoryLinks(item), holder: item.holder, subject: item.subject, predicateHint: item.predicate, value: item.value, stance: item.polarity, confidence: item.confidence, source: item.source, evidence: item.evidence, retention: item.retention ?? "arc" })),
+      ...episode.promises.map((item, index) => ({ kind: "promise_event" as const, key: `episode-promise-${index}`, ...memoryLinks(item), promisor: item.promisor, promisee: item.promisee, promiseKeyHint: item.key, content: item.content, event: item.status === "open" ? "established" as const : item.status === "offscreen" ? "scheduled_passed" as const : item.status, scheduledFor: item.scheduledFor, statusReason: item.statusReason, scope: item.scope ?? "future", evidence: item.evidence ?? [], access: item.access })),
     ],
     relationshipEvents: episode.relationshipEvents,
     socialKnowledge: episode.socialKnowledge,
@@ -2427,5 +2473,6 @@ export { escapeMemoryText, escapeMemoryAttribute } from "./memory-escaping.js";
 export { normalizeAuxiliaryShape, AuxiliaryShapeDiagnosticSchema, type AuxiliaryShapeDiagnostic, type AuxiliaryShapeContext } from "./auxiliary-shape.js";
 export { normalizeAuxiliaryResponse } from "./auxiliary-response-shape.js";
 export { estimateBackfillCalls } from './backfill-estimate.js';
+export * from './canonical-prose.js';
 export type { ProcessingModel, ProcessingTotals, ProcessingCall, ProcessingStage, ProcessingJob, ProcessingUnit, ProcessingTranslationDay, ProcessingHistory } from './processing-history.js';
 export { processingRunId, PROCESSING_BATCH_TYPES, processingStageOrder, sumProcessingTotals } from './processing-history.js';

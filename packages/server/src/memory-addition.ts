@@ -9,7 +9,7 @@ import { appendExtractionContinuation } from "./jobs.js";
 import { extractionDraftSchema } from "@rcm/shared";
 import { appendJobStateDrops } from "./jobs.js";
 import { ModelContentValidationError } from "@rcm/shared";
-import { recordSmallReviews } from "./small-review.js";
+import { recordSmallReviews, storedReviewParents } from "./small-review.js";
 import { optionalSourceSelectorsOnly } from "@rcm/shared";
 import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import { createHash, randomUUID } from 'node:crypto';
@@ -29,7 +29,7 @@ import { applyExtractionAuditPatch } from './extraction-audit.js';
 import { finishStateExtraction, recordStateObservationDrops } from './state-extraction.js';
 import { recordSeedResolutionDrops } from './story-seeds.js';
 import { additiveReconciliationResult, recordReconciliationReview, UNSUPPLIED_STATE_REVIEW_REASON } from './reconciliation.js';
-import { scopeExtractionMemoryKeys } from './extraction-memory-keys.js';
+import { extractionMemoryKeyMap, remapExtractionMemoryKeys, remapStateMemoryKeys } from './extraction-memory-keys.js';
 import { ingestExtraction, hasRelationshipEvent, validateDialogueEvidence, validateExtractionSources } from './ingest.js';
 import { sameSocialRelationScope } from './social-relations.js';
 import { markStoryRangesInvalid, maybeEnqueueStorySpine } from './story-spine.js';
@@ -54,6 +54,7 @@ interface AdditionPayload extends Partial<RecallCandidateSnapshot> {
   smallReviewDraft?: ExtractionDraftResult;
   requestOutcome?: ExtractionDraftResult['requestOutcome'];
   stateReviews?: ReturnType<typeof finishStateExtraction>['stateReviews'];
+  reviewMemoryKeys?: Array<[string,string]>;
 }
 
 export function additionLedgerFingerprint(db: RcmDatabase, chatId: string): string {
@@ -266,13 +267,15 @@ export function completeMemoryAddition(db: RcmDatabase, jobId: string, workerId:
     if (duplicate) throw contentFailure('기존 기억과 같은 후보가 반환됐어요. 빠진 내용을 더 구체적으로 요청해 주세요');
   }
   normalizeGeneratedCardShapes(final, payload.promptContract);
+  const keys=extractionMemoryKeyMap(final,`addition:${jobId}`,deletedMemoryKeys(db,job.chat_id));
   const candidate = validateDialogueEvidence(db, job.chat_id, payload.sourceMessageIds,
-    scopeExtractionMemoryKeys(final, `addition:${jobId}`,deletedMemoryKeys(db,job.chat_id)));
+    remapExtractionMemoryKeys(final,keys));
   const errors = validateExtractionSources(db, job.chat_id, payload.sourceMessageIds, candidate);
   if (errors.length) throw contentFailure(errors.join('; '));
   db.transaction(()=>{
     db.prepare("UPDATE jobs SET status='done',lease_owner=NULL,leased_until=NULL,last_error=NULL,payload_json=?,updated_at=? WHERE id=?")
-      .run(JSON.stringify({ ...payload, stateRecovery:appendJobStateDrops(db,jobId,additiveDrops), stateReviews:completed.stateReviews, stateInput:JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}).payload_json).stateInput,
+      .run(JSON.stringify({ ...payload, stateRecovery:appendJobStateDrops(db,jobId,additiveDrops), reviewMemoryKeys:[...keys],
+        stateReviews:completed.stateReviews.map(review=>({...review,entry:{...review.entry,observation:remapStateMemoryKeys(review.entry.observation,keys)}})), stateInput:JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}).payload_json).stateInput,
         candidateStatus: 'ready', candidate, smallReviewDraft, pipelineStage: 'complete' }), Date.now(), jobId);
     recordSeedResolutionDrops(db,jobId,completed.seedResolutionDrops);
     recordStateObservationDrops(db,jobId,completed.stateObservationDrops);
@@ -352,7 +355,8 @@ export function applyMemoryAddition(db: RcmDatabase, chatId: string, id: string)
       finishGapRecovery(db,chatId,id,payload,memories);
       return;
     }
-    if (payload.smallReviewDraft) recordSmallReviews(db, chatId, id, payload.sourceMessageIds, payload.smallReviewDraft, `addition:${id}`);
+    if (payload.smallReviewDraft) recordSmallReviews(db, chatId, id, payload.sourceMessageIds, payload.smallReviewDraft, `addition:${id}`,[],
+      payload.reviewMemoryKeys ? storedReviewParents(db,chatId,new Map(payload.reviewMemoryKeys)) : undefined);
     const evidenceIds = tables.flatMap((table,index) => (db.prepare(`SELECT evidence_json FROM ${table} WHERE chat_id=? AND rowid>?`)
       .all(chatId,before[index]) as Array<{evidence_json:string}>).flatMap(row =>
         (JSON.parse(row.evidence_json) as Array<{messageId:string}>).map(item => item.messageId)));

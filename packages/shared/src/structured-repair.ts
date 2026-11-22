@@ -33,6 +33,7 @@ export interface AuxiliaryRepairMessage {
 }
 
 export type AuxiliaryRepairRequest =
+  | { kind: "canonical_translation" }
   | { kind: "memory_group" }
   | { kind: "quiz" }
   | { kind: "extraction"; sourceMode: "source_units" | "message_ids"; promptContract?: "e1d" | "e1e" | "e1f" }
@@ -197,6 +198,8 @@ const commonInstruction ="Correct only the previous response. Preserve valid, su
 
 function taskInstruction(request: AuxiliaryRepairRequest): string {
   switch (request.kind) {
+    case "canonical_translation":
+      return 'Return {"items":[{"id":"…","text":"…"}]} using only supplied IDs in their original order. Preserve all valid translated text.';
     case "quiz":
       return "Match the original quiz schema. Use only supplied memoryRef values, allowed format/difficulty enums, distinct options and an answerIndex within the options. An explicit {items:[]} is allowed when no supported question can be made.";
     case "memory_group":

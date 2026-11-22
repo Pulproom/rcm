@@ -1,4 +1,6 @@
 import { ProcessingController, createProcessingView, renderProcessingHistory, type ProcessingView } from './dashboard/processing-history.js';
+import { memoryHasCanonicalScriptIssue, CANONICAL_LANGUAGE_UI_NAMES, type CanonicalTranslationPreview } from '@rcm/shared';
+import { canonicalTranslationConfirmation, canonicalSelectionBar, loadCanonicalMenuPreview, followCanonicalTranslation } from './dashboard/canonical-translation.js';
 import { classifyEntityType, isMainCharacterEntity, isPersonEntityType } from "@rcm/shared";
 import { copyText, MANUAL_COPY_MESSAGE } from "./clipboard.js";
 import { clearPrepareFailures, safePrepareFailure, prepareFailureLabel } from "./prepare-diagnostics.js";
@@ -168,6 +170,8 @@ const relationshipLandmarkKinds = new Set(["first_met", "romantic_relationship_e
 // Product-owned action IDs and form IDs, shared by both skins and every editor.
 const upgradeEditActions = new Set(`add-access-holder add-initial-entity anniversary-pick apply-probed-lineage approve-backfill backfill-social confirm-data-operation confirm-delete-world confirm-end-world confirm-entity-delete confirm-deleted-chat-cleanup decline-lineage delete delete-anniversary delete-conflict delete-initial-entity delete-intimacy delete-memory delete-queue delete-social delete-world designate-anniversary edit-address edit-detail-access edit-intimacy edit-memory edit-person edit-relationship edit-small-review edit-social edit-story-overview edit-world end-world go-entity-merge hide-anniversary inherit-from-chat initial-confirm initial-retry initial-skip load-story-overview-backup merge-entities-final new-anniversary new-first-met new-intimacy new-manual-memory new-person new-social new-world open-data-operation open-deleted-chat-cleanup open-entity-delete open-person-color open-setup-sources preview-entity-merge progress-remaining_not_yet progress-restore rebuild rebuild-story-spine regenerate-canonical regenerate-episode remove-access-holder reset-person-color reset-relationship-auto resolve-conflict resolve-reconciliation resolve-small-review resolve-small-review-bulk restore-cancelled restore-crumb retry-extraction-audit retry-failed revert-lineage save-initial-entity save-initial-relationship select-lineage set-persona set-profile set-profile-select setup-skip setup-submit swap-relation toggle-always-inject toggle-anniversary-always toggle-bookmark toggle-memory toggle-pin toggle-story-hidden toggle-story-index toggle-story-memory toggle-story-pin`.split(' '));
 for (const action of ['edit-seed','now-cleanup','resplit-extraction','gap-start','gap-retry','progress-cell','organization-add-memory','organization-create-group','organization-discard-group','organization-ungroup','organization-memory-exclusion','organization-release-hold','organization-apply-regeneration','organization-discard-regeneration']) upgradeEditActions.add(action);
+upgradeEditActions.add('toggle-now-always-inject');
+upgradeEditActions.add('translate-canonical');
 const upgradeEditForms = new Set(`small-review-form cleanup-opened-chats-form pair-progress-form memory-form manual-memory-form story-overview-form relationship-form social-form world-state-form intimacy-form anniversary-form anniversary-new-form detail-access-form memory-line-form person-color-form organization-addition-form entity-merge-form`.split(' '));
 for (const action of ['edit-detail-text','edit-event-reason','hide-detail','hide-event','restore-detail','restore-event','retry-lineage-open','retry-memory-delete']) upgradeEditActions.add(action);
 upgradeEditActions.delete('toggle-story-memory');
@@ -255,7 +259,7 @@ export function editableLandmarkKinds(text: string, existing: LandmarkKind[], pa
 
 /** Checkboxes commit their choice immediately; they are not text editors. */
 export function isDashboardEditingControl(element: HTMLElement): boolean {
-  return element.matches('input, select, textarea') && !['now-check','retry-memory-check'].includes(element.dataset.action ?? '');
+  return element.matches('input, select, textarea') && !['now-check','retry-memory-check','canonical-memory-check'].includes(element.dataset.action ?? '');
 }
 
 export function restoreDashboardActionFocus(root: ParentNode, previous: HTMLElement): void {
@@ -321,6 +325,7 @@ export interface DashboardData {
   gapRecovery?: import('@rcm/shared').GapRecoveryStatus;
   gapRecoveryDismissed?: boolean;
   alwaysInject?: import('@rcm/shared').AlwaysInjectEstimate;
+  nowAlwaysInjectCount?: number;
   pairProgress?: import("@rcm/shared").PairProgress[];
   pairProgressUnavailableReason?: import("@rcm/shared").PairProgressUnavailableReason;
   quizStatus?: import("@rcm/shared").QuizStatus;
@@ -339,7 +344,7 @@ export interface DashboardData {
     mcpSelector?:McpSelectorPublicConfig;
     translationConnection?:TranslationConnectionPublicConfig;
     serverWorker?: ServerWorkerStatus;
-    capabilities?: { memoryAlbum?: boolean; memoryLineEditing?: boolean; recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
+    capabilities?: { canonicalTranslation?: boolean; memoryAlbum?: boolean; memoryLineEditing?: boolean; recallPortfolioV2?: boolean; mcpAtomDelta?: boolean; memoryToolReadiness?: boolean; initialCalibration?: boolean; initialRelationshipProjection?: boolean; relationshipProjectionCursor?: boolean; offscreenPromises?: boolean; extractionAudit?: boolean; atomAccess?: boolean; beliefLifecycle?: boolean; reconciliationReview?: boolean; perspectiveResolution?: boolean; ingestionState?: boolean; qualitativeRelationships?: boolean; memoryDetails?: boolean; intimacyMilestones?: boolean; npcProminence?: boolean; adaptiveExtraction?: boolean; multilingualCanonicalMemory?: boolean; extractionGrouping?: boolean; promptCoverageSuppression?: boolean; durableLedger?: boolean; chatLineage?: boolean; manualLineageTransfer?: boolean; dashboardLineageProbe?: boolean; readOnlyLineageProbe?: boolean; recallCoverage?: boolean; socialKnowledge?: boolean; lineageAcknowledgement?: boolean; packetContractV2?: boolean; physicalIntimacy?: boolean; typedLandmarks?: boolean; resolvedRelationshipBaseline?: boolean; manualLedgerEditing?: boolean; memoryToolControl?: boolean; shortMemoryRefs?: boolean; multiGenerationLineage?: boolean; injectionManifest?: boolean; ledgerHistory?: boolean; typedSexMilestones?: boolean; deepRecall?: boolean; aspectProvenance?: boolean; creativeUnknownStates?: boolean; retrievalPlannerV2?: boolean; extractionBatches?: boolean; episodeRegeneration?: boolean; canonicalSuffixRegeneration?: boolean; storySpine?: boolean; storySpineV2?: boolean; memoryBudgetPresets?: boolean; holderMemoryTraces?: boolean; canonicalSourceNormalization?: boolean; editProtection?: boolean; cognitiveActivation?: boolean; serverServiceTier?: boolean; chatOperationLifecycleV2?: boolean; turnLineageDiscovery?: boolean; ledgerConsistencyBarrier?: boolean; canonicalLedgerIdentity?: boolean; providerJsonMode?: boolean; stateReconciliationV3?: boolean; pipelineRetryStatus?: boolean; repairDiagnosticsV2?: boolean; operationRunAccounting?: boolean; persistentBackfillResult?: boolean; retrievalDiagnostics?: boolean; memoryQuiz?: boolean; quizManagement?: boolean };
   };
   memories: any[];
   storySpine: any;
@@ -1892,23 +1897,26 @@ export function intimacyLandmarkMarks(memoryId: string, landmark: any, physicalI
   }).join("");
 }
 
-function memoryRow(memory: any, selectedId: string, translations: TranslationView, translationEnabled: boolean, numbers: Map<string, number>, selection?:TimelineViewState["retryDeletion"]): string {
+function memoryRow(memory: any, selectedId: string, translations: TranslationView, translationEnabled: boolean, numbers: Map<string, number>, selection?:TimelineViewState["retryDeletion"], language: MemoryLanguage = 'en', canonicalSelection?: Set<string>): string {
   const display: TranslationDisplay = translationEnabled ? "ko" : "en";
   const title = memoryDisplayTitle(memory, translations, display);
   const content = displayText(String(memory.content ?? ""), translations.get(`${memory.id}:content`), display);
   const body = `<button type="button" class="row${memory.active === false ? " is-off" : ""}"${memory.id === selectedId ? ' aria-current="true"' : ""} data-action="select-memory" data-translate-memory="${escapeHtml(memory.id)}" data-id="${escapeHtml(memory.id)}" data-day="${escapeHtml(memoryDay(memory).key)}" data-landmark="${memory.landmark === true}" data-bookmarked="${memory.bookmarked === true}" data-pinned="${memory.pinned === true}" data-active="${memory.active !== false}"><div class="row__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><div class="row__title">${title}</div><div class="row__sub">${content}</div></button>`;
-  if (!selection || memory.userOnlyRetry!==true || !selection.ids.includes(memory.id)) return body;
+  const marked = memoryHasCanonicalScriptIssue(memory, language) ? body.replace('<div class="row__slug">', '<div class="row__slug"><span class="canonical-mixed">언어 섞임</span>') : body;
+  if (canonicalSelection) return `<div class="row retry-pick${canonicalSelection.has(memory.id)?' is-on':''}" data-id="${escapeHtml(memory.id)}" data-day="${escapeHtml(memoryDay(memory).key)}"><label class="org-check"><input type="checkbox" data-action="canonical-memory-check" data-key="${escapeHtml(memory.id)}" aria-label="${escapeHtml(String(memory.title ?? memory.id))}" ${canonicalSelection.has(memory.id)?'checked':''} ${memory.active===false?'disabled':''}></label>${marked.replace('class="row','class="retry-pick__body')}</div>`;
+  if (!selection || memory.userOnlyRetry!==true || !selection.ids.includes(memory.id)) return marked;
   const on=selection.selected.has(memory.id);
-  return `<div class="row retry-pick${on?' is-on':''}" data-id="${escapeHtml(memory.id)}" data-day="${escapeHtml(memoryDay(memory).key)}"${memory.id===selectedId?' aria-current="true"':''}><label class="org-check"><input type="checkbox" data-action="retry-memory-check" data-key="${escapeHtml(memory.id)}" aria-label="${escapeHtml(String(memory.title ?? memory.id))}" ${on?'checked':''} ${selection.busy?'disabled':''}></label>${body.replace('class="row','class="retry-pick__body')}</div>`;
+  return `<div class="row retry-pick${on?' is-on':''}" data-id="${escapeHtml(memory.id)}" data-day="${escapeHtml(memoryDay(memory).key)}"${memory.id===selectedId?' aria-current="true"':''}><label class="org-check"><input type="checkbox" data-action="retry-memory-check" data-key="${escapeHtml(memory.id)}" aria-label="${escapeHtml(String(memory.title ?? memory.id))}" ${on?'checked':''} ${selection.busy?'disabled':''}></label>${marked.replace('class="row','class="retry-pick__body')}</div>`;
 }
 
-function memoryActionMenu(memory: any, count: number): string {
+function memoryActionMenu(memory: any, count: number, available = false): string {
   const id = { id: String(memory.id) };
   return menu({ label: "기억 더보기", items: [
     { label: memory.bookmarked ? "북마크 해제" : "북마크", icon: "bookmark", action: "toggle-bookmark", data: id },
     { label: memory.pinned ? "검색 우선 해제" : "검색 우선 고정", icon: "pin", action: "toggle-pin", data: id },
     { label: memory.alwaysInject ? '항상 전달 해제' : '항상 전달', icon: 'arrow-right', action: 'toggle-always-inject', data: id,
       count: `${count}/5`, hint: !memory.alwaysInject && count >= 5 ? ALWAYS_INJECT_LIMIT_MESSAGE : `매 턴 꼭 넣어요 · 약 ${memoryDeliveryTokens(memory)}토큰`, disabled: !memory.alwaysInject && count >= 5 },
+    ...(available && memory.active !== false ? [{ label: '정본 언어로 바꾸기', icon: 'world', action: 'translate-canonical', data: id, hint: '같은 묶음의 범위를 확인하고 있어요…' }] : []),
     { label: memory.active === false ? "다시 사용" : "비활성화", icon: "inactive", action: "toggle-memory", data: id },
     { label: "관련 원문 보기", icon: "search", action: "related-source", data: id },
     { label: "기억 삭제", icon: "delete", action: "delete-memory", data: id, danger: true },
@@ -1924,7 +1932,7 @@ export function expandableLongContent(label: string, html: string, textLength: n
 
 const EPISTEMIC_LABELS: Record<string, string> = { observed: "관찰", stated: "진술", inferred: "추론", unresolved: "미확인" };
 
-function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set(), lineEditingAvailable = false, alwaysCount = 0): string {
+function memoryDetail(memory: any, messages: Map<string, any>, translations: TranslationView, view: TimelineViewState, translationEnabled: boolean, sourceLanguage: MemoryLanguage, adjacent: { previous?: any; next?: any }, numbers: Map<string, number>, translationError?: string, personaNames: Set<string> = new Set(), lineEditingAvailable = false, alwaysCount = 0, canonicalAvailable = false): string {
   if (!memory) return empty("표시할 기억이 없어요", "검색이나 필터를 바꿔 봐 주세요.");
   const evidence = memoryEvidence(memory);
   const displayedDialogues = joinDialogueSpans(Array.isArray(memory.keyDialogues) ? memory.keyDialogues : []);
@@ -2069,11 +2077,13 @@ function memoryDetail(memory: any, messages: Map<string, any>, translations: Tra
     ? intimacyLandmarkMarks(key, entry, intimacyMilestones, (text, labelKey) => displayText(text, translations.get(labelKey), display))
     : `<span class="mark is-key">${icon("landmark")}${escapeHtml(landmarkLabel(entry))}</span>`).join("")}</div>` : "";
   const pager = `<nav class="pager" aria-label="기억 이동">${btn("이전", { kind: "quiet", icon: "back", action: "timeline-adjacent", data: { id: adjacent.previous?.id ?? "" }, disabled: !adjacent.previous, hit: true })}${btn("다음", { kind: "quiet", iconEnd: "chevron", action: "timeline-adjacent", data: { id: adjacent.next?.id ?? "" }, disabled: !adjacent.next, hit: true })}</nav>`;
-  const actions = `<div class="reader__acts">${iconBtn("edit", "기억 수정", { action: "edit-memory" })}${memoryActionMenu(memory, alwaysCount)}</div>`;
+  const actions = `<div class="reader__acts">${iconBtn("edit", "기억 수정", { action: "edit-memory" })}${memoryActionMenu(memory, alwaysCount, canonicalAvailable)}</div>`;
+  const canonicalBanner = canonicalAvailable && memory.active !== false && memoryHasCanonicalScriptIssue(memory, sourceLanguage)
+    ? notice(`${CANONICAL_LANGUAGE_UI_NAMES[sourceLanguage]} 정본인데 다른 언어로 저장된 문장이 있어요.`, { tone: 'cut', action: btn(`${CANONICAL_LANGUAGE_UI_NAMES[sourceLanguage]}로 바꾸기`, { kind: 'primary', action: 'translate-canonical', data: { id: key } }) }) : '';
   const content = phone
     ? `<div data-preserve-scroll="timeline-detail">${record}${lines ? labelledBlock("주요 대사", displayedDialogues.length, lines) : ""}${detailsFold}${hiddenFold}${structure}${evidenceFold}${info}</div>`
     : `${lines}<div data-preserve-scroll="timeline-detail">${expandableLongContent("기억 본문", record, Math.max(String(memory.content ?? "").length, String(translatedContent ?? "").length))}${info}${structure}${detailsFold}${hiddenFold}${evidenceFold}</div>`;
-  return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory, false)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${knowing}${people}${landmarkMarks}${memory.pinned || memory.alwaysInject ? `<div class="marks">${memory.pinned ? `<span class="mark">${icon("pin")}검색 우선</span>` : ""}${memory.alwaysInject ? `<span class="mark">${icon("arrow-right")}항상 전달</span>` : ""}</div>` : ""}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억이에요.") : ""}${translationState}${content}${pager}</article>`;
+  return `<article class="reader"><div class="reader__bar">${back}${actions}</div><div class="frame__slug"><b>${escapeHtml(memorySlug(memory, numbers))}</b>${memorySignals(memory, false)}${memory.story_time ?? memory.storyTime ? `<span class="tc">${escapeHtml(formatStoryTime(memory.story_time ?? memory.storyTime))}</span>` : ""}</div><h2 class="reader__title">${title}</h2>${canonicalBanner}${knowing}${people}${landmarkMarks}${memory.pinned || memory.alwaysInject ? `<div class="marks">${memory.pinned ? `<span class="mark">${icon("pin")}검색 우선</span>` : ""}${memory.alwaysInject ? `<span class="mark">${icon("arrow-right")}항상 전달</span>` : ""}</div>` : ""}${memory.active === false ? notice("현재 검색과 자동 주입에서 제외된 기억이에요.") : ""}${translationState}${content}${pager}</article>`;
 }
 
 /** Labels for picking a landmark kind; 기념일 기준 is set from a pair's scene log, so it is kept but never offered here. */
@@ -2177,8 +2187,8 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
     const header = day.key === lastDay ? "" : `<div class="day" data-day-header="${escapeHtml(day.key)}">${retryGroups.has(day.key) ? `<span class="day__retry-label">${label}</span>` : label}${retryGroups.has(day.key) ? `${selection ? "" : `<button type="button" class="day__retry-act" data-action="retry-memory-select" data-day="${escapeHtml(day.key)}">삭제</button>`}<span class="day__retry-note" data-user-only-retry-note>예전 버전 오류로 유저 메시지만 따로 정리된 기억이 섞여 있어요. 다른 기억과 겹치면 지워도 돼요.</span>` : ""}</div>`;
     lastDay = day.key;
     const children = matching.filter((candidate) => candidate.capsule_parent_id === memory.id);
-    const capsule = children.length ? `<details class="capsule-children fold"${children.some((child) => child.id === selected?.id) ? " open" : ""}><summary><span>원래 기억</span><span class="n">${children.length}</span></summary><div class="fold__body">${children.map((child) => memoryRow(child, selected?.id ?? "", translations, translationEnabled, numbers,selection)).join("")}</div></details>` : "";
-    return `${header}${memoryRow(memory, selected?.id ?? "", translations, translationEnabled, numbers,selection)}${capsule}`;
+    const capsule = children.length ? `<details class="capsule-children fold"${children.some((child) => child.id === selected?.id) ? " open" : ""}><summary><span>원래 기억</span><span class="n">${children.length}</span></summary><div class="fold__body">${children.map((child) => memoryRow(child, selected?.id ?? "", translations, translationEnabled, numbers,selection,sourceLanguage,view.canonicalSelection)).join("")}</div></details>` : "";
+    return `${header}${memoryRow(memory, selected?.id ?? "", translations, translationEnabled, numbers,selection,sourceLanguage,view.canonicalSelection)}${capsule}`;
   }).join("");
   const filterItems = [
     { label: "북마크", icon: "bookmark", pressed: view.bookmarkedOnly, action: "timeline-filter", data: { filter: "bookmark" } },
@@ -2189,21 +2199,21 @@ export function timeline(data: DashboardData, selectedId: string, translations: 
   const filterBar = filters(filterItems.map(({ icon: _icon, ...item }) => item), "기억 필터");
   // The phone skin keeps the header to search, add and one menu; the filters live in that menu (a check marks the active ones).
   const menuFilters = lex().skin === "phone" ? [...filterItems.map((item) => ({ label: item.label, icon: item.pressed ? "check" : item.icon, action: item.action, data: item.data })), "sep" as const] : [];
-  const tools = `<div class="tl-tools"><label class="search">${icon("search")}<span class="sr-only">기억 검색</span><input id="memory-search" class="input" type="search" value="${escapeHtml(view.query)}" placeholder="기억 검색"></label>${iconBtn("add", "기억 추가", { action: "new-manual-memory" })}${menu({ label: "타임라인 더보기", items: [
+  const tools = `<div class="tl-tools"><label class="search">${icon("search")}<span class="sr-only">기억 검색</span><input id="memory-search" class="input" type="search" value="${escapeHtml(view.query)}" placeholder="기억 검색"></label>${data.health?.capabilities?.canonicalTranslation ? btn(view.canonicalSelection ? "선택 취소" : "선택", { kind: "quiet", action: "canonical-memory-select" }) : ""}${iconBtn("add", "기억 추가", { action: "new-manual-memory" })}${menu({ label: "타임라인 더보기", items: [
     ...menuFilters,
     { label: view.sortOrder !== "ascending" ? "오래된 순으로 보기" : "최근 순으로 보기", icon: view.sortOrder !== "ascending" ? "up" : "down", action: "timeline-order" },
     { label: "기억 정리", icon: "sliders", action: "organization-open" },
   ] })}</div>`;
   const selectedCount=selection ? [...selection.selected].filter(id=>data.memories.some(memory=>memory.id===id && memory.userOnlyRetry===true)).length : 0;
-  const selectionBar=selection ? `<div class="org-sel retry-sel" data-retry-selection-bar><div class="org-sel__sum"><b>${selectedCount}개 선택</b><span>남길 기억은 체크를 풀어 주세요</span></div><div class="org-sel__acts">${btn("취소",{kind:"quiet",action:"retry-memory-cancel",disabled:selection.busy})}${btn(`기억 ${selectedCount}개 삭제`,{kind:"danger",action:"retry-memory-delete",disabled:selection.busy || !selectedCount})}</div>${selection.failures.length?`<ul class="retry-sel__errors" role="alert">${selection.failures.map(item=>`<li>${escapeHtml(item.title)}: ${escapeHtml(item.error)}</li>`).join("")}</ul>`:""}</div>` : "";
-  const list = `<div class="listcol${selection?" has-retry-selection":""}">${tools}${filterBar}${(data.upgrade && renderUpgradeLine(data.upgrade)) ?? `<p class="sub" data-timeline-count>기억 ${topLevel.length}개 · ${view.sortOrder !== "ascending" ? "최근 순" : "오래된 순"}</p>`}<div class="list tl-rows" id="memory-rows" data-preserve-scroll="timeline-list">${rows || empty("조건에 맞는 기억이 없어요", "검색어나 필터를 바꿔 봐 주세요.")}<div data-timeline-search-empty hidden>${empty("검색 결과가 없어요", "다른 단어로 찾아봐 주세요.")}</div></div>${selectionBar}</div>`;
+  const selectionBar=view.canonicalSelection ? canonicalSelectionBar(view.canonicalSelection) : selection ? `<div class="org-sel retry-sel" data-retry-selection-bar><div class="org-sel__sum"><b>${selectedCount}개 선택</b><span>남길 기억은 체크를 풀어 주세요</span></div><div class="org-sel__acts">${btn("취소",{kind:"quiet",action:"retry-memory-cancel",disabled:selection.busy})}${btn(`기억 ${selectedCount}개 삭제`,{kind:"danger",action:"retry-memory-delete",disabled:selection.busy || !selectedCount})}</div>${selection.failures.length?`<ul class="retry-sel__errors" role="alert">${selection.failures.map(item=>`<li>${escapeHtml(item.title)}: ${escapeHtml(item.error)}</li>`).join("")}</ul>`:""}</div>` : "";
+  const list = `<div class="listcol${selection || view.canonicalSelection?" has-retry-selection":""}">${tools}${filterBar}${(data.upgrade && renderUpgradeLine(data.upgrade)) ?? `<p class="sub" data-timeline-count>기억 ${topLevel.length}개 · ${view.sortOrder !== "ascending" ? "최근 순" : "오래된 순"}</p>`}<div class="list tl-rows" id="memory-rows" data-preserve-scroll="timeline-list">${rows || empty("조건에 맞는 기억이 없어요", "검색어나 필터를 바꿔 봐 주세요.")}<div data-timeline-search-empty hidden>${empty("검색 결과가 없어요", "다른 단어로 찾아봐 주세요.")}</div></div>${selectionBar}</div>`;
   const filteredListEmpty = data.memories.length > 0 && topLevel.length === 0;
   const reader = view.creating
     ? manualMemoryEditor()
     : filteredListEmpty
       ? empty("선택된 기억이 없어요", "목록에서 기억을 고르거나 필터를 바꿔 봐 주세요.")
     : selected
-      ? memoryDetail(selected, messages, translations, view, translationEnabled, sourceLanguage, adjacent, numbers, translationError, personaNameSet(data), data.health?.capabilities?.memoryLineEditing === true, data.alwaysInject?.items.length ?? data.memories.filter(item => item.alwaysInject).length)
+      ? memoryDetail(selected, messages, translations, view, translationEnabled, sourceLanguage, adjacent, numbers, translationError, personaNameSet(data), data.health?.capabilities?.memoryLineEditing === true, data.alwaysInject?.items.length ?? data.memories.filter(item => item.alwaysInject).length, data.health?.capabilities?.canonicalTranslation === true)
       : empty("아직 기억이 없어요", "대화가 쌓이면 장면이 여기에 정리돼요.");
   return `<div class="timeline${view.mobileDetail ? " is-detail" : ""}"><div class="split">${list}<div class="readercol" data-preserve-scroll="reader:timeline:${escapeHtml(view.creating ? "new" : selected?.id ?? "")}"><div data-timeline-reader-empty style="display:none">${empty("선택된 기억이 없어요", "목록에서 기억을 고르거나 필터를 바꿔 봐 주세요.")}</div>${reader}</div></div></div>`;
 }
@@ -2839,7 +2849,7 @@ function worldEditorPanel(data: DashboardData, editor?: WorldEditor, backLabel =
     ? `${kindPick}<div class="form__row">${input("subject", "대상", item.subject, " required")}${input("predicate", "항목", item.predicate, " required")}</div>${textarea("value", "내용", item.value, " required")}${knownByField}`
     : editor.kind === "belief"
       ? `<div class="form__row">${input("holder", "관점 인물", item.holder, " required")}${input("subject", "대상", item.subject, " required")}</div><div class="form__row">${input("predicate", "속성", item.predicate, " required")}${select("polarity", "인식", ["believes", "suspects", "denies", "knows", "heard"].map((value) => `<option value="${value}" ${item.polarity === value ? "selected" : ""}>${POLARITY_LABELS[value]}</option>`).join(""))}</div>${textarea("value", "내용", item.value, " required")}`
-      : `<div class="form__row">${input("promisor", "약속한 인물", item.promisor, " required")}${input("promisee", "상대", item.promisee, " required")}</div><div class="form__row">${select("status", "상태", Object.entries(PROMISE_STATUS_LABELS).map(([value, text]) => `<option value="${value}" ${(editor.promiseStatus ?? item.status) === value ? "selected" : ""}>${text}</option>`).join(""))}${input("scheduledFor", "예정 시점", item.scheduled_for, ' placeholder="예: 화요일 점심"')}</div>${textarea("content", "약속 내용", item.content, " required")}${input("statusReason", "상태 메모", item.status_reason, ' placeholder="현재 상태의 근거"')}<fieldset class="promise-when"><legend>상태를 바꾼 일이 언제 일어났나요?</legend><label class="check"><input type="radio" name="recency" value="already_past" checked><span>이미 지난 일<small>메인 모델에는 따로 알리지 않아요.</small></span></label><label class="check"><input type="radio" name="recency" value="recent"><span>최근 일어난 일<small>한동안 메인 모델에 최근 끝난 약속으로 알려요.</small></span></label></fieldset><label class="check"><input name="pinned" type="checkbox"${item.pinned ? " checked" : ""}><span>계속 기억<small>끝난 약속이어도 메인 모델에 계속 알려요.</small></span></label>`;
+      : `<div class="form__row">${input("promisor", "약속한 인물", item.promisor, " required")}${input("promisee", "상대", item.promisee, " required")}</div><div class="form__row">${select("status", "상태", Object.entries(PROMISE_STATUS_LABELS).map(([value, text]) => `<option value="${value}" ${(editor.promiseStatus ?? item.status) === value ? "selected" : ""}>${text}</option>`).join(""))}${input("scheduledFor", "예정 시점", item.scheduled_for, ' placeholder="예: 화요일 점심"')}</div>${textarea("content", "약속 내용", item.content, " required")}${input("statusReason", "상태 메모", item.status_reason, ' placeholder="현재 상태의 근거"')}<fieldset class="promise-when"><legend>상태를 바꾼 일이 언제 일어났나요?</legend><label class="check"><input type="radio" name="recency" value="already_past" checked><span>이미 지난 일<small>메인 모델에는 따로 알리지 않아요.</small></span></label><label class="check"><input type="radio" name="recency" value="recent"><span>최근 일어난 일<small>한동안 메인 모델에 최근 끝난 약속으로 알려요.</small></span></label></fieldset><label class="check"><input name="pinned" type="checkbox"${item.pinned ? " checked" : ""}><span>항상 전달<small>끝난 약속이어도 메인 모델에 계속 알려요.</small></span></label>`;
   const scope = editor.kind === "promise" && editor.mode === "create" ? select("scope", "반복 여부", '<option value="future">한 번의 약속</option><option value="recurring">반복 약속</option>') : "";
   const verb = editor.mode === "create" ? "추가" : "수정";
   // The title follows the 종류 picker as it changes.
@@ -3886,7 +3896,7 @@ export async function loadDashboardData(
     ? (chatCalls.get(dataset) as PromiseFulfilledResult<any>).value
     : fallback;
   const worldState = value("world", {
-    seeds: previous.seeds, assertions: previous.assertions, beliefs: previous.beliefs, promises: previous.promises,
+    alwaysInjectCount: previous.nowAlwaysInjectCount, seeds: previous.seeds, assertions: previous.assertions, beliefs: previous.beliefs, promises: previous.promises,
     endedAssertions: previous.endedAssertions, endedBeliefs: previous.endedBeliefs,
     userDeletedBeliefs: previous.userDeletedBeliefs, promiseHistory: previous.promiseHistory,
   });
@@ -3959,6 +3969,7 @@ export async function loadDashboardData(
       hiddenAnniversaries: Array.isArray(viewPreferences?.hiddenAnniversaries) ? viewPreferences.hiddenAnniversaries.map(String) : [],
     },
     personaEntity,
+    nowAlwaysInjectCount: worldState.alwaysInjectCount ?? 0,
     seeds: worldState.seeds ?? [],
     assertions: worldState.assertions ?? [],
     beliefs: worldState.beliefs ?? [],
@@ -4867,6 +4878,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
   const onDashboardResize = () => measurePhoneClamps();
   // A clamp opened while it overflowed may fit by the time it is closed again (the window may have grown).
   root.addEventListener("toggle", (event) => {
+    if (event.target instanceof HTMLDetailsElement && event.target.open && state.current && event.target.querySelector('[data-action="translate-canonical"]')) {
+      const details = event.target;
+      void loadCanonicalMenuPreview(details, state.current.chatId, client).catch(error => {
+        const hint = details.querySelector<HTMLElement>('[data-action="translate-canonical"] .menu__hint');
+        if (hint?.isConnected) hint.textContent = errorMessage(error);
+      });
+    }
     // Product-owned disclosure key grammar, shared with the render's open-state preservation.
     if (event.target instanceof HTMLDetailsElement && event.target.isConnected && event.target.open && event.target.dataset.preserveOpen?.startsWith('memory-evidence:')) {
       const id = event.target.dataset.preserveOpen.slice('memory-evidence:'.length);
@@ -5235,6 +5253,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       if (nextTab === "relationships" && next.selectedRelationship !== undefined) relationshipSection = "state";
       organizationView.open = false;
       timelineView.retryDeletion=undefined;
+      timelineView.canonicalSelection=undefined;
       timelineView.creating = false;
       timelineView.editing = false;
       storyView.editingOverview = false;
@@ -6149,10 +6168,18 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       syncLineageActivity(state, chatId, result.lineage);
       await refresh(); return;
     }
+    if (action === 'canonical-memory-check') return;
+    if (action === 'canonical-memory-select') {
+      timelineView.canonicalSelection = timelineView.canonicalSelection ? undefined : new Set();
+      timelineView.retryDeletion = undefined;
+      timelineView.mobileDetail = false;
+      render(); return;
+    }
     if (action === "retry-memory-check") return;
     if (action === "retry-memory-select") {
       if (timelineView.retryDeletion?.busy) return;
       const day=target.dataset.day ?? "";
+      timelineView.canonicalSelection = undefined;
       beginRetryMemorySelection(timelineView,day,timelineRetryGroups(data.memories,timelineView).get(day) ?? []);
       timelineView.mobileDetail=false;
       render();
@@ -6372,7 +6399,7 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     }
     if (action === "now-filter") {
       const next = target.dataset.value as NowFilter;
-      if (["all", "seed", "promise", "belief", "condition", "goal", "secret"].includes(next)) nowFilter = next;
+      if (["all", "always", "seed", "promise", "belief", "condition", "goal", "secret"].includes(next)) nowFilter = next;
       nowView.selection?.clear();
       render();
       return;
@@ -6595,7 +6622,30 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     const chat = encodeURIComponent(actionChatId);
     state.requestActivityRefresh?.();
     try {
-      if (action === 'retry-memory-delete') {
+      if (action === 'translate-canonical') {
+        const memoryIds = target.dataset.id ? [target.dataset.id] : [...(timelineView.canonicalSelection ?? [])];
+        const endpoint = `/v1/chats/${chat}/canonical-translation`, serverUrl = state.settings.serverUrl;
+        const estimate = await client.request<CanonicalTranslationPreview>(`${endpoint}/preview`, { method:'POST',body:JSON.stringify({memoryIds}) });
+        if (state.current?.chatId !== actionChatId || state.settings.serverUrl !== serverUrl) return;
+        const language = CANONICAL_LANGUAGE_UI_NAMES[estimate.language];
+        if (!await confirmDashboard('', false, { title:'정본 언어로 바꾸기',confirm:`${language}로 바꾸기`,cancel:'취소',bodyHtml:canonicalTranslationConfirmation(estimate) })) return;
+        if (state.current?.chatId !== actionChatId || state.settings.serverUrl !== serverUrl) return;
+        const result = await client.request<{jobId:string;calls:number}>(`${endpoint}/start`, { method:'POST',body:JSON.stringify({memoryIds}) });
+        if (state.current?.chatId !== actionChatId || state.settings.serverUrl !== serverUrl) return;
+        timelineView.canonicalSelection = undefined;
+        showActionSaveState({kind:'success',message:result.calls ? '정본 언어로 바꾸기를 시작했어요. 관리 → 처리에서 진행 상황을 볼 수 있어요.' : '바꿀 문장이 없어요.'});
+        void drainWorker(state,client);
+        if (result.calls) followCanonicalTranslation(client, actionChatId, result.jobId, {
+          active: () => dashboardOpen && state.current?.chatId === actionChatId && state.settings.serverUrl === serverUrl,
+          changed: async () => {
+            translations.clear(); memoryTranslationErrors.clear(); translationRequested.clear();
+            invalidateAutomaticTurnPacket(state, actionChatId);
+            await refresh();
+          },
+          done: async message => {showActionSaveState({kind:'success',message});},
+          failed: error => showActionSaveState({kind:'error',message:errorMessage(error),errorReport:formatServerError(error)}),
+        });
+      } else if (action === 'retry-memory-delete') {
         await deleteRetryMemorySelection(timelineView,data.memories,client,actionChatId,async (message,labels)=>{
           const selection=timelineView.retryDeletion!;
           const numbers=sceneNumbers(data.memories);
@@ -6728,6 +6778,13 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       } else if (action === "regenerate-episode" || action === "regenerate-canonical") {
         await organizationActions.regenerate(action, target, chat);
         return;
+      } else if (action === 'toggle-now-always-inject') {
+        const enabled = target.dataset.value === 'true';
+        const result = await client.request<{alwaysInjectCount:number}>(`/v1/chats/${chat}/world-state/always-inject`, {
+          method:'PATCH',body:JSON.stringify({kind:target.dataset.kind,id:target.dataset.id,alwaysInject:enabled}),
+        });
+        invalidateAutomaticTurnPacket(state,state.current.chatId);
+        showActionSaveState({kind:'success',message:enabled ? `항상 전달을 켰어요 · ${result.alwaysInjectCount}/5` : '항상 전달을 껐어요'});
       } else if (action === 'toggle-always-inject') {
         const memory = data.memories.find(item => item.id === target.dataset.id);
         if (!memory) return;
@@ -7411,6 +7468,12 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
     if (input.name === "dashboardTheme") {
       document.documentElement.dataset.theme = filmTheme(input.value === "light" ? "light" : "dark");
       return;
+    }
+    if (input.dataset.action === 'canonical-memory-check' && input instanceof HTMLInputElement) {
+      const selection = timelineView.canonicalSelection, key = input.dataset.key ?? '';
+      if (!selection) return;
+      if (input.checked) selection.add(key); else selection.delete(key);
+      render(); return;
     }
     if (input.dataset.action === 'retry-memory-check' && input instanceof HTMLInputElement) {
       const selection=timelineView.retryDeletion;

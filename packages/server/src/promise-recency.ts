@@ -1,5 +1,5 @@
 import type { RcmDatabase } from "./db.js";
-import { structuredStoryTimeEnd, parseStoryTime, formatPromiseTime, storedTimeOccasion, type PromiseFirstMade, type StoredLandmarkKind } from '@rcm/shared';
+import { structuredStoryTimeEnd, storedStoryTimeEnd, parseStoryTime, formatPromiseTime, storedTimeOccasion, type PromiseFirstMade, type StoredLandmarkKind } from '@rcm/shared';
 import { buildEntityIdentityResolver, normalizeEntityName } from './entities.js';
 import { parseLandmarkKinds } from './memory-search-document.js';
 import { loadPlotKnowers } from './item-access.js';
@@ -22,7 +22,7 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
     .map(item=>({...item,first:Math.min(...item.refs.map(e=>sources.get(e.messageId).ordinal)),last:Math.max(...item.refs.map(e=>sources.get(e.messageId).ordinal))}))
     .sort((a,b)=>b.last-a.last);
   const current=dated[0]?.memory;
-  const currentTime=structuredStoryTimeEnd(current?.story_time_normalized || current?.story_time);
+  const currentTime=storedStoryTimeEnd(current?.story_time) ?? storedStoryTimeEnd(current?.story_time_normalized);
   const resolve=buildEntityIdentityResolver(db,chatId);
   const identities=new Map<string,string|undefined>();
   const identity=(name:string)=>{
@@ -30,7 +30,8 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
     return identities.get(name);
   };
   const pair=(names:string[])=>{const values=names.map(identity);return values.length===2 && values.every(Boolean) ? values.sort().join('\0') : undefined;};
-  // Index the same one-day predicate used by the previous per-event scan.
+  // Keep strict span detection here: the tolerant normalizer drops span ends
+  // and could mistake an older multi-day span for an exact landmark day.
   const dayKey=(raw:unknown):string|undefined=>{
     const parsed=parseStoryTime(raw);
     if (parsed.calendarKey===undefined || parsed.year===undefined || parsed.month===undefined || parsed.day===undefined) return undefined;
@@ -74,7 +75,7 @@ export function promiseFirstMade(db: RcmDatabase, chatId: string): Map<string, P
     const day=dayKey(storyTime);
     const landmark=index?.byMemory.get(memory?.id) ?? (day===undefined ? undefined : index?.byDay.get(day));
     if(!storyTime && !landmark)continue;
-    const firstTime=structuredStoryTimeEnd(memory?.story_time_normalized || storyTime);
+    const firstTime=storedStoryTimeEnd(memory?.story_time) ?? storedStoryTimeEnd(memory?.story_time_normalized);
     const daysAgo=firstTime!==undefined && currentTime!==undefined && currentTime>=firstTime ? Math.floor((currentTime-firstTime)/86400000) : undefined;
     const occasion=storyTime?storedTimeOccasion(storyTime,current?.story_time_normalized || current?.story_time):undefined;
     result.set(event.promise_id,{...(storyTime?{storyTime}:{}),...(daysAgo!==undefined?{daysAgo}:{}),

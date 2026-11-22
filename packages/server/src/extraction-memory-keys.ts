@@ -1,4 +1,4 @@
-import { ModelContentValidationError } from "@rcm/shared";
+import { remapExtractionMemoryKeys, ModelContentValidationError } from "@rcm/shared";
 import { createHash } from "node:crypto";
 import type { ExtractionResult } from "@rcm/shared";
 
@@ -17,37 +17,15 @@ export const scopeMemoryKey = (key: string, scopeId: string, reserved?:ReadonlyS
  * earlier omitted item or reorder items without changing existing identities.
  * Apply once after model/audit processing, before canonical storage. */
 export function scopeExtractionMemoryKeys(result: ExtractionResult, scopeId: string, reserved?:ReadonlySet<string>): ExtractionResult {
+  return remapExtractionMemoryKeys(result, extractionMemoryKeyMap(result, scopeId, reserved));
+}
+
+export function extractionMemoryKeyMap(result: Pick<ExtractionResult, 'memories'>, scopeId: string, reserved?:ReadonlySet<string>): Map<string,string> {
   if (new Set(result.memories.map(memory => memory.key)).size !== result.memories.length) {
     throw new ModelContentValidationError("Duplicate local memory key in extraction result");
   }
-  const keys = new Map(result.memories.map(memory => [memory.key,
+  return new Map(result.memories.map(memory => [memory.key,
     scopeMemoryKey(memory.key, scopeId, reserved)]));
-  return remapExtractionMemoryKeys(result,keys);
 }
 
-/** Every typed local link follows the same mapping in scoping and regeneration. */
-export function remapExtractionMemoryKeys(result: ExtractionResult, keys: ReadonlyMap<string,string>): ExtractionResult {
-  const remap = (key: string): string => keys.get(key) ?? key;
-  const withMemoryKey = <T extends { memoryKey?: string; support?:Array<{memoryKey:string;detailKey:string}> }>(item: T): T =>
-    ({ ...item, ...(item.memoryKey === undefined ? {} : {memoryKey:remap(item.memoryKey)}),
-      ...(item.support === undefined ? {} : {support:item.support.map(ref=>({...ref,memoryKey:remap(ref.memoryKey)}))}) });
-  return {
-    ...result,
-    memories: result.memories.map(memory => ({ ...memory, key: remap(memory.key), associations: memory.associations.map(remap) })),
-    assertions: result.assertions.map(item => ({ ...withMemoryKey(item),
-      ...(item.validFromMemoryKey ? { validFromMemoryKey: remap(item.validFromMemoryKey) } : {}),
-      ...(item.socialRelation ? { socialRelation: withMemoryKey(item.socialRelation) } : {}),
-    })),
-    pairProgress: result.pairProgress?.map(withMemoryKey),
-    promises: result.promises.map(withMemoryKey),
-    beliefs: result.beliefs.map(withMemoryKey),
-    socialKnowledge: result.socialKnowledge?.map(withMemoryKey),
-    relationshipEvents: result.relationshipEvents?.map(withMemoryKey),
-    physicalIntimacy: result.physicalIntimacy?.map(withMemoryKey),
-    atomRelations: result.atomRelations?.map(relation => ({ ...relation,
-      source: { ...relation.source, memoryKey: remap(relation.source.memoryKey) },
-      target: "atomRef" in relation.target ? relation.target
-        : { ...relation.target, memoryKey: remap(relation.target.memoryKey) },
-    })),
-  };
-}
+export { remapExtractionMemoryKeys, remapStateMemoryKeys } from "@rcm/shared";

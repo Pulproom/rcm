@@ -3,7 +3,8 @@ import { isEndedPromiseStatus, promiseFirstMade, type PromiseFirstMade } from ".
 import { validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, intersectAccessKnowledge, type ItemAccessScope } from "./item-access.js";
 import { createItemAccessReadContext, loadKnownByLabels, type ItemAccessReadContext, linkedDetailKnowledge, promiseLinkedSupport, correctedPromiseDetailIds, projectPromiseRow } from "./item-access.js";
 import { createHash } from "node:crypto";
-import { normalizeSearchTokens, scopeOf, structuredStoryTimeEnd, type KnowledgeScope, type McpEvidence, type StateKind } from "@rcm/shared";
+import { stateCandidateValue } from './now-delivery.js';
+import { normalizeSearchTokens, scopeOf, storedStoryTimeEnd, type KnowledgeScope, type McpEvidence, type StateKind } from "@rcm/shared";
 import { publicKnowledgeScope } from "./item-access.js";
 import type { RcmDatabase } from "./db.js";
 import { listSocialKnowledge, hasRecognitionContent, joinSentences, recognitionNaming, socialKnowledgeLevelLabel, type SocialKnowledgeLevel } from "./social-knowledge.js";
@@ -28,6 +29,7 @@ export interface StateEvidence {
   promiseStatus?: string;
   firstMade?: PromiseFirstMade;
   promisePinned?: boolean;
+  alwaysInject?: boolean;
   promiseRecent?: boolean;
   due?: string;
   /** Automatic presentation only; excluded from search text and the atom fingerprint. */
@@ -165,8 +167,8 @@ function readStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcome
   const memories = new Map((db.prepare("SELECT id,active,user_managed,evidence_json,story_time,story_time_normalized FROM memories WHERE chat_id=?").all(chatId) as any[]).map(row => [row.id, row]));
   const supportTimes = new Map<string, Set<string>>();
   for (const memory of memories.values()) {
-    const time = structuredStoryTimeEnd(memory.story_time) !== undefined ? memory.story_time : memory.story_time_normalized;
-    if (!memory.active || structuredStoryTimeEnd(time) === undefined) continue;
+    const time = storedStoryTimeEnd(memory.story_time) !== undefined ? memory.story_time : memory.story_time_normalized;
+    if (!memory.active || storedStoryTimeEnd(time) === undefined) continue;
     for (const entry of parse(memory.evidence_json)) if (typeof entry.messageId === "string") {
       const times = supportTimes.get(entry.messageId) ?? new Set<string>();
       times.add(time); supportTimes.set(entry.messageId, times);
@@ -188,10 +190,11 @@ function readStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcome
         ...(stateKind ? { stateKind } : {}),
         ...(kind === "relationship" ? {relationship: {from:row.from, to:row.to, stale:row.stale}} : {}),
         subjects: [...new Set(subjects.filter(Boolean))], current, memoryId: row.source_memory_id || undefined, sourceIds: [...new Set<string>(ids)] };
-      const fingerprint = createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sourceIdentities.get(id))])).digest("hex");
+      const fingerprintRow = stateCandidateValue(row);
+      const fingerprint = createHash("sha256").update(JSON.stringify([item, fingerprintRow, ids.map((id: string) => sourceIdentities.get(id))])).digest("hex");
       // Legacy whole-message formula is used only by the one-time sidecar migration.
       if (migration) migration.set(item.id, { current: fingerprint,
-        legacy: createHash("sha256").update(JSON.stringify([item, row, ids.map((id: string) => sources.get(id))])).digest("hex") });
+        legacy: createHash("sha256").update(JSON.stringify([item, fingerprintRow, ids.map((id: string) => sources.get(id))])).digest("hex") });
       // Ordinal selects the latest support, not the largest calendar value.
       // Ambiguous/missing clocks and manual corrections never borrow an older time.
       const latestSource = ids.reduce<string | undefined>((latest, id) => latest === undefined
@@ -199,7 +202,7 @@ function readStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcome
       const times = latestSource ? supportTimes.get(latestSource) : undefined;
       const recordedStoryTime = !corrected && times?.size === 1 ? [...times][0] : undefined;
       const accessKind=kind==="world_fact" || kind==="basic_relation"?"assertion":kind==="promise"?"promise":kind==="intimacy"?"physical_milestone":undefined;
-      const collected:StateEvidence={ ...item, fingerprint, citations: evidence, citationScope, automatic, ...presentation, recordedStoryTime,
+      const collected:StateEvidence={ ...item, alwaysInject: current && row.always_inject === 1, fingerprint, citations: evidence, citationScope, automatic, ...presentation, recordedStoryTime,
         updatedRevision: row.updated_revision ?? row.updatedRevision ?? row.valid_from_revision ?? row.created_revision,
         updatedOrdinal: Math.max(row.user_edit_ordinal ?? row.userEditOrdinal ?? -1, row.source_end_ordinal ?? row.valid_from_ordinal ?? -1,
           ...ids.map(id => sources.get(id)?.ordinal ?? -1)),
@@ -364,8 +367,8 @@ function readStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcome
     // Author rendering gives the predecessor its own scope; it never inherits
     // the current row's holders. Character-facing evidence does not emit notes.
     const memory = item.memoryId ? memories.get(item.memoryId) : undefined;
-    const time = memory?.active ? memory.story_time_normalized : undefined;
-    item.previous = { item: prior, ...(typeof time === "string" && structuredStoryTimeEnd(time) !== undefined ? { changedAt: time } : {}) };
+    const time = memory?.active ? memory.story_time_normalized || memory.story_time : undefined;
+    item.previous = { item: prior, ...(typeof time === "string" && storedStoryTimeEnd(time) !== undefined ? { changedAt: time } : {}) };
   }
   return result;
 }
@@ -414,7 +417,7 @@ export function rankStateEvidence(items: StateEvidence[], query: string, options
   const scores = new Map<string, number>();
   for (const channel of [lexical.map(entry => entry.item), semantic, associated]) channel.forEach((item, index) => scores.set(item.id, (scores.get(item.id) ?? 0) + 1 / (60 + index + 1)));
   const ranked = visible.filter(item => {
-    if (options.automaticPromises && item.promisePinned) scores.set(item.id, scores.get(item.id) ?? 0);
+    if (options.automaticPromises && (item.promisePinned || item.alwaysInject)) scores.set(item.id, scores.get(item.id) ?? 0);
     if (!scores.has(item.id)) { options.trace?.record(options.perspective, item, "not_linked"); return false; }
     if (!(options.archive || options.history || item.kind !== "relationship" || (options.activeNames?.length ?? 0) <= 1
       || item.subjects.slice(1).some(subject=>names.has(norm(subject))) || (options.semantic?.get(item.id) ?? 0)>=.35)) {

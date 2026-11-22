@@ -416,6 +416,7 @@ export function createOrganizationController(organizationView: OrganizationView,
 
 // Timeline selection and display state; the dashboard retains dirty-editor/navigation gates.
 export interface TimelineViewState {
+  canonicalSelection?: Set<string>;
   retryDeletion?: { day:string; ids:string[]; selected:Set<string>; busy:boolean; failures:Array<{id:string;title:string;error:string}> };
   query: string;
   landmarkOnly: boolean;

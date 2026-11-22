@@ -1,3 +1,4 @@
+import { buildCanonicalTranslationJob, replanCanonicalTranslationJob } from './canonical-translation.js';
 import { isSupportedEntityType } from "./entity-cleanup.js";
 import { beginProcessingAttempt, endProcessingAttempt, recordProcessingCall, type CallIdentity } from './processing-records.js';
 import { modelEntityIdentityContext } from '@rcm/shared';
@@ -138,7 +139,10 @@ export function recordJobShapeNormalizations(db:RcmDatabase,jobId:string,normali
 export function recordJobStateRecovery(db: RcmDatabase, jobId: string, report: import("@rcm/shared").StateRecoveryReport, workerId?: string): boolean {
   assertUpgradeJobWritable(db,jobId);
   const row=db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(jobId) as {payload_json:string}|undefined;
-  const existing=JSON.parse(row?.payload_json ?? "{}").stateRecovery?.normalizations ?? [];
+  const recovery=JSON.parse(row?.payload_json ?? "{}").stateRecovery;
+  const existing=recovery?.normalizations ?? [];
+  const canonicalLanguage=recovery?.canonicalLanguage;
+  if(canonicalLanguage?.length)report={...report,canonicalLanguage};
   if(existing.length || report.normalizations?.length)report={...report,normalizations:[...existing,...(report.normalizations ?? [])]};
   return db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateRecovery',json(?)),updated_at=? WHERE id=? AND status='leased' AND (? IS NULL OR lease_owner=?)")
     .run(JSON.stringify(report), now(), jobId, workerId ?? null, workerId ?? null).changes === 1;
@@ -864,7 +868,7 @@ function recordAuxiliaryFailure(db:RcmDatabase,row:{type:string;chat_id:string;p
   if(row.type==='ledger_consistency') recordLedgerInputs(db,row.chat_id,payload,'failed');
 }
 
-export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number, options: { recoverUnstartedLease?: boolean; storyOnly?: boolean; excludeJobIds?: string[]; stateContract?: boolean; stateWriting?: boolean; eventWriting?: boolean; eventWritingE1e?: boolean; eventWritingE1f?: boolean; stateWritingR10?: boolean; stateWritingR11?: boolean } = {}): LeasedJob | null {
+export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number, options: { canonicalTranslation?: boolean; recoverUnstartedLease?: boolean; storyOnly?: boolean; excludeJobIds?: string[]; stateContract?: boolean; stateWriting?: boolean; eventWriting?: boolean; eventWritingE1e?: boolean; eventWritingE1f?: boolean; stateWritingR10?: boolean; stateWritingR11?: boolean } = {}): LeasedJob | null {
   // Every unsuccessful pass must retire a candidate. The initial row count
   // bounds cleanup even if planning enqueues replacements along the way.
   const passes = Number(db.prepare("SELECT count(*) FROM jobs WHERE status IN ('queued','leased')").pluck().get()) + 1;
@@ -966,7 +970,7 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       const needsE1f = eventJob && (contractPayload.promptContract === 'e1f' || !pinnedEvent && fresh && (options.eventWritingE1f !== undefined || options.eventWritingE1e !== undefined) && DEFAULT_EXTRACTION_CONTRACTS.event === 'e1f');
       const needsR10 = contractPayload.stateContract === 'r10' || !Object.hasOwn(contractPayload,'stateContract') && fresh && options.stateWritingR10 !== undefined && DEFAULT_EXTRACTION_CONTRACTS.state === 'r10';
       const needsR11 = contractPayload.stateContract === 'r11' || !Object.hasOwn(contractPayload,'stateContract') && fresh && options.stateWritingR11 !== undefined && DEFAULT_EXTRACTION_CONTRACTS.state === 'r11';
-      const incompatible = needsE1f && options.eventWritingE1f !== true || needsE1e && options.eventWritingE1e !== true
+      const incompatible = row.type === 'canonical_translation' && options.canonicalTranslation === false || needsE1f && options.eventWritingE1f !== true || needsE1e && options.eventWritingE1e !== true
         || (needsState || contractPayload.upgradeRunId) && (options.stateContract===false || options.stateWriting===false || needsR10 && options.stateWritingR10 !== true || needsR11 && options.stateWritingR11 !== true);
       if (!incompatible && !needsCompletedState) break;
       if (incompatible) heldChats.add(row.chat_id);
@@ -1021,6 +1025,11 @@ export function leaseJob(db: RcmDatabase, workerId: string, leaseSeconds: number
       db.prepare("UPDATE jobs SET status='leased',lease_owner=?,leased_until=?,attempts=attempts+1,payload_json=?,updated_at=? WHERE id=?")
         .run(workerId, timestamp + leaseSeconds * 8_000, JSON.stringify({ ...payload, extractionLookup, promptContract: addition.promptContract ?? null, recallCandidates: addition.recallCandidates, recallAtomRefs: addition.recallAtomRefs }), timestamp, row.id);
       return { ...addition, ...(stateContract ? {stateContract} : {}), ...operationMeta };
+    }
+    if (row.type === 'canonical_translation') {
+      db.prepare("UPDATE jobs SET status='leased',lease_owner=?,leased_until=?,attempts=attempts+1,updated_at=? WHERE id=?")
+        .run(workerId, timestamp + leaseSeconds * 4_000, timestamp, row.id);
+      return { ...buildCanonicalTranslationJob(row.id, row.chat_id, row.profile, row.attempts + 1, payload as any), llmCallStats: operationMeta.llmCallStats };
     }
     if (row.type === 'memory_group') {
       if (!validatePendingMemoryGroup(db, row.chat_id, row.id, payload as any)) return null;
@@ -1299,6 +1308,10 @@ export function attachAuxiliaryPlan(db: RcmDatabase, job: LeasedJob | null, budg
   const existingPayload = row ? JSON.parse(row.payload_json || "{}") as { auxiliaryBudget?: AuxiliaryBudgetSnapshot } : {};
   // Saved budgets describe the previous attempt, never the next lease.
   try {
+    if (job.kind === 'canonical_translation') {
+      job = replanCanonicalTranslationJob(db, job, budget);
+      Object.assign(existingPayload, JSON.parse((db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(job.id) as { payload_json: string }).payload_json));
+    }
     if (job.kind === "initial_calibration" && job.initialCalibration && job.systemPrompt) {
       const { renderedSetup: _setup, ...setupContext } = JSON.parse(job.userPrompt!);
       const emptyEnvelope = JSON.stringify([{ role: "system", content: job.systemPrompt }, { role: "user", content: JSON.stringify({ ...setupContext, renderedSetup: [] }) }]);
@@ -1588,8 +1601,16 @@ export function cancelQueuedMemoryTransferJobs(db: RcmDatabase, chatId: string):
     db.prepare(`UPDATE ${table} SET status='stale',updated_at=? WHERE chat_id=? AND status<>'applied'
       AND job_id IN (SELECT id FROM jobs WHERE chat_id=? AND status='queued')`).run(now(),chatId,chatId);
   }
+  retainCancelledTranslations(db,chatId,(db.prepare("SELECT id FROM jobs WHERE chat_id=? AND status='queued'").all(chatId) as {id:string}[]).map(row=>row.id));
   db.prepare("DELETE FROM jobs WHERE chat_id=? AND status='queued'").run(chatId);
   db.prepare("UPDATE messages SET extraction_state='pending' WHERE chat_id=? AND extraction_state='queued'").run(chatId);
+}
+
+/** Applied prose is not rolled back by cancellation; keep its recovery originals. */
+function retainCancelledTranslations(db:RcmDatabase,chatId:string,ids:string[]):number {
+  return db.prepare(`UPDATE jobs SET status='cancelled',lease_owner=NULL,leased_until=NULL,updated_at=?
+    WHERE chat_id=? AND id IN (SELECT value FROM json_each(?)) AND type='canonical_translation'
+    AND COALESCE(json_extract(payload_json,'$.applied'),0)>0`).run(now(),chatId,JSON.stringify(ids)).changes;
 }
 
 export function cancelExtractionJobs(db: RcmDatabase, chatId: string): { deletedJobs: number; cancelledMessages: number } {
@@ -1617,11 +1638,12 @@ export function cancelExtractionJobs(db: RcmDatabase, chatId: string): { deleted
       for (const source of turn) db.prepare('INSERT OR IGNORE INTO gap_recovery_messages(chat_id,message_id) VALUES(?,?)').run(chatId,source.message_id);
     }
     const remove = db.prepare("DELETE FROM jobs WHERE id=?");
+    const retained=retainCancelledTranslations(db,chatId,rows.map(row=>row.id));
     for (const row of rows) {
       db.prepare("UPDATE extraction_batches SET status='superseded',updated_at=? WHERE chat_id=? AND job_id=? AND status NOT IN ('applied','superseded')").run(timestamp,chatId,row.id);
-      remove.run(row.id);
+      if (!(db.prepare("SELECT 1 FROM jobs WHERE id=? AND status='cancelled'").get(row.id))) remove.run(row.id);
     }
-    return { deletedJobs: rows.length, cancelledMessages };
+    return { deletedJobs: rows.length-retained, cancelledMessages };
   })();
 }
 
@@ -1672,6 +1694,10 @@ export function projectJobListPayload(payload: Record<string, unknown>, kind?: s
   ].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
   if (projected.stateRecovery) projected.stateRecovery = { ...(projected.stateRecovery as any), drops: ((projected.stateRecovery as any).drops ?? []).map(({candidate: _candidate,identity:_identity, ...drop}: any) => drop) };
   if (payload.providerFailure) projected.providerFailure = providerFailureMetadata(payload.providerFailure);
+  if (kind === 'canonical_translation') projected.canonicalTranslation = {
+    completedChunks: payload.cursor, totalChunks: (payload.chunks as unknown[])?.length ?? 0,
+    applied: payload.applied, diagnostics: payload.diagnostics,
+  };
   if (payload.stateInput) projected.stateInput = payload.stateInput;
   if (JOB_TRIGGER_VALUES.includes(payload.trigger as JobTrigger)) projected.trigger = payload.trigger;
   if (kind === 'story_consolidation' && ['segment','arc','overview'].includes(payload.level as string)

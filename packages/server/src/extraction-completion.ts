@@ -4,7 +4,7 @@ import { deletedMemoryKeys } from './user-deletions.js';
 import { episodeMemoryKeys } from "./regeneration-items.js";
 import { refreshEpisodeRegenerationPreview } from "./regeneration.js";
 import { ModelContentValidationError } from "@rcm/shared";
-import { recordSmallReviews, ingestReviewedDialogue, finishSmallReviewRetry, readSmallReviews } from "./small-review.js";
+import { recordSmallReviews, storedReviewParents, ingestReviewedDialogue, finishSmallReviewRetry, readSmallReviews } from "./small-review.js";
 import { recordAuditAdditionDrops } from "./extraction-audit.js";
 import type { JobTrigger } from "@rcm/shared";
 import { maybeEnqueueQuiz } from "./quiz.js";
@@ -22,13 +22,13 @@ import { flushRelationshipProjectionQueue, queueLaggingRelationshipProjections }
 import { fingerprintMatches, extractionContinuationProgress, type SourceFingerprintItem } from "./source-fingerprint.js";
 import { lockInitialCalibration } from "./initial-calibration.js";
 import { maybeEnqueueStorySpine } from "./story-spine.js";
-import { applyReconciliation, prepareReconciliation } from "./reconciliation.js";
+import { applyReconciliation, prepareReconciliation, remapReconciliationReviews } from "./reconciliation.js";
 import { enqueueFinalLedgerConsistency } from "./ledger-consistency.js";
 import { inspectDraftEvidence, rescueDraftDialogues } from "./evidence-review.js";
 import { refreshMemoryFts } from "./memory-search-document.js";
 import { canonicalizeExtraction, buildEntityIdentityResolver } from "./entities.js";
 import type { RecallAtomReference } from "./atom-relations.js";
-import { scopeExtractionMemoryKeys } from "./extraction-memory-keys.js";
+import { extractionMemoryKeyMap, remapExtractionMemoryKeys } from "./extraction-memory-keys.js";
 import { finishStateExtraction, usesStateExtraction, recordStateObservationDrops, type StateObservationDrop } from "./state-extraction.js";
 import { recordSeedResolutionDrops, type SeedResolutionDrop } from "./story-seeds.js";
 
@@ -292,8 +292,10 @@ export function completeExtractionJob(
     const reconciled = applyReconciliation(db, job.chat_id, jobId, sourceMessageIds, audited.result, reconciliation, reconciliationBudget,stateReviewRefs);
     pendingReconciliations += reconciled.pending;
     normalizeGeneratedCardShapes(reconciled.result, payload.promptContract);
-    const scoped = scopeExtractionMemoryKeys(dedupeKeyDialogues(job.type === "social_backfill" ? socialOnlyResult(reconciled.result) : reconciled.result),
-      payload.batchId ?? payload.retryOfJobId ?? jobId,deletedMemoryKeys(db,job.chat_id));
+    const final = dedupeKeyDialogues(job.type === "social_backfill" ? socialOnlyResult(reconciled.result) : reconciled.result);
+    const keys = extractionMemoryKeyMap(final,payload.batchId ?? payload.retryOfJobId ?? jobId,deletedMemoryKeys(db,job.chat_id));
+    const scoped = remapExtractionMemoryKeys(final,keys);
+    remapReconciliationReviews(db,job.chat_id,jobId,keys);
     const normalized = normalizePromiseMemoryAssociations(db, job.chat_id, scoped);
     let storedResult = validateDialogueEvidence(db, job.chat_id, sourceMessageIds, normalized.result);
     const identityIsolation=isolateMemoryIdentityCollisions(db,job.chat_id,storedResult,payload.batchId);
@@ -320,7 +322,7 @@ export function completeExtractionJob(
       [recognitionIssues.map(issue => `socialKnowledge[${issue.index}]: ${issue.reason}`).join("; "),
         rejectedExcerpts ? `${sourceReviewSummary} could not be verified` : "", ...relationWarnings].filter(Boolean).join("; "), payload.sourceFingerprint);
     const held = recordSmallReviews(db, job.chat_id, jobId, sourceMessageIds, recognitionReviewDraft ?? submitted,
-      payload.batchId ?? payload.retryOfJobId ?? jobId, reviewed.pendingRefs);
+      payload.batchId ?? payload.retryOfJobId ?? jobId, reviewed.pendingRefs,storedReviewParents(db,job.chat_id,keys));
     pendingReconciliations = Math.max(0, pendingReconciliations - held);
     applyMemoryRecallObservations(db, job.chat_id, normalized.result.memoryRecallObservations, payload.recallCandidates ?? [], sourceMessageIds, payload.batchId);
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status=?,draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(reconciled.pending && !payload.upgradeRunId ? "pending_review" : "applied", JSON.stringify(recognitionReviewDraft ?? submitted), JSON.stringify(storedResult), audit?.patch ? JSON.stringify(audit.patch) : null, Date.now(), payload.batchId);

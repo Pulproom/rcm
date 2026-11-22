@@ -1,3 +1,4 @@
+import { previewCanonicalTranslation, startCanonicalTranslation, completeCanonicalTranslationJob } from './canonical-translation.js';
 import { jobListMetadata } from './job-list-metadata.js';
 import { isPersonEntityType } from "@rcm/shared";
 import { auxiliaryUsageMetadata } from '@rcm/shared';
@@ -46,7 +47,7 @@ import { answerQuiz, completeQuizJob, disableAllQuizzes, nextQuiz, quizStatus, r
 import { TranslationLegacySettingsSchema } from "@rcm/shared";
 import { TranslationConnection } from "./translation-connection.js";
 import { McpSelector } from "./mcp-selector.js";
-import { INVALID_MEMORY_REF_MESSAGE, mcpRequestTimeoutMs, structuredStoryTimeEnd } from "@rcm/shared";
+import { INVALID_MEMORY_REF_MESSAGE, mcpRequestTimeoutMs, storedStoryTimeEnd } from "@rcm/shared";
 import { resolveAssertionHolders } from "./state-evidence.js";
 import { stateEvidenceReader } from "./state-search-index.js";
 import { SocialRelationSchema } from "@rcm/shared";
@@ -120,6 +121,7 @@ import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enque
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot, syncChatTitle } from "./lifecycle.js";
+import { nowAlwaysInjectCount, assertNowDeliveryCapacity, deliverablePromiseSql, inheritNowDelivery } from './now-delivery.js';
 import { alwaysInjectEstimate, prepareAlwaysInject, prependAlwaysInject, automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, renderAlwaysInjectPlan, processedHistoryCoverage, lexicalCandidates, retrieve, mcpRetrievalAudience, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
 import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
@@ -313,7 +315,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const health = {
       ok: true, version: RCM_SERVER_VERSION, apiRevision: RCM_API_REVISION, instanceId: serverInstanceId,
       vectorEnabled, embeddingReady: embeddings.ready, embedding: embeddings.status, reranker: reranker.status, serverTranslationCache: true, completeMemoryBackup: true,
-      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, memoryLineEditing: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
+      serverLlm: llmStore.publicConfig, translationConnection:translationConnection.publicConfig, mcpSelector:mcpSelector.publicConfig, serverWorker: serverWorker.status, capabilities: { stateReconciliationV2: true, stateReconciliationV3: true, pipelineProgressV2: true, providerJsonMode: true, pipelineRetryStatus: true, landmarkAuditPatches: true, manualTimelineMemory: true, storyOverviewEditing: true, turnMemoryToolOpportunity: true, relationshipLandmarks: true, physicalIntimacyAutoInject: true, recallPortfolioV2: true, mcpAtomDelta: true, memoryToolReadiness: true, initialCalibration: true, initialRelationshipProjection: true, relationshipProjectionCursor: true, offscreenPromises: true, extractionAudit: true, atomAccess: true, beliefLifecycle: true, reconciliationReview: true, messageVisibility: true, sourceRangeOrganization: true, stagedMemoryGrouping: true, perspectiveResolution: true, ingestionState: true, relationshipScaleV2: true, qualitativeRelationships: true, memoryDetails: true, memoryLineEditing: true, intimacyMilestones: true, npcProminence: true, adaptiveExtraction: true, multilingualCanonicalMemory: true, canonicalTranslation: true, extractionGrouping: true, promptCoverageSuppression: true, durableLedger: true, chatLineage: true, manualLineageTransfer: true, dashboardLineageProbe: true, readOnlyLineageProbe: true, recallCoverage: true, socialKnowledge: true, lineageAcknowledgement: true, packetContractV2: true, physicalIntimacy: true, typedLandmarks: true, resolvedRelationshipBaseline: true, manualLedgerEditing: true, memoryToolControl: true, shortMemoryRefs: true, multiGenerationLineage: true, quoteReviewRemoved: true, injectionManifest: true, ledgerHistory: true, typedSexMilestones: true, deepRecall: true, aspectProvenance: true, creativeUnknownStates: true, retrievalPlannerV2: true, extractionBatches: true, episodeRegeneration: true, canonicalSuffixRegeneration: true, fullColdStartSync: true, storySpine: true, storySpineV2: true, memoryQuiz: true, quizManagement: true, memoryBudgetPresets: true, holderMemoryTraces: true, canonicalSourceNormalization: true, editProtection: true, cognitiveActivation: true, serverServiceTier: true, ...(retrievalTrace.dashboardAvailable ? { retrievalDiagnostics: true } : {}) },
     };
     Object.assign(health.capabilities, {
       methodOverride: true,
@@ -362,7 +364,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const body=await context.req.json().catch(()=>({}));
       for (const key of ['sourceChatId','targetChatId','parentChatId']) if (typeof body[key]==='string') assertUserChat(db,body[key]);
     }
-    const readOnlyPost = context.req.method === 'POST' && /\/(?:lineage\/(?:probe|preview)|memory-transplant\/preview|memory-additions\/(?:sources|preview)|memory-groups\/preview|extraction-batches\/[^/]+\/preview-regeneration|entities\/(?:[^/]+\/delete-preview|merge-preview))$/.test(context.req.path);
+    const readOnlyPost = context.req.method === 'POST' && /\/(?:lineage\/(?:probe|preview)|memory-transplant\/preview|memory-additions\/(?:sources|preview)|canonical-translation\/preview|memory-groups\/preview|extraction-batches\/[^/]+\/preview-regeneration|entities\/(?:[^/]+\/delete-preview|merge-preview))$/.test(context.req.path);
     const sourceWrite = context.req.method === 'POST' && (/\/(?:reprocess|gap-recovery|jobs\/(?:retry-failed|requeue-cancelled|[^/]+\/resplit)|episodes\/[^/]+\/(?:retry|release)|extraction-audits\/[^/]+\/retry|social-knowledge\/backfill|story-spine\/rebuild|embeddings\/retry-failed|initial-calibration\/(?:retry|confirm|skip)|memory-(?:additions|groups)\/(?:create|[^/]+\/(?:apply|retry))|extraction-batches\/[^/]+\/regenerate-(?:episode|canonical)|regenerations\/[^/]+\/apply(?:-with-keep)?)$/.test(context.req.path)
       || context.req.path.endsWith('/small-reviews/resolve') && (await context.req.json().catch(()=>null))?.action === 'retry');
     const projectionRetry = context.req.method === 'PATCH' && context.req.path.endsWith('/relationships')
@@ -840,8 +842,10 @@ export function createApp(dependencies: Dependencies): Hono {
     // Active stored memories are processed records; use the entire chat, not
     // only selected hits or the unprocessed newest prompt. Read once per packet.
     const storyTimes = db.prepare("SELECT story_time FROM memories WHERE chat_id=? AND active=1 AND story_time IS NOT NULL").all(parsed.chatId) as Array<{ story_time: string }>;
+    let latestStoryTimeText: string | undefined;
     const latestStoryTime = storyTimes.reduce<number | undefined>((latest, row) => {
-      const end = structuredStoryTimeEnd(row.story_time);
+      const end = storedStoryTimeEnd(row.story_time);
+      if (end!==undefined && (latest===undefined || end>latest)) latestStoryTimeText=row.story_time;
       return end === undefined ? latest : latest === undefined ? end : Math.max(latest, end);
     }, undefined);
     const resolveRelationshipName = buildEntityIdentityResolver(db, parsed.chatId);
@@ -851,10 +855,14 @@ export function createApp(dependencies: Dependencies): Hono {
       .flatMap(name => { if (!name || !modelAllowsName(name)) return []; const identity = resolveRelationshipName(name); return identity.ambiguous || !modelAllowsName(identity.canonical) ? [] : [identity.canonical]; });
     const stateCandidates = automaticStateCandidates(stateCorpus, { perspectives: retrievalPerspectives, sceneCharacters, preferredRelationshipNames,
       activeNames: [...new Set([...namesPresent, ...namesMentioned])], query: retrievalSignals.map(signal => signal.text).join("\n"), semantic: semantic.stateScores,
-      covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
+      covered: new Set(trustedPromptSourceMessageIds), latestStoryTime, latestStoryTimeText, trace: stateTrace, memoryOnly: parsed.memoryOnlyInjection,
       namesRecognitionIds: new Set(sceneNames.recognitionIds), sceneRecognitionIds: new Set(sceneNames.sceneRecognitionIds) });
     const stateBudget = parsed.memoryOnlyInjection ? 0 : sharedStateBudget(remainingBudget);
-    const selectedState = selectAutomaticState(stateCandidates, stateBudget, pricing, allocation.sceneRelationships);
+    // A mandatory row that cannot fit alone must not consume the memory lane
+    // during portfolio selection, only to be dropped after all cards yielded.
+    const impossibleState = new Set(stateCandidates.filter(row => (row.alwaysInject || row.promiseSlot==='pinned' || row.pinned)
+      && chargedPacketTokens(withAutomaticGuidance(prependAlwaysInject(`<rp_memory_context>${renderState([{...row,line:row.baseLine ?? row.line,changeNote:undefined}]).xml}</rp_memory_context>`,alwaysInject.xml)),alwaysInject.plan,pricing)>hardTokenCeiling).map(row=>row.item.id));
+    const selectedState = selectAutomaticState(stateCandidates.filter(row=>!impossibleState.has(row.item.id)), stateBudget, pricing, allocation.sceneRelationships);
     const ceilingDroppedState = new Set<string>();
     let progress = parsed.pairProgress !== true ? "" : renderPairProgress(listPairProgress(db,parsed.chatId,parsed.identityHints?.userPersonaName).filter(pair=>modelAllowsName(pair.persona)&&modelAllowsName(pair.character)),namesPresent,{ initialSetupOnly });
     const occasions = parsed.upcomingOccasions === false ? { asOf: null, items: [] } : prepareOccasions(db, parsed.chatId, parsed.profile, retrievalPerspectives, parsed.identityHints?.userPersonaName, { kind: "author", sceneCharacters });
@@ -980,7 +988,7 @@ export function createApp(dependencies: Dependencies): Hono {
         if (peripheral >= 0) { fitAt(peripheral); continue; }
         if (occasions.items.length) { occasions.items.pop(); packet = rebuildPacket(); continue; }
         // 2. State outside the active scene yields before older continuity.
-        const outside = lastMatchingIndex(selectedState, row => !row.active && !row.protectedPromise && !row.pinned);
+        const outside = lastMatchingIndex(selectedState, row => !row.active && !row.alwaysInject && !row.protectedPromise && !row.pinned);
         if (allowStateRemoval && outside >= 0) { dropState(outside); continue; }
         // 3. Oldest continuity first, including historical structured records.
         const continuity = selectedItems.filter(item => !protectedScene(item) && !floorProtected(item) && selectedRoles.get(item.id) === "continuity")
@@ -1003,7 +1011,7 @@ export function createApp(dependencies: Dependencies): Hono {
         // 4. Preserve scene state while the protected card still has a smaller
         // emission: optional lines, then plot, then ordinary remaining lines.
         if (selectedItems.length) { fitAt(selectedItems.length - 1); continue; }
-        const unpinned = lastMatchingIndex(selectedState, row => !row.pinned && !row.protectedPromise);
+        const unpinned = lastMatchingIndex(selectedState, row => !row.alwaysInject && !row.pinned && !row.protectedPromise);
         if (allowStateRemoval && unpinned >= 0) { dropState(unpinned); continue; }
         if (sourceEvidence.items.length) { sourceEvidence.items.pop(); packet = rebuildPacket(); continue; }
         // A mandatory-lane collision may omit the overview whole as a last
@@ -1012,6 +1020,10 @@ export function createApp(dependencies: Dependencies): Hono {
           renderStory=createStorySpineCompiler(db,parsed.chatId,activeTurnPerspectives,semantic.storyScores,0,retrievalTrace.enabled,pricing,0);
           finalStory=compileStoryForSelection(); packet=rebuildPacket(); continue;
         }
+        // Manual current-state delivery yields after ordinary state, before
+        // protected promises. It never raises the memory lane's hard ceiling.
+        const alwaysState = lastMatchingIndex(selectedState, row => !!row.alwaysInject);
+        if (allowStateRemoval && alwaysState >= 0) { dropState(alwaysState); continue; }
         // Global ceiling escape hatch only after every reservation and card has
         // yielded. Protected promises are not an unbounded packet-budget bypass.
         const promise = lastMatchingIndex(selectedState, row => !!row.protectedPromise);
@@ -1035,7 +1047,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const keptPeripheralIds = selectedItems.filter(peripheralMemory).map(item => item.id);
     for (const row of stateCandidates) for (const [index, perspective] of row.perspectives.entries()) {
       stateTrace?.record(perspective, row.item, selectedState.includes(row) ? index ? "deduped" : "delivered"
-        : ceilingDroppedState.has(row.item.id) ? "final_ceiling" : "budget", { rank: row.rank,
+        : ceilingDroppedState.has(row.item.id) || impossibleState.has(row.item.id) ? "final_ceiling" : "budget", { rank: row.rank,
+          ...(impossibleState.has(row.item.id)?{reason:'standalone_exceeds_ceiling'}:{}),
           ...(row.item.kind === "relationship" ? { reason: row.item.automatic?.summaryReady === false ? "relationship_summary_pending" : row.relationshipReservation === "reserved"
             ? selectedState.includes(row) ? "scene_relationship_reserved" : "scene_relationship_final_ceiling"
             : row.relationshipReservation === "overflow" ? "scene_relationship_allowance_exceeded" : "relationship_ranked_state" } : {}),
@@ -1593,7 +1606,7 @@ export function createApp(dependencies: Dependencies): Hono {
     if (llmStore.config.engine === "server") return context.json({ job: null });
     if(body.modelSettingsFingerprint) db.prepare("INSERT INTO server_meta(key,value) VALUES('risu_model_settings_fingerprint',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(body.modelSettingsFingerprint);
     let leased;
-    try {leased=leaseJob(db,body.workerId,config.leaseSeconds,{recoverUnstartedLease:true,stateContract:body.capabilities?.stateExtractionV2===true,stateWriting:body.capabilities?.stateWritingFormat===true,eventWriting:body.capabilities?.eventWritingFormat===true,eventWritingE1e:body.capabilities?.eventWritingFormatE1e===true,eventWritingE1f:body.capabilities?.eventWritingFormatE1f===true,stateWritingR10:body.capabilities?.stateWritingFormatR10===true,stateWritingR11:body.capabilities?.stateWritingFormatR11===true});}
+    try {leased=leaseJob(db,body.workerId,config.leaseSeconds,{canonicalTranslation:body.capabilities?.canonicalTranslation===true,recoverUnstartedLease:true,stateContract:body.capabilities?.stateExtractionV2===true,stateWriting:body.capabilities?.stateWritingFormat===true,eventWriting:body.capabilities?.eventWritingFormat===true,eventWritingE1e:body.capabilities?.eventWritingFormatE1e===true,eventWritingE1f:body.capabilities?.eventWritingFormatE1f===true,stateWritingR10:body.capabilities?.stateWritingFormatR10===true,stateWritingR11:body.capabilities?.stateWritingFormatR11===true});}
     catch(error) {
       if((error as {code?:string}).code==="PLUGIN_UPDATE_REQUIRED")return context.json({code:"PLUGIN_UPDATE_REQUIRED",error:"기억 플러그인을 업데이트해 주세요."},409);
       throw error;
@@ -1671,12 +1684,12 @@ export function createApp(dependencies: Dependencies): Hono {
       WHERE j.id=? AND j.lease_owner=? AND j.status='leased'`).get(context.req.param("id"), body.workerId) as { type: string; chat_id: string; payload_json: string; attempts: number; profile: any; memory_language: any } | undefined;
       if (!job) return context.json({ error: "Lease not found" }, 409);
       const expectedLanguage = (JSON.parse(job.payload_json || "{}") as { memoryLanguage?: string }).memoryLanguage ?? job.memory_language;
-      if (job.type !== 'memory_group' && job.type !== "relationship_projection" && job.type !== "initial_calibration" && job.type !== "story_consolidation" && job.type !== "ledger_consistency" && job.type !== "quiz" && (body.result as { language?: unknown } | null)?.language !== expectedLanguage) {
+      if (job.type !== 'canonical_translation' && job.type !== 'memory_group' && job.type !== "relationship_projection" && job.type !== "initial_calibration" && job.type !== "story_consolidation" && job.type !== "ledger_consistency" && job.type !== "quiz" && (body.result as { language?: unknown } | null)?.language !== expectedLanguage) {
         return context.json({ error: `Canonical language must be ${expectedLanguage}` }, 400);
       }
       try {
         if (body.reconciliation?.stateRecovery) recordJobStateRecovery(db, context.req.param("id"), body.reconciliation.stateRecovery, body.workerId);
-        const completed = job.type === 'memory_group' ? completeMemoryGroupJob(db, context.req.param('id'), body.workerId, body.result) : job.type === "episode"
+        const completed = job.type === 'canonical_translation' ? completeCanonicalTranslationJob(db, context.req.param('id'), body.workerId, body.result, embeddings) : job.type === 'memory_group' ? completeMemoryGroupJob(db, context.req.param('id'), body.workerId, body.result) : job.type === "episode"
           ? completeEpisodeJob(db, context.req.param("id"), body.workerId, EpisodeCapsuleResultSchema.parse(body.result), body.reconciliation, body.audit)
           : job.type === "initial_calibration"
             ? completeInitialCalibrationJob(db, context.req.param("id"), body.workerId, InitialCalibrationResultSchema.parse(body.result))
@@ -2630,6 +2643,23 @@ export function createApp(dependencies: Dependencies): Hono {
         return context.json({ error: error.message, reason: error.message, code: error.code }, error.code === 'MESSAGE_NOT_FOUND' ? 404 : 409);
       }
     });
+  });
+  for (const operation of ['preview', 'start'] as const) app.post(`/v1/chats/:id/canonical-translation/${operation}`, async context => {
+    const body = await context.req.json() as { memoryIds?: unknown };
+    if (!Array.isArray(body.memoryIds) || !body.memoryIds.length || !body.memoryIds.every(id => typeof id === 'string' && id.length)) return context.json({ error: '기억을 선택해 주세요.' }, 400);
+    const memoryIds = body.memoryIds as string[], chatId = context.req.param('id');
+    const budget = { maxInputTokens: llmStore.config.maxInputTokens, maxOutputTokens: llmStore.config.maxOutputTokens, llmTimeoutMs: llmStore.config.llmTimeoutMs };
+    try {
+      if (operation === 'preview') return context.json(previewCanonicalTranslation(db, chatId, memoryIds, budget));
+      return withChatWrite(db, chatId, () => {
+        const result = startCanonicalTranslation(db, chatId, memoryIds, budget);
+        serverWorker.wake();
+        return context.json(result, 202);
+      });
+    } catch (error: any) {
+      if (error.message === 'CHAT_UPGRADING') throw error;
+      return context.json({ error: error.message, code: error.code }, 409);
+    }
   });
   for (const operation of ['preview', 'create'] as const) app.post(`/v1/chats/:id/memory-groups/${operation}`, async (context) => {
     try {
@@ -3769,7 +3799,7 @@ export function createApp(dependencies: Dependencies): Hono {
     type LastMentionRow = Record<string, unknown> & { last_mention_ordinal: number | null; last_mention_story_time: string | null };
     const withLastMention = (row: LastMentionRow) => {
       const { last_mention_ordinal, last_mention_story_time, ...item } = row;
-      return { ...item, ...correctionView(item as any), lastMention: { ordinal: last_mention_ordinal, storyTime: last_mention_story_time } };
+      return { ...item, alwaysInject: Number(item.always_inject ?? item.pinned ?? 0) === 1, ...correctionView(item as any), lastMention: { ordinal: last_mention_ordinal, storyTime: last_mention_story_time } };
     };
     const assertionItem = (row: LastMentionRow) => {
       const item = withLastMention(row);
@@ -3798,6 +3828,7 @@ export function createApp(dependencies: Dependencies): Hono {
       (SELECT story_time_normalized FROM memories WHERE id=promises.source_memory_id AND chat_id=promises.chat_id) AS last_mention_story_time
       FROM promises`;
     return {
+      alwaysInjectCount: nowAlwaysInjectCount(db,chatId),
       seeds: dashboardStorySeeds(db,chatId),
       at: { revision: hasRevision ? atRevision : null, ordinal: hasOrdinal ? atOrdinal : null },
       assertions: (db.prepare(`${assertionSelect} WHERE ${clauses.join(" AND ")}`).all(...values) as LastMentionRow[]).map(assertionItem),
@@ -3817,6 +3848,23 @@ export function createApp(dependencies: Dependencies): Hono {
     };
   }
   app.get("/v1/chats/:id/world-state", (context) => context.json(readDashboardWorld(context.req.param("id"), context.req.query())));
+  app.patch("/v1/chats/:id/world-state/always-inject", async context => {
+    const body = await context.req.json() as {kind?: string; id?: string; alwaysInject?: boolean};
+    const chatId = context.req.param('id');
+    if (!['assertion','belief','promise'].includes(body.kind ?? '') || !body.id || typeof body.alwaysInject !== 'boolean')
+      return context.json({error:'kind, id and boolean alwaysInject are required'},400);
+    return withChatWrite(db,chatId,()=>db.transaction(()=>{
+      const table = body.kind === 'assertion' ? 'assertions' : body.kind === 'belief' ? 'beliefs' : 'promises';
+      const column = body.kind === 'promise' ? 'pinned' : 'always_inject';
+      const current = body.kind === 'assertion' ? 'valid_to_revision IS NULL' : body.kind === 'belief' ? "active=1 AND status='active'" : deliverablePromiseSql;
+      const row = db.prepare(`SELECT ${column} enabled FROM ${table} WHERE chat_id=? AND id=? AND ${current}`).get(chatId,body.id) as {enabled:number}|undefined;
+      if (!row) return context.json({code:'NOW_ITEM_NOT_CURRENT',error:'현재 기록을 찾지 못했어요'},409);
+      if (body.alwaysInject && !row.enabled) assertNowDeliveryCapacity(db,chatId);
+      db.prepare(`UPDATE ${table} SET ${column}=? WHERE chat_id=? AND id=?`).run(Number(body.alwaysInject),chatId,body.id);
+      if (row.enabled !== Number(body.alwaysInject)) db.prepare('UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?').run(Date.now(),chatId);
+      return context.json({ok:true,alwaysInject:body.alwaysInject,alwaysInjectCount:nowAlwaysInjectCount(db,chatId)});
+    })());
+  });
   app.post("/v1/chats/:id/world-state", async (context) => {
     const chatId = context.req.param("id");
     const body = await context.req.json() as { kind?: string; subject?: string; predicate?: string; holder?: string; promisor?: string; promisee?: string; value?: string; stateKind?: string; confidence?: number; polarity?: string; status?: string; content?: string; scope?: string; scheduledFor?: string; statusReason?: string; sourceMessageId?: string; socialRelation?: unknown; knownBy?: string[]; knownByEveryone?: boolean; locked?: boolean } & PromiseEditOptions;
@@ -3858,6 +3906,7 @@ export function createApp(dependencies: Dependencies): Hono {
       const id = randomUUID();
       const revision = chat.revision + 1;
       db.transaction(() => {
+        if (kind === "promise" && body.pinned && body.status !== "invalidated") assertNowDeliveryCapacity(db,chatId);
         if (kind === "assertion") {
           const stateKind = assertionStateKind!;
           db.prepare(`INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,created_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'durable',?)`).run(id, chatId, body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), stateKind, confidence, revision, ordinal, evidence, Date.now());
@@ -3949,6 +3998,7 @@ export function createApp(dependencies: Dependencies): Hono {
           || body.recency === 'recent' || body.recency === 'already_past' && current.recency_until_turn != null;
         if (!authored) {
           if (current.pinned !== Number(body.pinned)) db.transaction(()=>{
+            if (body.pinned && current.status !== 'invalidated') assertNowDeliveryCapacity(db,chatId);
             db.prepare('UPDATE promises SET pinned=? WHERE id=? AND chat_id=?').run(Number(body.pinned),body.id,chatId);
             db.prepare('UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?').run(Date.now(),chatId);
           })();
@@ -3963,6 +4013,8 @@ export function createApp(dependencies: Dependencies): Hono {
           : body.kind === 'belief' || body.kind === 'promise'
             ? db.prepare(`SELECT * FROM ${body.kind === 'belief' ? 'beliefs' : 'promises'} WHERE id=? AND chat_id=?`).get(body.id,chatId) as Record<string,any>|undefined : undefined;
         if (!current) return;
+        if (body.kind === 'promise' && (body.pinned ?? current.pinned) && (body.status ?? current.status) !== 'invalidated'
+          && (!current.pinned || current.status === 'invalidated')) assertNowDeliveryCapacity(db,chatId);
         const support = body.kind === 'promise' ? promiseLinkedSupport(db,chatId,body.id!)
           : current.linked_detail_ids_json != null && current.user_edit_ordinal == null
             ? {ids:JSON.parse(String(current.linked_detail_ids_json)) as string[],holders:linkedDetailKnowledge(db,chatId,JSON.parse(String(current.linked_detail_ids_json))) ?? [PENDING_ACCESS_HOLDER]} : undefined;
@@ -3990,6 +4042,7 @@ export function createApp(dependencies: Dependencies): Hono {
         `).run(nextId, chatId, body.subject?.trim() ?? current.subject, body.predicate?.trim() ?? current.predicate, body.value?.trim() ?? current.value,
             nextStateKind,
             Math.max(0, Math.min(1, Number(body.confidence ?? current.confidence))), revision, null, "[]", Date.now(),linkedDetails);
+          inheritNowDelivery(db,'assertions',nextId,[current,...mergeIds.map(id=>db.prepare('SELECT always_inject FROM assertions WHERE id=?').get(id) as {always_inject:number})]);
           if (grants.length) replaceItemAccess(db,chatId,'assertion',nextId,grants,revision,Date.now());
           const relationJson = body.socialRelation === null || !nextRelation ? null : JSON.stringify({ ...nextRelation, manual: true,
             ...publicKnowledgeScope(grants.map(grant=>grant.holder)), detailIds: explicitKnowledge ? [] : oldRelation?.detailIds ?? [] });
@@ -4372,6 +4425,7 @@ export function createApp(dependencies: Dependencies): Hono {
 
   app.onError(async (error, context) => {
     if ((error as {code?:string}).code === 'INTERNAL_CHAT') return context.json({code:'INTERNAL_CHAT',error:error.message},403);
+    if ((error as {code?:string}).code === 'NOW_ALWAYS_INJECT_LIMIT') return context.json({code:'NOW_ALWAYS_INJECT_LIMIT',error:error.message},409);
     const upgradeCode = (error as {code?:string}).code;
     if (upgradeCode && ['SOURCE_SNAPSHOT_HELD','CHAT_WORK_OFF','UPGRADE_ACTIVE','PHASE_LOCKED','SETUP_UNAVAILABLE','BACKUP_FAILED','SOURCE_MISSING','BUSY','ALREADY_CURRENT','RUN_NOT_FOUND','RUN_NOT_RESUMABLE','SOURCE_CHANGED','RUN_NOT_READY'].includes(upgradeCode)) {
       const reasons: Record<string,string> = {SETUP_UNAVAILABLE:'초기 설정 자료를 선택한 뒤 다시 시도해 주세요.',BACKUP_FAILED:'이 채팅의 백업을 만들지 못해서 다시 만들기를 시작하지 않았어요.'};
@@ -4389,6 +4443,7 @@ export function createApp(dependencies: Dependencies): Hono {
     const summary = error instanceof ExtractionValidationError
       ? error.summary
       : error instanceof BackupValidationError ? `백업 검증 실패: ${error.message}`
+        : code === 'RECONCILIATION_EVIDENCE_UNAVAILABLE' ? error.message
         : code === "LEASE_NOT_FOUND" ? "처리 작업의 임대가 만료됐어요."
           : "요청을 처리하지 못했어요.";
     console.error(`[RCM] Request failed code=${code} path=${context.req.path}`);

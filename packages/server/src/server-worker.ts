@@ -1,3 +1,5 @@
+import { completeCanonicalTranslationJob } from './canonical-translation.js';
+import { translateCanonicalWithServerLlm } from './server-llm.js';
 import { recordIncident } from './incidents.js';
 import { cleanupUnengagedChats } from "./chat-engagement.js";
 import { beginChatWork, isChatWorkHeld, CHAT_WORK_HELD, userChatSql } from "./chat-work.js";
@@ -260,7 +262,7 @@ export class ServerExtractionWorker {
     const { job, controller } = active;
     try {
       setJobPipelineStage(this.db, job.id, active.phase === "storing" ? "storing" : active.phase === "relationship_projection" ? "relationship_projection" : active.phase === "story_consolidation" ? "story_consolidation" : active.phase === "ledger_consistency" ? "ledger_consistency" : "first_extraction", active.owner);
-      let result = job.kind === 'memory_group' ? await groupMemoriesWithServerLlm(this.store, job, controller.signal) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode"
+      let result = job.kind === 'canonical_translation' ? await translateCanonicalWithServerLlm(this.store, job, controller.signal) : job.kind === 'memory_group' ? await groupMemoriesWithServerLlm(this.store, job, controller.signal) : job.kind === "audit_retry" ? job.auditDraft : job.kind === "episode"
         ? await episodeWithServerLlm(this.store, job, controller.signal)
         : job.kind === "initial_calibration"
           ? await calibrateInitialSetupWithServerLlm(this.store, job, controller.signal)
@@ -318,7 +320,7 @@ export class ServerExtractionWorker {
           console.warn(`[RCM] Source repair unresolved for job ${job.id}: ${String(error).slice(0, 160)}`);
         }
       }
-      if (!incomplete && !job.memoryOnly && !job.sourceRecovery && job.kind !== 'memory_group' && job.kind !== "initial_calibration" && job.kind !== "relationship_projection" && job.kind !== "story_consolidation" && job.kind !== "ledger_consistency" && job.kind !== "quiz") {
+      if (!incomplete && !job.memoryOnly && !job.sourceRecovery && job.kind !== 'canonical_translation' && job.kind !== 'memory_group' && job.kind !== "initial_calibration" && job.kind !== "relationship_projection" && job.kind !== "story_consolidation" && job.kind !== "ledger_consistency" && job.kind !== "quiz") {
         let draft = job.kind === "episode" ? extractionAuditDraftForJob(job, result) : ExtractionAggregateSchema.parse(result);
         if (audit?.patch) draft = applyExtractionAuditPatch(this.db, job.chatId, job.sourceMessageIds, draft, audit.patch).result;
         const grounded = !audit?.patch?.keepPendingItemRefs.length && !inspectDraftEvidence(this.db, job.chatId, job.sourceMessageIds, draft).some((issue) => issue.blocking);
@@ -355,7 +357,8 @@ export class ServerExtractionWorker {
       active.phase = "storing";
       if(controller.signal.aborted || !this.db.prepare("SELECT 1 FROM jobs WHERE id=? AND lease_owner=? AND status='leased'").get(job.id,active.owner)) return;
       setJobPipelineStage(this.db, job.id, "storing", active.owner);
-      if (job.kind === 'memory_group') completeMemoryGroupJob(this.db, job.id, active.owner, result);
+      if (job.kind === 'canonical_translation') completeCanonicalTranslationJob(this.db, job.id, active.owner, result, this.embeddings);
+      else if (job.kind === 'memory_group') completeMemoryGroupJob(this.db, job.id, active.owner, result);
       else if (job.kind === "episode") completeEpisodeJob(this.db, job.id, active.owner, result as any, reconciliation, audit);
       else if (job.kind === "initial_calibration") completeInitialCalibrationJob(this.db, job.id, active.owner, result as any);
       else if (job.kind === "relationship_projection") completeRelationshipProjectionJob(this.db, job.id, active.owner, result as any);

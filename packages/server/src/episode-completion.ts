@@ -19,7 +19,7 @@ import { flushRelationshipProjectionQueue, queueLaggingRelationshipProjections }
 import { applyExtractionAuditPatch, recordExtractionAudit } from "./extraction-audit.js";
 import { fingerprintMatches, type SourceFingerprintItem } from "./source-fingerprint.js";
 import { lockInitialCalibration } from "./initial-calibration.js";
-import { applyReconciliation } from "./reconciliation.js";
+import { applyReconciliation, remapReconciliationReviews } from "./reconciliation.js";
 import { enqueueFinalLedgerConsistency } from "./ledger-consistency.js";
 import { maybeEnqueueStorySpine } from "./story-spine.js";
 
@@ -109,6 +109,7 @@ export function completeEpisodeJob(
     relationshipBaselines: result.relationshipBaselines,
     physicalIntimacy: result.physicalIntimacy,
   };
+  extraction=remapExtractionMemoryKeys(extraction,new Map([[canonicalResult.capsule.key,`episode:${episodeId}`]]));
   const draft = extractionAuditDraftForJob({ kind: "episode", episode: { episodeId } as any }, canonicalResult);
   const pendingDialogueKeys=new Set<string>();
   const dialogueKey=(dialogue:any)=>JSON.stringify([dialogue.messageId,dialogue.speaker,dialogue.text,dialogue.kind,dialogue.evidence]);
@@ -166,7 +167,9 @@ export function completeEpisodeJob(
     pendingReconciliations += reconciled.pending;
     extraction = validateDialogueEvidence(db, job.chat_id, sourceMessageIds, reconciled.result);
     const capsuleKey=availableMemoryKey(`episode:${episodeId}`,deletedMemoryKeys(db,job.chat_id));
-    extraction=remapExtractionMemoryKeys(extraction,new Map([[`episode:${episodeId}`,capsuleKey]]));
+    const keys=new Map([[`episode:${episodeId}`,capsuleKey]]);
+    extraction=remapExtractionMemoryKeys(extraction,keys);
+    remapReconciliationReviews(db,job.chat_id,jobId,keys);
     const previousChildren = containedMemoryIds(db, job.chat_id, sourceSet);
     ingestExtraction(db, job.chat_id, extraction, jobId, payload.batchId);
     if (payload.batchId) db.prepare("UPDATE extraction_batches SET status='applied',draft_json=?,final_json=?,audit_patch_json=?,updated_at=? WHERE id=?").run(JSON.stringify(prepared), JSON.stringify(extraction), audit?.patch ? JSON.stringify(audit.patch) : null, now(), payload.batchId);

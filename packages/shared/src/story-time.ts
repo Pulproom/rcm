@@ -133,11 +133,10 @@ export function parseStoryTime(value: unknown): ParsedStoryTime {
 
 export const normalizeStoryTime = (value: unknown): string | undefined => parseStoryTime(value).normalized;
 
-/** Only the product-owned STORY_TIME_GUIDANCE grammar: YYYY-MM-DD[ HH:mm],
- * optionally followed by ` ~ HH:mm` or a full end date/time. Never parse RP
- * prose or normalize natural-language dates for automatic relative labels. */
+/** Product-owned STORY_TIME_GUIDANCE grammar. A comma suffix is opaque source
+ * wording attached to a date, never a clock or a natural-language inference. */
 function structuredStoryTimeParts(value: string | undefined) {
-  const match = value?.trim().match(/^(\d{4}-\d{2}-\d{2})(?: ([0-2]\d:[0-5]\d))?(?: ~ (?:(\d{4}-\d{2}-\d{2})(?: ([0-2]\d:[0-5]\d))?|([0-2]\d:[0-5]\d)))?$/u);
+  const match = value?.trim().match(/^(\d{4}-\d{2}-\d{2})(?: ([0-2]\d:[0-5]\d)|, ([^~\r\n]+?))?(?: ~ (?:(\d{4}-\d{2}-\d{2})(?: ([0-2]\d:[0-5]\d)|, ([^~\r\n]+?))?|([0-2]\d:[0-5]\d)))?$/u);
   if (!match) return undefined;
   const timestamp = (date: string, clock = "00:00"): number | undefined => {
     const [year, month, day] = date.split("-").map(Number);
@@ -145,14 +144,31 @@ function structuredStoryTimeParts(value: string | undefined) {
     return Date.parse(`${date}T${clock}:00Z`);
   };
   const startDate = match[1]!, startClock = match[2];
-  const endDate = match[3] ?? startDate, endClock = match[3] ? match[4] : match[5] ?? match[2];
+  const endDate = match[4] ?? startDate, endClock = match[4] ? match[5] : match[7] ?? match[2];
   const start = timestamp(startDate, startClock), end = timestamp(endDate, endClock);
   // A short end clock is same-day by contract; do not infer an overnight span.
-  return start !== undefined && end !== undefined && end >= start ? { startDate, startClock, endDate, endClock, end } : undefined;
+  return start !== undefined && end !== undefined && end >= start
+    ? { startDate, startClock, startWords: match[3], endDate, endClock, endWords: match[6], end } : undefined;
 }
 
 export function structuredStoryTimeEnd(value: string | undefined): number | undefined {
   return structuredStoryTimeParts(value)?.end;
+}
+
+function storedStoryTimeParts(value: string | undefined) {
+  return structuredStoryTimeParts(value) ?? structuredStoryTimeParts(normalizeStoryTime(value));
+}
+
+/** Read stored values without rewriting them. Prefer the owned grammar (including
+ * span ends and opaque words); the existing numeric-calendar normalizer may
+ * recover an older status-panel value, but does not preserve its span end. */
+export function storedStoryTimeEnd(value: string | undefined): number | undefined {
+  return storedStoryTimeParts(value)?.end;
+}
+
+/** Precision comes from the stored clock syntax, never opaque part-of-day prose. */
+export function storedStoryTimeHasClock(value: string | undefined): boolean {
+  return storedStoryTimeParts(value)?.endClock !== undefined;
 }
 
 const partOfDay = (clock: string | undefined): string | undefined => {
@@ -162,10 +178,12 @@ const partOfDay = (clock: string | undefined): string | undefined => {
 };
 
 /** Older records keep the date but trade clock times for the part of day,
- * as people remember them. Unstructured values are returned unchanged. */
+ * as people remember them. Older numeric formats use their normalized point;
+ * opaque values and the owned date-with-words form keep their stored wording. */
 export function coarseStoryTime(value: string): string {
-  const parts = structuredStoryTimeParts(value);
+  const parts = storedStoryTimeParts(value);
   if (!parts) return value;
+  if (parts.startWords || parts.endWords) return value;
   const dates = parts.endDate === parts.startDate ? parts.startDate : `${parts.startDate} ~ ${parts.endDate}`;
   const from = partOfDay(parts.startClock), to = partOfDay(parts.endClock);
   const day = from && to && from !== to ? `${from} to ${to}` : from ?? to;
@@ -191,7 +209,13 @@ export const compareStoryTimes = (left: unknown, right: unknown): number | null 
 
 /** Shared model guidance, not a schema restriction or stored-value rewrite. */
 export const STORY_TIME_GUIDANCE = `STORY TIME
-For storyTime, scheduledFor and other story date/time fields: when the source gives a calendar date/time, write YYYY-MM-DD HH:mm (date only: YYYY-MM-DD; span: YYYY-MM-DD HH:mm ~ HH:mm, or a full end date/time if the day changes). When no calendar date is given, keep the source's own wording (e.g. "late evening", "Year 123", an era or seasonal name). Never invent a date.`;
+storyTime, scheduledFor and other story date/time fields use exactly one of these forms. Convert the source's format; do not copy it.
+- Date and clock time: YYYY-MM-DD HH:mm, 24-hour. "2026-06-16 (Tue) 06:27 PM" becomes "2026-06-16 18:27".
+- Date with only a part of day: YYYY-MM-DD, followed by a comma and the source's words. "June 7, 2026, in the afternoon" becomes "2026-06-07, afternoon".
+- Date only: YYYY-MM-DD.
+- A span: start ~ end, where the start is a full form above and the end is HH:mm on the same day, or a full date and time if the day changes. Never leave the start time out when the end has one.
+- No calendar date in the source: keep the source's own wording (such as "late evening", "Year 123", an era or seasonal name).
+Never invent a date.`;
 
 /** Dashboard presentation only. Omit years consistently without a chat-wide reference year.
  * Parse the existing structured story-time field; never infer dates from RP prose. */

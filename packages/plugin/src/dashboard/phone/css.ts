@@ -879,6 +879,7 @@ button.sent-row:hover .sent-row__t { color: inherit; }
 .nr__ring .menu.ring > summary .i { width: 24px; height: 24px; stroke-width: 1.5; }
 .nr__ring .menu.ring > summary:hover, .nr__ring .menu.ring[open] > summary { color: var(--kc); background: none; }
 .nr__k { font-size: var(--t-meta); }
+.nr__delivery { color: var(--accent-text); }
 .nr__kind { font-weight: 600; color: var(--kc); }
 .nr__t { font-size: var(--t-ui); line-height: 1.5; }
 .nr__what:hover .nr__t { color: inherit; }
@@ -951,6 +952,8 @@ button.sent-row:hover .sent-row__t { color: inherit; }
 #memory-rows .row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px 8px; padding: 10px 16px; }
 #memory-rows .row > * { grid-column: 1 / -1; order: 3; }
 #memory-rows .row__slug { display: contents; }
+#memory-rows .row__slug .canonical-mixed { grid-row: 3; grid-column: 1 / -1; order: 3; }
+#memory-rows .canonical-mixed { background: color-mix(in srgb, var(--cut) 80%, #000000); }
 #memory-rows .row__title { order: 1; grid-row: 1; grid-column: 1 / -1; font-size: var(--t-ui); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #memory-rows .row__slug .tc { order: 1; grid-row: 2; grid-column: 2; align-self: center; font-size: var(--t-meta); white-space: nowrap; color: var(--ink-3); }
 #memory-rows .row__slug b { order: 2; grid-row: 2; grid-column: 1; font-size: var(--t-meta); font-weight: 400; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -1,4 +1,5 @@
-import { normalizeAuxiliaryResponse } from "@rcm/shared";
+import { validateCanonicalTranslation } from '@rcm/shared';
+import { inspectCanonicalProse, normalizeAuxiliaryResponse } from "@rcm/shared";
 import { recordJobShapeNormalizations } from "./jobs.js";
 import { expandEventWritingFormat, extractionDraftSchema } from "@rcm/shared";
 import { recoverStateResponse, stateWritingContext, normalizeStateEnvelope, sanitizeStateResponseForStaging, type StateRecoveryReport } from "@rcm/shared";
@@ -230,6 +231,12 @@ export class ServerLlmStore {
   }
   recordShapeNormalizations(jobId:string,diagnostics:import("@rcm/shared").AuxiliaryShapeDiagnostic[]):void {
     recordJobShapeNormalizations(this.db,jobId,diagnostics);
+  }
+  recordCanonicalLanguage(jobId: string, diagnostic: import('@rcm/shared').CanonicalLanguageDiagnostic): void {
+    const row = this.db.prepare('SELECT payload_json FROM jobs WHERE id=?').get(jobId) as {payload_json:string}|undefined;
+    const report = JSON.parse(row?.payload_json ?? '{}').stateRecovery ?? {localFixes:[],fieldRepairCalls:0,correctedFields:0,drops:[],wholeRepair:false,regenerated:false};
+    report.canonicalLanguage = [...(report.canonicalLanguage ?? []), diagnostic];
+    this.db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateRecovery',json(?)) WHERE id=? AND status='leased'").run(JSON.stringify(report),jobId);
   }
   normalizeShape(jobId:string,value:unknown,purpose:string):unknown {
     // State wire adaptation runs in normalizeStateEnvelope, before expansion.
@@ -547,6 +554,19 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
 
 type ServerLlmPurpose = import("@rcm/shared").AuxiliaryPurpose;
 
+export async function translateCanonicalWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal) {
+  const messages = [{ role: 'system' as const, content: job.systemPrompt! }, { role: 'user' as const, content: job.userPrompt! }];
+  const validate = (output: string, purpose: ServerLlmPurpose) => validateCanonicalTranslation(parseServerJson(store, job.id, output, purpose), job.canonicalTranslation!.items);
+  const first = await callProvider(store, job.id, messages, signal, 'canonical_translation');
+  try { return validate(first, 'canonical_translation'); }
+  catch (error) {
+    const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
+      originalMessages: messages, invalidOutput: first, validationError: error, request: { kind: 'canonical_translation' },
+    }), signal, 'canonical_translation_repair'));
+    return validate(repaired, 'canonical_translation_repair');
+  }
+}
+
 export async function groupMemoriesWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal): Promise<MemoryGroupingResult> {
   const stage = job.memoryGrouping!;
   const messages = [{ role: 'system' as const, content: stage.systemPrompt }, { role: 'user' as const, content: stage.userPrompt }];
@@ -805,6 +825,63 @@ export async function requestStructuredProvider(
     return { content:String(result.choices?.[0]?.message?.content ?? ""), finishReason:result.choices?.[0]?.finish_reason, refusal:Boolean(result.choices?.[0]?.message?.refusal), usage:result.usage };
 }
 
+/** A script warning spends only the existing repair allowance. Schema-valid
+ * originals survive unavailable, failed or still-mixed repairs. */
+async function repairCanonicalProse<T>(args: {
+  store: ServerLlmStore; jobId: string; stage: import('@rcm/shared').CanonicalProseStage; language: string;
+  value: T; output: string; messages: Array<{role:'system'|'user'|'assistant';content:string}>;
+  request: Parameters<typeof buildAuxiliaryRepairMessages>[0]['request'];
+  repair: (messages: Array<{role:'system'|'user'|'assistant';content:string}>) => Promise<string>;
+  validate: (output: string) => T; signal: AbortSignal; onRepair?: () => void;
+}): Promise<T> {
+  const inspect = (value: T, output: string) => {
+    const fields = new Map(inspectCanonicalProse(value,args.language,args.stage).map(issue=>[issue.path,issue]));
+    // Inspect authored slots too: moment text and working notes are consumed by adapters.
+    try { for(const issue of inspectCanonicalProse(parseStructuredModelJson(output).value,args.language,args.stage)) fields.set(issue.path,issue); } catch { /* Existing parser already validated the normalized result. */ }
+    return [...fields.values()];
+  };
+  const initial = inspect(args.value,args.output);
+  if (!initial.length) return args.value;
+  args.store.recordCanonicalLanguage(args.jobId,{stage:args.stage,phase:'initial',fields:initial});
+  let value = args.value, output = args.output;
+  let reason: 'repair_structure_changed' | undefined;
+  if (args.store.canRepair(args.jobId,args.stage==='state'?'state_response':'general')) {
+    args.onRepair?.();
+    try {
+      const messages = buildAuxiliaryRepairMessages({originalMessages:args.messages,invalidOutput:args.output,
+        validationError:new Error(`Write canonical prose in English at these field paths: ${initial.map(issue=>issue.path).join(', ')}. Keep all items, dialogue, evidence quotes and names unchanged.`),request:args.request});
+      const repaired = await callRepairProvider(()=>args.repair(messages));
+      // No unchanged-output regeneration for a storable script warning.
+      const candidate = args.validate(repaired);
+      const paths = new Set(initial.map(issue => issue.path));
+      // Only owned, flagged string leaves may change. Compare authored JSON too,
+      // since adapters can consume fields that are absent from the stored shape.
+      const patch = (original: unknown, next: unknown, path = ''): unknown => {
+        const flagged=paths.has(path) || args.stage==='audit' && path.startsWith('patch.') && paths.has(path.slice(6));
+        if (flagged && typeof original === 'string' && typeof next === 'string' && next.trim()) return next;
+        if (Array.isArray(original) && Array.isArray(next) && original.length === next.length)
+          return original.map((item,index) => patch(item,next[index],`${path}[${index}]`));
+        if (original && next && typeof original === 'object' && typeof next === 'object' && !Array.isArray(original) && !Array.isArray(next)) {
+          const left=original as Record<string,unknown>, right=next as Record<string,unknown>;
+          if (Object.keys(left).length!==Object.keys(right).length || Object.keys(left).some(key=>!Object.hasOwn(right,key))) throw new Error('structure');
+          return Object.fromEntries(Object.keys(left).map(key=>[key,patch(left[key],right[key],path?`${path}.${key}`:key)]));
+        }
+        if (original !== next) throw new Error('structure');
+        return original;
+      };
+      try {
+        const rawOriginal=parseStructuredModelJson(args.output).value as any, rawCandidate=parseStructuredModelJson(repaired).value as any;
+        patch(rawOriginal,rawCandidate);
+        value = patch(args.value,candidate) as T;
+        output = repaired;
+      } catch { reason='repair_structure_changed'; }
+    } catch { args.signal.throwIfAborted(); }
+  }
+  const retained = inspect(value,output);
+  if (retained.length || reason) args.store.recordCanonicalLanguage(args.jobId,{stage:args.stage,phase:'retained',fields:retained,...(reason?{reason}:{})});
+  return value;
+}
+
 export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal, onRepair?: () => void): Promise<ExtractionDraftResult> {
   const checkpoint = store.cachedExtraction(job);
   if (checkpoint) return checkpoint;
@@ -833,6 +910,10 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     },
     validate: (output, phase) => validate(output, phase === "repair" ? "extraction_repair" : "extraction"),
   });
+  const finish = async (value: ExtractionDraftResult, output: string) => store.cacheExtraction(job, job.promptContract === 'e1f'
+    ? await repairCanonicalProse({store,jobId:job.id,stage:'extraction',language:job.memoryLanguage,value,output,messages:sourceMessages,
+      request:{kind:'extraction',sourceMode:job.sourceUnits?'source_units':'message_ids',promptContract:job.promptContract},
+      repair:messages=>callProvider(store,job.id,messages,signal,'extraction_repair',undefined,'language'),validate:output=>validate(output,'extraction_repair'),signal,onRepair}) : value);
   let raw: unknown;
   let resolved: unknown;
   try {
@@ -841,7 +922,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     const parsed = extractionDraftSchema(job.promptContract).parse(resolved, { reportInput: true });
     if (parsed.language !== job.memoryLanguage) throw new Error(`Expected canonical language ${job.memoryLanguage}, received ${parsed.language}`);
     validateAuxiliarySourceIds(parsed, job.sourceMessageIds);
-    return store.cacheExtraction(job, validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest));
+    return await finish(validateMemoryAdditionRequestOutcome(parsed, job.memoryAddition?.userRequest), first);
   } catch (firstError) {
     onRepair?.();
     const rawWindow = structuredJsonErrorWindow(first, firstError);
@@ -849,7 +930,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     const fieldRepair = job.sourceUnits ? planExtractionFieldRepair(raw, resolved, firstError, job.sourceUnits) : undefined;
     if (fieldRepair) {
       const response = await callRepairProvider(() => callProvider(store, job.id, fieldRepair.messages, signal, "extraction_repair",undefined,"fields"));
-      if (isUnchangedStructuredRepair(first, response)) return store.cacheExtraction(job, await validateRepair(response));
+      if (isUnchangedStructuredRepair(first, response)) return finish(await validateRepair(response), response);
       const result = await validateStructuredRepairOrRegenerate({
         original: first, repaired: response, purpose: "extraction",
         regenerate: () => callProvider(store, job.id, sourceMessages, signal, "extraction"),
@@ -859,7 +940,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
           return validate(JSON.stringify(applyExtractionFieldRepair(raw, fieldRepair, patch)), "extraction_repair");
         },
       });
-      return store.cacheExtraction(job, result);
+      return finish(result, response);
     }
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages,
@@ -869,7 +950,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
       inputBudget: { maxInputTokens: store.config.maxInputTokens, estimate: estimateTokens, relaxed: store.config.relaxAuxiliaryCensorship },
     }), signal, "extraction_repair"));
     store.stageOutput(job.id, repaired);
-    return store.cacheExtraction(job, await validateRepair(repaired));
+    return finish(await validateRepair(repaired), repaired);
   }
 }
 
@@ -944,20 +1025,24 @@ export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: L
     if (submission.patch) applyExtractionAuditPatchToDraft(job.sourceMessageIds, draft, submission.patch);
     return submission;
   };
-  try { return validatePatch(parseServerJson(store, job.id, first, "audit")); }
+  let submission: ExtractionAuditSubmission, finalOutput = first;
+  try { submission = validatePatch(parseServerJson(store, job.id, first, "audit")); }
   catch (firstError) {
     onRepair?.();
     const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
       originalMessages: messages, invalidOutput: first, validationError: firstError, request: { kind: "audit" },
     }), signal, "audit_repair"));
-    return validateStructuredRepairOrRegenerate({
+    submission = await validateStructuredRepairOrRegenerate({
       original: first, repaired, purpose: "audit",
       regenerate: () => callProvider(store, job.id, messages, signal, "audit"),
       validate: (output, phase) => {
+        finalOutput = output;
         return validatePatch(parseServerJson(store, job.id, output, phase === "repair" ? "audit_repair" : "audit"));
       },
     });
   }
+  return repairCanonicalProse({store,jobId:job.id,stage:'audit',language:job.memoryLanguage,value:submission,output:finalOutput,messages,
+    request:{kind:'audit'},repair:messages=>callProvider(store,job.id,messages,signal,'audit_repair',undefined,'language'),validate:output=>validatePatch(parseServerJson(store,job.id,output,'audit_repair')),signal,onRepair});
 }
 
 export async function episodeWithServerLlm(store: ServerLlmStore, job: LeasedJob, signal: AbortSignal): Promise<EpisodeCapsuleResult> {
@@ -1050,16 +1135,20 @@ export async function reconcileWithServerLlm(
     { role: "user" as const, content: accessRepair ? JSON.stringify({ ledger: JSON.parse(prompts.userPrompt), sourceAccess: JSON.parse(accessRepair.plan.userPrompt) }) : prompts.userPrompt }];
   const purpose = accessRepair ? "reconciliation_repair" : "reconciliation";
   const stops = new Map<string, boolean>();
-  const call = async (messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, label: ServerLlmPurpose) => {
+  const call = async (messages: Array<{ role: "system" | "user" | "assistant"; content: string }>, label: ServerLlmPurpose, repairReason?: string) => {
     let normalStop = false;
-    const output = await callProvider(store, jobId, messages, signal, label, prompts.stateExtraction ? value => { normalStop = value; } : undefined);
+    const output = await callProvider(store, jobId, messages, signal, label, prompts.stateExtraction ? value => { normalStop = value; } : undefined, repairReason);
     stops.set(output, normalStop);
     return output;
   };
   const first = await call(sourceMessages, purpose);
   const localFixes: string[] = [];
   let regenerated = false;
-  const parse = (output: string, label: ServerLlmPurpose = purpose) => parseServerJson(store, jobId, output, label, stops.get(output), fixes => localFixes.push(...fixes));
+  let finalOutput = first;
+  const parse = (output: string, label: ServerLlmPurpose = purpose) => {
+    finalOutput = output;
+    return parseServerJson(store, jobId, output, label, stops.get(output), fixes => localFixes.push(...fixes));
+  };
   const writing = prompts.stateExtraction ? stateWritingContext(prompts.userPrompt) : undefined;
   const validationNormalizations:import("@rcm/shared").AuxiliaryShapeDiagnostic[]=[];
   const validateRaw = (raw: unknown): ReconciliationResult => {
@@ -1094,7 +1183,11 @@ export async function reconcileWithServerLlm(
     if(validationNormalizations.length)recovered.report.normalizations=[...(recovered.report.normalizations ?? []),...validationNormalizations];
     store.recordStateRecovery(jobId, recovered.report);
     console.warn(`[RCM] State recovery localFixes=${recovered.report.localFixes.join(",")} fieldRepairCalls=${recovered.report.fieldRepairCalls} correctedFields=${recovered.report.correctedFields} drops=${recovered.report.drops.length} wholeRepair=${recovered.report.wholeRepair} regenerated=${recovered.report.regenerated}`);
-    return recovered.result;
+    return writing?.stateContract === 'r11'
+      ? repairCanonicalProse({store,jobId,stage:'state',language:prompts.groundingDraft?.language ?? JSON.parse(prompts.userPrompt).eventDraft?.language ?? '',
+        value:recovered.result,output:finalOutput,messages:sourceMessages,request:{kind:'reconciliation'},repair:messages=>call(messages,'state_response_repair','language'),validate:output=>validate(output,'state_response_repair'),signal,
+        onRepair:()=>{recovered.report.wholeRepair=true;store.recordStateRecovery(jobId,recovered.report);onRepair?.();}})
+      : recovered.result;
   }
   try { return validate(first, purpose); } catch (error) { return await wholeRepair(error); } finally { if(validationNormalizations.length)store.recordShapeNormalizations(jobId,validationNormalizations); }
 }
