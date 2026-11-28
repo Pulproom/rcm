@@ -282,6 +282,7 @@ export type StoryViewState = {
   expandedMemoryId: string;
   editingOverview?: boolean;
   overviewDraft?: string;
+  overviewExpanded?: boolean;
   /** The season (story part) on screen; empty follows the selected act. */
   selectedPart?: string;
   /** A part or character detail open in the story sheet: `part|<season>` or `flow|<act>|<index>`. */
@@ -2471,7 +2472,12 @@ export function storySpinePage(
   };
   const transitionList = (key: string, texts: string[]) => `<ul class="threadlist">${texts.map((text, index) => `<li>${icon("arrow-right")}<span>${copy(key, "transition", text, index)}</span></li>`).join("")}</ul>`;
   // An act's beats read as numbered stations.
-  const rail = (key: string, texts: string[]) => `<ol class="rail">${texts.map((text, index) => `<li><span class="rail__no" aria-hidden="true">${index + 1}</span><p>${copy(key, "beat", text, index)}</p></li>`).join("")}</ol>`;
+  const rail = (key: string, texts: string[], offset = 0) => `<ol class="rail"${offset ? ` start="${offset + 1}"` : ""}>${texts.map((text, index) => `<li><span class="rail__no" aria-hidden="true">${offset + index + 1}</span><p>${copy(key, "beat", text, offset + index)}</p></li>`).join("")}</ol>`;
+  const railCard = (key: string, texts: string[]) => {
+    const preview = 5;
+    if (texts.length <= preview) return `<div class="story-card story-card--rail">${rail(key, texts)}</div>`;
+    return `<div class="story-card story-card--rail">${rail(key, texts.slice(0, preview), 0)}${fold("전개 더 보기", rail(key, texts.slice(preview), preview), { role: "more", count: texts.length - preview, preserveKey: `story-beats:${key}`, className: "story-beats-more" })}</div>`;
+  };
   // The story-level threads and the running act's threads say the same thing; the running act shows them once.
   const openThreads: { key: string; texts: string[] } = overview?.activeTransitions?.length
     ? { key: overviewKey, texts: overview.activeTransitions }
@@ -2519,11 +2525,11 @@ export function storySpinePage(
     const date = scenes.map((memory) => sceneDate(memory.story_time ?? memory.storyTime ?? null)).find(Boolean);
     const meta = [`${scenes.length}씬`, date ?? ""].filter(Boolean).join(" · ");
     return `<button type="button" class="ep${now ? " is-now" : ""}" data-action="select-story-group" data-group-id="${escapeHtml(item.key)}" data-season="${escapeHtml(seasons[place.season]!.key)}" data-cover="${(item.number - 1) % 6}" aria-current="${item.key === selectedAct?.key}">`
-      + `<span class="ep__still"><span class="ep__no">${lex().act(place.act)}</span>${now ? `<span class="ep__now">${lex().nowShort}</span>` : ""}<span class="ep__line${shot.quote ? " is-quote" : ""}">${shot.html}</span>${shot.speaker ? `<span class="ep__who">${escapeHtml(shot.speaker)}</span>` : ""}</span>`
+      + `<span class="ep__still"><span class="ep__top"><span class="ep__no">${lex().act(place.act)}</span>${now ? `<span class="ep__now">${lex().nowShort}</span>` : ""}</span><span class="ep__line${shot.quote ? " is-quote" : ""}">${shot.html}</span>${shot.speaker ? `<span class="ep__who">${escapeHtml(shot.speaker)}</span>` : ""}</span>`
       + `<span class="ep__title">${title(group, item.key)}</span><span class="ep__syn">${copy(item.key, "summary", String(group.summary ?? ""))}</span><span class="ep__meta">${escapeHtml(meta)}</span></button>`;
   };
 
-  // One act on screen: its synopsis, every scene in story order, then its beats, its people and what it hands on, all open.
+  // One act on screen: its synopsis, horizontal scene rail, people & threads in glass cards, and compact beats.
   const actView = (item: ReturnType<typeof storyGroups>[number]) => {
     const group = item.group;
     const scenes = actScenes(group, data.memories);
@@ -2532,20 +2538,29 @@ export function storySpinePage(
     const actMenu = group.level !== "arc" ? "" : menu({ label: `${fullLabel(item.key)} 더보기`, items: [
       { label: group.hidden ? "숨김 해제" : `이 ${lex().actNoun} 숨기기`, icon: "inactive", action: "toggle-story-hidden", data: { groupId: String(group.groupId ?? ""), value: String(!group.hidden) } },
     ] });
-    const section = (label: string, count: number, body: string) => body ? `<section class="actsec"><h3 class="sec">${label}${count ? ` <span class="n">${count}</span>` : ""}</h3>${body}</section>` : "";
+    const section = (label: string, count: number, body: string, opts: { end?: string; className?: string } = {}) => {
+      if (!body) return "";
+      const heading = `<h3 class="sec">${label}${count ? ` <span class="n">${count}</span>` : ""}</h3>`;
+      const head = opts.end ? `<div class="actsec__head">${heading}${opts.end}</div>` : heading;
+      return `<section class="actsec${opts.className ? ` ${opts.className}` : ""}">${head}${body}</section>`;
+    };
+    const reelNav = scenes.length > 2
+      ? `<div class="reel__nav" aria-label="장면 이동"><button type="button" class="reel__btn" data-action="scroll-story-reel" data-dir="-1" aria-label="이전 장면으로 이동">${icon("back")}</button><button type="button" class="reel__btn" data-action="scroll-story-reel" data-dir="1" aria-label="다음 장면으로 이동">${icon("chevron")}</button></div>`
+      : "";
     const reel = scenes.length ? `<div class="reel" data-drag-scroll data-preserve-scroll="reel:${escapeHtml(item.key)}">${scenes.map(sceneFrame).join("")}</div>` : "";
     const people = (group.flows ?? []).map((flow: any, flowIndex: number) => {
       const key = storyGroupKey(flow, `${item.key}:flow-${flowIndex}`);
-      return `<article class="flowcard"><h4><button type="button" class="flowcard__open" data-action="open-story-sheet" data-sheet="${escapeHtml(`flow|${item.key}|${flowIndex}`)}">${nameHtml(String(flow.holder || flow.title || "관점"))}${icon("chevron")}</button></h4><p class="flowcard__text">${copy(key, "summary", String(flow.summary ?? ""))}</p>${flow.activeTransitions?.length ? transitionList(key, flow.activeTransitions) : ""}</article>`;
+      const personName = String(flow.holder || flow.title || "관점");
+      return `<article class="flowcard"><h4><button type="button" class="flowcard__open" data-action="open-story-sheet" data-sheet="${escapeHtml(`flow|${item.key}|${flowIndex}`)}">${avatar(personName, "sm")}${nameHtml(personName)}${icon("chevron")}</button></h4><p class="flowcard__text">${copy(key, "summary", String(flow.summary ?? ""))}</p>${flow.activeTransitions?.length ? transitionList(key, flow.activeTransitions) : ""}</article>`;
     }).join("");
     const handed = current ? openThreads : { key: item.key, texts: group.activeTransitions ?? [] };
     return `<article class="actview${current ? " is-now" : ""}" data-act="${escapeHtml(item.key)}" data-cover="${(item.number - 1) % 6}">`
       + `<div class="actview__lead"><header class="actview__head"><h2><span class="act__no">${lex().act(placeOf.get(item.key)?.act ?? 0)}</span>${title(group, item.key)}</h2>${actMenu}</header>`
       + `<span class="tc">${escapeHtml(meta)}</span><p class="actview__syn">${copy(item.key, "summary", String(group.summary ?? ""))}</p></div>`
-      + section("장면", scenes.length, reel)
-      + section("전개", group.beats?.length ?? 0, group.beats?.length ? rail(item.key, group.beats) : "")
+      + section("장면", scenes.length, reel, { end: reelNav, className: "actsec--reel" })
       + section("인물", group.flows?.length ?? 0, people ? `<div class="flowcards">${people}</div>` : "")
-      + section(current ? "이어지는 것" : `다음 ${lex().actNoun}으로 넘어간 것`, handed.texts.length, handed.texts.length ? transitionList(handed.key, handed.texts) : "")
+      + section(current ? "이어지는 것" : `다음 ${lex().actNoun}으로 넘어간 것`, handed.texts.length, handed.texts.length ? `<div class="story-card story-card--threads">${transitionList(handed.key, handed.texts)}</div>` : "")
+      + section("전개", group.beats?.length ?? 0, group.beats?.length ? railCard(item.key, group.beats) : "")
       + `</article>`;
   };
 
@@ -2572,9 +2587,14 @@ export function storySpinePage(
   const draftCount = storyOverviewCount(view.overviewDraft ?? String(overview?.summary ?? ""), storyLimit);
   const overviewCount = `<p class="hint story__count${draftCount.over ? " is-over" : ""}" data-story-overview-count data-limit="${storyLimit}" aria-live="polite">${escapeHtml(draftCount.text)}</p>`;
   const overviewEditor = overview ? `<form id="story-overview-form" class="form story__edit" data-group-id="${escapeHtml(overview.groupId ?? "")}">${field({ id: "story-overview-summary", label: "지금까지의 이야기", control: `<textarea id="story-overview-summary" class="textarea" name="summary" rows="12" maxlength="120000" required>${escapeHtml(view.overviewDraft ?? String(overview.summary ?? ""))}</textarea>${overviewCount}`, hint: `대화 ${Number(overview.startOrdinal ?? 0) + 1}–${Number(overview.endOrdinal ?? 0) + 1} 범위는 그대로 유지돼요.` })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-story-overview" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>` : "";
+  const loglineRaw = String(overview?.summary ?? "").trim();
   const loglineText = overview ? copy(overviewKey, "summary", String(overview.summary ?? "")) : "전체 요약을 준비하고 있어요.";
-  const loglineContent = overview ? `<p>${loglineText}</p>` : loglineText;
-  const logline = view.editingOverview ? overviewEditor : `<div class="logline">${loglineContent}</div>`;
+  const loglineCollapsible = Boolean(overview && (loglineRaw.length > 220 || loglineRaw.includes("\n")));
+  const logline = view.editingOverview
+    ? overviewEditor
+    : loglineCollapsible
+      ? `<div class="logline logline--collapsible${view.overviewExpanded ? " is-expanded" : ""}"><p class="logline__text">${loglineText}</p><button type="button" class="logline__toggle" data-action="toggle-story-overview" aria-expanded="${Boolean(view.overviewExpanded)}"><span>${view.overviewExpanded ? "접기" : "전체 보기"}</span>${icon("down")}</button></div>`
+      : `<div class="logline">${overview ? `<p>${loglineText}</p>` : loglineText}</div>`;
   const runtime = [`${sceneCount}씬`, seasons.some((item) => item.part) ? `${seasons.filter((item) => item.part).length}부` : "", `${groups.length}${lex().actNoun}`].filter(Boolean).map((text) => `<span>${text}</span>`).join("");
   const titlecard = `<section class="titlecard">${presents}<h1>${overview?.title ? title(overview, overviewKey) : "지금까지의 이야기"}</h1><div class="runtime">${runtime}</div>${logline}</section>`;
   // Everything deeper than the page opens in one sheet: a scene, a part's flow, or a character's flow in an act.
@@ -2636,7 +2656,8 @@ export function storySpinePage(
     return "";
   })();
   const body = `${seasonTabs}<section class="season" data-story-part="${escapeHtml(season?.key ?? "")}">${seasonHead}${episodes}</section>${selectedAct ? actView(selectedAct) : ""}${sceneSheet || detailSheet}`;
-  return `<div class="story series" data-cover="${selectedAct ? (selectedAct.number - 1) % 6 : 0}">${groups.length ? reelnav : `<div class="story__bar">${pageMenu}</div>`}<div class="screening">${pendingNotice}${titlecard}${body}</div></div>`;
+  const topControls = groups.length ? reelnav : `<div class="story__bar">${pageMenu}</div>`;
+  return `<div class="story series" data-cover="${selectedAct ? (selectedAct.number - 1) % 6 : 0}"><div class="story__top">${pendingNotice}${topControls}</div><div class="screening">${titlecard}${body}</div></div>`;
 }
 
 const relationshipLevels: Record<string, string[]> = {
@@ -6249,6 +6270,20 @@ export async function openDashboard(state: RuntimeState, client: ServerClient, p
       storyView.expandedMemoryId = "";
       storyView.detailSheet = "";
       render();
+      return;
+    }
+    if (action === "toggle-story-overview") {
+      storyView.overviewExpanded = !storyView.overviewExpanded;
+      render();
+      return;
+    }
+    if (action === "scroll-story-reel") {
+      const dir = Number(target.dataset.dir ?? 1);
+      const railEl = target.closest(".actsec")?.querySelector<HTMLElement>(".reel");
+      if (railEl) {
+        const step = Math.max(280, Math.round(railEl.clientWidth * 0.78));
+        railEl.scrollBy({ left: dir * step, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      }
       return;
     }
     if (action === "select-story-group") {

@@ -210,14 +210,16 @@ export const FILM_CSS = `
 .kind-chip { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: var(--screen-2); font-size: var(--t-micro); font-weight: 500; line-height: 1.4; letter-spacing: 0; color: var(--ink-3); vertical-align: middle; white-space: nowrap; }
 
 /* frame: a scene still with slugline and subtitle */
-.frame { display: grid; grid-template-rows: auto auto auto; align-content: start; gap: 10px; min-height: 0; padding: 12px 14px 14px; border-radius: var(--r); background: var(--screen); text-align: left; width: 100%; box-shadow: var(--lift); transition: box-shadow var(--fast) var(--ease); }
+.frame { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; align-content: start; gap: 10px; min-width: 0; min-height: 0; padding: 12px 14px 14px; border-radius: var(--r); background: var(--screen); text-align: left; width: 100%; overflow: hidden; box-shadow: var(--lift); transition: box-shadow var(--fast) var(--ease); }
 .frame:hover, .frame.is-hover { box-shadow: 0 0 0 1px var(--rule-2), var(--lift); }
-.frame__slug { display: flex; justify-content: space-between; gap: 10px; font-size: var(--t-micro); color: var(--ink-3); }
+.frame__slug { display: flex; justify-content: space-between; gap: 10px; min-width: 0; font-size: var(--t-micro); color: var(--ink-3); }
 .frame__slug b { color: var(--ink-2); font-weight: 600; }
+.frame .frame__slug b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frame .frame__slug > span { flex: none; }
 .frame__slug .tag { color: var(--accent-text); }
-.frame__title { font-size: var(--t-body); color: var(--ink-2); line-height: 1.5; }
-.subtitle { margin: 0; text-align: center; font-size: var(--t-body); line-height: 1.55; color: var(--sub); }
-.subtitle > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.frame__title { min-width: 0; font-size: var(--t-body); color: var(--ink-2); line-height: 1.5; overflow-wrap: anywhere; }
+.subtitle { margin: 0; min-width: 0; text-align: center; font-size: var(--t-body); line-height: 1.55; color: var(--sub); overflow-wrap: anywhere; }
+.subtitle > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
 .subtitle small { display: block; margin-top: 3px; font-size: var(--t-micro); color: var(--ink-3); }
 .frame.is-mark { box-shadow: 0 0 0 1px var(--tungsten-dim), var(--lift); }
 .frame__rec { display: none; border-top: 1px solid var(--rule); padding-top: 10px; font-size: var(--t-small); color: var(--ink-2); line-height: 1.75; }
