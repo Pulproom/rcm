@@ -41,7 +41,6 @@ export interface ServerErrorContext {
 }
 
 export function errorMessage(error: unknown): string {
-  if (error instanceof ServerRequestError && error.code === 'NOW_ALWAYS_INJECT_LIMIT') return '항상 전달은 5개까지예요';
   const message = error && typeof error === "object" && "message" in error && typeof error.message === "string" ? error.message : String(error ?? "");
   if (message.trim()) return message;
   return error instanceof ServerRequestError ? `${upgradeErrorReason(error.code)} (HTTP ${error.status})` : "오류 이유가 전달되지 않았어요. 오류 자세히를 복사해 알려 주세요.";

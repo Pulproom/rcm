@@ -1,4 +1,6 @@
 import { personIdentity } from "./entity-person-fields.js";
+import { estimateTokens } from "./token-estimate.js";
+export { estimateTokenUnits, estimateTokensFromUnits, estimateTokens } from "./token-estimate.js";
 import { createEntityIdentityResolver, modelEntityIdentityContext, normalizeEntityName, type ModelIdentityEntity, type ResolvedEntityIdentity } from "./entity-identity.js";
 export * from "./entity-identity.js";
 export * from "./entity-person-fields.js";
@@ -51,7 +53,7 @@ export { SETTINGS_FAILURE_GUIDANCE, settingsFailureCode, settingsFailureMessage 
 /** User-owned presentation metadata; never inferred by extraction. */
 export const EntityColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, "색상은 #RRGGBB 형식이어야 해요.").nullable();
 
-export const RCM_API_REVISION = 105;
+export const RCM_API_REVISION = 107;
 export const CHAT_WORK_HELD_MESSAGE = "이 채팅의 RCM이 꺼져 있어 멈춰 있어요";
 export const UserCorrectionEditSchema = z.object({ locked: z.boolean().optional() });
 export const PromiseEditOptionsSchema = z.object({
@@ -86,6 +88,7 @@ import { MemoryGroupingResultSchema, type GroupInputStage } from "./memory-group
 export { MemoryGroupingResultSchema, MEMORY_GROUP_INPUT_TOKENS, groupingSystemPrompt, planGroupingInputs, validateGroupingResult, type MemoryGroupingResult, type GroupInputUnit, type GroupInputStage } from "./memory-grouping.js";
 export { auxiliaryInputBudgetMessage, auxiliaryRepairTooLargeError, AUXILIARY_REPAIR_TOO_LARGE_MESSAGE, consumeAuxiliaryRepair, measureAuxiliaryPrompt, splitAuxiliarySource, type AuxiliaryPromptBudget, type AuxiliaryPromptMeasurement } from "./auxiliary-budget.js";
 import type { SourceUnit } from "./source-references.js";
+export { resolveAuditSourceReferences } from "./source-references.js";
 export { buildSourceUnits, findAtomicDisplaySpans, joinSplitEmphasisQuote, resolveSourceQuote, sourceRangeIsVisible, dialogueSourceMatches, dialogueMessageMatches, preferAssistantDialogueSources, rescueDialogueEvidence, resolveModelSourceReferences, resolveDirectDialogueEvidence, inspectSourceReferences, validSourcePassageAccess, optionalSourceSelectorsOnly, sourceRepairMessages, applySourceRepairs, type SourceUnit, type SourceUnitBuildOptions, type SourceReferenceIssue } from "./source-references.js";
 export { segmentSentences, type SentenceSegment } from "./sentence-segmentation.js";
 export { planExtractionFieldRepair, applyExtractionFieldRepair, type ExtractionFieldRepair } from "./extraction-field-repair.js";
@@ -118,6 +121,8 @@ export type RpProfile = z.infer<typeof RpProfileSchema>;
 
 export const MemoryLanguageSchema = z.enum(["en", "ko", "ja", "zh"]);
 export type MemoryLanguage = z.infer<typeof MemoryLanguageSchema>;
+/** Omitted source retains the explicit-language request contract. */
+export const MemoryLanguageSourceSchema = z.enum(["chat", "default"]);
 
 export { MAX_MEMORY_BUDGET, MemoryBudgetPresetSchema, type MemoryBudgetPreset } from "./memory-budget.js";
 
@@ -237,6 +242,7 @@ export const ManualLineagePreviewRequestSchema = z.object({
     includeUserMessages: z.boolean().optional(),
     extractionGroupTurns: z.number().int().min(1).max(50).optional(),
     memoryLanguage: MemoryLanguageSchema.optional(),
+    memoryLanguageSource: MemoryLanguageSourceSchema.optional(),
   }).optional(),
 });
 export type ManualLineagePreviewRequest = z.infer<typeof ManualLineagePreviewRequestSchema>;
@@ -274,6 +280,7 @@ export const LineageProbeRequestSchema = z.object({
   editProtectionTurns: z.number().int().min(1).max(5).optional(),
   canonicalizationPolicy: CanonicalizationPolicySchema.optional(),
   memoryLanguage: MemoryLanguageSchema.optional(),
+  memoryLanguageSource: MemoryLanguageSourceSchema.optional(),
 });
 export type LineageProbeRequest = z.infer<typeof LineageProbeRequestSchema>;
 
@@ -491,6 +498,7 @@ export const TurnPrepareRequestSchema = z.object({
   editProtectionTurns: z.number().int().min(1).max(5).optional(),
   canonicalizationPolicy: CanonicalizationPolicySchema.optional(),
   memoryLanguage: MemoryLanguageSchema.optional(),
+  memoryLanguageSource: MemoryLanguageSourceSchema.optional(),
   promptSourceMessageIds: z.array(z.string().min(1)).max(512).optional(),
   memoryReferenceMode: z.enum(["short", "none"]).optional(),
   memoryGeneration: z.string().min(1).max(120).optional(),
@@ -862,6 +870,7 @@ export const KeyDialogueSchema = z.object({
 });
 
 export const StorySeedSchema = SeedMarkerSchema.extend({
+  reopenedTurn: z.number().int().nonnegative().optional(),
   closureEvidence: z.array(DialogueEvidenceSchema).min(1).optional(),
   delivery: z.object({ lane: z.literal("seed").optional(), count: z.number().int().nonnegative(), lastTurn: z.number().int().nonnegative(), receipt: z.string() }).optional(),
 }).superRefine((seed, context) => {
@@ -1096,6 +1105,7 @@ export const PromiseSchema = z.object({
   content: z.string(),
   event: PromiseEventSchema.optional(),
   amendment: z.string().trim().min(1).optional(),
+  rewritesContent: z.literal(true).optional(),
   // Server-owned keep/replay provenance; model output cannot establish it.
   storedAmendment: z.string().nullable().optional(),
   status: z.enum(["open", "kept", "broken", "released", "offscreen"]).default("open"),
@@ -1146,6 +1156,7 @@ export const StateObservationSchema = z.discriminatedUnion("kind", [
     content: z.string().trim().min(1),
     event: PromiseEventSchema,
     amendment: z.string().trim().min(1).optional(),
+    rewritesContent: z.literal(true).optional(),
     scheduledFor: z.string().trim().min(1).optional(),
     statusReason: z.string().trim().min(1).optional(),
     memoryKey: z.string().trim().min(1).optional(),
@@ -1696,6 +1707,14 @@ export function extractionAuditAllowedValues(result: ExtractionDraftResult): {
   return { accessItemRefs, detailItemRefs, observationItemRefs, removableItemRefs, landmarkKinds: [...LANDMARK_KIND_VALUES] };
 }
 
+/** Removing hidden blocks can shift a message's offsets in the audit transcript. */
+export function auditSourceUnitsForJob(job: Pick<LeasedJob, "auditSourceMessages" | "sourceUnits">): SourceUnit[] {
+  const sources = new Map(job.auditSourceMessages?.map(message => [message.id, message.content]));
+  const units = job.sourceUnits ?? [];
+  const shifted = new Set(units.filter(unit => sources.get(unit.messageId)?.slice(unit.start, unit.end) !== unit.text).map(unit => unit.messageId));
+  return units.filter(unit => !shifted.has(unit.messageId));
+}
+
 export function buildExtractionAuditMessages(input: {
   modelIdentityEntities?: readonly ModelIdentityEntity[];
   memoryLanguage: MemoryLanguage;
@@ -2049,7 +2068,10 @@ export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const ServerLlmServiceTierSchema = z.enum(["standard", "flex", "priority"]);
 export type ServerLlmServiceTier = z.infer<typeof ServerLlmServiceTierSchema>;
 
+export { readSourceTransport, sourcePdfUnavailable, sourcePdfGeometry, sourcePdfAdvance, layoutSourcePdf, type SourcePdfSettings, type SourceTransport } from './source-pdf.js';
+export const SourcePdfSettingsSchema = z.object({ enabled:z.boolean().default(false), fontPt:z.number().int().min(4).max(10).default(6) });
 export const ServerLlmConfigSchema = z.object({
+  sourcePdf: SourcePdfSettingsSchema.default({enabled:false,fontPt:6}),
   engine: ExtractionEngineSchema,
   relaxAuxiliaryCensorship: z.boolean().default(false),
   provider: ServerLlmProviderSchema,
@@ -2100,7 +2122,7 @@ export function initialTranslationConnection(extraction: Pick<ServerLlmPublicCon
     credentialSource:"shared", model:settings.model, temperature:settings.temperature, thinking:settings.thinking, maxOutputTokens:settings.maxOutput };
 }
 
-export const McpSelectorConfigSchema = ServerLlmConfigSchema.omit({ engine:true, embeddingTimeoutMs:true, rerankTimeoutMs:true, relaxAuxiliaryCensorship:true }).extend({
+export const McpSelectorConfigSchema = ServerLlmConfigSchema.omit({ engine:true, embeddingTimeoutMs:true, rerankTimeoutMs:true, relaxAuxiliaryCensorship:true, sourcePdf:true }).extend({
   enabled: z.boolean().default(true),
   credentialSource: z.enum(["shared", "dedicated"]).default("shared"),
   maxInputTokens: z.number().int().min(1024).max(128000).default(24000),
@@ -2121,6 +2143,7 @@ export const MCP_MAX_REQUEST_TIMEOUT_MS = 920000;
 export const WorkerControlSchema = z.object({ ...chatWorkPolicy, workerId: z.string().min(1).max(200), chatId: z.string().min(1).max(500).optional() });
 
 export interface ServerLlmPublicConfig {
+  sourcePdf?: import('./source-pdf.js').SourcePdfSettings;
   relaxAuxiliaryCensorship?: boolean;
   engine: ExtractionEngine;
   provider: ServerLlmProvider;
@@ -2342,24 +2365,6 @@ export interface RecallCoverageItem {
   targetMemoryIds?: string[];
   targetDetailIds?: string[];
 }
-
-/** Integer units make token costs additive without accumulating rounding error. */
-export const estimateTokenUnits = (text: string): number => {
-  let ascii = 0;
-  let wide = 0;
-  for (let index=0;index<text.length;index++) {
-    const code=text.charCodeAt(index);
-    if (code <= 0x7f) ascii += 1;
-    else {
-      wide += 1;
-      // Count a supplementary code point once, as the previous for-of estimator did.
-      if(code>=0xd800&&code<=0xdbff&&text.charCodeAt(index+1)>=0xdc00&&text.charCodeAt(index+1)<=0xdfff)index++;
-    }
-  }
-  return ascii * 12 + wide * 35;
-};
-export const estimateTokensFromUnits = (units: number): number => Math.max(1, Math.ceil(units / 42));
-export const estimateTokens = (text: string): number => estimateTokensFromUnits(estimateTokenUnits(text));
 
 export function selectTailStart(
   messageContents: Array<string | number>,

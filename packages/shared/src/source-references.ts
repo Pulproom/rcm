@@ -2,6 +2,61 @@ import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { modelImageRanges } from "./model-text.js";
 import { DIALOGUE_SOURCE_FORM_GUIDANCE } from "./dialogue-source-guidance.js";
 import { segmentSentences } from "./sentence-segmentation.js";
+
+const sourceRefRange = /^(s\d+)\s*-\s*(s\d+)$/;
+
+/** Commas and ranges are product-owned ID syntax, not natural-language meaning.
+ * Expand only a known message/version's real unit order. Keep invalid/unknown
+ * selectors intact for the existing failure/review paths, never widen them. */
+export function splitAuxiliarySourceRefs(value: unknown, units?: readonly SourceUnit[]): unknown[] {
+  const expanded = (Array.isArray(value) ? value : [value]).flatMap(ref =>
+    typeof ref === "string" && ref.includes(",") ? ref.split(",").map(part => part.trim()) : [ref]).flatMap(ref => {
+      const range = typeof ref === "string" ? sourceRefRange.exec(ref) : null;
+      if (!range || !units) return [ref];
+      const first = units.find(unit => unit.ref === range[1]), last = units.find(unit => unit.ref === range[2]);
+      if (!first || !last || first.messageId !== last.messageId || first.canonicalHash !== last.canonicalHash) return [ref];
+      const message = units.filter(unit => unit.messageId === first.messageId);
+      const start = message.indexOf(first), end = message.indexOf(last);
+      if (start > end) return [ref];
+      const selected = message.slice(start, end + 1);
+      if (selected.some((unit, index) => unit.canonicalHash !== first.canonicalHash || index > 0 && unit.start <= selected[index - 1]!.start)) return [ref];
+      return selected.map(unit => unit.ref);
+    });
+  return [...new Set(expanded)];
+}
+
+/** Adapt only source selector fields. Prose, quotes and single-message dialogue
+ * IDs are not lists; multi-message citations still need independent validation. */
+export function normalizeAuxiliarySourceLists(value: unknown, diagnostic: (path: (string | number)[]) => void = () => {}, units?: readonly SourceUnit[]): unknown {
+  const lists = new Set(["sourceRef", "evidenceSourceRefs", "sourceRefs", "evidenceMessageIds", "sourceMessageIds"]);
+  const citations = new Set(["evidence", "summaryEvidence", "closureEvidence"]);
+  const visit = (value: unknown, path: (string | number)[]): unknown => {
+    if (Array.isArray(value)) {
+      const next = value.flatMap((item, index) => {
+        if (citations.has(String(path.at(-1))) && item && typeof item === "object"
+          && typeof (item as any).messageId === "string" && (item as any).messageId.includes(",")) {
+          diagnostic([...path, index, "messageId"]);
+          return splitAuxiliarySourceRefs((item as any).messageId).map(messageId => visit({ ...item, messageId }, [...path, index]));
+        }
+        return [visit(item, [...path, index])];
+      });
+      return next.length !== value.length || next.some((item, index) => item !== value[index]) ? next : value;
+    }
+    if (!value || typeof value !== "object") return value;
+    let next = value as Record<string, unknown>;
+    for (const [key, child] of Object.entries(next)) {
+      const isList = lists.has(key) || key === "evidence";
+      const hasComma = (Array.isArray(child) ? child : [child]).some(ref => typeof ref === "string" && ref.includes(","));
+      const hasRange = units && (Array.isArray(child) ? child : [child]).some(ref => typeof ref === "string" && sourceRefRange.test(ref));
+      let normalized = child;
+      if (isList && (hasComma || hasRange)) { normalized = splitAuxiliarySourceRefs(child, units); diagnostic([...path, key]); }
+      normalized = visit(normalized, [...path, key]);
+      if (normalized !== child) next = { ...next, [key]: normalized };
+    }
+    return next;
+  };
+  return visit(value, []);
+}
 /** Model-facing source selectors. Canonical storage continues to use message evidence. */
 export interface SourceUnit {
   ref: string;
@@ -238,7 +293,7 @@ function sourceExcludedRanges(content: string) {
 }
 
 /** Exact excerpt joins only. Punctuation locates possible joins, never speakers or meaning. */
-function matchDialogueSource(text: string, content: string, allowed = [{ start: 0, end: content.length }]) {
+function matchDialogueSource(text: string, content: string, allowed = [{ start: 0, end: content.length }], kind: "dialogue" | "passage" = "dialogue") {
   const hidden = sourceExcludedRanges(content);
   const runs: Array<{ text: string; starts: number[]; ends: number[] }> = [];
   let cursor = 0;
@@ -257,17 +312,17 @@ function matchDialogueSource(text: string, content: string, allowed = [{ start: 
   const wholeChoices: Array<{ textStart: number; textEnd: number; startOffset: number; endOffset: number; quote: string }> = [];
   function matchSegment(from: number, to: number) {
     const raw = text.slice(from, to);
-    const trimmed = raw.trim().replace(/^["“”]+|["“”]+$/gu, "").trim();
+    const trimmed = kind === "passage" ? raw.trim() : raw.trim().replace(/^["“”]+|["“”]+$/gu, "").trim();
     if (!trimmed) return;
     const target = trimmed.replace(/\s+/gu, " ");
     // Only segment-final punctuation may differ; words and internal marks stay exact.
-    const variants = new Set(/[,.!?]$/u.test(target)
+    const variants = new Set(kind === "dialogue" && /[,.!?]$/u.test(target)
       ? [",", ".", "!", "?"].map(mark => target.slice(0, -1) + mark) : [target]);
     const matches = new Map<string, { startOffset: number; endOffset: number }>();
     for (const run of runs) for (const variant of variants) {
       for (let at = run.text.indexOf(variant); at >= 0; at = run.text.indexOf(variant, at + 1)) {
         const startOffset = run.starts[at]!, endOffset = run.ends[at + variant.length - 1]!;
-        if (/[\p{L}\p{N}\p{M}]$/u.test(content.slice(0, startOffset))
+        if (kind === "passage" ? content.slice(startOffset, endOffset) !== trimmed : /[\p{L}\p{N}\p{M}]$/u.test(content.slice(0, startOffset))
           || /^[\p{L}\p{N}\p{M}]/u.test(content.slice(endOffset))) continue;
         matches.set(`${startOffset}:${endOffset}`, { startOffset, endOffset });
       }
@@ -322,9 +377,10 @@ export function preferAssistantDialogueSources<T extends { role?: string }>(matc
 /** Match each message independently: one dialogue must never join evidence across messages. */
 export function dialogueMessageMatches<T extends { id: string; role?: string; content: string }>(
   text: string, messages: T[], allowed?: Array<{ messageId: string; start: number; end: number }>,
+  kind: "dialogue" | "passage" = "dialogue",
 ) {
   const matches = messages.flatMap(message => {
-    const matched = matchDialogueSource(text, message.content, allowed?.filter(span => span.messageId === message.id));
+    const matched = matchDialogueSource(text, message.content, allowed?.filter(span => span.messageId === message.id), kind);
     return matched.choices.length ? matched.choices.map(segments => ({message,role:message.role,complete:true,segments}))
       : [{message,role:message.role,complete:false,segments:matched.segments}];
   });
@@ -347,14 +403,7 @@ export function rescueDialogueEvidence<T>(draft: T, messages: Array<{ id: string
     if (evidence.length && verified.length === evidence.length) continue;
     const refs = [dialogue.messageId, ...evidence.filter((item: any) => !verified.includes(item)).map((item: any) => item.messageId)]
       .filter((id: unknown): id is string => typeof id === "string" && id.startsWith("unresolved:"))
-      .flatMap((id: string) => id.slice("unresolved:".length).split(","))
-      .flatMap((ref: string) => {
-        const range = /^s(\d+)-s(\d+)$/.exec(ref);
-        if (!range) return [ref];
-        const start = Number(range[1]), end = Number(range[2]);
-        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start || end - start >= units.length) return [ref];
-        return Array.from({ length: end - start + 1 }, (_, index) => `s${start + index}`);
-      });
+      .flatMap((id: string) => splitAuxiliarySourceRefs(id.slice("unresolved:".length), units) as string[]);
     const selected = [...new Set(refs)].map(ref => units.find(unit => unit.ref === ref));
     if (typeof dialogue.messageId !== "string" || typeof dialogue.text !== "string") continue;
     if (units.length && (!selected.length || selected.some(unit => !unit))) continue;
@@ -393,30 +442,24 @@ export function rescueDialogueEvidence<T>(draft: T, messages: Array<{ id: string
 }
 
 export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]): unknown {
+  return resolveSourceSelectors(value, units, "extraction");
+}
+
+/** Audit patches may mix direct message citations with unit selectors in the same addition. */
+export function resolveAuditSourceReferences(value: unknown, units: SourceUnit[]): unknown {
+  return resolveSourceSelectors(value, units, "audit");
+}
+
+function resolveSourceSelectors(value: unknown, units: SourceUnit[], mode: "extraction" | "audit"): unknown {
+  value = normalizeAuxiliarySourceLists(value, undefined, units);
   const sources = new Map(units.map((unit) => [unit.ref, unit]));
-  /** `sN-sM` is product-owned selector syntax. It expands only existing,
-   * forward consecutive units, so it cannot cross messages or revisions. */
   const expandRefs = (refs: unknown[]): string[] | undefined => {
-    const expanded: string[] = [];
-    for (const ref of refs) {
-      if (typeof ref !== "string") return undefined;
-      const range = /^s(\d+)-s(\d+)$/.exec(ref);
-      if (!range) { expanded.push(ref); continue; }
-      const start = Number(range[1]), end = Number(range[2]);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end) return undefined;
-      let previous: SourceUnit | undefined;
-      for (let index = start; index <= end; index++) {
-        const id = `s${index}`, unit = sources.get(id);
-        if (!unit || (previous && (unit.messageId !== previous.messageId || unit.canonicalHash !== previous.canonicalHash || unit.start <= previous.start))) return undefined;
-        expanded.push(id); previous = unit;
-      }
-    }
-    return expanded;
+    const expanded = splitAuxiliarySourceRefs(refs, units);
+    return expanded.some(ref => typeof ref !== "string" || sourceRefRange.test(ref)) ? undefined : expanded as string[];
   };
   const spans = (refs: string[]): SourceUnit[] => {
     const selected = refs.map(ref => sources.get(ref));
     if (selected.some(unit => !unit)) return [];
-    if (new Set(refs).size !== refs.length) return [];
     const result: SourceUnit[] = [];
     for (const unit of selected as SourceUnit[]) {
       const last = result.at(-1);
@@ -440,16 +483,17 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
         const candidate = item as Record<string, unknown>;
         const keys = Object.keys(candidate);
         if (!("sourceRef" in candidate) && typeof candidate.ref === "string"
-          && /^s\d+(?:-s\d+)?$/.test(candidate.ref)
+          && splitAuxiliarySourceRefs(candidate.ref, units).every(ref => typeof ref === "string" && (/^s\d+$/.test(ref) || sourceRefRange.test(ref)))
           && keys.every((key) => key === "ref" || key === "quote")) {
-          item = { ...candidate, sourceRef: candidate.ref };
+          item = { ...candidate, sourceRef: candidate.ref.includes(",") || sourceRefRange.test(candidate.ref) ? splitAuxiliarySourceRefs(candidate.ref, units) : candidate.ref };
           delete (item as Record<string, unknown>).ref;
         }
       }
       // One logical selection may have several disjoint exact source excerpts.
-      if (item && typeof item === "object" && (Array.isArray((item as any).sourceRef) || /^s\d+-s\d+$/.test((item as any).sourceRef))) {
+      if (item && typeof item === "object" && (Array.isArray((item as any).sourceRef) || sourceRefRange.test((item as any).sourceRef))) {
         const refs = expandRefs(Array.isArray((item as any).sourceRef) ? (item as any).sourceRef : [(item as any).sourceRef]);
         if (!refs?.length) {
+          if (mode === "audit") return [item]; // Let the audit schema isolate this invalid addition.
           if (/\.keyDialogues$/.test(path)) return [resolveItem(item as Record<string, unknown>, `${path}[${index}]`)];
           throw new Error(`${path}: invalid source selector`);
         }
@@ -459,7 +503,6 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
         // citations when no user-authored quote needs to be apportioned.
         if (/\.evidence$/.test(path) && (item as any).quote === undefined
           && selectedUnits.every((unit): unit is SourceUnit => Boolean(unit))
-          && new Set(refs).size === refs.length
           && new Set(selectedUnits.map(unit => `${unit.messageId}\0${unit.canonicalHash}`)).size > 1) {
           return selectedUnits.map(unit => resolveItem(item, `${path}[${index}]`, unit));
         }
@@ -489,7 +532,13 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
     const output: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(object)) {
       if (key === "sourceRef" || key === "evidenceSourceRefs") continue;
-      if (key === "messageId" || key === "evidenceMessageIds") throw new Error(`${path}: use supplied sourceRef selectors, not message IDs`);
+      if ((key === "messageId" || key === "evidenceMessageIds") && (mode === "extraction" || "sourceRef" in object || "evidenceSourceRefs" in object))
+        throw new Error(`${path}: use supplied sourceRef selectors, not message IDs`);
+      if (mode === "audit" && key === "dialogue" && child && typeof child === "object" && "sourceRef" in child) {
+        // A dialogueAddition wraps one dialogue instead of a keyDialogues array.
+        output[key] = (walk([child], `${path}.keyDialogues`) as unknown[])[0];
+        continue;
+      }
       output[key] = walk(child, `${path}.${key}`);
     }
     if ("sourceRef" in object) {
@@ -539,6 +588,7 @@ export function resolveModelSourceReferences(value: unknown, units: SourceUnit[]
     }
     return output;
   };
+  if (mode === "audit") return walk(value, "patch");
   // Preserve source offsets when only the supplied, visible units are available.
   const messages = [...new Set(units.map(unit => unit.messageId))].map(id => {
     const selected = units.filter(unit => unit.messageId === id);

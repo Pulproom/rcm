@@ -9,7 +9,7 @@ import { foldMemoryCard, isFoldedMemory, buildEmissionPlan, buildManifest, emitt
 import { clipLandmarkDisplayText } from "@rcm/shared";
 import { signatureSimilarity, type SimilaritySignature } from "./similarity.js";
 import { StateOutcomeCapture } from "./state-outcomes.js";
-import { accessibleStorySeed } from "./story-seeds.js";
+import { accessibleStorySeed, activeStorySeeds } from "./story-seeds.js";
 import { loadPlotKnowers, validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, publicKnowledgeScope } from "./item-access.js";
 import { loadKnownByLabels } from "./item-access.js";
 import { selectStateEvidence, stateMcpEvidence, type StateEvidence } from "./state-evidence.js";
@@ -1497,6 +1497,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
   const aspects = options.aspects?.length ? options.aspects : [options.query];
   if (!chat || options.tokenBudget <= 0) return { emissionPlan: buildEmissionPlan([]), packet: "", stableAnchors: "", perspectiveData: "", estimatedTokens: 0, selected: [], eligibleCandidates: [], directAtomKeys: [], structuredManifest: emptyPacketManifest(), coverage: aspects.map((aspect) => ({ aspect, status: "no_grounded_hit" })), alreadyProvidedIds: [], recentMemoryIds: [], focusLeaderIds: [], continuityBridgeIds: [], selectedCandidateClasses: {}, selectedRoles: {}, activationObservations: [], deliveredAtomKeys: [] };
   const pricing = options.pricing ?? chatPacketPricing(db,options.chatId);
+  const seedStates = new Map(activeStorySeeds(db,options.chatId).map(row=>[row.id,row]));
   const requestedPerspective = options.perspective.trim().toLocaleLowerCase().replace(/[\s_-]+/g, " ");
   const omniscient = requestedPerspective === "omniscient" || requestedPerspective === "omniscient narrator";
   const author = options.audience?.kind === "author";
@@ -1617,9 +1618,9 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
         AND (? OR EXISTS (SELECT 1 FROM json_each(m.participants_json) p JOIN json_each(?) person ON p.value=person.value COLLATE NOCASE))
       ORDER BY h.last_turn_seq IS NOT NULL,h.last_turn_seq,m.created_revision,m.id LIMIT 256`).all(options.chatId, Number(author), JSON.stringify(people)) as Array<{id:string}>;
     const seedCandidates=db.prepare(`SELECT DISTINCT d.memory_id id FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
-      WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND json_extract(d.seed_json,'$.status')='open'
+      WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND d.id IN (SELECT value FROM json_each(?))
       AND (? OR EXISTS(SELECT 1 FROM json_each(d.seed_json,'$.noticedBy') observer JOIN json_each(?) actor ON observer.value=actor.value COLLATE NOCASE))
-      ORDER BY d.source_start_ordinal,d.id`).all(options.chatId,Number(author),JSON.stringify(options.activePerspectives ?? [perspective])) as Array<{id:string}>;
+      ORDER BY d.source_start_ordinal,d.id`).all(options.chatId,JSON.stringify([...seedStates.values()].filter(row=>row.seed.status === 'open').map(row=>row.id)),Number(author),JSON.stringify(options.activePerspectives ?? [perspective])) as Array<{id:string}>;
     for (const id of [...(options.automaticSupportMemoryIds ?? []), ...seedCandidates.map(row=>row.id), ...historyCandidates.map(row => row.id),
       ...[...(options.semanticAtomHits?.keys() ?? [])]]) if (!candidates.includes(id)) candidates.push(id);
   }
@@ -1734,7 +1735,7 @@ export function retrieve(db: RcmDatabase, options: RetrieveOptions): {
       continue;
     }
     const list = detailsByMemory.get(detail.memory_id) ?? [];
-    list.push({ id: detail.id, seed: accessibleStorySeed(detail.seed_json, knownBy), sourceOrdinal: detail.source_start_ordinal ?? undefined, sourceOffset: detailOffsets.get(String(detail.id)), key: detail.detail_key, kind: detail.kind, role: detail.role, text: detail.text, epistemic: detail.epistemic,
+    list.push({ id: detail.id, seed: accessibleStorySeed(seedStates.get(detail.id)?.seed, knownBy), sourceOrdinal: detail.source_start_ordinal ?? undefined, sourceOffset: detailOffsets.get(String(detail.id)), key: detail.detail_key, kind: detail.kind, role: detail.role, text: detail.text, epistemic: detail.epistemic,
       participants: parseList(detail.participants_json), knownBy, hiddenFrom: parseList(detail.hidden_from_json), knownByLabels:labels("detail",detail.id,knownBy), locations: parseList(detail.locations_json), salience: detail.salience, retention: detail.retention_class });
     detailsByMemory.set(detail.memory_id, list);
   }

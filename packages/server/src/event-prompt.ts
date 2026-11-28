@@ -2,8 +2,9 @@ import { ROLEPLAY_ARCHIVE_FRAMING, MEMORY_DETAIL_KIND_VALUES, KEY_DIALOGUE_KIND_
 // Base: owner-approved E1d revision 3; entity policy amended for all contracts.
 // Original source SHA-256:
 // 73173ac26113ad59ef815eebc33386f958f14d2931d7aac76ac549c81c20f91e
+export const canonicalLanguageNames = { en: 'English', ko: 'Korean', ja: 'Japanese', zh: 'Chinese' } as const;
 export function eventWritingSystem(language: MemoryLanguage, profile: RpProfile, contract: "e1d" | "e1e" | "e1f" = "e1d"): string {
-  const names = { en: "English", ko: "Korean", ja: "Japanese", zh: "Chinese" };
+  const names = canonicalLanguageNames;
   const languageRule = language === "zh" ? "Write canonical prose in Chinese. Preserve the dominant Simplified or Traditional script when Chinese source exists; otherwise use Simplified Chinese." : `Write canonical prose in ${names[language]}.`;
   const profileFocus = profile === "companion" ? "Preserve relationship scenes, emotions, promises, boundaries and shared or private experiences as event evidence for later use." : "Preserve relationships, discoveries, world changes, conflicts, causal events and information transfer as event evidence for later use.";
   if (contract === "e1f") return E1F_SYSTEM.replace("Preserve relationship scenes, emotions, promises, boundaries and shared or private experiences as event evidence for later use.", profileFocus)

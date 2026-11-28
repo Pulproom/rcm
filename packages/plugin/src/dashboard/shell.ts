@@ -13,7 +13,7 @@ const escapeHtml = (value: unknown): string => String(value ?? "")
 
 const tabLabels: Record<Tab, string> = {
   overview: "홈",
-  albums: "추억",
+  albums: "앨범",
   initial: "인물",
   story: "기억",
   timeline: "기억",
@@ -92,7 +92,7 @@ const shellTabs: Array<{ tab: Tab; label: string; icon: string }> = [
   { tab: "timeline", label: "기억", icon: "film" },
   { tab: "initial", label: "인물", icon: "people" },
   { tab: "world", label: "현재", icon: "clip" },
-  { tab: "albums", label: "추억", icon: "album" },
+  { tab: "albums", label: "앨범", icon: "album" },
   { tab: "reviews", label: "관리", icon: "sliders" },
 ];
 
@@ -132,7 +132,7 @@ export function renderShell(opts: {
     { value: "ko", label: "번역", pressed: opts.translation === "ko", action: "set-translation-display", data: { display: "ko" } },
     { value: "en", label: "원문", pressed: opts.translation === "en", action: "set-translation-display", data: { display: "en" } },
   ]);
-  const bar = `<nav class="where" aria-label="현재 위치">${crumbs}</nav><span class="sp"></span><span class="bar__state" role="status" aria-live="polite" aria-atomic="true"></span>${language}${iconBtn("refresh", "새로고침", { action: "refresh" })}${iconBtn("close", "닫기", { action: "close" })}`;
+  const bar = `<nav class="where" aria-label="현재 위치">${crumbs}</nav><span class="sp"></span><div class="bar__island"><span class="bar__state" role="status" aria-live="polite" aria-atomic="true"></span>${language}${iconBtn("refresh", "새로고침", { action: "refresh" })}${iconBtn("close", "닫기", { action: "close" })}</div>`;
   return { nav, bar };
 }
 

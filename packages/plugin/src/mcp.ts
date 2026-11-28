@@ -2,7 +2,7 @@ declare const __RCM_DISTRIBUTION__: boolean;
 import { INVALID_MEMORY_REF_MESSAGE, MCP_MAX_REQUEST_TIMEOUT_MS, RCM_PLUGIN_VERSION, type McpQuestionAnswer, type McpSourceRange, estimateTokens, initialMemoryGuidanceBlock, memoryGuidanceBlock } from "@rcm/shared";
 import type { ServerClient } from "./api-client.js";
 import { readCurrentChatScope } from "./context.js";
-import { isChatMemoryEnabled } from "./settings.js";
+import { resolveChatSetting, isChatMemoryEnabled } from "./settings.js";
 import mcpContract from "./mcp-contract.json" with { type: "json" };
 import type { RuntimeState } from "./types.js";
 import { finishTiming, startTiming } from "./timing.js";
@@ -230,7 +230,7 @@ export async function executeMemoryTool(
       return reject("budget_rejected", "Ask a shorter question so the result fits its budget.");
     }
     const shared = { intent, tokenBudget: callBudget - responseReserve, excludeMemoryIds: [], excludeMemorySignatures: [],
-      memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
+      memoryOnlyInjection: resolveChatSetting(state.settings, "memoryOnlyInjection", chatId),
       alreadyPresentMemoryIds: delivered?.memoryIds ?? [],
       alreadyPresentAtomKeys: [...new Set([...(delivered?.atomKeys ?? []), ...(state.mcpReturnedAtomKeys ?? [])])].slice(-512),
       excludeAtomKeys: [...new Set(state.mcpReturnedAtomKeys ?? [])].slice(-512),

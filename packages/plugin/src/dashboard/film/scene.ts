@@ -11,8 +11,8 @@ export function dayPart(storyTime: string | null): DayPart | null {
   return hour >= 6 && hour < 18 ? "낮" : "밤";
 }
 
-export function slugline(no: number, place: string | null, storyTime: string | null): string {
-  return lex().slug(no, place, dayPart(storyTime));
+export function slugline(no: number, place: string | null): string {
+  return lex().slug(no, place);
 }
 
 /** Date-only credits use the same formatter as all other dashboard story times. */

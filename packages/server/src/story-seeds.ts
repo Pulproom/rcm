@@ -22,11 +22,39 @@ export function accessibleStorySeed(value: unknown, knownBy: string[]): SeedMark
   return {type:seed.type,status:seed.status,noticedBy:seed.noticedBy.filter(name=>holders.has(normalize(name)) || holders.has("__everyone__"))};
 }
 
-export function openStorySeeds(db: RcmDatabase, chatId: string) {
-  return db.prepare(`SELECT d.id,d.text,d.seed_json,d.evidence_json,d.source_end_ordinal FROM visible_memory_details d
+export const SEED_STALE_TURNS = 60;
+
+/** Derive closure from the same monotonic clock used by actual delivery receipts.
+ * Historical extraction can supply its batch turn; omit seeds from later turns.
+ * Source ordinals are message positions, not turns; use their persisted turn sequence.
+ * Keep stored markers untouched so rollback, replay and old backups need no migration.
+ */
+export function activeStorySeeds(db: RcmDatabase, chatId: string, referenceTurn?: number) {
+  const turn = referenceTurn ?? (db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(chatId) as {completed_turn_count:number}|undefined)?.completed_turn_count ?? 0;
+  const rows = db.prepare(`SELECT d.id,d.memory_id,d.text,d.user_edited,d.seed_json,d.evidence_json,d.source_start_ordinal,d.source_end_ordinal,m.story_time_normalized,
+    (SELECT s.completed_turn_seq FROM messages s WHERE s.chat_id=d.chat_id AND s.ordinal<=d.source_end_ordinal
+      AND s.completed_turn_seq IS NOT NULL AND s.lifecycle IN ('committed','client_pruned')
+      AND s.memory_excluded=0 AND s.host_visibility IN ('active','all_before') ORDER BY s.ordinal DESC LIMIT 1) source_turn
+    FROM visible_memory_details d
     JOIN memories m ON m.id=d.memory_id AND m.chat_id=d.chat_id
-    WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND json_extract(d.seed_json,'$.status')='open'
-    ORDER BY d.source_start_ordinal,d.id`).all(chatId) as Array<{id:string;text:string;seed_json:string;evidence_json:string;source_end_ordinal:number}>;
+    WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND d.seed_json IS NOT NULL
+    ORDER BY d.source_start_ordinal,d.id`).all(chatId) as Array<{id:string;memory_id:string;text:string;user_edited:number;seed_json:string;evidence_json:string;source_start_ordinal:number;source_end_ordinal:number;story_time_normalized:string|null;source_turn:number|null}>;
+  return rows.flatMap(row => {
+    if (referenceTurn !== undefined && row.source_turn !== null && row.source_turn > referenceTurn) return [];
+    const seed=readStorySeed(row.seed_json);
+    if (!seed) return [];
+    if (referenceTurn !== undefined) {
+      if (seed.reopenedTurn !== undefined && seed.reopenedTurn > referenceTurn) delete seed.reopenedTurn;
+      if (seed.delivery && seed.delivery.lastTurn > referenceTurn) delete seed.delivery;
+    }
+    const lastActivity=Math.max(row.source_turn ?? 0,seed.delivery?.lastTurn ?? 0,seed.reopenedTurn ?? 0);
+    const autoClosed=seed.status === 'open' && turn-lastActivity >= SEED_STALE_TURNS;
+    return [{...row,seed:autoClosed ? {...seed,status:'closed' as const} : seed,autoClosed}];
+  });
+}
+
+export function openStorySeeds(db: RcmDatabase, chatId: string, referenceTurn?: number) {
+  return activeStorySeeds(db,chatId,referenceTurn).filter(row=>row.seed.status === 'open');
 }
 
 export type SeedResolutionDrop = { detailId: string; reason: string };
@@ -43,6 +71,8 @@ export function validateSeedResolutions(db: RcmDatabase, chatId: string, resolut
     const row = db.prepare(`SELECT d.seed_json,d.source_end_ordinal FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
       WHERE d.id=? AND d.chat_id=? AND d.active=1 AND m.active=1`).get(patch.detailId, chatId) as {seed_json:string;source_end_ordinal:number}|undefined;
     const seed=row && readStorySeed(row.seed_json);
+    // A batch-supplied seed may be stale at the head. Validate its stored status
+    // and exact later evidence, rather than reapplying the live read-time window.
     if (!seed || seed.status !== "open" && (seed.status !== patch.status || JSON.stringify(seed.closureEvidence) !== JSON.stringify(patch.evidence))) { reject("Seed resolution target is not open"); continue; }
     const valid = patch.evidence.length > 0 && patch.evidence.every(evidence => {
       const source = db.prepare(`SELECT ordinal,canonical_content,canonical_hash FROM messages WHERE chat_id=? AND message_id=?
@@ -82,8 +112,7 @@ export function reopenSeedsBySource(db: RcmDatabase, chatId: string, messageId: 
 
 export function storySeedCounts(db: RcmDatabase, chatId: string) {
   const counts = {open:0,fulfilled:0,abandoned:0,closed:0};
-  for (const row of db.prepare(`SELECT json_extract(d.seed_json,'$.status') status,count(*) count FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
-    WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND d.seed_json IS NOT NULL GROUP BY status`).all(chatId) as Array<{status:keyof typeof counts;count:number}>) counts[row.status]=row.count;
+  for (const row of activeStorySeeds(db,chatId)) counts[row.seed.status]++;
   return counts;
 }
 
@@ -123,13 +152,15 @@ function persistSeedsInReplay(db: RcmDatabase, chatId: string, edits: SeedEdit[]
 
 export function editStorySeeds(db: RcmDatabase, chatId: string, detailIds: string[], action:'close'|'reopen'|'delete') {
   return db.transaction(()=>{
+    const turn=(db.prepare('SELECT completed_turn_count FROM chats WHERE id=?').get(chatId) as {completed_turn_count:number}|undefined)?.completed_turn_count ?? 0;
     const edits:SeedEdit[]=[];
     const results=[...new Set(detailIds)].map(detailId=>{
       const row=db.prepare(`SELECT d.seed_json FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
         WHERE d.chat_id=? AND d.id=? AND d.active=1 AND m.active=1`).get(chatId,detailId) as {seed_json:string}|undefined;
       const seed=readStorySeed(row?.seed_json);
       if (!seed) return {id:detailId,ok:false,error:'Seed not found'};
-      const next=action === 'delete' ? undefined : {...seed,status:action === 'close' ? 'closed' as const : 'open' as const,closureEvidence:undefined};
+      const next=action === 'delete' ? undefined : {...seed,status:action === 'close' ? 'closed' as const : 'open' as const,closureEvidence:undefined,
+        ...(action === 'reopen' ? {reopenedTurn:turn} : {})};
       db.prepare('UPDATE memory_details SET seed_json=?,updated_at=? WHERE chat_id=? AND id=?').run(next ? JSON.stringify(next) : null,Date.now(),chatId,detailId);
       edits.push({detailId,seed:next});
       return {id:detailId,ok:true};
@@ -169,16 +200,14 @@ export function recordSeedDelivery(db: RcmDatabase, chatId: string, seedAtomKeys
 
 export function dashboardStorySeeds(db: RcmDatabase, chatId: string) {
   const turn = (db.prepare("SELECT completed_turn_count FROM chats WHERE id=?").get(chatId) as {completed_turn_count:number}|undefined)?.completed_turn_count ?? 0;
-  return (db.prepare(`SELECT d.id,d.memory_id,d.text,d.user_edited,d.seed_json,d.source_start_ordinal,m.story_time_normalized
-    FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id WHERE d.chat_id=? AND d.active=1 AND m.active=1 AND d.seed_json IS NOT NULL`).all(chatId) as Array<any>).flatMap(row => {
-    const seed = readStorySeed(row.seed_json);
-    if (!seed) return [];
+  return activeStorySeeds(db,chatId).map(row => {
+    const seed = row.seed;
     const closureOrdinal = seed.status === 'fulfilled' ? seed.closureEvidence?.reduce((max, evidence) => {
       const ordinal = (db.prepare("SELECT ordinal FROM messages WHERE chat_id=? AND message_id=?").get(chatId,evidence.messageId) as {ordinal:number}|undefined)?.ordinal;
       return Math.max(max,ordinal ?? -1);
     },-1) : undefined;
-    return [{id:row.id,memoryId:row.memory_id,text:row.text,userEdited:!!row.user_edited,noticedBy:seed.noticedBy,status:seed.status,
+    return {id:row.id,memoryId:row.memory_id,text:row.text,userEdited:!!row.user_edited,noticedBy:seed.noticedBy,status:seed.status,...(row.autoClosed ? {autoClosed:true} : {}),
       lastMention:{ordinal:row.source_start_ordinal,storyTime:row.story_time_normalized},closureOrdinal,
-      deliveryCount:seed.delivery?.count ?? 0,turnsSinceLastDelivery:seed.delivery ? Math.max(0,turn-seed.delivery.lastTurn) : null}];
+      deliveryCount:seed.delivery?.count ?? 0,turnsSinceLastDelivery:seed.delivery ? Math.max(0,turn-seed.delivery.lastTurn) : null};
   });
 }

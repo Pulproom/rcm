@@ -8,7 +8,7 @@ import { estimateTokens, type TurnPrepareResponse } from "@rcm/shared";
 import { cachedSourceReceipt, ServerClient, UpgradeBlockedError, type UpgradeLock, type PrepareClientTimings } from "./api-client.js";
 import { hasRecentPocketSlot, confirmPocketSlotSource, requestPocketSlot, hasUnroutedPocketSlot, maintainPocketSlot, missingPocketSlotReason, pocketSlotEnabled, resolvePocketSlot, stripDisabledPocketSlot } from "./pocket-memory-slot.js";
 import { MEMORY_MARKER, assertHostSelection, confirmCurrentChatScope, injectMemory, inspectMemoryPrompt, makePrepareRequest, protectedPromptSourceMessageIds, readContextMetadata, readCurrentChatScope, readCurrentContext, readHostSelection, readMessageSourceInputs, resolvedSetupProjection, sameMessageSourceInputs, sha256, stripRcmPromptContent, observeCurrentHostGeneration, messageRole } from "./context.js";
-import { CACHE_KEY, addLog, isChatMemoryEnabled, loadSettings, loadStoredJson, saveSettings, saveStoredJson } from "./settings.js";
+import { resolveChatSetting, CACHE_KEY, addLog, isChatMemoryEnabled, loadSettings, loadStoredJson, saveSettings, saveStoredJson } from "./settings.js";
 import type { AutomaticInjectionTimings, ChatScopeTiming, CachedChatState, RuntimeState } from "./types.js";
 import { beginMainGeneration, clearMainGeneration, endMainGeneration, isInternalModelRequest, scheduleWorker } from "./worker.js";
 import { stageLineageSettings } from "./lineage-settings.js";
@@ -244,9 +244,9 @@ function isIntentionalEmptyPrepare(response: TurnPrepareResponse | undefined): b
 
 function preparedDeliverySettingsMatch(state: RuntimeState, prepared: NonNullable<RuntimeState["automaticTurnPacket"]>): boolean {
   const chatId = prepared.chatId;
-  return (prepared.upcomingOccasions ?? true) === (state.settings.upcomingOccasions[chatId] ?? true)
-    && (prepared.pairProgress ?? false) === (state.settings.pairProgress[chatId] ?? false)
-    && (prepared.memoryOnlyInjection ?? false) === (state.settings.memoryOnlyInjection[chatId] ?? false)
+  return (prepared.upcomingOccasions ?? true) === (resolveChatSetting(state.settings, "upcomingOccasions", chatId))
+    && (prepared.pairProgress ?? false) === (resolveChatSetting(state.settings, "pairProgress", chatId))
+    && (prepared.memoryOnlyInjection ?? false) === (resolveChatSetting(state.settings, "memoryOnlyInjection", chatId))
     && prepared.narrationViewpoint === (state.settings.narrationViewpoint[chatId] || undefined);
 }
 
@@ -685,7 +685,7 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
         tailStart = context.snapshotScope === "tail" ? context.snapshot[0]?.ordinal ?? 0 : 0;
         void syncQuizEnabled(state, client).catch(() => undefined);
         state.lastPromptValidation = { chatId: context.chatId, status: "marker_present", at: Date.now() };
-        const selectedMemoryBudget = state.settings.memoryBudgets[context.chatId] ?? state.settings.defaultMemoryBudget;
+        const selectedMemoryBudget = resolveChatSetting(state.settings, "memoryBudgets", context.chatId);
         const totalMemoryBudget = selectedMemoryBudget;
         const turnKeyStartedAt = performance.now();
         const turnKey = await sha256(`${context.chatId}\0${context.snapshot.at(-1)?.id ?? ""}\0${context.querySourceHash ?? context.query}\0${state.settings.memoryToolsEnabled}\0${context.memoryOnlyInjection ?? false}\0${context.upcomingOccasions ?? true}\0${context.pairProgress ?? false}`);
@@ -799,19 +799,20 @@ export function installRequestHooks(state: RuntimeState, client: ServerClient): 
               state.retrievalTraceEnabled = response.retrievalTrace?.enabled === true;
               if (!response) throw new Error("Memory preparation returned no response");
               const parentId = response.lineage?.status === "inherited" ? response.lineage.parentChatId : undefined;
-              if (parentId) {
-                lineageSettings = stageLineageSettings(state, context.chatId, parentId, response.memoryLanguage);
+              if (parentId && state.settings.lineageSettingsFrom[context.chatId] !== parentId) {
+                lineageSettings = stageLineageSettings(state, context.chatId, parentId);
                 const { settings } = lineageSettings;
-                const inheritedBudget = settings.memoryBudgets[context.chatId] ?? settings.defaultMemoryBudget;
+                const inheritedBudget = resolveChatSetting(settings, "memoryBudgets", context.chatId);
                 context = {
                   ...context,
-                  profile: settings.profiles[context.chatId] ?? settings.defaultProfile,
-                  includeUserMessages: settings.includeUserMessages[context.chatId] ?? true,
-                  upcomingOccasions: settings.upcomingOccasions[context.chatId] ?? true,
-                  pairProgress: settings.pairProgress[context.chatId] ?? false,
-                  memoryOnlyInjection: settings.memoryOnlyInjection[context.chatId] ?? false,
-                  extractionGroupTurns: Math.min(50, Math.max(1, Math.round(settings.extractionGroupTurns[context.chatId] ?? 6))),
+                  profile: resolveChatSetting(settings, "profiles", context.chatId),
+                  includeUserMessages: resolveChatSetting(settings, "includeUserMessages", context.chatId),
+                  upcomingOccasions: resolveChatSetting(settings, "upcomingOccasions", context.chatId),
+                  pairProgress: resolveChatSetting(settings, "pairProgress", context.chatId),
+                  memoryOnlyInjection: resolveChatSetting(settings, "memoryOnlyInjection", context.chatId),
+                  extractionGroupTurns: Math.min(50, Math.max(1, Math.round(resolveChatSetting(settings, "extractionGroupTurns", context.chatId)))),
                   memoryLanguage: settings.memoryLanguages[context.chatId] ?? response.memoryLanguage,
+                  memoryLanguageSource: Object.hasOwn(settings.memoryLanguages, context.chatId) ? "chat" : "default",
                   narrationViewpoint: settings.narrationViewpoint[context.chatId] || undefined,
                 };
                 const inheritedEnabled = isChatMemoryEnabled(settings, context.chatId, context.characterId);

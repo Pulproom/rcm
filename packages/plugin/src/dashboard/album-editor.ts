@@ -22,7 +22,7 @@ const act = (name: string, text: string, cls = "", value = "", label = "") => `<
 const revisionConflict = (error: unknown) => (error as { status?: number; code?: string })?.status === 409 || (error as { code?: string })?.code === "ALBUM_REVISION_CONFLICT";
 
 export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks: {
-  skin: () => "film" | "phone"; host?: AlbumImageHost; render: () => void; closed: () => void; confirm: (message: string) => Promise<boolean>; toast?: (message: string) => void;
+  host?: AlbumImageHost; render: () => void; closed: () => void; confirm: (message: string) => Promise<boolean>; toast?: (message: string) => void;
 }) {
   let active = false, doc: AlbumDocument | undefined, generation = 0, loading = false, error = "", busy = false;
   let sections: AlbumSection[] = [], photos: AlbumViewPhoto[] = [], current = 0, photoIndex = 0;
@@ -240,7 +240,7 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     past = undefined; pastRun++; overlay = ""; photos = doc ? buildAlbumPhotoList(doc) : [];
     repaint(); menuTrigger()?.focus({ preventScroll: true });
   };
-  const openAlbumView = async (id: string) => {
+  const openAlbumView = async (id: string, restoreMessage?: string) => {
     clear(); active = true; loading = true; error = ""; current = 0; const epoch = generation; repaint();
     try {
       const loaded = await api.get(id); if (epoch !== generation) return; doc = loaded.document; photoMeta = loaded.photos ?? [];
@@ -248,10 +248,22 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
       if (epoch !== generation) return;
       photos = buildAlbumPhotoList(doc);
     } catch { if (epoch === generation) error = "앨범을 불러오지 못했어요."; }
-    finally { if (epoch === generation) { loading = false; repaint(); view()?.querySelector<HTMLElement>(".av-back")?.focus(); if (doc) void checkTogether(); } }
+    finally {
+      if (epoch === generation) {
+        loading = false;
+        repaint();
+        view()?.querySelector<HTMLElement>(".av-back")?.focus();
+        if (doc) void checkTogether();
+        const notice = view()?.querySelector<HTMLElement>(".av-restore-notice");
+        if (restoreMessage && notice) {
+          notice.textContent = restoreMessage;
+          setTimeout(() => { notice.textContent = ""; }, 5_000);
+        }
+      }
+    }
   };
   const editor = createAlbumEditController(root, api, {
-    skin: hooks.skin, host: hooks.host, photoSrc: id => urls.get(id) ?? "", photoLoaded: (id, url) => urls.set(id, url),
+    host: hooks.host, photoSrc: id => urls.get(id) ?? "", photoLoaded: (id, url) => urls.set(id, url),
     render: () => { renderedHtml = ""; hooks.render(); },
     done: saved => { doc = saved; photos = buildAlbumPhotoList(saved); repaint(); void checkTogether(); },
   });
@@ -284,17 +296,18 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     if (action === "album-version-list" && past?.doc) { showOverlay("versions", node); paintBar(); }
     if (action === "album-version-step" && past?.doc && !past.restoring) await showVersion(past.index + Number(value));
     if (action === "album-version-pick" && past?.doc) { closeOverlay(); await showVersion(Number(value)); }
+    if (action === "dismiss-restore-notice") node.textContent = "";
     if (action === "album-version-restore" && doc && past?.doc && !past.restoring && !past.loading) {
       const id = doc.id, epoch = generation, state = past, row = state.list![state.index]!;
       state.restoring = true; state.error = ""; paintBar();
       try {
         await api.restoreVersion(id, row.revision, doc.revision);
         if (epoch !== generation) return;
-        await openAlbumView(id); hooks.toast?.(`${albumVersionWhen(row.createdAt)} 모습으로 되돌렸어요`);
+        await openAlbumView(id, `${albumVersionWhen(row.createdAt)} 모습으로 되돌렸어요`);
       } catch (error) {
         if (epoch !== generation || past !== state) return;
         if (revisionConflict(error)) {
-          await openAlbumView(id); hooks.toast?.("다른 기기에서 바뀌어서 앨범을 새로 불러왔어요"); return;
+          await openAlbumView(id, "다른 기기에서 바뀌어서 앨범을 새로 불러왔어요"); return;
         }
         state.restoring = false; state.error = "되돌리지 못했어요. 다시 시도해 주세요."; paintBar();
       }
@@ -475,6 +488,6 @@ export function createAlbumViewController(root: HTMLElement, api: ViewApi, hooks
     const shown = past?.doc ?? doc, row = past?.doc ? past.list?.[past.index] : undefined;
     const rendered = shown && !loading ? renderAlbum(shown, { mode: "view", photoSrc: id => urls.get(id) ?? "", storedPhotos: photoMeta }) : undefined;
     sections = rendered?.sections ?? [];
-    return renderedHtml = `<section class="album-view" data-skin="${hooks.skin()}"><div class="av-base${row ? " is-past" : ""}"${overlay ? " inert" : ""}>${renderScreenBar(`${row ? act("album-versions-close", icon("back") + "<span>지금 앨범</span>", "av-back") : act("album-back", icon("back") + "<span>추억</span>", "av-back")}<div class="av-title"><b>${esc(shown?.title ?? "앨범")}</b>${row ? `<span class="avh-chip">${albumVersionWhen(row.createdAt)}의 모습</span>` : `<small>${esc(albumDateFormat(doc?.periodLabel).header)}</small>`}</div>${act("album-toc", '목차 · <span class="av-current">' + esc(currentLabel()) + '</span>' + icon("chevron"), "av-toc-trigger")}${doc && !row ? act("album-edit", icon("edit") + "꾸미기", "av-edit") : ""}${doc && !row ? act("album-view-menu", icon("more"), "av-icon", "", "앨범 메뉴") : ""}`, "av-head")}<div class="av-scroll">${error ? `<p class="av-status" role="alert">${esc(error)}</p>` : ""}${loading ? '<p class="av-status" role="status">앨범 불러오는 중…</p>' : rendered ? `<style>${rendered.css}</style>${rendered.html}` : ""}</div><div class="av-together-slot">${row ? "" : togetherChip()}</div>${row ? renderAlbumVersionBar(past!, overlay === "versions") : sections.length ? act("album-toc", `<i class="av-number">${sections[current]?.number ?? "01"}</i><span class="av-current">${esc(currentLabel())}</span>${icon("chevron")}`, "av-pill") : ""}</div><div class="av-overlay">${overlayHtml()}</div></section>`;
+    return renderedHtml = `<section class="album-view" data-skin="phone"><div class="av-base${row ? " is-past" : ""}"${overlay ? " inert" : ""}>${renderScreenBar(`${row ? act("album-versions-close", icon("back") + "<span>지금 앨범</span>", "av-back") : act("album-back", icon("back") + "<span>추억</span>", "av-back")}<div class="av-title"><b>${esc(shown?.title ?? "앨범")}</b>${row ? `<span class="avh-chip">${albumVersionWhen(row.createdAt)}의 모습</span>` : `<small>${esc(albumDateFormat(doc?.periodLabel).header)}</small>`}</div>${act("album-toc", '목차 · <span class="av-current">' + esc(currentLabel()) + '</span>' + icon("chevron"), "av-toc-trigger")}${doc && !row ? act("album-edit", icon("edit") + "꾸미기", "av-edit") : ""}${doc && !row ? act("album-view-menu", icon("more"), "av-icon", "", "앨범 메뉴") : ""}`, "av-head")}<div class="av-scroll">${error ? `<p class="av-status" role="alert">${esc(error)}</p>` : ""}${loading ? '<p class="av-status" role="status">앨범 불러오는 중…</p>' : rendered ? `<style>${rendered.css}</style>${rendered.html}` : ""}</div><div class="av-together-slot">${row ? "" : togetherChip()}</div>${row ? renderAlbumVersionBar(past!, overlay === "versions") : sections.length ? act("album-toc", `<i class="av-number">${sections[current]?.number ?? "01"}</i><span class="av-current">${esc(currentLabel())}</span>${icon("chevron")}`, "av-pill") : ""}</div><div class="av-overlay">${overlayHtml()}</div><div class="av-restore-notice" role="status" data-album-action="dismiss-restore-notice" aria-atomic="true"></div></section>`;
   } };
 }

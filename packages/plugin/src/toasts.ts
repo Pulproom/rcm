@@ -10,23 +10,24 @@ export type Incident = {
 };
 export type IncidentFeed = { incidents: Incident[]; incidentCursor: number };
 type Toast = { success: boolean; title: string; chatLabel?: string; subtitle?: string };
-type Appearance = Pick<PluginSettings, 'dashboardSkin' | 'dashboardTheme'>;
+type Appearance = Pick<PluginSettings, 'dashboardTheme'>;
 const HOST = '[x-rcm-toasts]';
+const CARD = `${HOST} > :is([role="status"],[role="alert"])`;
 
 function toastCss(settings: Appearance): string {
-  const s = chipSkin(settings), phone = settings.dashboardSkin === 'phone';
+  const s = chipSkin(settings);
   return `${HOST}{position:fixed;z-index:2147483000;top:calc(env(safe-area-inset-top,0px) + 16px);right:16px;width:360px;max-width:calc(100vw - 24px);pointer-events:none;font-family:${s.sans}}
-${HOST} .rcm-toast{box-sizing:border-box;display:grid;grid-template-columns:18px minmax(0,1fr);gap:3px 10px;padding:${phone ? '12px 14px' : '11px 13px'};border:${s.border};border-radius:${phone ? '16px' : '4px'};background:${phone && settings.dashboardTheme !== 'light' ? 'rgba(36,36,38,.86)' : s.screen};color:${s.ink};box-shadow:${s.shadow};backdrop-filter:${s.backdrop};-webkit-backdrop-filter:${s.backdrop};pointer-events:auto;cursor:pointer;touch-action:pan-y;animation:rcm-toast-in .18s ease-out}
-${HOST} .rcm-toast:empty{height:0;padding:0;border:0;box-shadow:none;pointer-events:none;animation:none}
+${CARD}{box-sizing:border-box;display:grid;grid-template-columns:18px minmax(0,1fr);gap:3px 10px;padding:12px 14px;border:${s.border};border-radius:16px;background:${settings.dashboardTheme !== 'light' ? 'rgba(36,36,38,.86)' : s.screen};color:${s.ink};box-shadow:${s.shadow};backdrop-filter:${s.backdrop};-webkit-backdrop-filter:${s.backdrop};pointer-events:auto;cursor:pointer;touch-action:pan-y;animation:rcm-toast-in .18s ease-out}
+${CARD}:empty{height:0;padding:0;border:0;box-shadow:none;pointer-events:none;animation:none}
 ${HOST} svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;margin-top:1px;color:${s.cut}}
 ${HOST} [role=status] svg{color:${s.ok}}
-${HOST} b{font-size:${phone ? 14 : 13}px;font-weight:600;line-height:1.45;overflow-wrap:anywhere}
-${HOST} .who{color:${s.ink2};font-weight:500}
+${HOST} b{font-size:14px;font-weight:600;line-height:1.45;overflow-wrap:anywhere}
+${CARD} b > span{color:${s.ink2};font-weight:500}
 ${HOST} small{grid-column:2;font-size:12px;line-height:1.45;color:${s.ink2}}
 @media(max-width:600px){${HOST}{top:calc(env(safe-area-inset-top,0px) + 54px);left:12px;right:12px;width:auto;max-width:420px;margin-inline:auto}}
-@media(prefers-reduced-transparency:reduce){${HOST} .rcm-toast{backdrop-filter:none;-webkit-backdrop-filter:none;background:${phone ? settings.dashboardTheme === 'light' ? '#fff' : '#242426' : s.screen}}}
+@media(prefers-reduced-transparency:reduce){${CARD}{backdrop-filter:none;-webkit-backdrop-filter:none;background:${settings.dashboardTheme === 'light' ? '#fff' : '#242426'}}}
 @keyframes rcm-toast-in{from{transform:translateY(-6px)}to{transform:translateY(0)}}
-@media(prefers-reduced-motion:reduce){${HOST} .rcm-toast{animation:none}}`;
+@media(prefers-reduced-motion:reduce){${CARD}{animation:none}}`;
 }
 
 /** Adapter uses the same async element contract as getRootDocument. */
@@ -34,6 +35,7 @@ export function toastDocument(doc: Document): SafeRootDocument {
   const elements = new WeakMap<SafeRootElement, Element>();
   const wrap = (element: Element): SafeRootElement => {
     const result: SafeRootElement = {
+      async focus() { (element as HTMLElement).focus(); },
       async appendChild(child) { element.appendChild(elements.get(child)!); },
       async remove() { element.remove(); },
       async setTextContent(value) { element.textContent = value; },
@@ -54,6 +56,7 @@ export function toastDocument(doc: Document): SafeRootDocument {
 class ToastHost {
   private queue: Toast[] = [];
   private seen = new Set<number>();
+  private root?: SafeRootDocument;
   private host?: SafeRootElement;
   private style?: SafeRootElement;
   private status?: SafeRootElement;
@@ -75,6 +78,8 @@ class ToastHost {
   mount(root: SafeRootDocument, visibilityDocument: Document): Promise<void> {
     return this.serialize(async () => {
       this.cancelTimer(); this.stopVisibility?.();
+      const previousRoot = this.root;
+      this.root = root;
       this.visibilityDocument=visibilityDocument;
       const update=()=>{ void this.serialize(async()=>this.syncDismissTimer()); };
       visibilityDocument.addEventListener('visibilitychange',update);
@@ -85,32 +90,38 @@ class ToastHost {
         visibilityDocument.defaultView?.removeEventListener('focus',update);
         visibilityDocument.defaultView?.removeEventListener('blur',update);
       };
-      await this.host?.remove();
-      await (await root.querySelector(HOST))?.remove();
-      const body = await root.querySelector('body');
-      if (!body) return;
-      this.host = await root.createElement('div');
-      await this.host.setAttribute('x-rcm-toasts','true');
-      // SafeElement permits explicit x- attributes, but sanitized HTML strips them.
-      // Roles survive sanitization and also identify the persistent live regions.
-      await this.host.setInnerHTML('<div class="rcm-toast" role="status" aria-live="polite" aria-atomic="true"></div><div class="rcm-toast" role="alert" aria-live="assertive" aria-atomic="true"></div>');
-      await body.appendChild(this.host);
-      this.style = await root.createElement('style');
-      await this.host.appendChild(this.style);
-      this.status = await this.host.querySelector('[role="status"]') ?? undefined;
-      this.alert = await this.host.querySelector('[role="alert"]') ?? undefined;
-      if (!this.style || !this.status || !this.alert) throw new Error('Toast live regions were removed by host HTML sanitization');
-      let swipedAt=-Infinity;
-      await this.host.addEventListener('click',() => { if (Date.now()-swipedAt>500) void this.dismiss(); });
-      let press: {x:number;y:number} | undefined;
-      await this.host.addEventListener('pointerdown',e => { press={x:e.clientX,y:e.clientY}; });
-      await this.host.addEventListener('pointerup',e => {
-        if (press && Math.hypot(e.clientX-press.x,e.clientY-press.y)>32) { swipedAt=Date.now(); void this.dismiss(); }
-        press=undefined;
-      });
+      this.host = undefined;
+      if (previousRoot && previousRoot !== root) await (await previousRoot.querySelector(HOST))?.remove();
+      await this.createContainer(root);
       await this.paint();
       this.syncDismissTimer();
     });
+  }
+
+  private async createContainer(root: SafeRootDocument): Promise<void> {
+    await (await root.querySelector(HOST))?.remove();
+    const body = await root.querySelector('body');
+    if (!body) throw new Error('Toast mount requires a document body');
+    const container = await root.createElement('div');
+    await container.setAttribute('x-rcm-toasts','true');
+    // SafeElement permits explicit x- attributes, but sanitized HTML strips them.
+    // Roles survive sanitization and also identify the persistent live regions.
+    await container.setInnerHTML('<div class="rcm-toast" role="status" aria-live="polite" aria-atomic="true"></div><div class="rcm-toast" role="alert" aria-live="assertive" aria-atomic="true"></div>');
+    this.style = await root.createElement('style');
+    await container.appendChild(this.style);
+    this.status = await container.querySelector('[role="status"]') ?? undefined;
+    this.alert = await container.querySelector('[role="alert"]') ?? undefined;
+    if (!this.style || !this.status || !this.alert) throw new Error('Toast live regions were removed by host HTML sanitization');
+    let swipedAt=-Infinity;
+    await container.addEventListener('click',() => { if (Date.now()-swipedAt>500) void this.dismiss(); });
+    let press: {x:number;y:number} | undefined;
+    await container.addEventListener('pointerdown',e => { press={x:e.clientX,y:e.clientY}; });
+    await container.addEventListener('pointerup',e => {
+      if (press && Math.hypot(e.clientX-press.x,e.clientY-press.y)>32) { swipedAt=Date.now(); void this.dismiss(); }
+      press=undefined;
+    });
+    await body.appendChild(container);
+    this.host = container;
   }
 
   enqueue(incidents: Incident[], enabled: boolean): Promise<void> {
@@ -132,7 +143,7 @@ class ToastHost {
         this.queue.push({success:item.kind==='upgrade_done',title,chatLabel:item.chatLabel ?? undefined,
           subtitle:item.kind==='job_failed' ? '보조 모델 오류 · 처리 상태에서 볼 수 있어요' : undefined});
       }
-      await this.next();
+      if (fresh.length) await this.next();
     });
   }
 
@@ -176,8 +187,14 @@ class ToastHost {
   }
   private async next(): Promise<void> {
     if (this.settings().majorAlerts === false) { await this.clear(); return; }
-    if (this.active) return;
-    this.active=this.queue.shift(); await this.paint();
+    const root = this.root;
+    if (root && (!this.host || !await root.querySelector(HOST))) {
+      this.cancelTimer();
+      this.host = undefined;
+      await this.createContainer(root);
+    } else if (this.active) return;
+    this.active ??= this.queue.shift();
+    await this.paint();
     this.syncDismissTimer();
   }
   dismiss(): Promise<void> {
@@ -205,16 +222,19 @@ export async function installToasts(state: RuntimeState, rootDocument?: SafeRoot
   installed.stopObserving=subscribeActivity(state,()=>{
     if (state.settings.majorAlerts === false) void installed.enqueue([],false).catch(()=>undefined);
   });
-  state.notifyConnectionOutage=()=>{ void installed.connection(state.settings.majorAlerts !== false).catch(()=>undefined); };
+  state.notifyConnectionOutage=()=>{ void installed.connection(state.settings.majorAlerts !== false).catch(()=>addLog(state.logs,'warn','Connection alert could not be rendered', "ALERT_RENDER_FAILED")); };
   if (typeof risuai.onUnload === 'function') await risuai.onUnload(async () => {
     await installed.dispose(); if (host===installed) { host=undefined; root=undefined; dashboard=undefined; }
   });
 }
 
-export async function setToastDashboard(doc?: Document): Promise<void> {
+export async function setToastDashboard(state: RuntimeState, doc?: Document): Promise<void> {
   dashboard=doc;
   const target=doc ? toastDocument(doc) : root;
-  if (host && target) await host.mount(target,doc ?? document).catch(()=>undefined);
+  if (host && target) {
+    try { await host.mount(target,doc ?? document); }
+    catch { addLog(state.logs,'warn',doc ? 'Major alert dashboard mount failed' : 'Major alert host restore failed', "ALERT_HOST_UNAVAILABLE"); }
+  }
 }
 
 export async function showToasts(incidents: Incident[], opts: {skin: Appearance; enabled: boolean}): Promise<void> {

@@ -6,7 +6,7 @@ import type { ServerClient } from "../api-client.js";
 import { albumWizardSteps, initialAlbumChoices, renderAlbumWizard, type AlbumWizardState } from "./album-wizard.js";
 
 export function createAlbumWizardController(root: HTMLElement, client: ServerClient, hooks: {
-  host?: InlayHost & PersonImageHost; skin: () => "film" | "phone"; currentChatId: () => string | undefined; render: () => void; closed: () => void; openAlbumView: (id: string) => Promise<void>;
+  host?: InlayHost & PersonImageHost; currentChatId: () => string | undefined; render: () => void; closed: () => void; openAlbumView: (id: string) => Promise<void>;
 }) {
   const api = albumClient(client);
   const portraits = hooks.host && createAlbumPortraitReader(hooks.host);
@@ -169,8 +169,9 @@ export function createAlbumWizardController(root: HTMLElement, client: ServerCli
   });
   window.addEventListener("pagehide", clear, { once: true });
   return { open, submit, clear, get active() { return active; }, render: () => {
-    const key = `${hooks.skin()}:${hooks.currentChatId() ?? ""}`;
-    if (!html || key !== renderKey) { renderKey = key; html = renderAlbumWizard(s, { skin: hooks.skin(), currentChatId: hooks.currentChatId() }); }
+    const currentChatId = hooks.currentChatId();
+    const key = currentChatId ?? "";
+    if (!html || key !== renderKey) { renderKey = key; html = renderAlbumWizard(s, { currentChatId }); }
     return html;
   } };
 }

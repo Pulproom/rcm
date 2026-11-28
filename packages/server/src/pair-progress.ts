@@ -171,8 +171,9 @@ export function editPairProgress(db: RcmDatabase, chatId: string, persona: strin
   } else if (action.kind === "add") {
     const label = action.label.trim();
     if (!label || label.length > 120) throw new Error("Progress label must contain 1–120 characters.");
-    saveProgressItem(db, chatId, pair, { id: randomUUID(), label, mode: action.mode, hidden: false, custom: true,
-      cells: emptyCells(pair, action.mode, hasPairHistory(db, chatId, pair) ? "unknown" : "not_yet") });
+    const cells = emptyCells(pair, action.mode, "not_yet");
+    for (const cell of cells) setUserCell(cell, "not_yet");
+    saveProgressItem(db, chatId, pair, { id: randomUUID(), label, mode: action.mode, hidden: false, custom: true, cells });
   } else {
     const item = pair.items.find(candidate => candidate.id === action.itemId);
     if (!item) throw new Error("Progress item not found.");

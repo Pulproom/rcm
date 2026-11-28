@@ -1,4 +1,4 @@
-import { avatar, btn, escapeHtml, field, fold, icon } from "./film/ui.js";
+import { avatar, btn, escapeHtml, fold, icon } from "./film/ui.js";
 import { SOCIAL_KNOWLEDGE_LEVEL_LABELS } from "./person.js";
 import { resolveSourceQuote } from "@rcm/shared";
 
@@ -92,19 +92,14 @@ export function smallReviewDetail(item: any, back: string): string {
   const keep = item.canKeep
     ? btn("남기기", { kind: "primary", action: "resolve-small-review", data: { ...data, resolution: "keep" } })
     : "";
-  const editor = !item.canKeep ? `<form id="small-review-form" class="form review-small__editor" data-audit-id="${escapeHtml(data.auditId)}" data-id="${escapeHtml(data.id)}" data-resolution="keep_edited" hidden>
-    ${field({ id: "small-review-text", label: meta.subject, control: `<textarea id="small-review-text" class="textarea notranslate" translate="no" name="text" rows="5" aria-describedby="small-review-error" required>${escapeHtml(item.text || "")}</textarea>` })}
-    <p id="small-review-error" class="err" data-small-review-error role="status" hidden></p>
-    <div class="form__bar">${btn("고쳐서 남기기", { kind: "primary", action: "submit-form", data: { formId: "small-review-form" } })}</div>
-    </form>` : "";
   const discard = btn("빼기", { kind: "danger", action: "resolve-small-review", data: { ...data, resolution: "discard" } });
   const actions = item.canKeep ? `${discard}${keep}`
-    : `${discard}${btn("고쳐서 남기기", { kind: "secondary", action: "edit-small-review" })}${item.canKeepAsWritten ? btn("그대로 남기기", { kind: "primary", action: "resolve-small-review", data: { ...data, resolution: "keep_as_written" } }) : ""}`;
+    : `${discard}${item.canKeepAsWritten ? btn("그대로 남기기", { kind: "primary", action: "resolve-small-review", data: { ...data, resolution: "keep_as_written" } }) : ""}`;
   return `<article class="reader review-small">${back}
     <h2 class="reader__title">${item.canKeep ? meta.title : `원문과 글자가 조금 다른 ${meta.subject}예요`}</h2>
     <p class="review-small__why">${item.canKeep ? escapeHtml(item.reason) : `보조 모델이 나레이션을 건너뛰고 이었거나 말을 조금 다듬었을 수 있어요. 기억은 저장됐어요.`}</p>
     ${subject}${!item.canKeep && !highlighted.matched ? `<p class="review-small__missing">원문에서 이 ${meta.subject}의 조각을 찾지 못했어요.</p>` : ""}
-    ${editor}<div class="review-small__acts">${actions}</div>
+    <div class="review-small__acts">${actions}</div>
     ${source}
     </article>`;
 }

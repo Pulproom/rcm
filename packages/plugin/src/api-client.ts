@@ -134,6 +134,9 @@ export function cachedSourceReceipt(settings: PluginSettings, chatId: string): S
 }
 
 export class ServerClient {
+  hasCompatibleDashboardApi(): boolean {
+    return serverSummaries.get(this.settings().serverUrl.replace(/\/$/, ""))?.serverApiRevision === RCM_API_REVISION;
+  }
   onIncidentFeed?: (feed: Partial<IncidentFeed>, serverUrl: string, requestedCursor?: number) => Promise<void>;
   constructor(private readonly settings: () => PluginSettings) {}
 

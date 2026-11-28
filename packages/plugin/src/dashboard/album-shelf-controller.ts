@@ -5,14 +5,14 @@ import { btn, notice } from "./film/ui.js";
 
 /** Shelf lifetime owns thumbnail URLs; the full editor/wizard are subsequent tasks. */
 export function createAlbumShelfController(root: HTMLElement, client: ServerClient, hooks: {
-  skin: () => "film" | "phone"; render: () => void;
+  render: () => void;
   confirm: (message: string) => Promise<boolean>;
 }) {
   const api = albumClient(client);
   let albums: AlbumSummary[] = [], loaded = false, error = "", generation = 0, identity = "";
   let observer: IntersectionObserver | undefined;
   let lifetime = 0;
-  let html = "", renderedSkin = "", renderEpoch = 0, frame = 0, reservedHeight = 0;
+  let html = "", renderEpoch = 0, frame = 0, reservedHeight = 0;
   let mounted: HTMLElement | null = null;
   const BATCH_SIZE = 24;
   const busy = new Set<string>();
@@ -24,7 +24,7 @@ export function createAlbumShelfController(root: HTMLElement, client: ServerClie
     for (const album of albums) api.closeAlbum(album.id);
     albums = []; urls.clear(); loading.clear(); busy.clear(); loaded = false; error = "";
   };
-  const options = () => ({ skin: hooks.skin(), photoUrl: (id: string, _photo: string, _size: "thumb") => urls.get(id) ?? "" });
+  const options = () => ({ photoUrl: (id: string, _photo: string, _size: "thumb") => urls.get(id) ?? "" });
   const refresh = async (serverIdentity: string) => {
     if (identity !== serverIdentity) { clear(); identity = serverIdentity; }
     const current = ++generation;
@@ -107,8 +107,7 @@ export function createAlbumShelfController(root: HTMLElement, client: ServerClie
     render: () => {
       if (error) return notice(error, { tone: "cut", action: btn("다시 시도", { action: "refresh" }) });
       if (!loaded) return '<p class="sub" role="status">앨범 불러오는 중…</p>';
-      if (!html || renderedSkin !== hooks.skin()) {
-        renderedSkin = hooks.skin();
+      if (!html) {
         html = renderAlbumShelf(albums.slice(0, BATCH_SIZE), { ...options(), totals: { albums: albums.length, chats: new Set(albums.map(a => a.sourceChatId).filter(Boolean)).size } })
           .replace('<section class="album-shelf"', `<section data-album-render="${renderEpoch}" class="album-shelf"`)
           .replace('class="album-shelf-grid"', `class="album-shelf-grid" style="min-height:${reservedHeight}px"`);

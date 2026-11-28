@@ -19,6 +19,9 @@ export const ALBUM_VIEW_CSS = `
 .album-view button{font:inherit;color:inherit;cursor:pointer;border:0;background:none;min-height:44px}
 .album-view button:focus-visible,.album-view [tabindex]:focus-visible{outline:2px solid var(--tungsten,#007aff);outline-offset:3px}
 .av-base{height:100%;display:grid;grid-template-rows:56px minmax(0,1fr)}
+.av-restore-notice{position:absolute;z-index:21;top:calc(60px + env(safe-area-inset-top));right:12px;max-width:calc(100% - 24px);pointer-events:none}
+.av-restore-notice:not(:empty){pointer-events:auto;cursor:pointer;padding:10px 14px;border:1px solid var(--rule-2);border-radius:4px;background:var(--screen-2);color:var(--ink);box-shadow:0 12px 28px -12px #0008}
+.album-view[data-skin=phone] .av-restore-notice{border-radius:14px}
 .av-head{display:flex;align-items:center;gap:6px;padding:0 16px 0 12px;z-index:4}
 .album-view .i{width:20px;height:20px;flex:none}
 .album-view .av-back{display:inline-flex;align-items:center;gap:2px;padding:0 10px 0 4px;color:var(--ink-2);flex:none}

@@ -347,7 +347,7 @@ export function listRelationshipProjections(db: RcmDatabase, chatId: string): Re
     to: row.to_entity,
     axes: { ...unknownAxes(), ...parseObject(row.axes_json) },
     summary: row.summary,
-    summaryReady: Boolean(row.summary?.trim()) && row.summary !== PENDING_RELATIONSHIP_SUMMARY,
+    summaryReady: typeof row.summary === "string" && row.summary !== PENDING_RELATIONSHIP_SUMMARY,
     activeTensions: parseList(row.active_tensions_json),
     basisEventIds: parseList(row.basis_event_ids_json),
     overrides: parseObject(row.overrides_json),
@@ -364,7 +364,7 @@ export function listRelationshipProjections(db: RcmDatabase, chatId: string): Re
     const key = `${pair.from}\0${pair.to}`;
     if (known.has(key)) continue;
     const initial = pair.source === "setup" ? parseObject(pair.projectionAxes) : {};
-    const hasInitial = Object.keys(initial).length > 0 && typeof pair.initialSummary === "string" && pair.initialSummary.trim().length > 0;
+    const hasInitial = Object.keys(initial).length > 0 && typeof pair.initialSummary === "string";
     views.push({
       from: pair.from, to: pair.to,
       axes: hasInitial ? Object.fromEntries(RELATIONSHIP_PROJECTION_AXES.map((axis) => [axis, { level: initial[axis] ?? "unknown", trend: "unclear" }])) as RelationshipProjectionView["axes"] : unknownAxes(),

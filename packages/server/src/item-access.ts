@@ -1,5 +1,5 @@
 import type { RcmDatabase } from "./db.js";
-import type { ItemAccessBasis, MemoryDetailAccess, MemoryContextItem, McpQuestionAnswer } from "@rcm/shared";
+import type { ExtractionResult, ItemAccessBasis, MemoryDetailAccess, MemoryContextItem, McpQuestionAnswer } from "@rcm/shared";
 import { inspectSourceReferences, NARRATOR_ARCHIVE_HOLDER, plotKnowers } from "@rcm/shared";
 import { UNCORRECTED_SQL } from "./user-corrections.js";
 import { readStorySeed, accessibleStorySeed } from "./story-seeds.js";
@@ -409,12 +409,21 @@ export function linkedDetailKnowledge(db: RcmDatabase, chatId: string, detailIds
 }
 
 
+// Stored reinforced events distinguish a full replacement from a legacy delta.
+export const PROMISE_REWRITE_EVENT = 'reinforced_rewrite';
+
+export function restorePromiseEventKind(kind: string | null) {
+  if (kind === PROMISE_REWRITE_EVENT) return {event: 'reinforced' as const, rewritesContent: true as const};
+  return { ...(kind ? {event: kind as ExtractionResult['promises'][number]['event']} : {}), rewritesContent: undefined };
+}
+
 type PromiseEventRow = {id:string;active:number;event_kind:string|null;amendment_text:string|null;linked_detail_ids_json:string|null;[key:string]:any};
 
 function rebuiltPromiseSnapshots(events:PromiseEventRow[]): Record<string,any>[] {
   let content=events[0]!.content, scheduled=events[0]!.scheduled_for, memoryId:null|string=null, batchId:null|string=null;
   return events.map((event,index)=>{
-    if (index>0 && event.amendment_text) content+=`\n${event.amendment_text}`;
+    if (event.event_kind===PROMISE_REWRITE_EVENT) content=event.content;
+    else if (index>0 && event.amendment_text) content+=`\n${event.amendment_text}`;
     if (event.scheduled_for_delta!=null) scheduled=event.scheduled_for_delta;
     if (event.source_memory_id!=null) memoryId=event.source_memory_id;
     if (event.source_batch_id!=null) batchId=event.source_batch_id;

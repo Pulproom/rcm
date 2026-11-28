@@ -50,7 +50,7 @@ export function recoverySummary(status: GapRecoveryStatus) {
     text: `새 기억 ${created}개 · 더할 장면 없음 ${empty}곳 · 실패 ${failed.length}곳` };
 }
 
-export function recoveryCard(status: GapRecoveryStatus | undefined, memories: any[], phone: boolean, dismissed = false): string {
+export function recoveryCard(status: GapRecoveryStatus | undefined, memories: any[], dismissed = false): string {
   if (!status) return '';
   const s = recoverySummary(status);
   if (!s.rows.length || dismissed && !status.holeCount && !s.running) return '';
@@ -63,9 +63,8 @@ export function recoveryCard(status: GapRecoveryStatus | undefined, memories: an
   const actions = s.running ? btn('결과 보기', { kind: 'quiet', action: 'gap-sheet' })
     : s.failed.length ? btn('다시 시도', { kind: 'primary', action: 'gap-retry' }) + btn('결과 보기', { kind: 'quiet', action: 'gap-sheet' })
       : s.started ? btn('결과 보기', { kind: 'quiet', action: 'gap-sheet' }) + iconBtn('close', '닫기', { action: 'gap-dismiss' })
-        : btn('빠진 기억 만들기', { kind: 'primary', action: 'gap-start' }) + (!phone ? btn('구간 보기', { kind: 'quiet', action: 'gap-sheet' }) : '');
-  if (phone) return `<section class="gap-card noti${s.failed.length ? ' is-bad' : ''}" aria-live="polite"><span class="noti__ic noti__ic--${s.failed.length ? 'red' : 'gray'}">${icon(s.failed.length ? 'alert' : 'film')}</span><span class="noti__hd"><button type="button" class="gap-open" data-action="gap-sheet"><b>${escapeHtml(title)}</b></button></span><span class="noti__bd">${escapeHtml(body)}</span><div class="noti__acts">${s.running ? recoveryProgress(s.complete, s.rows.length) : ''}${actions}</div></section>`;
-  return `<section class="gap-card ${phone ? 'noti' : 'notice'}${s.failed.length ? ' is-bad' : ''}" aria-live="polite"><div><strong>${escapeHtml(title)}</strong>${body ? `<p>${escapeHtml(body)}</p>` : ''}${s.running ? recoveryProgress(s.complete, s.rows.length) : ''}<div class="notice__acts">${actions}</div></div></section>`;
+        : btn('빠진 기억 만들기', { kind: 'primary', action: 'gap-start' });
+  return `<section class="gap-card noti${s.failed.length ? ' is-bad' : ''}" aria-live="polite"><span class="noti__ic noti__ic--${s.failed.length ? 'red' : 'gray'}">${icon(s.failed.length ? 'alert' : 'film')}</span><span class="noti__hd"><button type="button" class="gap-open" data-action="gap-sheet"><b>${escapeHtml(title)}</b></button></span><span class="noti__bd">${escapeHtml(body)}</span><div class="noti__acts">${s.running ? recoveryProgress(s.complete, s.rows.length) : ''}${actions}</div></section>`;
 }
 
 export function recoveryProgress(done: number, total: number): string {

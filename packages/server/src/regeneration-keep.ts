@@ -4,7 +4,7 @@ import type { RcmDatabase } from './db.js';
 import { refreshMemoryFts } from './memory-search-document.js';
 import { refreshDetailFts } from './memory-detail-edits.js';
 import { parseSourceFingerprintJson } from './source-fingerprint.js';
-import { readDetailAccessEdits, writeDetailAccessEdits, promiseContributionChain, projectPromiseRow } from './item-access.js';
+import { readDetailAccessEdits, writeDetailAccessEdits, promiseContributionChain, restorePromiseEventKind, projectPromiseRow } from './item-access.js';
 import { snapshotRegenerationItems, structuralJson, type RegenerationItemChange, type RegenerationItemSnapshot } from './regeneration-items.js';
 import { parseSocialRelation } from './social-relations.js';
 
@@ -265,7 +265,7 @@ function persistKeptReplay(db: RcmDatabase, chatId: string, plan: RegenerationKe
       confidence: row.confidence, source: row.source ?? undefined, evidence, retention: row.retention_class, action: 'coexist' });
     if (table === 'promise_events') {
       const promise = read('promises', row.promise_id);
-      target.promises.push({ ...links, ...(row.event_kind ? {event:row.event_kind} : {}), storedAmendment:row.amendment_text,
+      target.promises.push({ ...links, ...restorePromiseEventKind(row.event_kind), storedAmendment:row.amendment_text,
         ...(row.amendment_text ? {amendment:row.amendment_text} : {}), key: row.promise_key, promisor: row.promisor, promisee: row.promisee, content: row.content, status: row.status,
         scheduledFor: (row.amendment_text==null ? row.scheduled_for : row.scheduled_for_delta) ?? undefined, statusReason: row.status_reason ?? undefined, memoryKey: links.memoryKey ?? memoryKey(row.source_memory_id),
         evidence, access: (db.prepare("SELECT 1 FROM item_access WHERE chat_id=? AND item_kind='promise_event' AND item_id=?").get(chatId,row.id)

@@ -2,7 +2,7 @@ import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { modelEntityIdentityContext, type ModelIdentityEntity } from './entity-identity.js';
 import { ACCESS_BASIS_GUIDANCE } from "./state-classification.js";
 import { estimateTokens, ItemAccessGrantSchema, type ExtractionDraftResult } from "./index.js";
-import { inspectSourceReferences, resolveModelSourceReferences, validSourcePassageAccess, type SourceUnit } from "./source-references.js";
+import { inspectSourceReferences, normalizeAuxiliarySourceLists, resolveModelSourceReferences, validSourcePassageAccess, type SourceUnit } from "./source-references.js";
 
 export interface SourceAccessRepairPlan {
   systemPrompt: string;
@@ -64,6 +64,7 @@ export function planSourceAccessRepair(draft: ExtractionDraftResult, units: Sour
 }
 
 export function applySourceAccessRepair(draft: ExtractionDraftResult, plan: SourceAccessRepairPlan, response: unknown): ExtractionDraftResult {
+  response = normalizeAuxiliarySourceLists(response, undefined, plan.units);
   const result = structuredClone(draft);
   if (!response || typeof response !== "object" || !Array.isArray((response as any).sourceAccessCorrections)) return result;
   const corrections = (response as any).sourceAccessCorrections as unknown[];
@@ -79,9 +80,9 @@ export function applySourceAccessRepair(draft: ExtractionDraftResult, plan: Sour
     try {
       const seenHolders = new Set<string>();
       const grants = patch.grants.map((grant: any) => {
-        if (!grant || !plan.allowedHolders.includes(grant.holder) || seenHolders.has(grant.holder) || typeof grant.confidence !== "number" || !Array.isArray(grant.evidenceSourceRefs) || !grant.evidenceSourceRefs.length || new Set(grant.evidenceSourceRefs).size !== grant.evidenceSourceRefs.length || grant.evidenceSourceRefs.some((ref: unknown) => typeof ref !== "string" || !target.allowedSourceRefs.includes(ref))) throw new Error("Invalid grant selector");
+        if (!grant || !plan.allowedHolders.includes(grant.holder) || seenHolders.has(grant.holder) || typeof grant.confidence !== "number" || !Array.isArray(grant.evidenceSourceRefs) || !grant.evidenceSourceRefs.length || grant.evidenceSourceRefs.some((ref: unknown) => typeof ref !== "string" || !target.allowedSourceRefs.includes(ref))) throw new Error("Invalid grant selector");
         seenHolders.add(grant.holder);
-        const evidence = (resolveModelSourceReferences({ evidence: grant.evidenceSourceRefs.map((sourceRef: string) => ({ sourceRef })) }, plan.units) as any).evidence;
+        const evidence = (resolveModelSourceReferences({ evidence: [...new Set<string>(grant.evidenceSourceRefs)].map((sourceRef: string) => ({ sourceRef })) }, plan.units) as any).evidence;
         return ItemAccessGrantSchema.parse({ holder: grant.holder, basis: grant.basis, confidence: grant.confidence, evidence });
       });
       if (validSourcePassageAccess(passage, sources, grants).length !== grants.length) continue;

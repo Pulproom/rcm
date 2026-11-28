@@ -16,7 +16,7 @@ import { supportFailure } from "./support-diagnostics.js";
 import { isPermanentProviderError, isProviderAuthenticationError, isProviderContextLimitError, projectRisuAuxiliaryCallDiagnostic, RISU_AUXILIARY_AUTH_FAILURE_MESSAGE, type RisuAuxiliaryCallDiagnostic } from "@rcm/shared";
 import { consumeAuxiliaryRepair } from "@rcm/shared";
 import { parseReconciliationResult, mergeStateExtraction, type SourceUnit } from "@rcm/shared";
-import { prepareAuxiliaryText, rescueDialogueEvidence, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
+import { prepareAuxiliaryText, rescueDialogueEvidence, auditSourceUnitsForJob, resolveAuditSourceReferences, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs, planExtractionFieldRepair, applyExtractionFieldRepair, planSourceAccessRepair, applySourceAccessRepair, type SourceAccessRepairPlan, type ExtractionDraftResult } from "@rcm/shared";
 import { mergeInitialCalibrationResults, measureAuxiliaryPrompt, mergeExtractionPages, memoryAdditionStopsAfterEvents, validateMemoryAdditionRequestOutcome } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch } from "@rcm/shared";
 import { EpisodeCapsuleResultSchema, EpisodeDraftResultSchema, buildAuxiliaryRepairMessages, buildExtractionAuditMessages, extractionAuditDraftForJob, ExtractionAuditPatchSchema, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, ReconciliationResultSchema, RelationshipProjectionResultSchema, StorySpineConsolidationResultSchema, isUnchangedStructuredRepair, validateStructuredRepairOrRegenerate, estimateTokens, groupEpisodeDrafts, normalizeEpisodeCapsuleInput, normalizeEpisodeDraftInput, normalizeExtractionDraftInput, normalizeStructuredModelOptionals, parseStructuredModelJson, structuredValidationDiagnostic, validateStorySpineConsolidation, type EpisodeDraftResult, type ExtractionAuditSubmission, type LeasedJob, type OperationLlmCallStats, type ReconciliationSubmission } from "@rcm/shared";
@@ -726,8 +726,9 @@ async function auditExtraction(state: RuntimeState, job: LeasedJob, result: unkn
     sourceRecoveryContext: job.sourceRecoveryContext,
   });
   const first = await runModel(state, messages, "audit");
+  const units = auditSourceUnitsForJob(job);
   const validatePatch = (value: unknown): ExtractionAuditSubmission => {
-    const resolved = resolveDirectDialogueEvidence(value, job.sourceUnits ?? [], Boolean(job.sourceRecovery));
+    const resolved = resolveDirectDialogueEvidence(resolveAuditSourceReferences(value, units), job.sourceUnits ?? [], Boolean(job.sourceRecovery));
     // Recovery is a restricted correction protocol, not a general additive audit.
     const submission = job.sourceRecovery
       ? { patch: validateSourceRecoveryPatch(ExtractionAuditPatchSchema.parse(resolved), draft) }

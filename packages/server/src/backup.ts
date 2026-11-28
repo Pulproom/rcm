@@ -13,7 +13,7 @@ import { syncManualCognition } from "./social-knowledge.js";
 import { memoryReferenceHighWater } from "./memory-references.js";
 import { DATABASE_SCHEMA_VERSION, type RcmDatabase } from "./db.js";
 import { migrateMemoryGaps } from './gap-recovery.js';
-import { AlbumDocumentSchema, ChatBackupSettingsSchema, type ChatBackupSettings } from "@rcm/shared";
+import { readSourceTransport, AlbumDocumentSchema, ChatBackupSettingsSchema, type ChatBackupSettings } from "@rcm/shared";
 import { ALBUM_IMAGE_EXTENSIONS, assertAlbumStorageId, createAlbumPhotoStore, validateAlbumPhoto, validateAlbumThumbnail, type AlbumPhoto, type AlbumPhotoRestoreEntry, type AlbumPhotoStore } from "./album-photos.js";
 import { bindInheritedMemoryGroups, invalidateChangedMemoryGroups } from './memory-grouping.js';
 import { sourceFingerprint } from './source-fingerprint.js';
@@ -60,7 +60,7 @@ type CompleteManifest = {
   format: "risu-cognitive-memory-complete";
   scope: "complete" | "chat";
   version: 31 | 32 | 33 | 34 | typeof BACKUP_VERSION;
-  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | typeof DATABASE_SCHEMA_VERSION;
+  schemaVersion: 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 70 | typeof DATABASE_SCHEMA_VERSION;
   exportedAt: number;
   instanceId: string;
   chats: Array<{ id: string; title: string; characterId: string }>;
@@ -227,9 +227,9 @@ function readCompleteArchive(archive: Uint8Array): { files: Record<string, Uint8
   const manifestBytes = files["manifest.json"];
   if (!manifestBytes) throw new BackupValidationError("Backup manifest is missing");
   const manifest = JSON.parse(strFromU8(manifestBytes)) as CompleteManifest;
-  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 35 && [60, 62, 63, 64, 65, 66, 67, 68, 69, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 34 && [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
+  if (manifest.format !== "risu-cognitive-memory-complete" || !(manifest.version === 35 && [60, 62, 63, 64, 65, 66, 67, 68, 69, 70, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 34 && [57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, DATABASE_SCHEMA_VERSION].includes(manifest.schemaVersion) || manifest.version === 33 && [49, 50, 51, 52, 53, 54, 55, 56].includes(manifest.schemaVersion) || manifest.version === 32 && manifest.schemaVersion === 48
     || manifest.version === 31 && [46, 47].includes(manifest.schemaVersion))) {
-    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or 56, or backup 34 / schema 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69 or ${DATABASE_SCHEMA_VERSION}, or backup 35 / schema 60, 62, 63, 64, 65, 66, 67, 68, 69 or ${DATABASE_SCHEMA_VERSION})`);
+    throw new BackupValidationError(`Unsupported backup format (accepts backup 31 / schema 46 or 47, backup 32 / schema 48, or backup 33 / schema 49, 50, 51, 52, 53, 54, 55 or 56, or backup 34 / schema 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 or ${DATABASE_SCHEMA_VERSION}, or backup 35 / schema 60, 62, 63, 64, 65, 66, 67, 68, 69, 70 or ${DATABASE_SCHEMA_VERSION})`);
   }
   if (!["complete","chat"].includes(manifest.scope) || (manifest.scope === "chat" && manifest.chats?.length !== 1)) throw new BackupValidationError("Invalid backup scope");
   if (!manifest.tables || typeof manifest.tables !== "object") throw new BackupValidationError("Backup table contract is missing");
@@ -264,6 +264,10 @@ function archiveTables(files: Record<string, Uint8Array>, manifest: CompleteMani
     const text = strFromU8(files[backupTablePath(table)]!).trim();
     tables[table] = ["albums", "album_photos"].includes(table) ? JSON.parse(text) as Row[] : text ? text.split(/\r?\n/u).map(line => JSON.parse(line) as Row) : [];
     if (!Array.isArray(tables[table])) throw new BackupValidationError(`Invalid backup rows: ${table}`);
+  }
+  for (const row of tables.processing_calls ?? []) {
+    const transport=readSourceTransport(row.source_transport_json);
+    row.source_transport_json=transport ? JSON.stringify(transport) : null;
   }
   sanitizeSetupRows(tables);
   stripInternalArchiveRows(tables);
@@ -346,7 +350,8 @@ function validateCurrentSchema(db: RcmDatabase, manifest: CompleteManifest): voi
   for (const table of current) {
     const archived = manifest.tables[table];
     const columns = (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
-      .filter(column => !(manifest.schemaVersion < 70 && ['assertions','beliefs'].includes(table) && column === 'always_inject')
+      .filter(column => !(manifest.schemaVersion < 71 && table === 'processing_calls' && column === 'source_transport_json')
+        && !(manifest.schemaVersion < 70 && ['assertions','beliefs'].includes(table) && column === 'always_inject')
         && !(manifest.schemaVersion < 69 && table === 'processing_calls' && ['repair_reason','completed_items'].includes(column))
         && !(manifest.schemaVersion < 67 && table === 'albums' && column === 'summary_json')
         && !(manifest.schemaVersion < 65 && table === 'relationship_projections' && column === 'level_definition_version')

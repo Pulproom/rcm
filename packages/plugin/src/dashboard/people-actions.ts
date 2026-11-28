@@ -1,7 +1,6 @@
 import { EntityBirthdaySchema } from "@rcm/shared";
 import type { ServerClient } from "../api-client.js";
 import type { DashboardData } from "../dashboard.js";
-import { lex } from "./lexicon.js";
 import { renderPersonColorPicker } from "./person.js";
 
 export interface PeopleViewState {
@@ -141,7 +140,7 @@ export function createPeopleController(peopleView: PeopleViewState, management: 
         management.mergePreview = undefined;
         management.deletePreview = undefined;
       } else if (action === "open-person-color") {
-        if (lex().skin !== "phone" || !getChatId()) return true;
+        if (!getChatId()) return true;
         const entity = getData().entities.find(item => item.id === target.dataset.entityId);
         if (!entity) return true;
         const dialog = document.createElement("dialog");

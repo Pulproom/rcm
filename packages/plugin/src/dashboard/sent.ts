@@ -103,13 +103,11 @@ function budget(data: SentData): string {
 }
 
 /** The widget: counts, the three newest scenes, the budget, and the way into everything. */
-export function sentWidget(data: SentData, phone: boolean): string {
+export function sentWidget(data: SentData): string {
   const shown = [...data.scenes].slice(0, 3);
   const rows = shown.map((scene) => `<button type="button" class="wg__row" data-action="open-timeline-memory" data-memory-id="${escapeHtml(scene.memoryId)}"><span class="wg__no">${sceneNo(scene)}</span><span class="wg__main">${scene.alwaysInject ? '<span class="tag">항상 전달</span> ' : ""}${scene.titleHtml}</span>${scene.clarity ? `<span class="wg__haze">${CLARITY_LABEL[scene.clarity]}</span>` : scene.when ? `<span class="wg__end">${escapeHtml(scene.when)}</span>` : ""}</button>`).join("");
   const rest = sentTotal(data) - shown.length;
-  const head = phone
-    ? `<h2 class="wg__h">${icon("arrow-right")}이번 턴에 전달한 기억${data.at ? `<span class="wg__time">${escapeHtml(time(data.at))}</span>` : ""}</h2>`
-    : `<h2 class="sec">이번 턴에 전달한 기억${data.at ? ` <span class="n">${escapeHtml(time(data.at))}</span>` : ""}</h2>`;
+  const head = `<h2 class="wg__h">${icon("arrow-right")}이번 턴에 전달한 기억${data.at ? `<span class="wg__time">${escapeHtml(time(data.at))}</span>` : ""}</h2>`;
   if (data.fallback) return `${head}<p class="wg__empty">${FALLBACK_NOTE}</p><div class="wg__list sent-widget">${budget(data)}<button type="button" class="wg__row wg__more" data-action="open-sent"><span>전체 보기</span><span class="wg__end">${icon("chevron")}</span></button></div>`;
   return `${head}${mix(data)}<div class="wg__list sent-widget">${rows}${budget(data)}<button type="button" class="wg__row wg__more" data-action="open-sent"><span>전체 보기</span><span class="wg__end">${rest > 0 ? `외 ${rest}개` : ""}${icon("chevron")}</span></button></div>`;
 }

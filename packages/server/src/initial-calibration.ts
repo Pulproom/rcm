@@ -47,7 +47,7 @@ export function initialCalibrationView(db: RcmDatabase, chatId: string): Initial
   };
 }
 
-export function initialCalibrationLedger(db: RcmDatabase, chatId: string): InitialCalibrationView & { entities: Array<Record<string, unknown>>; relationships: Array<Record<string, unknown>>; socialKnowledge: Array<Record<string, unknown>> } {
+export function initialCalibrationLedger(db: RcmDatabase, chatId: string, calibration = initialCalibrationView(db, chatId)): InitialCalibrationView & { entities: Array<Record<string, unknown>>; relationships: Array<Record<string, unknown>>; socialKnowledge: Array<Record<string, unknown>> } {
   const entities = (db.prepare(`SELECT id,entity_key AS key,name AS internalName,display_name AS displayName,type,color,birthday_json AS birthday,origin,
     setup_prominence AS prominence,source_json AS evidence,user_managed AS userManaged
     FROM entities WHERE chat_id=? AND (origin IN ('setup','manual') OR user_managed=1)
@@ -62,7 +62,7 @@ export function initialCalibrationLedger(db: RcmDatabase, chatId: string): Initi
   const socialKnowledge = db.prepare(`SELECT s.holder,s.subject,s.level,m.content AS description
     FROM social_knowledge_events s JOIN memories m ON m.id=s.source_memory_id
     WHERE s.chat_id=? AND is_initial_calibration_memory(m.memory_key) ORDER BY s.holder,s.subject`).all(chatId) as Array<Record<string,unknown>>;
-  return { ...initialCalibrationView(db, chatId), entities, relationships, socialKnowledge };
+  return { ...calibration, entities, relationships, socialKnowledge };
 }
 
 export function upsertInitialEntity(
@@ -133,7 +133,6 @@ export function updateInitialRelationship(
     return [axis, value];
   }));
   const summary = input.summary.trim();
-  if (!summary) throw new Error("Initial relationship summary is required");
   db.prepare("UPDATE relationship_baselines SET projection_axes_json=?,initial_summary=?,user_managed=1 WHERE id=? AND chat_id=?")
     .run(JSON.stringify(axes), summary, id, chatId);
   const revision = Number((db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision?: number } | undefined)?.revision ?? 0);

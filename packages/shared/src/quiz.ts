@@ -30,7 +30,9 @@ export const QuizDraftSchema = z.object({
   memoryRef: z.string().trim().min(1),
 });
 
-/** Shape-only checks (spec "형태 검사"). A broken item is dropped alone; quotes are never checked against the source. */
+const hasKoreanQuizProse = (item: QuizDraftItem): boolean => /[가-힣]/.test(item.question) && /[가-힣]/.test(item.explanation);
+
+/** Shape and owned output-language checks (spec "형태 검사"). A broken item is dropped alone; quotes are never checked against the source. */
 export function acceptQuizItems(raw: unknown, allowedRefs: ReadonlySet<string>): { items: QuizDraftItem[]; dropped: number } {
   const list = Array.isArray(raw) ? raw : raw && typeof raw === "object" && Array.isArray((raw as { items?: unknown }).items) ? (raw as { items: unknown[] }).items : null;
   if (!list) return { items: [], dropped: 0 };
@@ -39,6 +41,7 @@ export function acceptQuizItems(raw: unknown, allowedRefs: ReadonlySet<string>):
     const parsed = QuizDraftSchema.safeParse(entry);
     if (!parsed.success) continue;
     const item = parsed.data;
+    if (!hasKoreanQuizProse(item)) continue;
     if (item.format === "ox" && (item.options.length !== 2 || new Set(item.options.map(option => option.toLowerCase())).size !== 2)) continue;
     const options = item.format === "ox" ? ["O", "X"] : item.options;
     if (item.format === "choice4" && options.length !== 4) continue;
@@ -60,6 +63,7 @@ export function validateQuizResult<T>(raw: T, allowedRefs: ReadonlySet<string>):
     const parsed = QuizDraftSchema.safeParse(entry, { reportInput: true });
     if (!parsed.success) return `items.${index}: ${structuredValidationDiagnostic(parsed.error)}`;
     const item = parsed.data;
+    if (!hasKoreanQuizProse(item)) return `items.${index}: question and explanation must be written in Korean`;
     if (!allowedRefs.has(item.memoryRef)) return `items.${index}.memoryRef ${JSON.stringify(item.memoryRef)} was not supplied`;
     return `items.${index}: format=${JSON.stringify(item.format)} options=${JSON.stringify(item.options)} answerIndex=${item.answerIndex} has invalid option count, duplicate options or answer index`;
   });

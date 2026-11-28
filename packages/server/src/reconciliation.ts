@@ -24,7 +24,7 @@ import {
   type StateObservation,
 } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
-import { ingestExtraction } from "./ingest.js";
+import { ingestExtraction, preserveLinkedAssertionAccess } from "./ingest.js";
 import { normalizeLedgerPredicate, normalizeLedgerText } from "./normalization.js";
 import { buildEntityIdentityResolver, type ResolvedEntityIdentity } from "./entities.js";
 
@@ -255,6 +255,7 @@ function addObservation(result: ExtractionResult, observation: StateObservation,
     result.promises.push({
       key: canonical || observation.promiseKeyHint, promisor: observation.promisor, promisee: observation.promisee,
       content: observation.content, event: observation.event, amendment: observation.amendment,
+      ...(observation.rewritesContent ? {rewritesContent: true} : {}),
       status: promiseStatus(observation.event), scheduledFor: observation.scheduledFor,
       statusReason: observation.statusReason, memoryKey: observation.memoryKey ?? observation.support?.[0]?.memoryKey, detailKeys: observation.detailKeys, support: observation.support, scope: observation.scope,
       evidence: observation.evidence, access: observation.access,
@@ -524,6 +525,11 @@ export function resolveReconciliationReview(db: RcmDatabase, chatId: string, rev
       if(!changed.length && confirmed) changed.push(canonical);
       if(!changed.length) throw new Error("Review application did not change state; review remains pending");
       for(const item of changed.filter(item=>table==='assertions'?item.valid_to_revision==null:table==='beliefs'?item.active===1:item.status!=='invalidated')) {
+        if (table === "assertions" && (item.state_kind === "secret" || item.state_kind === "goal") && item.linked_detail_ids_json != null
+          && (item.user_edit_ordinal == null || stateDetailSupport(observation)?.length)) {
+          const { revision } = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number };
+          preserveLinkedAssertionAccess(db, chatId, item.id, JSON.parse(item.linked_detail_ids_json), revision, Date.now());
+        }
         db.prepare(`UPDATE ${table} SET user_edit_ordinal=? WHERE id=? AND chat_id=?`).run(committedEditOrdinal(db,chatId),item.id,chatId);
       }
     }

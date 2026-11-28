@@ -95,6 +95,7 @@ export function manualMemoryLineageRequest(
       includeUserMessages: context.includeUserMessages,
       extractionGroupTurns: context.extractionGroupTurns,
       memoryLanguage: context.memoryLanguage,
+      memoryLanguageSource: context.memoryLanguageSource,
     },
   };
 }
@@ -217,6 +218,7 @@ export function clearDeletedChatState(state: RuntimeState, chatId: string, clear
   for (const scope of Object.keys(state.settings.backfillApproved)) if (scope.endsWith(`:${chatId}`)) delete state.settings.backfillApproved[scope];
   if (clearActivation) {
     delete state.settings.chatEnabled[chatId];
+    delete state.settings.lineageSettingsFrom[chatId];
     delete state.settings.chatCatchUpPending[chatId];
     delete state.settings.memoryLanguages[chatId];
     delete state.settings.storyOverviewBackups[chatId];

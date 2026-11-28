@@ -74,8 +74,7 @@ export async function showAlbumWizardPreview(params: URLSearchParams, state: Run
     ];
     materials[0]!.blocks.story.forEach((chapter, n) => chapter.children!.forEach(scene => { scene.signals!.pair = n === 0; }));
   }
-  state.settings.dashboardSkin = params.get("skin") === "phone" ? "phone" : "film";
-  state.settings.dashboardTheme = state.settings.dashboardSkin === "phone" ? "light" : "dark";
+  state.settings.dashboardTheme = "light";
   const photoFiles = new Map<string, { bytes: Uint8Array; mime: string; meta: any }>();
   risuai.readInlay = async id => {
     const canvas = document.createElement("canvas"); canvas.width = 160; canvas.height = 120;

@@ -3,7 +3,6 @@ import type { AlbumSummary } from "../album/api.js";
 import { btn, escapeHtml as esc, icon, menu } from "./film/ui.js";
 
 export interface AlbumShelfOptions {
-  skin: "film" | "phone";
   photoUrl: (albumId: string, photoId: string, size: "thumb") => string;
   totals?: { albums: number; chats: number };
 }
@@ -25,7 +24,7 @@ export function renderAlbumMiniCover(album: Pick<AlbumSummary, "id" | "title" | 
 
 export function renderAlbumShelf(summaries: AlbumSummary[], options: AlbumShelfOptions): string {
   const create = () => btn("새 앨범", { action: "new-album", icon: "add", kind: "primary", hit: true }).replace('class="btn ', 'class="album-shelf-act btn ');
-  const heading = `<header class="album-shelf-head"><div>${options.skin === "film" ? '<div class="album-shelf-kicker">Memories</div>' : ""}<h1>추억</h1>${summaries.length ? `<p>앨범 ${options.totals?.albums ?? summaries.length}개 · 채팅 ${options.totals?.chats ?? new Set(summaries.map(a => a.sourceChatId).filter(Boolean)).size}개</p>` : ""}</div>${summaries.length ? create() : ""}</header>`;
+  const heading = `<header class="album-shelf-head"><div><h1>앨범</h1>${summaries.length ? `<p>앨범 ${options.totals?.albums ?? summaries.length}개 · 채팅 ${options.totals?.chats ?? new Set(summaries.map(a => a.sourceChatId).filter(Boolean)).size}개</p>` : ""}</div>${summaries.length ? create() : ""}</header>`;
   if (!summaries.length) return `<section class="album-shelf">${heading}<div class="album-shelf-empty"><div class="album-shelf-stack" aria-hidden="true"><span></span><span></span><span>${icon("add")}</span></div><p>남기고 싶은 채팅을 골라 첫 앨범을 만들어요.</p>${create()}</div></section>`;
   const cards = summaries.map(album => {
     const names = esc((album.names ?? []).filter(Boolean).join(" · "));

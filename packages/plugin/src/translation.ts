@@ -59,6 +59,13 @@ export interface TranslationSource {
 }
 export type TranslationRecord = Pick<TranslationSource, "kind" | "itemId" | "text" | "scene" | "dialogue">;
 
+/** Locations share stable reader keys across all scene surfaces; stored values stay untouched. */
+export function memoryLocationTranslationRecords(memory: any): TranslationRecord[] {
+  const locations = Array.isArray(memory?.locations) ? memory.locations : memory?.location ? [memory.location] : [];
+  return locations.map((text: unknown, index: number) => ({ kind: "memory-location", itemId: `${memory.id}:location:${index}`, text: String(text ?? "") }))
+    .filter((record: TranslationRecord) => record.text.trim());
+}
+
 /** Stored names, participant sets and source order only; no inference from dialogue text. */
 export function withSceneTranslationContext(records: TranslationRecord[], data: { memories?: any[]; relationships?: any[] }): TranslationRecord[] {
   const byRecord = new Map<string, { scene: NonNullable<TranslationSource["scene"]>; dialogue?: TranslationSource["dialogue"] }>();
@@ -75,7 +82,11 @@ export function withSceneTranslationContext(records: TranslationRecord[], data: 
     }).slice(0, 3)))];
     const scene = { memoryId: String(memory.id), participants, relationships, storyOrder: memory.source_ordinal == null ? undefined : Number(memory.source_ordinal) };
     for (const field of ["title", "content"]) byRecord.set(`${memory.id}:${field}`, { scene });
-    for (const detail of memory.details ?? []) byRecord.set(`${memory.id}:detail:${detail.id}`, { scene });
+    for (const record of memoryLocationTranslationRecords(memory)) byRecord.set(record.itemId, { scene });
+    for (const detail of memory.details ?? []) {
+      byRecord.set(`${memory.id}:detail:${detail.id}`, { scene });
+      for (const record of memoryLocationTranslationRecords({ ...detail, id: `${memory.id}:detail:${detail.id}` })) byRecord.set(record.itemId, { scene });
+    }
     // These IDs are the reader builders' owned record grammar, not prose matching.
     for (const record of records) if (record.kind === "evidence" && record.itemId.startsWith(`${memory.id}:evidence:`)) byRecord.set(record.itemId, { scene });
     (memory.keyDialogues ?? []).forEach((line: any, index: number) => byRecord.set(`${memory.id}:dialogue:${index}`, {
@@ -206,8 +217,9 @@ export function splitGoogleTranslationText(text: string, sourceLanguage: MemoryL
   return chunks;
 }
 
-async function requestGoogleTranslation(chunk: string, sourceLanguage: MemoryLanguage, retry431 = true): Promise<string> {
+async function requestGoogleTranslation(chunk: string, sourceLanguage: MemoryLanguage, isCurrent: () => boolean, retry431 = true): Promise<string> {
   // Check after acquiring a slot, including queued requests and smaller 431 parts.
+  if (!isCurrent()) throw new TranslationError("CANCELLED", "Translation cancelled");
   checkCooldown();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
@@ -221,7 +233,7 @@ async function requestGoogleTranslation(chunk: string, sourceLanguage: MemoryLan
       const smaller = splitGoogleTranslationText(chunk, sourceLanguage, GOOGLE_431_RETRY_BYTE_LIMIT);
       if (smaller.length > 1) {
         const translated: string[] = [];
-        for (const part of smaller) translated.push(await requestGoogleTranslation(part, sourceLanguage, false));
+        for (const part of smaller) translated.push(await requestGoogleTranslation(part, sourceLanguage, isCurrent, false));
         return translated.join("");
       }
     }
@@ -234,16 +246,14 @@ async function translateGoogle(text: string, sourceLanguage: MemoryLanguage, isC
   const chunks = splitGoogleTranslationText(text, sourceLanguage);
   const translated: string[] = [];
   for (const chunk of chunks) {
-    if (!isCurrent()) throw new Error("Translation cancelled");
-    translated.push(await withGoogleSlot(() => {
-      if (!isCurrent()) throw new Error("Translation cancelled");
-      return requestGoogleTranslation(chunk, sourceLanguage);
-    }));
+    if (!isCurrent()) throw new TranslationError("CANCELLED", "Translation cancelled");
+    translated.push(await withGoogleSlot(() => requestGoogleTranslation(chunk, sourceLanguage, isCurrent)));
   }
   return translated.join("");
 }
 export const translationOutputBudget = (state: RuntimeState) => state.settings.translationProvider === "server" ? state.settings.translationServerMaxOutput : state.settings.translationMaxOutput;
-export const backgroundTranslationEnabled = (state: RuntimeState) => state.settings.translationProvider === "google" || state.settings.translationBackground;
+export const backgroundTranslationEnabled = (state: RuntimeState) =>
+  state.settings.translationBackground && state.settings.autoTranslate && state.settings.translationDisplay === "ko";
 export async function callTranslationBatch(state: RuntimeState, batch: TranslationBatch, provider = state.settings.translationProvider, background = false, chatId = state.current?.chatId, finalRetry=false): Promise<{ items: ReturnType<typeof validateTranslation>; usage?: any; model: string; failure?: { code: string; retryAfterMs?: number } }> {
   checkCooldown();
   const items = translationParts(batch);
@@ -488,7 +498,7 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
       const message = translationFailure(state, error);
       batchError ??= message;
       const code = settingsFailureCode(error) ?? (error as { code?: string })?.code;
-      if (background && isCurrent() && code !== "RATE_LIMITED" && code !== "CHAT_WORK_HELD" && !translationCooldownMs()) {
+      if (background && provider !== "google" && isCurrent() && code !== "RATE_LIMITED" && code !== "CHAT_WORK_HELD" && !translationCooldownMs()) {
         const retries = backgroundRetriesFor(state, item.source.chatId);
         const key = sourceIdentity(item.source);
         const attempts = Math.min(6, (retries.get(key)?.attempts ?? 0) + 1);
@@ -497,7 +507,9 @@ async function translateRecordsUnlocked(state: RuntimeState, records: Translatio
       results.set(item.key, { ...item.source, translated: item.source.text, cached: false, error: message });
     };
     if (provider === "google") {
-      const settled = await Promise.allSettled(missing.map((item) => translateGoogle(item.source.text, item.source.sourceLanguage, isCurrent)));
+      // Turning prefetch off stops new chunks but can still cache a completed request.
+      const canRequest = () => isCurrent() && (!background || backgroundTranslationEnabled(state));
+      const settled = await Promise.allSettled(missing.map((item) => translateGoogle(item.source.text, item.source.sourceLanguage, canRequest)));
       settled.forEach((result, index) => {
         const item = missing[index]!;
         if (result.status === "fulfilled") fresh.set(item.key, result.value);
@@ -617,39 +629,36 @@ export function resetBackgroundTranslationRetries(state: RuntimeState, chatId: s
 /** Google keeps its bounded prefetch; LLM modes pack all pending sources by output budget. */
 export async function prefetchTranslationRecords(state: RuntimeState, records: TranslationSource[], isCurrent: () => boolean): Promise<TranslationSource[]> {
   const provider = state.settings.translationProvider;
-  if (!backgroundTranslationEnabled(state)) return [];
+  if (!backgroundTranslationEnabled(state)) return records;
   if (translationCooldownMs()) return records;
+  const current = () => isCurrent() && state.settings.translationProvider === provider;
+  const canPrefetch = () => current() && backgroundTranslationEnabled(state);
   if (provider !== "google") {
     if (translationBusy) return records;
     translationBusy = true;
     try {
       const eligible = records.filter(record => (backgroundRetries.get(state)?.get(record.chatId)?.get(sourceIdentity(record))?.retryAt ?? 0) <= Date.now());
       if (!eligible.length) return records;
-      const result = await translateRecordsUnlocked(state, eligible, provider, () => isCurrent() && backgroundTranslationEnabled(state) && state.settings.translationProvider === provider, true);
+      const result = await translateRecordsUnlocked(state, eligible, provider, canPrefetch, true);
       const done = new Set(result.filter(item => !item.error).map(sourceIdentity));
       return records.filter(record => !done.has(sourceIdentity(record)));
     } finally { releaseTranslation(); }
   }
-  const current = () => isCurrent() && state.settings.translationProvider === provider;
   let translated = 0;
   for (let offset = 0; offset < records.length && translated < 24; offset += 128) {
-    if (!current()) return [];
-    if (!state.settings.autoTranslate || state.settings.translationDisplay !== "ko") return records.slice(offset);
-    if (translationBusy || translationCooldownMs()) return records.slice(offset);
+    if (!canPrefetch() || translationBusy || translationCooldownMs()) return records.slice(offset);
     const candidates = records.slice(offset, offset + 128).filter(record => !shownAsWritten(record));
     const cached = await readCachedTranslations(state, candidates, provider);
     const cachedKeys = new Set(cached.map(record => JSON.stringify([record.kind, record.itemId, record.text])));
     const missing = candidates.filter(record => !cachedKeys.has(JSON.stringify([record.kind, record.itemId, record.text])));
     for (let index = 0; index < missing.length && translated < 24; index += 2) {
-      if (!current()) return [];
-      if (!state.settings.autoTranslate || state.settings.translationDisplay !== "ko") return [...missing.slice(index), ...records.slice(offset + 128)];
-      if (translationBusy || translationCooldownMs()) return [...missing.slice(index), ...records.slice(offset + 128)];
+      if (!canPrefetch() || translationBusy || translationCooldownMs()) return [...missing.slice(index), ...records.slice(offset + 128)];
       translationBusy = true;
       try {
         const batch = missing.slice(index, index + Math.min(2, 24 - translated));
-        const results = await translateRecordsUnlocked(state, batch, provider, current);
+        const results = await translateRecordsUnlocked(state, batch, provider, current, true);
         translated += batch.length;
-        if (results.some(record => record.error)) return [...missing.slice(index), ...records.slice(offset + 128)];
+        if (results.length !== batch.length || results.some(record => record.error)) return [...missing.slice(index), ...records.slice(offset + 128)];
         if (translated >= 24) return [...missing.slice(index + batch.length), ...records.slice(offset + 128)];
       } finally { releaseTranslation(); }
     }

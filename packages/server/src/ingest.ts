@@ -27,7 +27,7 @@ import { refreshMemoryFts } from "./memory-search-document.js";
 import { transitionEvidenceJson, transitionSourceEvidence, compatibleIndependentAssertion, canAutomaticallyChange } from "./user-corrections.js";
 import { storeAtomRelations, type AtomRelationContext } from "./atom-relations.js";
 import { aliasRemovalGuard, deletionGuard, userDeletionsKey, deletionSuppressesEvidence } from "./user-deletions.js";
-import { loadPlotKnowers, promiseLinkedSupport, promiseContributionChain, projectPromiseRow, rebuildPromiseContent, PENDING_ACCESS_HOLDER, readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
+import { linkedDetailKnowledge, snapshotKnowledgeGrants, loadPlotKnowers, promiseLinkedSupport, promiseContributionChain, PROMISE_REWRITE_EVENT, projectPromiseRow, rebuildPromiseContent, PENDING_ACCESS_HOLDER, readDialogueAccessIdentities, writeDialogueAccessIdentities, readDetailAccessEdits, pruneDetailAccessEdits, syncDetailKnownBy } from "./item-access.js";
 
 const storyHeader = /\[🌐\|([^|\]\r\n]+)\|/g;
 
@@ -52,6 +52,13 @@ export function replaceItemAccess(
     confidence=excluded.confidence,active=1,source_revision=excluded.source_revision`);
   if (grants.length === 0) insert.run(randomUUID(), chatId, itemKind, itemId, "__narrator_archive__", "internal", "[]", 1, revision, timestamp);
   else for (const grant of grants) insert.run(randomUUID(), chatId, itemKind, itemId, grant.holder, grant.basis, JSON.stringify(grant.evidence), grant.confidence, revision, timestamp);
+}
+
+/** An approved edit reads direct grants from now on. Snapshot its linked scope first. */
+export function preserveLinkedAssertionAccess(db: RcmDatabase, chatId: string, id: string, detailIds: string[], revision: number, timestamp: number): void {
+  const holders = linkedDetailKnowledge(db, chatId, detailIds) ?? [PENDING_ACCESS_HOLDER];
+  const grants = snapshotKnowledgeGrants(db, chatId, "assertion", id, { ids: detailIds, holders });
+  replaceItemAccess(db, chatId, "assertion", id, grants, revision, timestamp);
 }
 
 function evidenceOrdinal(db: RcmDatabase, chatId: string, evidence: Array<{ messageId: string }>): number | null {
@@ -1068,13 +1075,14 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       // User corrections and locks remain protected by the gate above.
       const reestablishes = existingPromise?.status === "invalidated" && existingPromise.user_edit_ordinal == null && !existingPromise.auto_locked;
       const eventEvidence=transitionEvidenceJson(db,chatId,promise.evidence ?? []);
+      const rewrite = promise.event === 'reinforced' && promise.rewritesContent === true;
       const duplicateAmendment=!reestablishes && promise.amendment && promiseContributionChain(db,chatId,promiseId)
         .some(event=>event.active===1 && event.amendment_text===promise.amendment && event.evidence_json===eventEvidence);
       const amendmentText = replayAccepted ? options.preserveStoredCardShapes ? promise.storedAmendment ?? null : null
-        : (promise.event==='established'||promise.event==='reinforced') && !duplicateAmendment ? promise.amendment ?? '' : '';
+        : (promise.event==='established'||promise.event==='reinforced') && !rewrite && !duplicateAmendment ? promise.amendment ?? '' : '';
       // Replay already carries accepted content; never append its amendment again.
       let content = promise.content;
-      if (existingPromise && !userInitiated && !replayAccepted && !reestablishes) {
+      if (existingPromise && !userInitiated && !replayAccepted && !reestablishes && !rewrite) {
         content = existingPromise.content;
         if (amendmentText) {
           content += `\n${amendmentText}`;
@@ -1102,10 +1110,9 @@ export function ingestExtraction(db: RcmDatabase, chatId: string, result: Extrac
       recordPromiseRecency(db, chatId, promiseId, existingPromise?.status, promise.status, "automatic");
       const eventId = randomUUID();
       const effective=db.prepare("SELECT * FROM promises WHERE id=?").get(promiseId) as Record<string,any>;
-      // Existing open commitments keep their cumulative content, even when an
-      // older response calls an amendment established. Only a fresh baseline
-      // (or its accepted replay) starts a contribution chain.
-      const eventKind = promise.event === 'established' && existingPromise && !reestablishes && !replayAccepted ? 'reinforced'
+      // A rewrite changes text within the same chain of evidence and grants.
+      // Older writers may call a reaffirmation on an existing key established.
+      const eventKind = rewrite ? PROMISE_REWRITE_EVENT : promise.event === 'established' && existingPromise && !reestablishes && !replayAccepted ? 'reinforced'
         : promise.event ?? (!existingPromise || reestablishes ? 'established' : promise.status === 'open' ? 'reinforced' : promise.status === 'offscreen' ? 'scheduled_passed' : promise.status);
       db.prepare(`INSERT INTO promise_events(id,chat_id,promise_id,promise_key,promisor,promisee,content,status,scheduled_for,status_reason,source_memory_id,source_batch_id,source_ordinal,created_revision,created_at,evidence_json,user_authored,linked_detail_ids_json,event_kind,amendment_text,scheduled_for_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         eventId, chatId, promiseId, effective.promise_key, effective.promisor, effective.promisee, effective.content, effective.status,

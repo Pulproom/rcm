@@ -1,5 +1,13 @@
 // Film dashboard stylesheet. Ported verbatim from the approved visual contract (film.css); one theme = one token block, components read tokens only.
 export const FILM_CSS = `
+.source-pdf-number { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.source-pdf-number input { box-sizing: border-box; width: 80px; min-width: 0; height: 36px; padding: 6px 10px; color: var(--ink); background: var(--screen); border: 1px solid var(--rule-2); border-radius: var(--r); font: inherit; }
+.source-pdf-number > span { color: var(--ink-3); }
+.source-pdf-controls { align-items: center; }
+.source-pdf-controls .field--check input[type="checkbox"] { appearance: none; position: relative; display: block; width: 34px; height: 20px; border: 0; border-radius: 999px; background: var(--rule-2); }
+.source-pdf-controls .field--check input[type="checkbox"]::after { content: ""; position: absolute; left: 3px; top: 3px; width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--ink-2); transform: none; }
+.source-pdf-controls .field--check input[type="checkbox"]:checked { background: var(--tungsten); }
+.source-pdf-controls .field--check input[type="checkbox"]:checked::after { left: 3px; top: 3px; width: 14px; height: 14px; transform: translateX(14px); background: var(--tungsten-ink); }
 /* RCM · Film — tokens and components. One theme = one token block; components read tokens only. */
 :root, :root[data-theme="night"] {
   color-scheme: dark;
@@ -195,33 +203,8 @@ export const FILM_CSS = `
 /* Fold hierarchy (film "shot list"): a top-level fold is a section — one rule above it, a Korean credit title with its
    count and a small chevron beside it. Folds inside it are shots: no rules, a short tick in place of a number that
    lengthens on hover and turns tungsten when open; an open shot and its body share one quiet panel. Job rows keep their look. */
-:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis) { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis) > summary { min-height: 32px; gap: 10px; border-bottom: 0; font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis) > summary:hover, :root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis)[open] > summary { color: var(--ink); }
-:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis) > summary .n { font: 500 var(--t-micro)/1 var(--credit); letter-spacing: .04em; font-variant-numeric: tabular-nums; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis) > summary .chev { margin-left: 0; width: 12px; height: 12px; }
-:root:not([data-skin="phone"]) .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis) > .fold__body { padding: 8px 0 0; }
-:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis)) { margin-top: 0; }
-:root:not([data-skin="phone"]) .foldbox:has(> .fold:not(:is(.fold__body, .stack) .fold):not(.meters__basis)) > .foldbox__acts { top: 42px; right: 0; }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) { margin: 0; }
 /* 더 보기 inside a fold continues the same list: no tick, no indent, a quiet line before the rest */
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more { margin: 0; }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more > summary { min-height: 40px; padding: 0; border-bottom: 0; font-size: var(--t-small); font-weight: 400; color: var(--ink-3); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more > summary:hover { color: var(--ink); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold--more > .fold__body { padding: 0; }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > summary { position: relative; min-height: 40px; padding: 0 10px 0 38px; border-bottom: 0; border-radius: var(--r); font-size: var(--t-ui); font-weight: 500; color: var(--ink); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > summary::before { content: ""; position: absolute; left: 10px; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > summary:hover { background: var(--screen-2); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > summary:hover::before { width: 16px; background: var(--ink-3); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more)[open] > summary { border-radius: var(--r) var(--r) 0 0; background: var(--screen); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more)[open] > summary::before { width: 18px; height: 2px; margin-top: -1px; border-radius: 1px; background: var(--tungsten); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > summary .chev { opacity: 0; transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > summary:hover .chev, :root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more)[open] > summary .chev { opacity: 1; }
-:root:not([data-skin="phone"]) :is(.fold__body, .stack) .fold:not(.fold--more) > .fold__body { margin-bottom: 6px; padding: 4px 10px 14px 38px; border-radius: 0 0 var(--r) var(--r); background: var(--screen); }
 /* an ended fold under a section's rows hangs from the same tick column as those rows */
-:root:not([data-skin="phone"]) .stack > .fold.fold:not(.fold--more) > summary { padding-left: 28px; }
-:root:not([data-skin="phone"]) .stack > .fold.fold:not(.fold--more) > summary::before { left: 0; }
-:root:not([data-skin="phone"]) .stack > .fold.fold:not(.fold--more) > .fold__body { padding-left: 28px; }
 .fold__mark { flex: none; padding: 2px 6px; border-radius: 3px; background: var(--screen-2); font-size: var(--t-micro); font-weight: 500; line-height: 1.3; color: var(--ink-3); }
 .fold__mark--key { color: var(--accent-text); background: var(--tungsten-dim); }
 .kind-chip { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: var(--screen-2); font-size: var(--t-micro); font-weight: 500; line-height: 1.4; letter-spacing: 0; color: var(--ink-3); vertical-align: middle; white-space: nowrap; }
@@ -285,11 +268,6 @@ export const FILM_CSS = `
 .memory-line-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .memory-line-actions .btn { min-height: 44px; min-width: 44px; }
 .memory-line-actions .btn[data-action^="hide-"] { color: var(--cut); }
-:root:not([data-skin="phone"]) .memory-line-hidden { position: relative; display: flex; align-items: center; gap: 10px; min-height: 40px; padding-left: 28px; }
-:root:not([data-skin="phone"]) .memory-line-hidden::before { content: ""; position: absolute; left: 0; top: 50%; width: 12px; height: 1px; background: var(--rule-2); opacity: .7; }
-:root:not([data-skin="phone"]) .memory-line-hidden p { flex: 1; margin: 0; font-size: var(--t-ui); color: var(--ink-3); opacity: .8; }
-:root:not([data-skin="phone"]) .memory-line-hidden .memory-line-actions { margin: 0; }
-:root:not([data-skin="phone"]) .memory-line-hidden .btn { color: var(--accent-text); }
 .rel-change__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .rel-chip { display: inline-flex; align-items: center; gap: 3px; min-height: 24px; padding: 0 8px 0 6px; border-radius: var(--r); background: var(--screen-2); font-size: var(--t-micro); color: var(--ink-2); }
 .rel-chip .i { width: 12px; height: 12px; stroke-width: 2; color: var(--ink-3); }
@@ -591,26 +569,7 @@ html, body { margin: 0; min-height: 100%; }
 .contact-group > h3.sec .n { font-size: inherit; color: inherit; }
 .person__name { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin: 8px 0 12px; font-size: var(--t-title); font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 .person__name .name.is-cjk { font-size: 24px; }
-:root:not([data-skin="phone"]) .person__name { margin-bottom: 0; }
-:root:not([data-skin="phone"]) .person__aka { margin: 4px 0 0; font-size: var(--t-small); color: var(--ink-2); }
-:root:not([data-skin="phone"]) .person__role { margin: 6px 0 0; font: 500 var(--t-micro)/1.3 var(--credit); letter-spacing: .08em; color: var(--ink-3); }
 /* 나와의 관계 reads as one billed line: the pair's names in credits, its label and scenes after */
-:root:not([data-skin="phone"]) .person__mine { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; margin-top: 20px; padding: 12px 0; border: 0; border-top: 1px solid var(--rule); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-:root:not([data-skin="phone"]) .person__mine-avs { display: none; }
-:root:not([data-skin="phone"]) .person__mine-tx { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
-:root:not([data-skin="phone"]) .person__mine-k { font: 500 var(--t-micro)/1.3 var(--credit); letter-spacing: .08em; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .person__mine-t { font-size: var(--t-ui); font-weight: 600; }
-:root:not([data-skin="phone"]) .person__mine-label { margin-left: 8px; font-size: var(--t-small); font-weight: 400; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .person__mine-n { flex: none; font-size: var(--t-micro); color: var(--ink-3); }
-:root:not([data-skin="phone"]) .person__mine > .i { flex: none; width: 14px; height: 14px; color: var(--ink-3); transition: transform var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .person__mine:hover > .i { transform: translateX(2px); color: var(--tungsten); }
-:root:not([data-skin="phone"]) .pfield { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 12px; padding: 10px 0; }
-:root:not([data-skin="phone"]) .pfield + .pfield { border-top: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .pfield__v { min-width: 0; font-size: var(--t-body); overflow-wrap: anywhere; }
-:root:not([data-skin="phone"]) .entry__lead { display: inline-flex; align-items: center; gap: 4px; }
-:root:not([data-skin="phone"]) .entry__lead .av { display: none; }
-:root:not([data-skin="phone"]) .entry__lead > .i { width: 10px; height: 10px; }
-:root:not([data-skin="phone"]) .beliefs > .sec-head { flex-wrap: wrap; gap: 8px; }
 .beliefs:has(input[value="about"]:checked) .beliefs__pane--held, .beliefs:has(input[value="held"]:checked) .beliefs__pane--about { display: none; }
 .psec h3.sec { margin: 30px 0 8px; }
 .subhead { margin: 16px 0 4px; font-size: var(--t-ui); font-weight: 600; color: var(--ink-3); }
@@ -851,15 +810,6 @@ button.st-row__what:hover .st-row__text { color: var(--ink); }
 .psec > h3.sec + .subsec { margin-top: 4px; }
 
 /* 종료 · 삭제 confirmations: the record sits on a slate under its title, the consequence below it, then the verbs */
-:root:not([data-skin="phone"]) .world-confirm .reader__title { margin-bottom: 18px; }
-:root:not([data-skin="phone"]) .world-confirm__card { max-width: 68ch; padding: 18px 20px; border: 1px solid var(--rule); border-radius: var(--r); background: var(--screen); }
-:root:not([data-skin="phone"]) .world-confirm__who { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; font-size: var(--t-small); letter-spacing: .04em; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .world-confirm__person { margin: 0; font-size: var(--t-read); letter-spacing: 0; color: var(--ink); }
-:root:not([data-skin="phone"]) .world-confirm__card .rec { margin: 0; font-size: var(--t-read); line-height: 1.75; color: var(--ink); }
-:root:not([data-skin="phone"]) .world-confirm .notice { box-sizing: border-box; width: 100%; max-width: 68ch; margin-top: 14px; }
-:root:not([data-skin="phone"]) .world-confirm .form__bar { max-width: 68ch; }
-:root:not([data-skin="phone"]) .delete-impact { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .entry__body.is-empty { color: var(--ink-3); }
 /* 현재: the records beside one record's history; on phones the list and the record are separate views */
 @media (max-width: 899px) {
   .worldbook:not(.is-detail) .readercol, .worldbook.is-detail .listcol { display: none; }
@@ -984,28 +934,57 @@ button.st-row__what:hover .st-row__text { color: var(--ink); }
 .settings-regex-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 14px; }
 .settings-regex-toolbar span { display: block; font-size: var(--t-micro); color: var(--ink-3); }
 /* 추가 제외 규칙 reads as one more labelled field of 원문 정리, its add action a quiet link */
-:root:not([data-skin="phone"]) .settings-regex-toolbar { align-items: center; margin-top: 18px; }
-:root:not([data-skin="phone"]) .settings-regex-toolbar strong { font-size: var(--t-small); font-weight: 600; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .settings-regex-toolbar .btn { min-height: 0; height: auto; padding: 0; border: 0; background: none; color: var(--accent-text); font-size: var(--t-small); font-weight: 500; }
 /* an opened disclosure flows straight into its fields */
 .settings-advanced[open] > summary { border-bottom: 0; }
 /* 설정 sections: a quiet side list beside the panel; on narrow screens a row of pills */
-:root:not([data-skin="phone"]) .settings-nav { display: flex; gap: 6px; overflow-x: auto; margin: 4px 0 8px; scrollbar-width: none; }
-:root:not([data-skin="phone"]) .settings-nav__row { display: flex; align-items: center; gap: 8px; flex: none; min-height: 34px; padding: 0 14px; border: 1px solid var(--rule); border-radius: 999px; background: none; color: var(--ink-2); font-size: var(--t-small); cursor: pointer; }
-:root:not([data-skin="phone"]) .settings-nav__row[aria-current="true"] { border-color: var(--ink); color: var(--ink); font-weight: 600; }
-:root:not([data-skin="phone"]) .settings-nav__ic, :root:not([data-skin="phone"]) .settings-nav__t small, :root:not([data-skin="phone"]) .settings-nav__row > .i:last-child { display: none; }
-@media (min-width: 900px) {
-  :root:not([data-skin="phone"]) .settingspage { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 0 40px; align-items: start; }
-  :root:not([data-skin="phone"]) .settingspage > .intro { grid-column: 1 / -1; }
-  :root:not([data-skin="phone"]) .settings-nav { position: sticky; top: 16px; flex-direction: column; gap: 0; overflow: visible; margin: 12px 0 0; border-top: 1px solid var(--rule); }
-  :root:not([data-skin="phone"]) .settings-nav__row { gap: 12px; min-height: 0; padding: 12px 8px 12px 14px; border: 0; border-bottom: 1px solid var(--rule); border-radius: 0; text-align: left; font-size: var(--t-ui); font-weight: 400; color: var(--ink-2); box-shadow: inset 2px 0 0 transparent; }
-  :root:not([data-skin="phone"]) .settings-nav__row[aria-current="true"] { border-color: var(--rule); color: var(--ink); font-weight: 600; box-shadow: inset 2px 0 0 var(--tungsten); }
-  :root:not([data-skin="phone"]) .settings-nav__ic { display: grid; place-items: center; color: var(--ink-3); }
-  :root:not([data-skin="phone"]) .settings-nav__ic .i { width: 16px; height: 16px; }
-  :root:not([data-skin="phone"]) .settings-nav__row[aria-current="true"] .settings-nav__ic { color: var(--accent-text); }
-  :root:not([data-skin="phone"]) .settings-nav__t { display: block; flex: 1; min-width: 0; }
-  :root:not([data-skin="phone"]) .settings-nav__t small { display: block; margin-top: 2px; font-size: var(--t-micro); font-weight: 400; color: var(--ink-3); }
-  :root:not([data-skin="phone"]) .settings-panel { margin-top: 0; }
+/* Memory settings share scope columns; each skin supplies its existing surfaces. */
+.settings-context { display:flex; align-items:center; gap:8px; margin:4px 0 8px; color:var(--ink-3); font-size:var(--t-small); min-width:0; overflow-wrap:anywhere; }
+.settings-context__avatar { display:grid; place-items:center; flex:none; width:22px; height:22px; border-radius:50%; background:var(--tungsten-dim); color:var(--accent-text); }
+.scope-header, .field.scope-row { display:grid; grid-template-columns:minmax(0,1fr) 148px 148px; column-gap:12px; align-items:center; }
+.scope-header { position:sticky; top:50px; z-index:3; padding:10px 0; background:var(--house); }
+.scope-header > div { text-align:center; font-size:var(--t-small); color:var(--ink-2); font-weight:600; min-width:0; overflow-wrap:anywhere; }
+.scope-header small { display:block; color:var(--ink-3); font-weight:400; }
+.field.scope-row { padding:12px 0; gap:8px 12px; }
+.scope-row + .scope-row { border-top:1px solid var(--rule); }
+.scope-row__text { min-width:0; font-size:var(--t-ui); color:var(--ink); overflow-wrap:anywhere; }
+.scope-row__text > small { display:block; margin-top:4px; color:var(--ink-3); font-size:var(--t-small); line-height:1.4; }
+.scope-slot { display:flex; align-items:center; justify-content:center; min-width:0; min-height:36px; }
+.scope-slot:empty::after { content:""; width:14px; height:1px; background:var(--rule-2); }
+.scope-control { position:relative; display:flex; width:100%; min-width:0; border-radius:var(--r); background:var(--screen-2); color:var(--ink); }
+.scope-control:has(select)::after { content:""; position:absolute; right:10px; top:13px; width:6px; height:6px; border:solid currentColor; border-width:0 1.5px 1.5px 0; transform:rotate(45deg); pointer-events:none; }
+.scope-control :is(select,input) { appearance:none; width:100%; min-width:0; height:36px; margin:0; padding:0 24px 0 8px; border:0; border-radius:inherit; background:transparent; color:inherit; font:400 var(--t-ui)/1.4 var(--sans); text-align:center; text-align-last:center; font-variant-numeric:tabular-nums; }
+.scope-control select { text-overflow:ellipsis; }
+.scope-control select option { background:var(--screen); color:var(--ink); }
+.scope-control input { padding:0 8px; }
+.scope-control input::placeholder { color:var(--ink-3); opacity:1; }
+.scope-control:focus-within { outline:2px solid var(--focus); outline-offset:2px; }
+.scope-control :is(select,input):focus { outline:none; }
+.scope-control.is-following { background:transparent; box-shadow:inset 0 0 0 1px var(--rule-2); color:var(--ink-3); }
+.scope-control.is-own { background:var(--tungsten-dim); color:var(--accent-text); }
+.scope-control:has(:disabled) { opacity:.45; }
+.scope-control--number > .btn { display:none; position:absolute; right:0; top:0; min-width:28px; width:28px; height:36px; padding:0; color:var(--accent-text); }
+.scope-control--number.is-own > .btn { display:block; }
+.scope-control--number.is-own > input { padding-right:28px; }
+.scope-control input::-webkit-inner-spin-button { appearance:none; }
+.scope-control input { -moz-appearance:textfield; }
+.scope-budget { display:grid; gap:8px; width:100%; min-width:0; }
+.scope-budget > input { width:100%; min-width:0; min-height:36px; border:1px solid var(--edge); border-radius:var(--r); background:var(--screen); color:var(--ink); padding:0 8px; font:inherit; }
+.scope-budget small { color:var(--ink-3); font-size:var(--t-small); }
+.scope-switch:has(input:disabled) { opacity:.45; }
+.scope-switch { display:flex; align-items:center; justify-content:center; min-height:44px; min-width:44px; position:relative; }
+.scope-tail { margin-top:16px; display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; }
+.scope-legend { display:flex; flex-wrap:wrap; gap:12px; color:var(--ink-3); font-size:var(--t-small); }
+.scope-legend i { display:inline-block; width:22px; height:13px; margin-right:6px; vertical-align:-2px; border-radius:3px; box-shadow:inset 0 0 0 1px var(--rule-2); }
+.scope-legend i.is-own { box-shadow:none; background:var(--tungsten-dim); }
+.settings-bar { position:sticky; bottom:0; z-index:4; background:var(--house); align-items:center; justify-content:space-between; padding-bottom:16px; }
+.settings-bar > .btn { flex:none; }
+@media (max-width:760px) {
+  .scope-header, .field.scope-row { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+  .scope-header__label { display:none; }
+  .scope-row__text { grid-column:1/-1; }
+  .scope-control :is(select,input), .scope-budget > input { font-size:16px; }
+  .scope-row__text { font-size:var(--t-body); }
+  .settings-bar > [data-scope-count] { max-width:55%; }
 }
 .settings-bar { margin-top: 20px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -1356,94 +1335,9 @@ dialog.dialog--notes[open] { display: flex; flex-direction: column; max-height: 
 /* iOS zooms into any field under 16px; last so it beats sized pickers */
 @media (max-width: 760px) { .film :is(.input, .select, .textarea, .field > input, .field > select, .field > textarea) { font-size: 16px; } }
 /* 기억 · 줄거리: a series of features. PART tabs, each part opens on its own title card, its acts are subtitled stills, the chosen act plays on the screen below */
-:root:not([data-skin="phone"]) .series .seasons { display: flex; gap: 4px; margin: 40px -16px 0; padding: 0 16px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .series .seasons::-webkit-scrollbar { display: none; }
-:root:not([data-skin="phone"]) .season-tab { flex: none; display: flex; align-items: center; gap: 8px; height: 48px; margin-bottom: -1px; padding: 0 14px; border-bottom: 2px solid transparent; color: var(--ink-3); white-space: nowrap; transition: color var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .season-tab__no { font-family: var(--credit); font-stretch: 125%; font-weight: 500; font-size: var(--t-credit); letter-spacing: .26em; }
-:root:not([data-skin="phone"]) .season-tab__now { font-size: var(--t-micro); color: var(--accent-text); }
-:root:not([data-skin="phone"]) .season-tab:hover { color: var(--ink-2); }
-:root:not([data-skin="phone"]) .season-tab[aria-current="true"] { color: var(--ink); border-bottom-color: var(--tungsten); }
-:root:not([data-skin="phone"]) .series .season__head { display: grid; justify-items: center; gap: 10px; margin-top: 44px; text-align: center; }
-:root:not([data-skin="phone"]) .season__titlebar { display: grid; grid-template-columns: var(--hit) minmax(0, 1fr) var(--hit); align-items: center; width: 100%; }
-:root:not([data-skin="phone"]) .season__titlebar::before { content: ""; }
-:root:not([data-skin="phone"]) .season__title { justify-self: center; max-width: 24ch; margin: 0; font-size: 25px; font-weight: 300; line-height: 1.45; letter-spacing: .02em; text-wrap: balance; overflow-wrap: anywhere; }
-:root:not([data-skin="phone"]) .series .season__head > .tc { font-variant-numeric: tabular-nums; }
-:root:not([data-skin="phone"]) .series .season__head .syn { max-width: 68ch; margin: 14px 0 0; text-align: left; font-size: var(--t-read); line-height: 1.85; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .season__folds { width: 100%; max-width: 68ch; text-align: left; }
-:root:not([data-skin="phone"]) .series .episodes { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(230px, 74%); gap: 14px; margin: 32px -16px 0; padding: 4px 16px 12px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; scrollbar-width: none; }
-:root:not([data-skin="phone"]) .series .episodes::-webkit-scrollbar { display: none; }
-:root:not([data-skin="phone"]) .ep { display: grid; align-content: start; gap: 4px; min-width: 0; text-align: left; scroll-snap-align: start; }
-:root:not([data-skin="phone"]) .ep__still { position: relative; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; aspect-ratio: 16 / 9; margin-bottom: 8px; padding: 34px 18px 14px; border-radius: var(--r); overflow: hidden; text-align: center;
-  background: radial-gradient(110% 80% at 50% 35%, #1a1b1f 0%, #070708 100%); box-shadow: 0 0 0 1px rgba(255,255,255,.04), var(--lift); transition: box-shadow var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .ep:hover .ep__still { box-shadow: 0 0 0 1px rgba(255,255,255,.14), var(--lift); }
-:root:not([data-skin="phone"]) .ep[aria-current="true"] .ep__still { box-shadow: 0 0 0 1px var(--tungsten), var(--lift); }
-:root:not([data-skin="phone"]) .ep__no { position: absolute; top: 12px; left: 14px; font-family: var(--credit); font-stretch: 125%; font-weight: 500; font-size: var(--t-credit); letter-spacing: .3em; color: #dba35a; }
-:root:not([data-skin="phone"]) .ep__now { position: absolute; top: 10px; right: 12px; font-size: var(--t-micro); color: #dba35a; }
-:root:not([data-skin="phone"]) .ep__line { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; font-size: var(--t-small); line-height: 1.55; color: #f4ecd0; text-shadow: 0 1px 2px rgba(0,0,0,.9); text-wrap: balance; }
-:root:not([data-skin="phone"]) .ep__line:not(.is-quote) { color: #b3afa7; font-style: italic; }
-:root:not([data-skin="phone"]) .ep__line .orig-mark { color: #8b8881; }
-:root:not([data-skin="phone"]) .ep__who { font-size: var(--t-micro); color: #8b8881; }
-:root:not([data-skin="phone"]) .ep__title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: var(--t-body); font-weight: 500; line-height: 1.45; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .ep[aria-current="true"] .ep__title, :root:not([data-skin="phone"]) .ep:hover .ep__title { color: var(--ink); }
-:root:not([data-skin="phone"]) .ep__syn { display: none; }
-:root:not([data-skin="phone"]) .ep__meta { font-size: var(--t-small); color: var(--ink-3); font-variant-numeric: tabular-nums; }
-:root:not([data-skin="phone"]) .series .actview { margin-top: 44px; padding-top: 40px; border-top: 1px solid var(--rule); scroll-margin-top: 110px; }
-:root:not([data-skin="phone"]) .actview__head { display: flex; align-items: flex-start; gap: 8px; }
-:root:not([data-skin="phone"]) .actview__head h2 { flex: 1; min-width: 0; margin: 0; font-size: var(--t-title); font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
-:root:not([data-skin="phone"]) .series .actview__lead > .tc { display: block; margin-top: 10px; }
-:root:not([data-skin="phone"]) .actview__syn { max-width: 68ch; margin: 20px 0 0; font-size: var(--t-read); line-height: 1.9; color: var(--ink-2); white-space: pre-line; }
-:root:not([data-skin="phone"]) .series .actview .reel { margin-top: 26px; }
-:root:not([data-skin="phone"]) .series .actsec { margin-top: 40px; }
-:root:not([data-skin="phone"]) .series .actsec > .sec { margin: 0 0 14px; }
-:root:not([data-skin="phone"]) .series .actsec .reel { margin-top: 0; }
-:root:not([data-skin="phone"]) .series .actsec .rail, :root:not([data-skin="phone"]) .series .actsec > .threadlist { max-width: 68ch; }
-:root:not([data-skin="phone"]) .series .actview .flowcards { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-:root:not([data-skin="phone"]) .flowcard__text { margin: 0; font-size: var(--t-small); line-height: 1.75; color: var(--ink-2); }
-@media (min-width: 900px) {
-  :root:not([data-skin="phone"]) .series .seasons { margin-inline: 0; padding-inline: 0; }
-  :root:not([data-skin="phone"]) .series .episodes { grid-auto-flow: row; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 26px 18px; margin-inline: 0; padding-inline: 0; overflow: visible; }
-  :root:not([data-skin="phone"]) .season__title { font-size: 30px; }
-  :root:not([data-skin="phone"]) .series .actview .reel { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-inline: 0; padding-inline: 0; overflow: visible; }
-  :root:not([data-skin="phone"]) .series .actview .reel > .frame { min-width: 0; }
-}
 /* scene sheet: the projector stops on one scene. The house goes dark with letterbox bars and the frame sits on the screen with its subtitle */
-:root:not([data-skin="phone"]) .scene-sheet { --ink: #ebe8e2; --ink-2: #b3afa7; --ink-3: #8b8881; --rule: #222328; --rule-2: #33353b; --screen: #16171a; --accent-text: #dba35a; width: min(780px, calc(100vw - 32px)); max-height: 80vh; margin: auto; padding: 0; border: 0; border-radius: var(--r); overflow: hidden; color: #ebe8e2; background: #0f1012; box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 30px 80px -20px rgba(0,0,0,.9); }
-:root:not([data-skin="phone"]) .scene-sheet[open] { display: flex; flex-direction: column; animation: scene-sheet-in 360ms var(--ease); }
-:root:not([data-skin="phone"]) .scene-sheet::backdrop { background: linear-gradient(#000 0 8vh, rgba(0,0,0,.84) 8vh calc(100% - 8vh), #000 calc(100% - 8vh)); animation: scene-sheet-dim 420ms ease-out; }
 @keyframes scene-sheet-in { from { opacity: 0; transform: scale(.985); } }
 @keyframes scene-sheet-dim { from { opacity: 0; } }
-:root:not([data-skin="phone"]) .scene-sheet__grip { display: none; }
-:root:not([data-skin="phone"]) .scene-sheet__bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 12px 0 26px; }
-:root:not([data-skin="phone"]) .scene-sheet__slug { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--t-small); color: #dba35a; }
-:root:not([data-skin="phone"]) .scene-sheet__bar .iconbtn { color: #b3afa7; }
-:root:not([data-skin="phone"]) .scene-sheet__body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 18px 26px 30px; }
-:root:not([data-skin="phone"]) .scene-sheet__title { margin: 0; text-align: center; font-size: var(--t-title); font-weight: 300; line-height: 1.5; letter-spacing: .02em; text-wrap: balance; color: #ebe8e2; }
-:root:not([data-skin="phone"]) .scene-sheet__line { margin: 26px auto 0; max-width: 46ch; text-align: center; }
-:root:not([data-skin="phone"]) .scene-sheet__line p { margin: 0; font-size: var(--t-read); line-height: 1.7; color: #f4ecd0; }
-:root:not([data-skin="phone"]) .scene-sheet__line cite { display: block; margin-top: 6px; font-style: normal; font-size: var(--t-small); color: #8b8881; }
-:root:not([data-skin="phone"]) .scene-sheet__lede { max-width: 56ch; margin: 22px auto 0; text-align: center; font-size: var(--t-read); line-height: 1.85; color: #f4ecd0; }
-:root:not([data-skin="phone"]) .scene-sheet .sheet-sec { max-width: 68ch; margin: 34px auto 0; }
-:root:not([data-skin="phone"]) .scene-sheet .sheet-sec > .sec { margin: 0 0 14px; }
-:root:not([data-skin="phone"]) .sheet-people { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
-:root:not([data-skin="phone"]) .sheet-person { min-width: 0; padding: 16px 16px 8px; border-radius: var(--r); background: #16171a; }
-:root:not([data-skin="phone"]) .sheet-person h4 { margin: 0 0 10px; }
-:root:not([data-skin="phone"]) .sheet-person > .flowcard__text { margin-bottom: 12px; }
-:root:not([data-skin="phone"]) .sheet-person .rail p, :root:not([data-skin="phone"]) .sheet-person .threadlist li { font-size: var(--t-small); }
-:root:not([data-skin="phone"]) .season__more { display: inline-flex; align-items: center; gap: 4px; min-height: var(--hit); margin-top: 4px; font-size: var(--t-small); color: var(--accent-text); }
-:root:not([data-skin="phone"]) .season__more .i { width: 13px; height: 13px; }
-:root:not([data-skin="phone"]) .series .actview .flowcard { position: relative; }
-:root:not([data-skin="phone"]) .series .actview .flowcard:hover { box-shadow: 0 0 0 1px var(--rule-2); }
-:root:not([data-skin="phone"]) .flowcard__open { display: inline-flex; align-items: center; gap: 6px; text-align: left; }
-:root:not([data-skin="phone"]) .flowcard__open::after { content: ""; position: absolute; inset: 0; }
-:root:not([data-skin="phone"]) .flowcard__open .i { width: 13px; height: 13px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .scene-sheet__record { max-width: 68ch; margin: 30px auto 0; padding-top: 24px; border-top: 1px solid #222328; font-size: var(--t-read); line-height: 1.9; color: #b3afa7; white-space: pre-line; }
-:root:not([data-skin="phone"]) :is(.scene-sheet__record, .scene-sheet__title, .scene-sheet__line) .orig-mark { color: #8b8881; }
-:root:not([data-skin="phone"]) .scene-sheet__foot { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 4px; padding: 8px 12px; border-top: 1px solid #222328; }
-:root:not([data-skin="phone"]) .scene-sheet__foot .btn { color: #b3afa7; }
-:root:not([data-skin="phone"]) .scene-sheet__foot > :first-child { justify-self: start; }
-:root:not([data-skin="phone"]) .scene-sheet__foot > :last-child { justify-self: end; }
-:root:not([data-skin="phone"]) :is(.scene-sheet.is-shown[open], .scene-sheet.is-shown::backdrop) { animation: none; }
-@media (prefers-reduced-motion: reduce) { :root:not([data-skin="phone"]) :is(.scene-sheet[open], .scene-sheet::backdrop) { animation: none; } }
 
 /* ---- 이번 턴에 전달한 기억: home widget and full view ---- */
 .sent-mix { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 4px 0 6px; padding: 10px 0; border: 1px solid var(--rule); border-radius: var(--r); }
@@ -1551,7 +1445,8 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 .nr__what { grid-column: 1; display: grid; gap: 2px; min-width: 0; text-align: left; color: inherit; }
 .nr__what:hover .nr__t { color: var(--accent-text); }
 .nr__k { font-size: var(--t-small); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nr__delivery { margin-right: 6px; color: var(--tungsten); }
+:is(.nr__k, .rec-who) > .signal { display: inline-flex; vertical-align: middle; margin-right: 6px; color: var(--tungsten); }
+:is(.nr__k, .rec-who) > .signal .i { width: 13px; height: 13px; }
 .nr__kind { font-weight: 600; color: var(--ink-2); }
 .nr__t { font-size: var(--t-ui); line-height: 1.55; color: var(--ink); max-width: 44em; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .nr__m { display: flex; flex-wrap: wrap; align-items: center; column-gap: .3em; grid-column: 1; font-size: var(--t-small); color: var(--ink-3); }
@@ -1841,143 +1736,20 @@ button.sent-row:hover .sent-row__t { color: var(--accent-text); }
 @media(max-width:767px) { .review-small__choices { grid-template-columns:1fr; } }
 
 /* 작은 확인 (film): same structure, film voice — quiet rows, ruled source quote, stacked choices. */
-:root:not([data-skin="phone"]) .row.row--small { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 10px; }
-:root:not([data-skin="phone"]) .row--small > .review-small__mark { grid-row: 1 / span 3; align-self: start; margin-top: 2px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .row--small > :not(.review-small__mark) { grid-column: 2; }
-:root:not([data-skin="phone"]) .review-small__mark .i { width: 16px; height: 16px; }
-:root:not([data-skin="phone"]) .review-small__bulk { display: flex; justify-content: flex-end; gap: 4px; margin-top: 6px; }
-:root:not([data-skin="phone"]) .review-small__bulk .btn[data-resolution="discard"] { color: var(--cut); }
-:root:not([data-skin="phone"]) .review-small__calm, :root:not([data-skin="phone"]) .review-small__note { margin: 6px 0 0; font-size: var(--t-micro); color: var(--ink-3); }
-:root:not([data-skin="phone"]) .review-small__why { color: var(--ink-2); }
-:root:not([data-skin="phone"]) .review-small__card { display: block; margin-top: 8px; padding: 12px 14px; border-radius: var(--r); background: var(--screen); }
-:root:not([data-skin="phone"]) .review-small__speaker { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-:root:not([data-skin="phone"]) .review-small__source { margin: 6px 0 0; padding-left: 10px; border-left: 1px solid var(--rule-2); color: var(--ink-2); }
-:root:not([data-skin="phone"]) .review-small__missing { display: flex; align-items: center; gap: 8px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .review-small__missing .i { width: 15px; height: 15px; }
-:root:not([data-skin="phone"]) .review-small__acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
-:root:not([data-skin="phone"]) .review-small__match { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ink); border-radius: 3px; }
-:root:not([data-skin="phone"]) .review-small__unmatched { color: var(--ink-3); }
-:root:not([data-skin="phone"]) .review-small__legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: var(--t-small); color: var(--ink-3); }
-:root:not([data-skin="phone"]) .review-small__legend i { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 2px; background: color-mix(in srgb, var(--ok) 30%, transparent); }
-:root:not([data-skin="phone"]) .review-small__legend .is-missing { background: var(--rule-2); }
-:root:not([data-skin="phone"]) .review-small__editor { margin-top: 18px; }
-:root:not([data-skin="phone"]) .review-small__editor .err { margin: 0; font-size: var(--t-small); color: var(--cut); }
-:root:not([data-skin="phone"]) .review-small__editor .form__bar { position: static; padding-top: 0; border: 0; }
 
 /* ===== Pair sheet (film): the couple-app order in the film voice =====
    Title credits stay; numbers are the credit card's fine print; names are screenplay cues; feelings are hairline meters in the
    two 흐름 colours; promises and keepsakes are shot rows; the next round day is a slate. */
-:root:not([data-skin="phone"]) .appsheet .titles .pair-rels { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 8px; margin-top: 18px; }
-:root:not([data-skin="phone"]) .appsheet .titles .pair-rels > .menu + .menu::before { content: "·"; margin-right: 8px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .appsheet .pair-rel { display: inline-flex; align-items: center; min-height: 32px; list-style: none; font-size: var(--t-small); color: var(--ink-2); cursor: pointer; }
-:root:not([data-skin="phone"]) .appsheet .pair-rel::-webkit-details-marker { display: none; }
-:root:not([data-skin="phone"]) .appsheet .pair-rel .orig-mark { margin-left: 4px; }
 
-:root:not([data-skin="phone"]) .appsheet .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .appsheet .psec > .sec-head { margin: 30px 0 12px; padding-top: 16px; border-top: 1px solid var(--rule); }
-:root:not([data-skin="phone"]) .appsheet .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec, :root:not([data-skin="phone"]) .appsheet .psec > .sec-head > .sec { font: 600 var(--t-micro)/1.2 var(--credit); letter-spacing: .08em; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .appsheet .psec > .sec-head > .sec { margin: 0; padding: 0; border: 0; }
-:root:not([data-skin="phone"]) .appsheet .psec > :is(h2, :root:not([data-skin="phone"]) h3).sec .n, :root:not([data-skin="phone"]) .appsheet .psec > .sec-head > .sec .n { font: inherit; letter-spacing: .04em; color: var(--ink-3); }
 
-:root:not([data-skin="phone"]) .says { display: grid; gap: 18px; padding: 6px 0 2px; }
-:root:not([data-skin="phone"]) .say { display: grid; justify-items: center; gap: 2px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: center; }
-:root:not([data-skin="phone"]) button.say { cursor: pointer; }
-:root:not([data-skin="phone"]) .say__cue { font-family: var(--credit); font-stretch: 125%; font-size: var(--t-micro); font-weight: 500; letter-spacing: .24em; text-transform: uppercase; color: var(--flow-other); }
-:root:not([data-skin="phone"]) .say__cue .name { font: inherit; letter-spacing: inherit; color: inherit; }
-:root:not([data-skin="phone"]) .say.is-mine .say__cue { color: var(--flow-warm); }
-:root:not([data-skin="phone"]) .say__paren { font-size: var(--t-small); font-style: italic; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pairsheet .titles { padding: 40px 16px 34px; }
-:root:not([data-skin="phone"]) .pairsheet .titles .cast { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: baseline; gap: 0 16px; max-width: 440px; margin: 14px auto 0; }
-:root:not([data-skin="phone"]) .pairsheet .titles .cast > .titles__name:first-child { text-align: right; }
-:root:not([data-skin="phone"]) .pairsheet .titles .cast > .titles__name:last-child { text-align: left; }
-:root:not([data-skin="phone"]) .pairsheet .titles .nm { margin-top: 0; font-size: 20px; letter-spacing: .2em; padding-left: 0; }
-:root:not([data-skin="phone"]) .pairsheet .titles .nm.is-cjk { font-size: 19px; letter-spacing: .12em; }
-:root:not([data-skin="phone"]) .pairsheet .titles .and { margin: 0; }
-:root:not([data-skin="phone"]) .pairsheet .titles .tie { margin-top: 12px; }
-:root:not([data-skin="phone"]) .appsheet > .titles + .psec > h2.sec.sec { margin-top: 22px; padding-top: 0; border-top: 0; }
 /* the credit card's fine print: the pair's numbers in one line under a hairline */
-:root:not([data-skin="phone"]) .pair-facts { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; margin: 14px 8px 0; padding-top: 12px; border-top: 1px solid var(--rule); font-size: var(--t-micro); letter-spacing: .04em; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-facts > * + *::before { content: "·"; margin: 0 9px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-facts b { font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-:root:not([data-skin="phone"]) .pair-facts__add { display: inline-flex; align-items: center; gap: 3px; padding: 0; border: 0; background: none; font: inherit; color: var(--accent-text); cursor: pointer; }
-:root:not([data-skin="phone"]) .pair-facts__add .i { width: 12px; height: 12px; }
-:root:not([data-skin="phone"]) .say__bub { margin-top: 2px; font-size: var(--t-head); font-weight: 300; line-height: 1.45; color: var(--ink); }
-:root:not([data-skin="phone"]) .say__bub b { font-weight: 500; }
-:root:not([data-skin="phone"]) .say__bub.is-empty { font-size: var(--t-small); font-style: italic; font-weight: 400; color: var(--ink-3); }
-:root:not([data-skin="phone"]) button.say:hover .say__bub:not(.is-empty) { color: var(--accent-text); }
 
-:root:not([data-skin="phone"]) .meters__head { display: grid; grid-template-columns: minmax(0, 1fr) 58px minmax(0, 1fr); padding-bottom: 6px; }
-:root:not([data-skin="phone"]) .meters__dir { font-family: var(--credit); font-stretch: 125%; font-size: var(--t-credit); font-weight: 500; letter-spacing: .18em; text-transform: uppercase; }
-:root:not([data-skin="phone"]) .meters__dir:first-child { grid-column: 1; text-align: right; color: var(--flow-warm); }
-:root:not([data-skin="phone"]) .meters__dir:last-child { grid-column: 3; color: var(--flow-other); }
-:root:not([data-skin="phone"]) .feel { display: grid; grid-template-columns: minmax(0, 1fr) 58px minmax(0, 1fr); grid-template-areas: "l axis r"; align-items: center; min-height: 46px; }
-:root:not([data-skin="phone"]) .feel + .feel { border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent); }
-:root:not([data-skin="phone"]) .feel__axis { grid-area: axis; text-align: center; font-size: var(--t-small); color: var(--ink-2); }
-:root:not([data-skin="phone"]) .feel__side { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-:root:not([data-skin="phone"]) .feel__side--l { grid-area: l; align-items: flex-end; }
-:root:not([data-skin="phone"]) .feel__side--r { grid-area: r; align-items: flex-start; }
-:root:not([data-skin="phone"]) .feel__bar { position: relative; width: 100%; height: 2px; background: var(--rule-2); }
-:root:not([data-skin="phone"]) .feel__bar i { position: absolute; top: 0; bottom: 0; min-width: 0; height: auto; }
-:root:not([data-skin="phone"]) .feel__side--l .feel__bar i { right: 0; background: var(--flow-warm); }
-:root:not([data-skin="phone"]) .feel__side--r .feel__bar i { left: 0; background: var(--flow-other); }
-:root:not([data-skin="phone"]) .feel__bar.is-conflicted i { background: repeating-linear-gradient(90deg, var(--ink-3) 0 4px, transparent 4px 7px); }
-:root:not([data-skin="phone"]) .feel__word { display: inline-flex; align-items: center; gap: 3px; font-size: var(--t-micro); color: var(--ink-3); }
-:root:not([data-skin="phone"]) .feel__word.is-strong { font-weight: 600; color: var(--ink); }
-:root:not([data-skin="phone"]) .feel__trend .i { width: 11px; height: 11px; stroke-width: 2; }
-:root:not([data-skin="phone"]) .feel__trend.is-up { color: var(--ok); }
-:root:not([data-skin="phone"]) .feel__trend.is-down { color: var(--cut); }
-:root:not([data-skin="phone"]) .appsheet .meters__basis { margin-top: 8px; padding: 0; border: 0; }
-:root:not([data-skin="phone"]) .appsheet .meters__basis > summary { border: 0; font: 400 var(--t-micro)/1.2 var(--sans); letter-spacing: 0; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .meters__basis > summary { display: flex; align-items: center; justify-content: center; gap: 4px; min-height: 40px; list-style: none; font-size: var(--t-micro); color: var(--ink-3); cursor: pointer; }
-:root:not([data-skin="phone"]) .meters__basis > summary::-webkit-details-marker { display: none; }
-:root:not([data-skin="phone"]) .appsheet .meters__basis > summary > .chev { margin-left: 0; transition: transform var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .meters__basis[open] > summary > .chev { transform: rotate(90deg); }
-:root:not([data-skin="phone"]) .meters__basis ul { margin: 0; padding: 0 0 8px 18px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
 
-:root:not([data-skin="phone"]) .appsheet .pov .tensions { margin: 8px 0 0; padding: 0; list-style: none; }
-:root:not([data-skin="phone"]) .appsheet .pov .tensions li { position: relative; margin-top: 8px; padding-left: 26px; font-size: var(--t-small); line-height: 1.6; color: var(--ink-2); }
-:root:not([data-skin="phone"]) .appsheet .pov .tensions li::before { content: ""; position: absolute; left: 0; top: .8em; width: 14px; height: 1px; background: var(--rule-2); }
-:root:not([data-skin="phone"]) .appsheet .pov .tensions li .i { display: none; }
 
-:root:not([data-skin="phone"]) .pair-card { background: none; }
-:root:not([data-skin="phone"]) .pair-list { margin: 0; padding: 0; list-style: none; }
-:root:not([data-skin="phone"]) .pair-list > .entry { display: block; border: 0; }
-:root:not([data-skin="phone"]) .appsheet .pair-row { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 0 10px 28px; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
-:root:not([data-skin="phone"]) .appsheet .pair-row::before { content: ""; position: absolute; left: 0; top: 50%; width: 12px; height: 1px; background: var(--rule-2); transition: width var(--fast) var(--ease), background var(--fast) var(--ease); }
-:root:not([data-skin="phone"]) .appsheet .pair-row:hover::before { width: 16px; background: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-row__ic, :root:not([data-skin="phone"]) .pair-row__who .av, :root:not([data-skin="phone"]) .pair-row__who > .i { display: none; }
-:root:not([data-skin="phone"]) .pair-row__tx { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
-:root:not([data-skin="phone"]) .pair-list > .entry > .detail-know { margin: 0 0 0 28px; }
-:root:not([data-skin="phone"]) .pair-row__t { font-size: var(--t-ui); color: var(--ink); }
-:root:not([data-skin="phone"]) .pair-row__t b { font-weight: 600; }
-:root:not([data-skin="phone"]) .pair-row__clamp { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 1; -webkit-box-orient: vertical; font-size: var(--t-small); color: var(--ink-2); }
-:root:not([data-skin="phone"]) .pair-row__s { order: -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--t-micro); color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-row__s .dot { color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-row > .i { flex: none; width: 14px; height: 14px; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-pill { padding: 1px 6px; border-radius: 2px; background: color-mix(in srgb, var(--tungsten) 16%, transparent); font-size: var(--t-credit); font-weight: 600; color: var(--accent-text); }
-:root:not([data-skin="phone"]) .pair-card > .fold--more { margin-top: 0; }
 
-:root:not([data-skin="phone"]) .pair-next { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "stripes stripes" "dday what"; width: 100%; max-width: 380px; margin-bottom: 10px; overflow: hidden; border: 1px solid var(--rule-2); border-radius: var(--r); }
-:root:not([data-skin="phone"]) .pair-next::before { content: ""; grid-area: stripes; height: 14px; background: repeating-linear-gradient(135deg, var(--ink) 0 10px, var(--house) 10px 20px); opacity: .85; }
-:root:not([data-skin="phone"]) .pair-cal { display: none; }
-:root:not([data-skin="phone"]) .pair-next__dd { grid-area: dday; display: grid; place-items: center; min-width: 108px; padding: 14px 16px; border-right: 1px solid var(--rule-2); font: 600 26px/1 var(--credit); font-stretch: 125%; letter-spacing: .04em; color: var(--accent-text); }
-:root:not([data-skin="phone"]) .pair-next__tx { grid-area: what; display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 14px 16px; }
-:root:not([data-skin="phone"]) .pair-next__k { font-family: var(--credit); font-size: var(--t-credit); font-weight: 600; letter-spacing: .08em; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .pair-next__date { order: 2; font-size: var(--t-small); color: var(--ink-2); }
-:root:not([data-skin="phone"]) .pair-next__t { font-size: var(--t-read); font-weight: 500; }
 
-:root:not([data-skin="phone"]) .appsheet .anni--row { border: 0; background: none; box-shadow: none; }
-:root:not([data-skin="phone"]) .appsheet .anni--row + .anni--row { border-top: 1px solid color-mix(in srgb, var(--rule) 70%, transparent); }
-:root:not([data-skin="phone"]) .appsheet .anni--row .anni__open { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 10px; padding: 10px 40px 10px 0; border: 0; background: none; text-align: left; }
-:root:not([data-skin="phone"]) .anni__date { display: flex; flex-direction: column; font-size: var(--t-small); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
-:root:not([data-skin="phone"]) .anni__date small { font-size: var(--t-credit); font-weight: 400; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .anni__tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-:root:not([data-skin="phone"]) .anni--row .anni__label { font-size: var(--t-ui); color: var(--ink); }
-:root:not([data-skin="phone"]) .anni--row .anni__slug { overflow: hidden; font-size: var(--t-micro); white-space: nowrap; text-overflow: ellipsis; color: var(--ink-3); }
-:root:not([data-skin="phone"]) .appsheet .reel { display: block; overflow: visible; margin: 0; padding: 0; }
-:root:not([data-skin="phone"]) .appsheet .anni--row .anni__acts { top: 50%; transform: translateY(-50%); }
 
-:root:not([data-skin="phone"]) .meters__note { margin: 8px 0 0; text-align: center; font-size: var(--t-micro); color: var(--ink-3); }
 
 /* Occasion controls share film/phone tokens and native keyboard radio behavior. */
 .anniversary-kind{border:0;padding:0;margin:0;min-width:0}

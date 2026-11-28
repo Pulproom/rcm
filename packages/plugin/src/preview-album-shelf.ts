@@ -22,10 +22,8 @@ export async function showAlbumShelfPreview(params: URLSearchParams, state: Runt
     coverPhotoId: i === 0 || i === 2 || i === 5 || i === 7 ? `cover-${i}` : null, revision: 1, updatedAt: 1,
     chapterCount: [12, 8, 3, 5][i % 4], promiseCount: [9, 16, 2, 4][i % 4], sceneCount: [97, 59, 6, 31][i % 4], coverQuote: "첫눈 오면 약방 앞에서.", newMemoryCount: i === 0 ? 4 : 0,
   }));
-  state.settings.dashboardSkin = params.get("skin") === "phone" ? "phone" : "film";
   if (params.get("pairs") === "1") albums = albums.slice(0, 2).map((album, n) => ({ ...album, sourceChatId: "shared-chat", names: n ? ["하린", "연우"] : ["하린", "도윤"], title: n ? "하린 & 연우" : "하린 & 도윤", newMemoryCount: n ? 1 : 4 }));
-  state.settings.dashboardTheme = params.get("scheme") === "light" ? "light" : params.get("scheme") === "dark" ? "dark"
-    : state.settings.dashboardSkin === "phone" ? "light" : "dark";
+  state.settings.dashboardTheme = params.get("scheme") === "dark" ? "dark" : "light";
   const request = client.request.bind(client);
   client.request = (async (path: string, init?: RequestInit) => {
     if (path === "/v1/health") {

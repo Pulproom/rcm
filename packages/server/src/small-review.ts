@@ -89,17 +89,21 @@ function verifiedCitations(rows: ReturnType<typeof eligibleSourceMessages>, evid
     && sourceRangeIsVisible(row.canonical_content,span.startOffset,span.endOffset)));
 }
 
-function dialogueMatches(db: RcmDatabase, chatId: string, sources: string[], messageId: string | undefined, text: string, cited?: ExactEvidence[], preferResponse = true) {
+function reviewSourceMatches(db: RcmDatabase, chatId: string, sources: string[], messageId: string | undefined, text: string, cited?: ExactEvidence[], kind: "dialogue" | "passage" = "dialogue") {
   const eligible = eligibleSourceMessages(db, chatId, sources);
   const rows = eligible.filter(row => !eligible.some(candidate => candidate.message_id === messageId) || row.message_id === messageId);
   const allowed = cited === undefined ? undefined : verifiedCitations(rows,cited)
     .map(span => ({messageId:span.messageId,start:span.startOffset,end:span.endOffset}));
-  const matches = dialogueMessageMatches(text, rows.map(row => ({id:row.message_id,role:preferResponse ? row.role : undefined,
-    content:row.canonical_content,canonicalHash:row.canonical_hash})), allowed);
-  if (matches.length !== 1) return { complete: false, segments: [], evidence: [] };
+  const matches = dialogueMessageMatches(text, rows.map(row => ({id:row.message_id,role:kind === "dialogue" ? row.role : undefined,
+    content:row.canonical_content,canonicalHash:row.canonical_hash})), allowed, kind);
+  if (matches.length !== 1) return { hasMatch:matches.some(match => match.segments.length), complete: false, segments: [], evidence: [] };
   const matched = matches[0]!;
-  return { complete:matched.complete, segments:matched.segments, evidence:matched.segments.map(({startOffset,endOffset,quote}) => ({
+  return { hasMatch:matched.segments.length > 0, complete:matched.complete, segments:matched.segments, evidence:matched.segments.map(({startOffset,endOffset,quote}) => ({
     messageId:matched.message.id,canonicalHash:matched.message.canonicalHash,startOffset,endOffset,quote})) };
+}
+
+function hasSourceFragment(db: RcmDatabase, chatId: string, sources: string[], item: Pick<SmallReviewCandidate,'dialogue'|'passage'>) {
+  return reviewSourceMatches(db,chatId,sources,undefined,item.dialogue?.text ?? item.passage?.quote ?? '',undefined,item.dialogue ? "dialogue" : "passage").hasMatch;
 }
 
 function nameOnlyEvidence(db: RcmDatabase, chatId: string, sources: string[], recognition: Recognition): Recognition["evidence"] {
@@ -120,6 +124,7 @@ export function storedReviewParents(db:RcmDatabase,chatId:string,keys:ReadonlyMa
   return parents;
 }
 
+/** Returns handled optional candidates (reviewed or dropped), so neither blocks extraction. */
 export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: string, sources: string[], draft: ExtractionDraftResult,
   scopeId: string, pendingRefs: string[] = [], explicitParents?: Map<string, string>): number {
   draft = rescueDraftDialogues(db, chatId, sources, draft);
@@ -149,8 +154,14 @@ export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: strin
   };
   const parent = (memory: Memory) => explicitParents ? explicitParents.get(memory.key) : (db.prepare("SELECT id FROM memories WHERE chat_id=? AND memory_key=? AND active=1")
     .get(chatId, `batch:${scopeId}:${createHash("sha256").update(memory.key).digest("hex")}`) as {id: string} | undefined)?.id;
-  const add = (ref: string, candidate: Omit<SmallReviewCandidate, "id" | "status">) => candidates.push({ ...candidate,
-    id: createHash("sha256").update(`${jobId}\0${ref}`).digest("hex"), status: "pending" });
+  const drops: Array<{array:string;index:number;issues:Array<{path:Array<string|number>;message:string}>}> = [];
+  const add = (ref: string, candidate: Omit<SmallReviewCandidate, "id" | "status">, path: Array<string|number>) => {
+    if ((candidate.dialogue || candidate.passage) && !hasSourceFragment(db,chatId,sources,candidate)) {
+      drops.push({array:String(path[0]),index:Number(path[1]),issues:[{path,message:'source_fragment_missing: No candidate fragment matches an eligible batch source.'}]});
+      return;
+    }
+    candidates.push({ ...candidate, id: createHash("sha256").update(`${jobId}\0${ref}`).digest("hex"), status: "pending" });
+  };
   for (const [mi, memory] of draft.memories.entries()) for (const [di, dialogue] of (memory.keyDialogues ?? []).entries()) {
     const ref = `dialogue:${memory.key}:${dialogue.messageId}:${di}`;
     const problems = issues.filter(issue => issue.path.startsWith(`memories[${mi}].keyDialogues[${di}]`));
@@ -160,28 +171,33 @@ export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: strin
       validateDialogueEvidence(db, chatId, sources, ExtractionResultSchema.parse({memories: [{...memory, keyDialogues: [dialogue]}]}));
       verifiedEvidence = dialogue.evidence;
     } catch {
-      const matched = dialogueMatches(db, chatId, sources, dialogue.messageId, dialogue.text);
+      const matched = reviewSourceMatches(db, chatId, sources, dialogue.messageId, dialogue.text);
       verifiedEvidence = matched.complete ? matched.evidence : undefined;
     }
     add(ref, { kind: "dialogue", memory, dialogue, parentMemoryId: parent(memory), verifiedEvidence,
       citedEvidence: citedEvidence([dialogue.messageId, ...dialogue.evidence.map(span => span.messageId)], dialogue.evidence),
-      reason: "대사 후보의 원문 위치를 확인하지 못했어요." });
+      reason: "대사 후보의 원문 위치를 확인하지 못했어요." }, ['memories',mi,'keyDialogues',di]);
   }
   for (const [index, passage] of (draft.sourcePassages ?? []).entries()) {
     const problems = issues.filter(issue => issue.path === `sourcePassages[${index}]` && issue.reason !== "access_unverified");
     if (!problems.length && !pendingRefs.includes(`source:${index}`)) continue;
     add(`source:${index}`, { kind: "passage", passage, verifiedEvidence: exactEvidence(db, chatId, sources, passage.messageId, passage.quote),
       citedEvidence: citedEvidence([passage.messageId], exactEvidence(db, chatId, sources, passage.messageId, passage.quote)),
-      reason: "발췌 후보의 원문 위치를 확인하지 못했어요." });
+      reason: "발췌 후보의 원문 위치를 확인하지 못했어요." }, ['sourcePassages',index]);
   }
   for (const issue of normalizeRecognitionReferences(draft,buildEntityIdentityResolver(db,chatId)).rejected) {
     const recognition = draft.socialKnowledge![issue.index]!;
     const memory = draft.memories.find(item => item.key === recognition.memoryKey);
     const verifiedEvidence = recognition.evidence.flatMap(evidence => evidence.quote ? exactEvidence(db, chatId, sources, evidence.messageId, evidence.quote) ?? [] : []);
     add(`recognition:${issue.index}`, { verifiedEvidence: verifiedEvidence.length ? verifiedEvidence : undefined, kind: "recognition", recognition, memory, parentMemoryId: memory && parent(memory),
-      reason: "이 인식과 세부 기억의 접근 근거를 확인하지 못했어요." });
+      reason: "이 인식과 세부 기억의 접근 근거를 확인하지 못했어요." }, ['socialKnowledge',issue.index]);
   }
-  if (!candidates.length) return 0;
+  if (drops.length) {
+    const existing = JSON.parse(payload?.payload_json ?? '{}').auditAdditionDrops ?? [];
+    db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.auditAdditionDrops',json(?),'$.smallReviewCount',?) WHERE id=?")
+      .run(JSON.stringify([...existing,...drops]),candidates.length,jobId);
+  }
+  if (!candidates.length) return drops.length;
   let row = db.prepare("SELECT id,draft_json FROM extraction_audits WHERE chat_id=? AND job_id=?").get(chatId, jobId) as {id: string; draft_json: string} | undefined;
   if (!row) {
     recordExtractionAudit(db, chatId, jobId, sources, draft, undefined, "pending_review");
@@ -191,7 +207,7 @@ export function recordSmallReviews(db: RcmDatabase, chatId: string, jobId: strin
   db.prepare("UPDATE extraction_audits SET draft_json=?,updated_at=? WHERE id=?")
     .run(JSON.stringify({ ...draft, smallReviews: candidates.map(item => previous.get(item.id) ?? item) }), Date.now(), row!.id);
   db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.smallReviewCount',?) WHERE id=?").run(candidates.length, jobId);
-  return candidates.length;
+  return candidates.length + drops.length;
 }
 
 function preparedCandidate(db: RcmDatabase, chatId: string, sources: string[], item: SmallReviewCandidate): ExtractionDraftResult | undefined {
@@ -223,6 +239,7 @@ function preparedCandidate(db: RcmDatabase, chatId: string, sources: string[], i
 
 function authoredCandidate(db: RcmDatabase, chatId: string, sources: string[], item: SmallReviewCandidate): SmallReviewCandidate | undefined {
   if (!item.dialogue && !item.passage) return;
+  if (!hasSourceFragment(db,chatId,sources,item)) return;
   const choices = dialogueSourceChoices(db, chatId, sources, item);
   if (choices.length > 1) return;
   if (choices.length === 1 && item.dialogue) {
@@ -238,8 +255,8 @@ function authoredCandidate(db: RcmDatabase, chatId: string, sources: string[], i
   let messageId = sources.includes(originalId) ? originalId : ids.length === 1 ? ids[0] : undefined;
   // A missing model citation must not discard a uniquely located visible fragment.
   // The user approves the authored wording; evidence still records the exact source.
-  const matched = dialogueMatches(db, chatId, sources, messageId, item.dialogue?.text ?? item.passage!.quote,
-    cited.length ? cited : undefined, Boolean(item.dialogue));
+  const matched = reviewSourceMatches(db, chatId, sources, messageId, item.dialogue?.text ?? item.passage!.quote,
+    cited.length ? cited : undefined, item.dialogue ? "dialogue" : "passage");
   const evidence = matched.evidence.length ? matched.evidence : cited;
   if (!messageId && new Set(evidence.map(span => span.messageId)).size === 1) messageId = evidence[0]!.messageId;
   if (!messageId || !evidence.length || evidence.some(span => span.messageId !== messageId)) return;
@@ -255,8 +272,8 @@ export function smallReviewView(db: RcmDatabase, chatId: string, sources: string
   const recognition = item.recognition;
   const additions = recognition && recognitionNameAdditions(db, chatId, recognition);
   const canKeep = item.status === "pending" && Boolean(prepared);
-  const sourceMatches = item.dialogue || item.passage ? dialogueMatches(db, chatId, sources,
-    item.dialogue?.messageId ?? item.passage?.messageId, item.dialogue?.text ?? item.passage!.quote, undefined, Boolean(item.dialogue)) : undefined;
+  const sourceMatches = item.dialogue || item.passage ? reviewSourceMatches(db, chatId, sources,
+    item.dialogue?.messageId ?? item.passage?.messageId, item.dialogue?.text ?? item.passage!.quote, undefined, item.dialogue ? "dialogue" : "passage") : undefined;
   const sourceChoices = !canKeep ? dialogueSourceChoices(db, chatId, sources, item) : [];
   return { sourceChoices: sourceChoices.length > 1 ? sourceChoices.map(({evidence, ...choice}) => choice) : [], id: item.id, kind: item.kind, status: item.status, reason: item.reason, retryJobId: item.retryJobId,
     text: item.dialogue?.text ?? item.passage?.quote ?? (recognition?.cognitionDetailKeys ?? [])
@@ -271,7 +288,8 @@ export function smallReviewView(db: RcmDatabase, chatId: string, sources: string
 }
 
 export function visibleSmallReviews(db: RcmDatabase, chatId: string, sources: string[], candidates: SmallReviewCandidate[]) {
-  return candidates.map(candidate => smallReviewView(db, chatId, sources, candidate))
+  return candidates.filter(item => item.status !== 'pending' || item.kind === 'recognition' || hasSourceFragment(db,chatId,sources,item))
+    .map(candidate => smallReviewView(db, chatId, sources, candidate))
     .filter(item => item.kind !== "recognition" || item.status !== "pending" || item.canKeep || item.canKeepNames);
 }
 
@@ -304,7 +322,7 @@ export function ingestReviewedDialogue(db: RcmDatabase, chatId: string, sources:
   refreshMemoryFts(db, parent.id);
 }
 
-export function resolveSmallReviews(db: RcmDatabase, chatId: string, selections: Array<{auditId: string; candidateId: string; sourceChoiceId?: string}>, action: "keep" | "keep_as_written" | "keep_edited" | "keep_names" | "hold" | "discard" | "retry", editedText?: string) {
+export function resolveSmallReviews(db: RcmDatabase, chatId: string, selections: Array<{auditId: string; candidateId: string; sourceChoiceId?: string}>, action: "keep" | "keep_as_written" | "keep_names" | "hold" | "discard" | "retry") {
   const bulkKeep = action === "keep_as_written" && selections.length > 1;
   const resolveOne = (selection: typeof selections[number]): ResolutionResult => {
     const audit = db.prepare("SELECT * FROM extraction_audits WHERE id=? AND chat_id=?").get(selection.auditId, chatId) as AuditRow | undefined;
@@ -341,7 +359,7 @@ export function resolveSmallReviews(db: RcmDatabase, chatId: string, selections:
         message = "이름과 호칭을 남겼어요.";
       }
       item.status = "kept";
-    } else if (action === "keep" || action === "keep_edited" || action === "keep_as_written") {
+    } else if (action === "keep" || action === "keep_as_written") {
       let candidate = item;
       const keepAsWritten = action === "keep_as_written";
       const choices = keepAsWritten && !preparedCandidate(db, chatId, sources, item) ? dialogueSourceChoices(db, chatId, sources, item) : [];
@@ -357,17 +375,6 @@ export function resolveSmallReviews(db: RcmDatabase, chatId: string, selections:
         const authored = authoredCandidate(db, chatId, sources, item);
         if (!authored) return {id:item.id,status:item.status,message:"원문 위치가 없어 남겨 뒀어요.",reason:"source_location_missing"};
         candidate = authored;
-      }
-      if (action === "keep_edited") {
-        if (item.kind === "recognition" || !editedText?.trim()) throw new Error("대사나 발췌를 입력해 주세요.");
-        const text = editedText.trim();
-        const matched = item.dialogue ? dialogueMatches(db, chatId, sources, item.dialogue.messageId, text) : undefined;
-        const evidence = item.dialogue ? matched?.complete ? matched.evidence : undefined
-          : exactEvidence(db, chatId, sources, item.passage?.messageId, text);
-        if (!evidence?.length) return { id: item.id, status: item.status, message: "원문과 아직 맞지 않아요." };
-        candidate = { ...item, verifiedEvidence: evidence,
-          ...(item.dialogue ? { dialogue: { ...item.dialogue, text, messageId: evidence[0]!.messageId, evidence } } : {}),
-          ...(item.passage ? { passage: { ...item.passage, quote: evidence[0]!.quote, messageId: evidence[0]!.messageId, startOffset: evidence[0]!.startOffset } } : {}) };
       }
       let prepared = preparedCandidate(db, chatId, sources, candidate);
       if (prepared && keepAsWritten && candidate.passage) {

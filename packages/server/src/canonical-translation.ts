@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { canonicalProseEntries, canonicalForeignScriptCount, canonicalTranslationSystemPrompt, validateCanonicalTranslation, canonicalTranslationIssue,
+import { canonicalProseEntries, canonicalForeignScriptCount, maskCanonicalProseSpans, canonicalTranslationSystemPrompt, validateCanonicalTranslation, canonicalTranslationIssue,
   estimateTokens, splitAuxiliarySource, measureAuxiliaryPrompt, type CanonicalTranslationItem, type MemoryLanguage,
   type AuxiliaryBudgetSnapshot, type LeasedJob, type RpProfile } from '@rcm/shared';
 import type { RcmDatabase } from './db.js';
@@ -7,7 +7,7 @@ import type { EmbeddingService } from './embedding.js';
 import { assertChatUnlocked, assertUpgradeJobWritable } from './upgrade-lock.js';
 import { refreshMemoryFts } from './memory-search-document.js';
 import { refreshDetailFts } from './memory-detail-edits.js';
-import { rebuildPromiseContent, promiseContributionState } from './item-access.js';
+import { rebuildPromiseContent, PROMISE_REWRITE_EVENT, promiseContributionState } from './item-access.js';
 import { renewMemoryEpoch } from './derived-state.js';
 
 type Slot = { id: string; table: string; rowId: string; column: string; path?: Array<string | number>; text: string; memoryId?: string; promiseId?: string; source: string };
@@ -76,7 +76,7 @@ function translationScope(db: RcmDatabase, chatId: string, memoryIds: string[]) 
         // Translate contributors, not cumulative caches that reconstruction will
         // replace between chunks. Legacy/manual parent text remains writable.
         const derived = table==='promises' ? row.user_edit_ordinal==null && !!promiseContributionState(db,chatId,row.id).rebuilt
-          : row.event_kind!==null && row.event_kind!=='established' && row.amendment_text!==null;
+          : row.event_kind!==null && row.event_kind!=='established' && row.event_kind!==PROMISE_REWRITE_EVENT && row.amendment_text!==null;
         if (!derived) add(row, table, 'content', { stateObservations: [{ content: row.content }] }, 'stateObservations[0].content', memoryId);
         add(row, table, 'status_reason', { stateObservations: [{ statusReason: row.status_reason }] }, 'stateObservations[0].statusReason', memoryId);
         if (table==='promise_events') add(row,table,'amendment_text',{stateObservations:[{amendment:row.amendment_text}]},'stateObservations[0].amendment',memoryId);
@@ -121,10 +121,11 @@ function chunkTranslationUnits(units: Unit[], language: MemoryLanguage, budget: 
 
 function plan(db: RcmDatabase, chatId: string, memoryIds: string[], budget: AuxiliaryBudgetSnapshot) {
   const scope = translationScope(db, chatId, memoryIds);
-  const originals = scope.slots.filter(slot => scope.language !== 'en' || canonicalForeignScriptCount(slot.text));
+  const names = registeredNames(db, chatId);
+  const originals = scope.slots.filter(slot => scope.language !== 'en' || canonicalForeignScriptCount(maskCanonicalProseSpans(slot.text, names)));
   const chunks = chunkTranslationUnits(originals.map((slot, index) => ({ id: `p${index}`, slot: slot.id, text: slot.text })), scope.language, budget);
   return { scope, payload: { memoryIds: scope.memoryIds, memoryLanguage: scope.language, originals, chunks, cursor: 0,
-    translated: {}, diagnostics: [], applied: 0, auxiliaryBudget: budget, registeredNames: registeredNames(db,chatId) } satisfies TranslationPayload };
+    translated: {}, diagnostics: [], applied: 0, auxiliaryBudget: budget, registeredNames: names } satisfies TranslationPayload };
 }
 
 function registeredNames(db:RcmDatabase,chatId:string):string[] {

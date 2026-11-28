@@ -1,10 +1,9 @@
+import { memoryLocationTranslationRecords } from "../translation.js";
 import { chartPersonColors } from "./person-colors.js";
 import type { DashboardData } from "../dashboard.js";
 import type { PairDetailRenderOptions } from "./pair-detail.js";
 import { avatar, btn, icon } from "./film/ui.js";
-import { dayPart } from "./film/scene.js";
 import { type Anniversary, landmarkLabel } from "./diary.js";
-import { lex } from "./lexicon.js";
 import { MILESTONE_LABELS, pairKey } from "./pairs.js";
 import { buildAxisFlow, FLOW_AXES, firstFlowSync, flowKnots, flowPinLabels, flowValueAt, flowY, ladderScale, ladderTop, ladderTopLevel, toLadderFlow, type AxisFlow, type FlowAxis, type FlowPoint, type CurveSeries, type FlowScale } from "./relationship-flow.js";
 import { sceneLocator, sceneNumbers } from "./scenes.js";
@@ -65,14 +64,13 @@ function curve(flow: CurveSeries, range: [number, number], scale: FlowScale): st
   return `${path} L100,${r(Y(ys[ys.length - 1]!))}`;
 }
 
-const pinCredits: Record<string, string> = { first_met: "FIRST MEETING", confession: "CONFESSION", romantic_relationship_established: "TOGETHER", engagement: "ENGAGED", marriage: "MARRIED", first_kiss: "FIRST KISS", first_deep_kiss: "FIRST KISS", first_hand_holding: "FIRST TOUCH", first_embrace: "FIRST EMBRACE", first_physical_intimacy: "FIRST INTIMACY", first_sex: "FIRST INTIMACY" };
 function chartPins(data: DashboardData, meta: RelationshipFlowMeta, names: readonly [string, string], numbers: Map<string, number>, copy: Copy) {
-  const pins = meta.anniversaries.map(item => ({ scene: numbers.get(item.memoryId), label: lex().skin === "film" && !item.userDefined ? esc(pinCredits[item.kind] ?? item.label) : item.userDefined ? copy(item.label, `landmark:${item.hideKey}:label`) : esc(item.label) }));
+  const pins = meta.anniversaries.map(item => ({ scene: numbers.get(item.memoryId), label: item.userDefined ? copy(item.label, `landmark:${item.hideKey}:label`) : esc(item.label) }));
   for (const memory of data.memories ?? []) for (const [index, landmark] of (memory.landmarkKinds ?? []).entries()) {
     if (landmark.kind !== "intimacy_milestone" || !landmark.pair || pairKey(...landmark.pair as [string, string]) !== pairKey(...names) || data.viewPreferences?.hiddenAnniversaries?.includes(`${memory.id}#${index}`)) continue;
     const intimacy = (data.physicalIntimacy ?? []).find((item: any) => item.sourceMemoryId === memory.id && pairKey(item.participantA, item.participantB) === pairKey(...names));
     const key = intimacy?.milestoneKey ?? "";
-    const label = lex().skin === "film" ? pinCredits[key] ?? landmark.label ?? "FIRST INTIMACY" : MILESTONE_LABELS[key] ?? landmarkLabel(landmark);
+    const label = MILESTONE_LABELS[key] ?? landmarkLabel(landmark);
     pins.push({ scene: numbers.get(memory.id), label: esc(label) });
   }
   return pins.filter((pin): pin is { scene: number; label: string } => pin.scene !== undefined).sort((a, b) => a.scene - b.scene);
@@ -97,7 +95,7 @@ export function renderRelationshipFlow(data: DashboardData, directions: readonly
   const scene = options.flowView?.scene === undefined ? undefined : Math.max(range[0], Math.min(range[1], options.flowView.scene));
   const colors = chartPersonColors(...names);
   const style = colors.map((color, index) => `--flow-${index === 0 ? "a" : "b"}-h:${r(color.h)};--flow-${index === 0 ? "a" : "b"}-s:${r(color.s)}%;--flow-${index === 0 ? "a" : "b"}-l:${r(color.l)}%`).join(";");
-  const header = `<header class="duet-head">${lex().skin === "phone" ? `<div class="duet-avatars pair-avs">${avatar(names[0])}${avatar(names[1])}</div>` : ""}<div><p class="duet-credit">${esc(names.join(" & "))}</p><h3>두 사람의 마음</h3><p class="duet-meta">함께한 ${meta.scenes}장면${meta.days === null ? "" : ` · 처음 만난 지 D+${meta.days}`}</p></div></header>`;
+  const header = `<header class="duet-head"><div class="duet-avatars pair-avs">${avatar(names[0])}${avatar(names[1])}</div><div><p class="duet-credit">${esc(names.join(" & "))}</p><h3>두 사람의 마음</h3><p class="duet-meta">함께한 ${meta.scenes}장면${meta.days === null ? "" : ` · 처음 만난 지 D+${meta.days}`}</p></div></header>`;
   const pins = chartPins(data, meta, names, numbers, options.copy);
   const pinLayout = flowPinLabels(pins, range, 240);
   const pinHtml = pins.map((pin, index) => `<span class="duet-pin" data-pin-scene="${pin.scene}" style="left:${r(pinLayout[index]!.left)}%"><i>${icon("heart")}</i><span class="duet-pin__label is-${pinLayout[index]!.anchor}"${pinLayout[index]!.showLabel ? "" : " hidden"}>${pin.label}</span></span>`).join("");
@@ -117,7 +115,7 @@ export function renderRelationshipFlow(data: DashboardData, directions: readonly
   const edges = `<span class="duet-edge is-top" style="top:${r(flowY(top, scale))}%">${esc(options.levelLabels[ladderTopLevel(axis)] ?? "")}</span><span class="duet-edge is-floor" style="top:${r(flowY(0, scale))}%">${esc(options.levelLabels.none ?? "")}</span>`;
   const rungs = Array.from({ length: top }, (_, index) => `M0,${r(flowY(index + 1, scale))} H100`).join(" ");
   const sync = axis === "affection" ? firstFlowSync(flows[0]!, flows[1]!, range) : undefined;
-  const syncHtml = sync ? `<span class="duet-sync" style="left:${r(xOf(sync.scene, range))}%;top:${r(flowY(sync.value, scale))}%"><i></i><small>${lex().skin === "phone" ? "같은 마음" : "IN SYNC"}</small></span>` : "";
+  const syncHtml = sync ? `<span class="duet-sync" style="left:${r(xOf(sync.scene, range))}%;top:${r(flowY(sync.value, scale))}%"><i></i><small>같은 마음</small></span>` : "";
   const axisTurning = changesOf(series, axis).filter(({ point }) => point.turning).sort((a, b) => b.point.scene - a.point.scene)[0];
   const turnHtml = axisTurning ? `<i class="duet-turn duet-person-${axisTurning.person}" style="left:${r(xOf(axisTurning.point.scene, range))}%;top:${r(flowY(axisTurning.point.value, scale))}%"></i>` : "";
   const cursor = `<div class="duet-cursor"${scene === undefined ? " hidden" : ""} style="left:${scene === undefined ? 0 : r(xOf(scene, range))}%"><b>S#${scene ?? ""}</b>${flows.map((flow, person) => `<i class="duet-cursor__dot duet-person-${person}" style="top:${scene === undefined ? 50 : r(flowY(flowValueAt(flow, scene, range[0]), scale))}%"></i>`).join("")}</div>`;
@@ -139,8 +137,9 @@ export function renderRelationshipFlow(data: DashboardData, directions: readonly
     const memory = (data.memories ?? []).find(item => item.id === point.memoryId);
     const dialogues = memory?.keyDialogues ?? [], index = dialogues.findIndex((line: any) => String(line.text ?? "").trim());
     const dialogue = index < 0 ? undefined : dialogues[index];
-    const place = memory?.locations?.[0] ?? "장소 미상";
-    const slug = lex().skin === "phone" ? `추억 · S#${point.scene} · ${esc(place)}` : `S#${point.scene}. ${esc(place)}${dayPart(memory?.story_time ?? null) ? ` — ${dayPart(memory.story_time) === "낮" ? "DAY" : "NIGHT"}` : ""}`;
+    const location = memoryLocationTranslationRecords(memory)[0];
+    const place = location ? options.copy(location.text, location.itemId) : "장소 미상";
+    const slug = `추억 · S#${point.scene} · ${place}`;
     return `<figure class="duet-memory"><figcaption>${slug}</figcaption><blockquote>${dialogue ? options.copy(String(dialogue.text), `${point.memoryId}:dialogue:${index}`) : reason(point, options.copy)}</blockquote><p>— ${esc(dialogue?.speaker ?? names[person])}${dialogue ? ` · ${reason(point, options.copy)}` : ""}</p>${btn("장면 열기 ›", { kind: "quiet", action: "open-timeline-memory", data: { memoryId: point.memoryId }, hit: true })}</figure>`;
   })() : "";
   return `<div class="duet" style="${style}">${header}<div class="duet-chips" role="group" aria-label="마음의 축" data-preserve-scroll="duet-chips:${esc(names.join("|"))}" data-drag-scroll>${chips}</div><div class="duet-layout"><div class="duet-primary"><section class="duet-panel">${legend}${chart}<div class="duet-readout" data-flow-readout aria-live="polite">${renderFlowReadout(data, names, axis, scene, options.copy)}</div></section>${quiet ? `<div class="duet-quiet">${quiet}</div>` : ""}</div><aside class="duet-aside">${memoryHtml}${recentHtml}</aside></div></div>`;

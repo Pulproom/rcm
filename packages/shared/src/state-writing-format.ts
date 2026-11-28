@@ -2,7 +2,7 @@ import { createEntityIdentityResolver, normalizeEntityName } from "./entity-iden
 import { STATE_PERSON_WRITING_FIELDS } from "./entity-person-fields.js";
 import { parseStructuredModelJson } from "./structured-json.js";
 import type { ReconciliationResult } from "./index.js";
-import type { SourceUnit } from "./source-references.js";
+import { splitAuxiliarySourceRefs, type SourceUnit } from "./source-references.js";
 
 export type StateWritingContext = {
   stateContract?: "r10" | "r11";
@@ -109,11 +109,18 @@ export function expandStateWritingFormat(raw: unknown, context?: StateWritingCon
       const matches = context?.priorLedger.filter(row => row.id === item.promiseId) ?? [];
       const row = matches.length === 1 && matches[0]!.kind === "promise_event" ? matches[0] : undefined;
       const value = row?.value;
+      const rewrite = context?.stateContract === "r11" && item.event === "reinforced" && item.content !== undefined;
+      const content = rewrite ? item.content : value?.content;
+      delete item.rewritesContent; // Derived only from authored R11 content on a bound reinforcement.
       // Even a mixed-shape input cannot supply its own replacement for an
       // unavailable/invalidated/closed ledger occurrence.
       for (const field of ["promiseKeyHint", "promisor", "promisee", "content"]) delete item[field];
       if (value && !promiseLifecycleReason(value.status, item.event)) {
-        Object.assign(item, { promiseKeyHint: value.promise_key, promisor: value.promisor, promisee: value.promisee, content: value.content });
+        Object.assign(item, { promiseKeyHint: value.promise_key, promisor: value.promisor, promisee: value.promisee, content });
+        if (rewrite) {
+          item.rewritesContent = true;
+          delete item.amendment;
+        }
         if (item.scope === undefined && ["future", "recurring"].includes(String(value.retention_scope))) item.scope = value.retention_scope;
         decision("reinforce", [item.promiseId]);
         delete item.promiseId;
@@ -227,31 +234,17 @@ export function expandStateWritingFormat(raw: unknown, context?: StateWritingCon
 
 /** Shared wire expansion for event and state outputs, before source resolution. */
 export function expandItemEvidenceWritingFormat(raw: unknown, sourceUnits?: SourceUnit[], diagnostic: (message: string) => void = message => console.warn(`[RCM] writing-format: ${message}`)): void {
-  const sources = new Map(sourceUnits?.map(unit => [unit.ref, unit]));
-  const expandRange = (ref: string): string[] => {
-    const range = /^s(\d+)-s(\d+)$/.exec(ref);
-    if (!range || !sourceUnits) return [ref];
-    const start = Number(range[1]), end = Number(range[2]);
-    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || end - start + 1 > sourceUnits.length) return [ref];
-    const selected: SourceUnit[] = [];
-    for (let index = start; index <= end; index++) {
-      const unit = sources.get(`s${index}`), previous = selected.at(-1);
-      // Do not turn a missing/cross-message/cross-revision range into valid
-      // standalone refs. Leave it for the unchanged selector to reject.
-      if (!unit || previous && (unit.messageId !== previous.messageId || unit.canonicalHash !== previous.canonicalHash || unit.start <= previous.start)) return [ref];
-      selected.push(unit);
-    }
-    return selected.map(unit => unit.ref);
-  };
+  const sourceOrder = new Map(sourceUnits?.map((unit, index) => [unit.ref, index]));
   const walk = (value: unknown): void => {
     if (Array.isArray(value)) { value.forEach(walk); return; }
     if (!record(value)) return;
     if (typeof value.evidence === "string") value.evidence = [value.evidence];
     if (Array.isArray(value.evidence)) {
-      const refs = [...new Set(value.evidence.filter((item): item is string => typeof item === "string").flatMap(expandRange))];
+      const refs = [...new Set(splitAuxiliarySourceRefs(value.evidence, sourceUnits).filter((item): item is string => typeof item === "string"))];
       // Gathered strings are a citation set. The existing selector needs them
       // in source order; preserve invalid spellings for its normal rejection.
       refs.sort((left, right) => {
+        if (sourceUnits) return (sourceOrder.get(left) ?? Infinity) - (sourceOrder.get(right) ?? Infinity);
         const a = /^s(\d+)(?:-s\d+)?$/.exec(left), b = /^s(\d+)(?:-s\d+)?$/.exec(right);
         if (!a) return b ? 1 : 0;
         if (!b) return -1;

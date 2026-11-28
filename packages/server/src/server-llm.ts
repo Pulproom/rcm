@@ -12,7 +12,7 @@ import { auxiliaryInputBudgetMessage, withAuxiliaryStoryFraming, describeModelRe
 import { sanitizeDiagnosticText, auxiliaryUsageMetadata, assertProviderOutputAllowed } from "@rcm/shared";
 import { defaultAuxiliaryModelConfig, SERVER_LLM_DEFAULT_ENDPOINTS } from "@rcm/shared";
 import { parseReconciliationResult } from "@rcm/shared";
-import { prepareAuxiliaryText, rescueDialogueEvidence, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
+import { prepareAuxiliaryText, rescueDialogueEvidence, auditSourceUnitsForJob, resolveAuditSourceReferences, resolveDirectDialogueEvidence, resolveModelSourceReferences, inspectSourceReferences, sourceRepairMessages, applySourceRepairs } from "@rcm/shared";
 import { validateGroupingResult, validateSourceRecoveryPatch, type MemoryGroupingResult } from "@rcm/shared";
 import { createHash, randomUUID, sign } from "node:crypto";
 import { Agent } from 'undici';
@@ -66,15 +66,37 @@ import { normalizeAndValidateSetupEvidence } from "./initial-calibration.js";
 import { recordJobStateRecovery, recordJobLlmCall, repairBudgetSpent, stateRepairBudgetSpent, settleJobLlmCall, stageJobModelOutput } from "./jobs.js";
 import { cachedAuxiliaryPage, storeValidatedAuxiliaryPage, type CachedAuxiliaryPurpose } from "./auxiliary-page-cache.js";
 
+import {sourcePdfUnavailable, type SourceTransport} from '@rcm/shared';
+import {buildSourcePdf} from './source-pdf.js';
+import {canonicalLanguageNames} from './event-prompt.js';
+export interface ExtractionSourcePdf {
+  sourceText: string;
+  part: {inlineData:{mimeType:'application/pdf';data:string}};
+  languageLine: string;
+  metadata: SourceTransport;
+}
+export function extractionSourcePdf(job: Pick<LeasedJob,'userPrompt'|'memoryLanguage'>, config: StoredServerLlmConfig): ExtractionSourcePdf | undefined {
+  if (!config.sourcePdf?.enabled || sourcePdfUnavailable(config) || !job.userPrompt) return;
+  try {
+    // Product-owned extraction envelope: header, then one JSON line; additive/continuation text follows.
+    const payload=JSON.parse(job.userPrompt.split('\n')[1] ?? 'null');
+    if (!Array.isArray(payload?.messages) || !payload.messages.length) return;
+    const sourceText=JSON.stringify(payload.messages);
+    const pdf=buildSourcePdf(sourceText, config.sourcePdf.fontPt);
+    return {sourceText,part:{inlineData:{mimeType:'application/pdf',data:pdf.bytes.toString('base64')}},
+      languageLine:`The attached PDF is the full \`messages\` array of this request, laid out as plain text; the \`messages\` field above is left empty only because its content is in the PDF. Long lines wrap at the page edge: a wrapped line continues the same string, so never treat a wrap as a line break in the source. Its language says nothing about the output: whatever language the source is written in, write every prose field in ${canonicalLanguageNames[job.memoryLanguage]}, exactly as the instructions require.`,
+      metadata:{kind:'pdf',pages:pdf.pages,fontPt:pdf.fontPt}};
+  } catch { console.warn('[RCM] SOURCE_PDF_BUILD_FAILED: using original text'); }
+}
 const CONFIG_KEY = "server_llm_config";
 const providers: ServerLlmProvider[] = ["gemini_api", "vertex", "llm_gateway", "openai_compatible", "vercel", "ollama_cloud", "copilot"];
 const secretName = (provider: ServerLlmProvider) => `RCM_LLM_API_KEY_${provider.toUpperCase()}` as const;
 type StoredServerLlmConfig = Omit<ServerLlmPublicConfig, "keyConfigured" | "configuredProviders">;
 
-function extractionCheckpointKey(job: LeasedJob, config: StoredServerLlmConfig): string {
+function extractionCheckpointKey(job: LeasedJob, config: StoredServerLlmConfig, transport?: SourceTransport): string {
   const { provider, endpoint, model, temperature, thinking, serviceTier, relaxAuxiliaryCensorship } = config;
   return createHash("sha256").update(JSON.stringify({
-    modelSettings: { provider, endpoint, model, temperature, thinking, serviceTier, relaxAuxiliaryCensorship },
+    modelSettings: { provider, endpoint, model, temperature, thinking, serviceTier, relaxAuxiliaryCensorship, ...(transport?.kind === 'pdf' ? {sourcePdf:{enabled:true,fontPt:transport.fontPt}} : {}) },
     promptContract: job.promptContract,
     profile: job.profile,
     memoryLanguage: job.memoryLanguage,
@@ -88,6 +110,7 @@ function extractionCheckpointKey(job: LeasedJob, config: StoredServerLlmConfig):
 
 const defaults: StoredServerLlmConfig = {
   engine: "risu",
+  sourcePdf: {enabled:false,fontPt:6},
   relaxAuxiliaryCensorship: false,
   ...defaultAuxiliaryModelConfig,
   serviceTier: "standard",
@@ -221,7 +244,7 @@ export class ServerLlmStore {
     return this.#jobApiKeys.get(jobId) ?? this.apiKeyFor(provider);
   }
   backupApiKeys(): Partial<Record<ServerLlmProvider,string>> { return {...this.#apiKeys}; }
-  recordCall(jobId: string, purpose: ServerLlmPurpose, identity = this.config, repairReason?:string): void { recordJobLlmCall(this.db, jobId, purpose, undefined, { site: 'server', provider: identity.provider, model: identity.model },repairReason??(purpose.endsWith('_repair')?purpose==='state_field_repair'?'fields':'format':undefined)); }
+  recordCall(jobId: string, purpose: ServerLlmPurpose, identity = this.config, repairReason?:string, transport:SourceTransport={kind:'text'}, transportRetry=false): void { recordJobLlmCall(this.db, jobId, purpose, undefined, { site: 'server', provider: identity.provider, model: identity.model, transport },repairReason??(purpose.endsWith('_repair')?purpose==='state_field_repair'?'fields':'format':undefined),transportRetry); }
   setTimingObserver(observer: (event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }) => void): void { this.#timingObserver = observer; }
   recordTiming(event: { id: string; jobId: string; purpose: ServerLlmPurpose; startedAt: number; elapsedMs?: number; outcome: "running" | "succeeded" | "failed" }): void { this.#timingObserver?.(event); }
   canRepair(jobId: string, purpose: "general" | "state_response" = "general"): boolean {
@@ -237,6 +260,12 @@ export class ServerLlmStore {
     const report = JSON.parse(row?.payload_json ?? '{}').stateRecovery ?? {localFixes:[],fieldRepairCalls:0,correctedFields:0,drops:[],wholeRepair:false,regenerated:false};
     report.canonicalLanguage = [...(report.canonicalLanguage ?? []), diagnostic];
     this.db.prepare("UPDATE jobs SET payload_json=json_set(payload_json,'$.stateRecovery',json(?)) WHERE id=? AND status='leased'").run(JSON.stringify(report),jobId);
+  }
+  canonicalRegisteredNames(jobId: string): string[] {
+    const rows = this.db.prepare(`SELECT e.name, e.display_name, a.alias FROM jobs j
+      JOIN entities e ON e.chat_id=j.chat_id LEFT JOIN aliases a ON a.entity_id=e.id WHERE j.id=?`)
+      .all(jobId) as Array<{ name: string; display_name: string; alias: string | null }>;
+    return [...new Set(rows.flatMap(row => [row.name, row.display_name, ...(row.alias ? [row.alias] : [])]).filter(Boolean))];
   }
   normalizeShape(jobId:string,value:unknown,purpose:string):unknown {
     // State wire adaptation runs in normalizeStateEnvelope, before expansion.
@@ -263,17 +292,19 @@ export class ServerLlmStore {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=?").get(job.id) as { payload_json: string } | undefined;
     if (!row) return undefined;
     const checkpoint = (JSON.parse(row.payload_json || "{}") as Record<string, any>).validatedExtractionCheckpoint;
-    if (!checkpoint || checkpoint.inputHash !== extractionCheckpointKey(job, this.config)) return undefined;
+    const transport=checkpoint?.sourceTransport?.kind==='pdf' && this.config.sourcePdf?.enabled && !sourcePdfUnavailable(this.config)
+      ? {kind:'pdf' as const,fontPt:this.config.sourcePdf.fontPt} : undefined;
+    if (!checkpoint || checkpoint.inputHash !== extractionCheckpointKey(job, this.config, transport)) return undefined;
     const parsed = extractionDraftSchema(job.promptContract).safeParse(checkpoint.result);
     if (!parsed.success || parsed.data.language !== job.memoryLanguage) return undefined;
     try { return validateMemoryAdditionRequestOutcome(parsed.data, job.memoryAddition?.userRequest); }
     catch { return undefined; }
   }
-  cacheExtraction(job: LeasedJob, result: ExtractionDraftResult): ExtractionDraftResult {
+  cacheExtraction(job: LeasedJob, result: ExtractionDraftResult, transport:SourceTransport={kind:'text'}): ExtractionDraftResult {
     const row = this.db.prepare("SELECT payload_json FROM jobs WHERE id=? AND status='leased' AND lease_owner IS NOT NULL").get(job.id) as { payload_json: string } | undefined;
     if (!row) return result;
     const payload = JSON.parse(row.payload_json || "{}") as Record<string, any>;
-    payload.validatedExtractionCheckpoint = { inputHash: extractionCheckpointKey(job, this.config), result, validatedAt: Date.now() };
+    payload.validatedExtractionCheckpoint = { inputHash: extractionCheckpointKey(job, this.config, transport), sourceTransport:transport, result, validatedAt: Date.now() };
     this.db.prepare("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=? AND status='leased' AND lease_owner IS NOT NULL")
       .run(JSON.stringify(payload), Date.now(), job.id);
     return result;
@@ -475,7 +506,17 @@ function geminiApiUrl(endpoint: string, model: string): string {
   return `${endpoint.replace(/\/$/, "")}/models/${encodeURIComponent(model)}:generateContent`;
 }
 
+/** Classifies provider protocol rejection only; never generated prose or JSON validation. */
+function documentInputRejected(status:number, message:string):boolean {
+  if (status<400 || status>=500 || [401,403,404,407,429].includes(status)) return false;
+  message=message.replace(/[_-]+/g,' '); // Provider status identifiers use both words and SNAKE_CASE.
+  if (/\b(?:quota|rate\s*limit(?:ed|s)?|resource\s*exhausted|auth|unauthenticated|unauthorized|forbidden|permission\s*denied|credentials?|api\s*key|authentication|authorization)\b/i.test(message)) return false;
+  const document=/\b(?:pdf|documents?|files?|mime(?:[\s_-]*types?)?|inline[\s_-]*data)\b/i.test(message);
+  const rejected=/\b(?:unsupported|not\s+supported|does\s+not\s+support|cannot\s+(?:read|process|accept)|invalid|malformed|corrupt(?:ed)?|too\s+(?:large|big)|exceeds?|not\s+allowed|only\s+supports?|not\s+accepted|rejected)\b/i.test(message);
+  return document && rejected || /\bunsupported\s+input(?:\s+type)?\b|\binput\s+type\b.*\bnot\s+supported\b/i.test(message);
+}
 export class ProviderRequestError extends Error {
+  documentRejected = false;
   providerMessage?: string;
   code?: string;
   retryAfterMs?:number;
@@ -539,6 +580,8 @@ async function fetchJson(url: string, init: RequestInit, signal: AbortSignal, ti
         if(Number.isFinite(delay)) error.retryAfterMs=Math.max(0,delay);
       }
       try { const parsed = JSON.parse(body); error.providerMessage = typeof parsed?.error?.message === "string" ? parsed.error.message : typeof parsed?.message === "string" ? parsed.message : undefined; } catch { /* Unstructured response bodies are not diagnostic messages. */ }
+      // Retain only a protocol classification; raw provider errors may contain source material.
+      error.documentRejected = documentInputRejected(response.status,error.providerMessage ?? '');
       error.code = settingsFailureCode({ kind: error.kind, status: error.status, providerMessage: error.providerMessage });
       error.message = `${error.code ?? "PROVIDER_HTTP_ERROR"}: ${settingsFailureMessage(error)} · HTTP ${response.status}`;
       error.providerMessage = undefined;
@@ -649,6 +692,8 @@ async function callProvider(
   purpose: ServerLlmPurpose,
   onNormalStop?: (normalStop: boolean) => void,
   repairReason?:string,
+  sourcePdf?: ExtractionSourcePdf,
+  onTransportUsed?: (transport:SourceTransport)=>void,
 ): Promise<string> {
   // Recovery settings are current per call; the job snapshot is history only.
   const config = ServerLlmConfigSchema.omit({ apiKey: true }).parse(store.config);
@@ -682,7 +727,10 @@ async function callProvider(
     }
     const promptChars = messages.reduce((sum, message) => sum + message.content.length, 0);
     console.log(`[RCM] Server LLM request start provider=${config.provider} model=${sanitizeDiagnosticText(config.model, [apiKey], 160)} purpose=${purpose} promptChars=${promptChars} jsonBudget=${limit} maxTokens=${limit}`);
-    const result = await requestStructuredProvider(store, config, apiKey, messages, signal, limit, () => { store.recordCall(jobId, purpose, config,repairReason); dispatched = true; }, purpose === "quiz" ? "text" : "json");
+    const result = await requestStructuredProvider(store, config, apiKey, messages, signal, limit, (transport, retry) => { onTransportUsed?.(transport ?? {kind:'text'}); store.recordCall(jobId, purpose, config,repairReason,transport,retry); dispatched = true; }, purpose === "quiz" ? "text" : "json", true, {
+      sourcePdf: config.sourcePdf?.enabled && !sourcePdfUnavailable(config) ? sourcePdf : undefined,
+      onDocumentRejected: () => {store.settleCall(jobId,purpose,'failed',{error:{code:'SOURCE_PDF_REJECTED'}});},
+    });
     metadata = result;
     usage = auxiliaryUsageMetadata(result.usage);
     const staged = onNormalStop ? sanitizeStateResponseForStaging(result.content) : result.content;
@@ -734,9 +782,10 @@ export async function requestStructuredProvider(
   messages: Array<{role:"system"|"user"|"assistant";content:string}>,
   signal: AbortSignal,
   limit: number,
-  onRequest: () => void = () => {},
+  onRequest: (transport?: SourceTransport, retry?:boolean) => void = () => {},
   outputFormat: "json" | "text" = "json",
   storyContent = true,
+  sourceOptions: {sourcePdf?:ExtractionSourcePdf;onDocumentRejected?:()=>void} = {},
 ): Promise<{content:string;finishReason?:unknown;refusal?:boolean;usage?:any}> {
     if (storyContent) messages = withAuxiliaryStoryFraming(messages, store.config?.relaxAuxiliaryCensorship === true);
     const deadline = Date.now() + config.llmTimeoutMs;
@@ -754,9 +803,13 @@ export async function requestStructuredProvider(
     }
     if (config.provider === "gemini_api" || config.provider === "vertex") {
       const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
+      const pdf=sourceOptions.sourcePdf;
+      const usePdf=!!pdf && !sourcePdfUnavailable({engine:'server',...config}) && messages.some(m=>m.role==='user'&&m.content.includes(pdf.sourceText));
       const contents = messages.filter((message) => message.role !== "system").map((message) => ({
         role: message.role === "assistant" ? "model" : "user",
-        parts: [{ text: message.content }],
+        parts: usePdf && message.role==='user' && message.content.includes(pdf!.sourceText)
+          ? [pdf!.part,{text:pdf!.languageLine},{text:message.content.replace(pdf!.sourceText,'[]')}]
+          : [{ text: message.content }],
       }));
       const vertex = config.provider === "vertex" ? await store.vertexCredential(signal, apiKey, Math.max(1, deadline - Date.now())) : undefined;
       const timeoutMs = Math.max(1, deadline - Date.now());
@@ -782,8 +835,19 @@ export async function requestStructuredProvider(
           },
         }),
       };
-      onRequest();
-      const result = await fetchJson(url, request, signal, timeoutMs);
+      onRequest(usePdf ? {...pdf!.metadata, estimatedTextInputTokens:estimateTokens(messages.map(message => message.content).join('\n\n'))} : {kind:'text'});
+      let result;
+      try { result = await fetchJson(url, request, signal, timeoutMs); }
+      catch(error) {
+        // Match provider protocol errors only, never the model's generated JSON.
+        if(!usePdf || !(error instanceof ProviderRequestError) || !error.documentRejected) throw error;
+        sourceOptions.onDocumentRejected?.();
+        console.warn('[RCM] SOURCE_PDF_REJECTED: retrying once with original text');
+        const body=JSON.parse(String(request.body));
+        body.contents=messages.filter(m=>m.role!=='system').map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]}));
+        onRequest({kind:'text'},true);
+        result=await fetchJson(url,{...request,body:JSON.stringify(body)},signal,Math.max(1,deadline-Date.now()));
+      }
       const content = (result.candidates?.[0]?.content?.parts ?? []).map((part: any) => typeof part?.text === "string" ? part.text : "").join("");
       return { content, finishReason: result.promptFeedback?.blockReason ?? result.candidates?.[0]?.finishReason, usage: result.usageMetadata };
     }
@@ -834,10 +898,24 @@ async function repairCanonicalProse<T>(args: {
   repair: (messages: Array<{role:'system'|'user'|'assistant';content:string}>) => Promise<string>;
   validate: (output: string) => T; signal: AbortSignal; onRepair?: () => void;
 }): Promise<T> {
+  if (args.language !== 'en') return args.value;
+  const registeredNames = args.store.canonicalRegisteredNames(args.jobId);
+  // Read identity fields only from the owned extraction/audit/state envelopes.
+  const authoredNames = (value: unknown): string[] => {
+    if (!value || typeof value !== 'object') return [];
+    const root = value as Record<string, any>;
+    return [root.entities, root.additions?.entities, root.patch?.additions?.entities, root.state?.entities]
+      .flatMap(entities => Array.isArray(entities) ? entities : [])
+      .flatMap(entity => [entity?.name, ...(Array.isArray(entity?.aliases) ? entity.aliases : [])])
+      .filter((name): name is string => typeof name === 'string' && !!name);
+  };
   const inspect = (value: T, output: string) => {
-    const fields = new Map(inspectCanonicalProse(value,args.language,args.stage).map(issue=>[issue.path,issue]));
+    let authored: unknown;
+    try { authored = parseStructuredModelJson(output).value; } catch { /* Existing parser already validated the normalized result. */ }
+    const options = { names: [...registeredNames, ...authoredNames(value), ...authoredNames(authored)] };
+    const fields = new Map(inspectCanonicalProse(value,args.language,args.stage,options).map(issue=>[issue.path,issue]));
     // Inspect authored slots too: moment text and working notes are consumed by adapters.
-    try { for(const issue of inspectCanonicalProse(parseStructuredModelJson(output).value,args.language,args.stage)) fields.set(issue.path,issue); } catch { /* Existing parser already validated the normalized result. */ }
+    for(const issue of inspectCanonicalProse(authored,args.language,args.stage,options)) fields.set(issue.path,issue);
     return [...fields.values()];
   };
   const initial = inspect(args.value,args.output);
@@ -888,7 +966,11 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
   const sourceMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = job.systemPrompt && job.userPrompt
     ? [{ role: "system", content: job.systemPrompt }, { role: "user", content: job.userPrompt }]
     : [{ role: "user", content: job.prompt }];
-  const first = await callProvider(store, job.id, sourceMessages, signal, "extraction");
+  const pdf=extractionSourcePdf(job,store.config);
+  let actualTransport:SourceTransport={kind:'text'};
+  const call=(messages: Parameters<typeof callProvider>[2], purpose:ServerLlmPurpose, reason?:string)=>callProvider(store,job.id,messages,signal,purpose,undefined,reason,pdf,
+    transport=>{if(pdf && messages.some(m=>m.role==='user'&&m.content.includes(pdf.sourceText)))actualTransport=transport;});
+  const first = await call(sourceMessages, "extraction");
   store.stageOutput(job.id, first);
   const expand = (raw: unknown) => (job.promptContract === 'e1d' || job.promptContract === 'e1e' || job.promptContract === 'e1f') ? expandEventWritingFormat(raw, undefined, undefined, job.sourceUnits, job.promptContract) : raw;
   const validate = (output: string, purpose: "extraction" | "extraction_repair"): ExtractionDraftResult => {
@@ -904,7 +986,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     repaired,
     purpose: "extraction",
     regenerate: async () => {
-      const regenerated = await callProvider(store, job.id, sourceMessages, signal, "extraction");
+      const regenerated = await call(sourceMessages, "extraction");
       store.stageOutput(job.id, regenerated);
       return regenerated;
     },
@@ -913,7 +995,7 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
   const finish = async (value: ExtractionDraftResult, output: string) => store.cacheExtraction(job, job.promptContract === 'e1f'
     ? await repairCanonicalProse({store,jobId:job.id,stage:'extraction',language:job.memoryLanguage,value,output,messages:sourceMessages,
       request:{kind:'extraction',sourceMode:job.sourceUnits?'source_units':'message_ids',promptContract:job.promptContract},
-      repair:messages=>callProvider(store,job.id,messages,signal,'extraction_repair',undefined,'language'),validate:output=>validate(output,'extraction_repair'),signal,onRepair}) : value);
+      repair:messages=>call(messages,'extraction_repair','language'),validate:output=>validate(output,'extraction_repair'),signal,onRepair}) : value, actualTransport);
   let raw: unknown;
   let resolved: unknown;
   try {
@@ -929,11 +1011,11 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
     console.warn(`[RCM] Server LLM validation repair purpose=extraction issue=${validationSummary(firstError)}${rawWindow === undefined ? "" : ` rawWindow=${JSON.stringify(rawWindow)}`}`);
     const fieldRepair = job.sourceUnits ? planExtractionFieldRepair(raw, resolved, firstError, job.sourceUnits) : undefined;
     if (fieldRepair) {
-      const response = await callRepairProvider(() => callProvider(store, job.id, fieldRepair.messages, signal, "extraction_repair",undefined,"fields"));
+      const response = await callRepairProvider(() => call(fieldRepair.messages, "extraction_repair","fields"));
       if (isUnchangedStructuredRepair(first, response)) return finish(await validateRepair(response), response);
       const result = await validateStructuredRepairOrRegenerate({
         original: first, repaired: response, purpose: "extraction",
-        regenerate: () => callProvider(store, job.id, sourceMessages, signal, "extraction"),
+        regenerate: () => call(sourceMessages, "extraction"),
         validate: (output, phase) => {
           if (phase === "regeneration") return validate(output, "extraction");
           const patch = parseServerJson(store, job.id, output, "extraction_repair");
@@ -942,13 +1024,13 @@ export async function extractWithServerLlm(store: ServerLlmStore, job: LeasedJob
       });
       return finish(result, response);
     }
-    const repaired = await callRepairProvider(() => callProvider(store, job.id, buildAuxiliaryRepairMessages({
+    const repaired = await callRepairProvider(() => call(buildAuxiliaryRepairMessages({
       originalMessages: sourceMessages,
       invalidOutput: first,
       validationError: firstError,
       request: { kind: "extraction", sourceMode: job.sourceUnits ? "source_units" : "message_ids", promptContract: job.promptContract },
       inputBudget: { maxInputTokens: store.config.maxInputTokens, estimate: estimateTokens, relaxed: store.config.relaxAuxiliaryCensorship },
-    }), signal, "extraction_repair"));
+    }), "extraction_repair"));
     store.stageOutput(job.id, repaired);
     return finish(await validateRepair(repaired), repaired);
   }
@@ -1016,8 +1098,9 @@ export async function auditExtractionWithServerLlm(store: ServerLlmStore, job: L
     sourceRecoveryContext: job.sourceRecoveryContext,
   });
   const first = await callProvider(store, job.id, messages, signal, "audit");
+  const units = auditSourceUnitsForJob(job);
   const validatePatch = (value: unknown): ExtractionAuditSubmission => {
-    const resolved = resolveDirectDialogueEvidence(value, job.sourceUnits ?? [], Boolean(job.sourceRecovery));
+    const resolved = resolveDirectDialogueEvidence(resolveAuditSourceReferences(value, units), job.sourceUnits ?? [], Boolean(job.sourceRecovery));
     // Recovery is a restricted correction protocol, not a general additive audit.
     const submission = job.sourceRecovery
       ? { patch: validateSourceRecoveryPatch(ExtractionAuditPatchSchema.parse(resolved), draft) }

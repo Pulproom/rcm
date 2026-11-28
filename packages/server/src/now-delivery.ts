@@ -16,11 +16,6 @@ export function nowAlwaysInjectCount(db: RcmDatabase, chatId: string): number {
     .pluck().get(chatId, chatId, chatId));
 }
 
-/** Called inside the caller's write transaction, before changing any canonical row. */
-export function assertNowDeliveryCapacity(db: RcmDatabase, chatId: string): void {
-  if (nowAlwaysInjectCount(db, chatId) >= 5) throw Object.assign(new Error('항상 전달은 5개까지예요'), { code: 'NOW_ALWAYS_INJECT_LIMIT' });
-}
-
 /** Only explicit same-identity successors inherit the preference; endings do not. */
 export function inheritNowDelivery(db: RcmDatabase, table: 'assertions' | 'beliefs', id: string, predecessors: readonly { always_inject?: number }[]): void {
   if (predecessors.some(row => row.always_inject === 1)) db.prepare(`UPDATE ${table} SET always_inject=1 WHERE id=?`).run(id);

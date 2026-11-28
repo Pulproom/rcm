@@ -39,11 +39,12 @@ export interface CanonicalTranslationPreview {
   language: keyof typeof CANONICAL_LANGUAGE_NAMES; memories: number; details: number; states: number; items: number; calls: number;
 }
 export const CanonicalTranslationResultSchema = z.object({ items: z.array(z.object({ id: z.string().min(1), text: z.string() })) });
+const CANONICAL_QUOTED_SPANS = /“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|«[^»]*»|"[^"]*"|(?<![\p{L}\p{N}])'[^'\n]+'(?![\p{L}\p{N}])/gu;
 
 /** Product-owned exact-string preservation, never a judgement about meaning. */
 export function canonicalTranslationIssue(original: string, translated: string, registeredNames: readonly string[] = []) {
   if (!translated.trim()) return 'blank' as const;
-  const quotes=original.match(/“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|«[^»]*»|"[^"]*"|(?<![\p{L}\p{N}])'[^'\n]+'(?![\p{L}\p{N}])/gu) ?? [];
+  const quotes=original.match(CANONICAL_QUOTED_SPANS) ?? [];
   if (quotes.some(quote=>!translated.includes(quote))) return 'quoted_text_changed' as const;
   if (registeredNames.some(name=>name && original.includes(name) && !translated.includes(name))) return 'registered_name_changed' as const;
   return undefined;
@@ -98,8 +99,17 @@ export function canonicalForeignScriptCount(text: string): number {
   return [...text.matchAll(/[\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/gu)].length;
 }
 
-export function memoryHasCanonicalScriptIssue(memory: unknown, language: string): boolean {
-  return inspectCanonicalProse({ memories: [memory] }, language, 'extraction').length > 0;
+/** Exclude exact registered names and owned punctuation shapes, never infer meaning.
+ * Names are matched longest first; parentheses are non-nested and single-line. */
+export function maskCanonicalProseSpans(text: string, names: readonly string[] = []): string {
+  const registered = [...new Set(names)].filter(Boolean).sort((a, b) => b.length - a.length)
+    .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = [...registered, CANONICAL_QUOTED_SPANS.source, /\([^()（）\r\n]*\)|（[^()（）\r\n]*）/.source].join('|');
+  return text.replace(new RegExp(pattern, 'gu'), ' ');
+}
+
+export function memoryHasCanonicalScriptIssue(memory: unknown, language: string, options?: { names?: readonly string[] }): boolean {
+  return inspectCanonicalProse({ memories: [memory] }, language, 'extraction', options).length > 0;
 }
 export const CanonicalScriptIssueSchema = z.object({ path: z.string(), count: z.number().int().positive() });
 export type CanonicalScriptIssue = z.infer<typeof CanonicalScriptIssueSchema>;
@@ -112,10 +122,10 @@ export type CanonicalLanguageDiagnostic = z.infer<typeof CanonicalLanguageDiagno
 
 /** Script membership in owned fields only; never a natural-language meaning test.
  * Counts Unicode code points, including supplementary Han ideographs. */
-export function inspectCanonicalProse(value: unknown, language: string, stage: CanonicalProseStage): CanonicalScriptIssue[] {
+export function inspectCanonicalProse(value: unknown, language: string, stage: CanonicalProseStage, options?: { names?: readonly string[] }): CanonicalScriptIssue[] {
   if (language !== 'en') return [];
   return canonicalProseEntries(value, stage).flatMap(({ path, text }) => {
-    const count = canonicalForeignScriptCount(text);
+    const count = canonicalForeignScriptCount(maskCanonicalProseSpans(text, options?.names));
     return count ? [{ path, count }] : [];
   });
 }

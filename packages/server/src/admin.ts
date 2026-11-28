@@ -1,5 +1,6 @@
 import { jobLastServedKey } from "./jobs.js";
 import { countBlockingExtractionAudits } from "./evidence-review.js";
+import { listDashboardConflicts } from "./conflicts.js";
 import { countPendingSmallReviews } from "./small-review.js";
 import { markSourceDeleted } from "./albums.js";
 import { assertUserChat, userChatSql } from './chat-work.js';
@@ -88,7 +89,6 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       (SELECT count(*) FROM beliefs b WHERE b.chat_id=c.id) AS beliefs,
       (SELECT count(*) FROM promises p WHERE p.chat_id=c.id) AS promises,
       (SELECT count(*) FROM reconciliation_items r WHERE r.chat_id=c.id AND r.status='pending') AS pending_reviews,
-      (SELECT count(*) FROM conflicts x WHERE x.chat_id=c.id AND x.status='pending' AND x.kind<>'static_projection_changed') AS pending_conflicts,
       (SELECT count(*) FROM embedding_items e WHERE e.chat_id=c.id) AS embeddings,
       (SELECT count(*) FROM jobs j WHERE j.chat_id=c.id) AS jobs,
       (SELECT count(*) FROM server_meta s WHERE s.key='retrieval_trace_chat:' || c.id AND s.value='1') AS retrieval_diagnostics_enabled,
@@ -102,7 +102,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
   `).all() as Array<{
     upgrade_locked: number;
     engaged_at: number | null; last_seen_at: number; id: string; chat_title: string | null; character_id: string; profile: string; memory_language: "en" | "ko" | "ja" | "zh"; pending_memory_language: "en" | "ko" | "ja" | "zh" | null; static_json: string | null; ingestion_state: "historical_pending" | "managed" | "cleared"; updated_at: number;
-    messages: number; active_messages: number; has_imported_memory: number; committed_messages: number; client_pruned_messages: number; disabled_messages: number; memories: number; relationships: number; assertions: number; beliefs: number; promises: number; pending_reviews: number; pending_conflicts: number; embeddings: number; jobs: number; retrieval_diagnostics_enabled: number; reprocessable_messages: number; buffered_messages: number; waiting_for_assistant: number; recoverable_messages: number; approximate_bytes: number;
+    messages: number; active_messages: number; has_imported_memory: number; committed_messages: number; client_pruned_messages: number; disabled_messages: number; memories: number; relationships: number; assertions: number; beliefs: number; promises: number; pending_reviews: number; embeddings: number; jobs: number; retrieval_diagnostics_enabled: number; reprocessable_messages: number; buffered_messages: number; waiting_for_assistant: number; recoverable_messages: number; approximate_bytes: number;
     lineage_status: string | null; lineage_kind: string | null; parent_chat_id: string | null; parent_title: string | null; fork_ordinal: number | null;
   }>;
   return rows.map((row) => {
@@ -135,7 +135,7 @@ export function listAdminChats(db: RcmDatabase, includeRetrievalDiagnostics = fa
       beliefs: row.beliefs,
       promises: row.promises,
       pendingReviews: row.pending_reviews + countBlockingExtractionAudits(db, row.id) + countPendingSmallReviews(db, row.id),
-      pendingConflicts: row.pending_conflicts,
+      pendingConflicts: listDashboardConflicts(db,row.id).filter(item => item.status === 'pending').length,
       embeddings: row.embeddings,
       jobs: row.jobs,
       reprocessableMessages: row.reprocessable_messages,

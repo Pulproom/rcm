@@ -17,8 +17,16 @@ export interface TranslationCacheRecord {
   translated: string;
 }
 
-/** Item IDs used by the readers embed a story group or a landmark's memory ID and ordinal. */
+/** Reader keys embed stored memory/detail IDs, location/landmark indexes or story groups. */
 export function remapReaderTranslationId(kind: string, itemId: string, ids: Map<string,string>, stories: Map<string,string>): string | undefined {
+  if (kind === "memory-location") {
+    const match = /^(.+):location:(\d+)$/.exec(itemId);
+    if (!match) return undefined;
+    const detail = /^(.+):detail:(.+)$/.exec(match[1]!);
+    const memory = ids.get(detail ? detail[1]! : match[1]!);
+    const detailId = detail && ids.get(detail[2]!);
+    return memory && (!detail || detailId) ? `${memory}${detail ? `:detail:${detailId}` : ""}:location:${match[2]}` : undefined;
+  }
   if (kind === "landmark-label") {
     const match = /^landmark:(.+)#(\d+):label$/.exec(itemId);
     const id = match && ids.get(match[1]!);

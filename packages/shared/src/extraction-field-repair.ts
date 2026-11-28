@@ -1,6 +1,6 @@
 import { ROLEPLAY_ARCHIVE_FRAMING } from "./social-memory-guidance.js";
 import { ACCESS_BASIS_GUIDANCE } from "./state-classification.js";
-import type { SourceUnit } from "./source-references.js";
+import { splitAuxiliarySourceRefs, type SourceUnit } from "./source-references.js";
 
 type Path = Array<string | number>;
 interface FieldCorrection { id: string; path: Path; allowed: Array<string | number | boolean | null>; }
@@ -25,14 +25,9 @@ export function planExtractionFieldRepair(raw: unknown, resolved: unknown, error
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
       if (key === "sourceRef" || key === "evidenceSourceRefs") {
-        for (const selector of Array.isArray(child) ? child : [child]) {
+        for (const selector of splitAuxiliarySourceRefs(child, units)) {
           if (typeof selector !== "string") continue;
-          const range = /^s([1-9]\d*)-s([1-9]\d*)$/.exec(selector);
-          if (range) for (const unit of units) {
-            const n = Number(unit.ref.slice(1));
-            if (n >= Number(range[1]) && n <= Number(range[2])) target.add(unit.ref);
-          }
-          else target.add(selector);
+          target.add(selector);
         }
       } else collectRefs(child, target);
     }

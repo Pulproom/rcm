@@ -2,23 +2,15 @@ import { escapeHtml } from "./film/ui.js";
 import type { StoryHoliday } from "./holidays.js";
 import type { BirthdayPerson } from "./birthdays.js";
 
-export function birthdayMark(people: readonly BirthdayPerson[], skin: "phone" | "film", namesOnly = false): string {
+export function birthdayMark(people: readonly BirthdayPerson[], namesOnly = false): string {
   if (!people.length) return "";
   const names = people.map(person => person.name).join(" · ");
-  return skin === "phone"
-    ? `<span class="holiday-pill" data-holiday="birthday"><span aria-hidden="true">🎂</span>${escapeHtml(names)}${namesOnly ? "" : " 생일"}</span>`
-    : `<span class="holiday-credit credit" data-holiday="birthday">— BIRTHDAY · ${escapeHtml(names.toLocaleUpperCase())}</span>`;
+  return `<span class="holiday-pill" data-holiday="birthday"><span aria-hidden="true">🎂</span>${escapeHtml(names)}${namesOnly ? "" : " 생일"}</span>`;
 }
 
-export function holidayMark(holiday: StoryHoliday | undefined, skin: "phone" | "film", prefix = ""): string {
+export function holidayMark(holiday: StoryHoliday | undefined): string {
   if (!holiday) return "";
-  return skin === "phone"
-    ? `<span class="holiday-pill" data-holiday="${holiday.tone}"><span aria-hidden="true">${holiday.emoji}</span>${escapeHtml(holiday.label)}</span>`
-    : `<span class="holiday-credit credit" data-holiday="${holiday.tone}">${prefix}${escapeHtml(holiday.credit)}</span>`;
-}
-
-export function holidayDateCredit(holiday: { month: number; day: number }): string {
-  return `${["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"][holiday.month - 1]} ${holiday.day}`;
+  return `<span class="holiday-pill" data-holiday="${holiday.tone}"><span aria-hidden="true">${holiday.emoji}</span>${escapeHtml(holiday.label)}</span>`;
 }
 
 /** Shared occasion tokens, with opaque pill fills so contrast holds on glass as well as lists. */

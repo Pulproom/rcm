@@ -80,15 +80,6 @@ export function createAttentionController(view: AttentionViewState, root: HTMLEl
         if (save) save.disabled = false;
         return true;
       }
-      if (action === "edit-small-review") {
-        const form = root.querySelector<HTMLFormElement>("#small-review-form");
-        if (form) {
-          form.hidden = false; target.hidden = true;
-          form.nextElementSibling?.querySelector('[data-resolution="keep_as_written"]')?.classList.replace("btn--primary", "btn--secondary");
-          form.querySelector<HTMLTextAreaElement>("textarea")?.focus();
-        }
-        return true;
-      }
       if (action === "attention-filter") {
         const next = target.dataset.filter;
         if (!isAttentionFilter(next)) return true;
@@ -134,16 +125,8 @@ export function createAttentionController(view: AttentionViewState, root: HTMLEl
           if (!selected) return;
           Object.assign(items[0]!, {sourceChoiceId: selected.value});
         }
-        const edited = target.dataset.resolution === "keep_edited";
-        const text = edited ? String(new FormData(target as HTMLFormElement).get("text") ?? "") : undefined;
         if (target.dataset.resolution === 'retry') await syncSources(decodeURIComponent(chat));
-        const response = await client.request<{items: Array<{message: string; status?: string; reason?:string}>; counts?:{kept:number;pending:number;missingSource:number;skipped:number;stale:number}}>(`/v1/chats/${chat}/small-reviews/resolve`, {method: "POST", body: JSON.stringify({items, action: target.dataset.resolution, ...(edited ? {text} : {})})});
-        if (edited && response.items[0]?.status === "pending") {
-          const error = target.querySelector<HTMLElement>("[data-small-review-error]");
-          if (error) { error.textContent = response.items[0].message; error.hidden = false; }
-          target.querySelector("textarea")?.setAttribute("aria-invalid", "true");
-          return;
-        }
+        const response = await client.request<{items: Array<{message: string; status?: string; reason?:string}>; counts?:{kept:number;pending:number;missingSource:number;skipped:number;stale:number}}>(`/v1/chats/${chat}/small-reviews/resolve`, {method: "POST", body: JSON.stringify({items, action: target.dataset.resolution})});
         items.forEach((selection, index) => {
           const saved = response.items[index];
           const candidate = data.extractionAudits.find(audit => audit.id === selection.auditId)?.smallReviews?.find((item: any) => item.id === selection.candidateId);

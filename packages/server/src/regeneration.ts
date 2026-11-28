@@ -2,7 +2,7 @@ import { markSourceDeleted } from "./albums.js";
 import { assertChatUnlocked } from './upgrade-lock.js';
 import { batchHasStoredMaterial } from './source-coverage.js';
 import { CHAT_DERIVED_TABLES, deleteDerivedRows } from './derived-state.js';
-import { detailAccessEditsKey, dialogueAccessIdentityKey } from './item-access.js';
+import { restorePromiseEventKind, detailAccessEditsKey, dialogueAccessIdentityKey } from './item-access.js';
 import { userDeletionsKey, ledgerEditOriginsKey } from './user-deletions.js';
 import { beginInitialCalibration } from './initial-calibration.js';
 import { clearAuxiliaryInputs } from './auxiliary-input-cache.js';
@@ -504,7 +504,7 @@ function acceptedBatchResult(db:RcmDatabase,chatId:string,row:{id:string;final_j
     const matches=signature===undefined ? [] : snapshots.filter((_snapshot,i)=>eventSignatures[i]===signature);
     if(matches.length===1&&signatures.filter(value=>value===signature).length===1)return [{...promise,content:matches[0]!.content,
       storedAmendment:matches[0]!.amendment_text,...(matches[0]!.amendment_text!=null ? {scheduledFor:matches[0]!.scheduled_for_delta ?? undefined} : {}),
-      ...(matches[0]!.event_kind ? {event:matches[0]!.event_kind as typeof promise.event} : {})}];
+      ...restorePromiseEventKind(matches[0]!.event_kind)}];
     db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)").run(randomUUID(),reportChatId,"promise_replay_correspondence",JSON.stringify(snapshots),JSON.stringify({point:"promise_replay_correspondence",batchId:row.id,evidenceIdentity:signature??null,candidate:promise,reason:matches.length ? "ambiguous accepted occurrence" : "no matching accepted occurrence"}),
       (db.prepare("SELECT revision FROM chats WHERE id=?").get(reportChatId) as {revision:number}).revision,now());
     return [];

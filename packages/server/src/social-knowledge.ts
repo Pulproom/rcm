@@ -13,6 +13,7 @@ import { buildEntityIdentityResolver, listEntities, modelEntityContext, normaliz
 import { canAutomaticallyChange, committedEditOrdinal, correctionView, UNCORRECTED_SQL } from "./user-corrections.js";
 import { invalidateStorySupports, storyMemorySupportIds } from "./story-spine.js";
 import { memoryAtomKey } from "./memory-atoms.js";
+import { sourceFingerprint } from "./source-fingerprint.js";
 
 export type SocialKnowledgeLevel = "aware_of" | "interacted";
 export const socialKnowledgeLevelLabel: Record<SocialKnowledgeLevel, string> = {
@@ -256,6 +257,16 @@ function nameAdditions(current: Pick<SocialKnowledgeItem, "knownAs" | "addressTe
     addressTerms: missing(addressTerms, current?.addressTerms ?? [], value => value) };
 }
 
+/** Shared by conflict presentation and approval; names and typed terms use the ingest comparison. */
+export function protectedRecognitionChanges(incoming: SocialKnowledge, ledger: SocialKnowledgeItem[]) {
+  const current = ledger.find(item =>
+    normalizeEntityName(item.holder) === normalizeEntityName(incoming.holder)
+    && normalizeEntityName(item.subject) === normalizeEntityName(incoming.subject));
+  const additions = nameAdditions(current, incoming.knownAs, incoming.addressTerms);
+  const higherLevel = current && levelRank(incoming.level) > levelRank(current.level) ? incoming.level : undefined;
+  return { current, additions, higherLevel };
+}
+
 /** Names can survive withheld cognition, but never identity ambiguity or user protection. */
 export function recognitionNameAdditions(db: RcmDatabase, chatId: string,
   recognition: Pick<SocialKnowledge, "holder" | "subject" | "knownAs" | "addressTerms" | "evidence">) {
@@ -265,6 +276,19 @@ export function recognitionNameAdditions(db: RcmDatabase, chatId: string,
     || holder.ambiguous
     || !canAutomaticallyChangeSocialKnowledge(db, chatId, recognition.holder, recognition.subject, recognition.evidence)) return;
   return nameAdditions(currentPair(db, chatId, recognition.holder, recognition.subject), recognition.knownAs, recognition.addressTerms);
+}
+
+function recognitionDetailIds(db: RcmDatabase, chatId: string, item: IngestedSocialKnowledge,
+  memoryByKey: ReadonlyMap<string,string>, detailByKey: ReadonlyMap<string,string>) {
+  return (item.cognitionDetailKeys ?? []).map(key => {
+    const memoryId = item.memoryKey && memoryByKey.get(item.memoryKey);
+    const detailId = detailByKey.get(JSON.stringify([item.memoryKey,key]));
+    const detail = db.prepare(`SELECT d.id FROM memory_details d WHERE d.chat_id=?
+      AND (d.id=? OR (? IS NULL AND d.memory_id=? AND d.detail_key=?)) AND d.active=1 AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id
+      AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`)
+      .get(chatId, detailId ?? null, detailId ?? null, memoryId ?? null, key, item.holder) as { id: string } | undefined;
+    return detail?.id;
+  });
 }
 
 export function ingestSocialKnowledge(
@@ -291,19 +315,16 @@ export function ingestSocialKnowledge(
       && levelRank(current.level) >= levelRank(item.level)
       && !additions.knownAs.length && !additions.addressTerms.length) continue;
     if (!canAutomaticallyChangeSocialKnowledge(db,chatId,item.holder,item.subject,item.evidence)) {
+      if (!additions.knownAs.length && !additions.addressTerms.length
+        && (!current || levelRank(current.level) >= levelRank(item.level))) continue;
+      const sourceMemoryId = item.memoryKey ? memoryByKey.get(item.memoryKey) : undefined;
+      const cognitionDetailIds = recognitionDetailIds(db,chatId,item,memoryByKey,detailByKey).filter(id => id !== undefined);
       db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
-        .run(randomUUID(),chatId,"recognition_auto_protected",JSON.stringify({point:"recognition_auto_protected",reason:"User-controlled recognition cannot change automatically",current}),JSON.stringify(item),chat.revision,now());
+        .run(randomUUID(),chatId,"recognition_auto_protected",JSON.stringify({point:"recognition_auto_protected",reason:"User-controlled recognition cannot change automatically",current,
+          sourceFingerprint:sourceFingerprint(db,chatId,[...new Set(item.evidence.map(e => e.messageId))]),sourceMemoryId,cognitionDetailIds}),JSON.stringify(item),chat.revision,now());
       continue;
     }
-    const cognitionIds = (item.cognitionDetailKeys ?? []).map(key => {
-      const memoryId = item.memoryKey && memoryByKey.get(item.memoryKey);
-      const detailId = detailByKey.get(JSON.stringify([item.memoryKey,key]));
-      const detail = db.prepare(`SELECT d.id FROM memory_details d WHERE d.chat_id=?
-        AND (d.id=? OR (? IS NULL AND d.memory_id=? AND d.detail_key=?)) AND d.active=1 AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id
-        AND a.item_kind='detail' AND a.item_id=d.id AND a.active=1 AND a.holder=? COLLATE NOCASE)`)
-        .get(chatId, detailId ?? null, detailId ?? null, memoryId ?? null, key, item.holder) as { id: string } | undefined;
-      return detail?.id;
-    });
+    const cognitionIds = recognitionDetailIds(db,chatId,item,memoryByKey,detailByKey);
     if(holder.ambiguous || cognitionIds.some(id=>id===undefined)) {
       db.prepare("INSERT INTO conflicts(id,chat_id,kind,existing_json,incoming_json,created_revision,created_at) VALUES(?,?,?,?,?,?,?)")
         .run(randomUUID(),chatId,"C9:persisted_recognition_access",JSON.stringify({reason:"Cognition detail requires live evidence and access for its holder"}),JSON.stringify(item),chat.revision,now());
@@ -328,7 +349,7 @@ export function ingestSocialKnowledge(
 export function setManualSocialKnowledge(
   db: RcmDatabase,
   chatId: string,
-  input: { holder: string; subject: string; level: SocialKnowledgeLevel; knownAs: string[]; addressTerms?: string[]; previousHolder?: string; previousSubject?: string; description?: string; locked?: boolean },
+  input: { holder: string; subject: string; level: SocialKnowledgeLevel; knownAs: string[]; addressTerms?: string[]; previousHolder?: string; previousSubject?: string; description?: string; locked?: boolean; cognitionDetailIds?: string[] },
 ): SocialKnowledgeItem[] {
   const chat = db.prepare("SELECT revision FROM chats WHERE id=?").get(chatId) as { revision: number } | undefined;
   if (!chat) throw new Error("Chat not found");
@@ -371,6 +392,7 @@ export function setManualSocialKnowledge(
       }
       refreshMemoryFts(db, memoryId);
     }
+    detailIds = [...new Set([...detailIds, ...(input.cognitionDetailIds ?? [])])];
 
     // A moved pair must also retract a pending setup recognition, which is not
     // in the active view yet; confirmation must not resurrect the old pair.

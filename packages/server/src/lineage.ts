@@ -355,7 +355,7 @@ function cloneLineage(
     const parentChat = prepare("SELECT * FROM chats WHERE id=?").get(parent) as any;
     if (!parentChat) throw new Error("Lineage parent not found");
     const inheritedLanguage = parentChat.memory_language ?? "en";
-    const requestedLanguage = request.memoryLanguage ?? inheritedLanguage;
+    const requestedLanguage = request.memoryLanguageSource === "default" ? inheritedLanguage : request.memoryLanguage ?? inheritedLanguage;
     if (options.preserveChildConfiguration) {
       prepare("UPDATE chats SET memory_language=?,pending_memory_language=?,ingestion_state='managed',updated_at=? WHERE id=?")
         .run(inheritedLanguage, requestedLanguage === inheritedLanguage ? null : requestedLanguage, now, child);
@@ -1137,7 +1137,7 @@ function cloneLineage(
       for (const row of social) namedKeys.add(`initial-social:${row.holder}|${row.subject}`);
     }
     const translationKinds = new Set([
-      "memory-title", "memory-content", "memory-detail", "dialogue", "evidence",
+      "memory-title", "memory-content", "memory-location", "memory-detail", "dialogue", "evidence",
       "relationship", "relationship-tension", "relationship-event", "initial-relationship", "physical-intimacy",
       "assertion", "assertion-history", "assertion-predicate", "belief", "belief-history", "belief-predicate", "promise", "promise-history", "promise-reason",
       "social-cognition", "reconciliation", "story-flow-transition",
@@ -1152,7 +1152,7 @@ function cloneLineage(
         const detail = match && detailMap.get(match[2]!);
         return memory && detail ? `${memory}:detail:${detail}` : undefined;
       }
-      const readerKey = remapReaderTranslationId(kindName, itemId, memoryMap, stories);
+      const readerKey = remapReaderTranslationId(kindName, itemId, lineageIds, stories);
       if (readerKey) return readerKey;
       if (!translationKinds.has(kindName)) return undefined;
       if (kindName === "relationship" || kindName === "relationship-tension") {
@@ -1416,7 +1416,7 @@ export function applyManualLineage(
     if (preview.requiresReplacement && !replaceDerived) throw new Error("TARGET_HAS_DERIVED_DATA");
     if (preview.requiresReplacement && !targetInventory?.length) throw new Error("TARGET_INVENTORY_REQUIRED");
     const request = !targetWasMissing
-      ? { ...manualTargetRequest(db, targetChatId), ...(targetInventory?.length ? { messageVisibility: targetInventory } : {}) }
+      ? { ...manualTargetRequest(db, targetChatId), memoryLanguageSource: targetDescriptor?.memoryLanguageSource, ...(targetInventory?.length ? { messageVisibility: targetInventory } : {}) }
       : {
         chatId: targetChatId,
         chatTitle: targetDescriptor?.chatTitle,
@@ -1430,6 +1430,7 @@ export function applyManualLineage(
         includeUserMessages: targetDescriptor?.includeUserMessages,
         extractionGroupTurns: targetDescriptor?.extractionGroupTurns,
         memoryLanguage: targetDescriptor?.memoryLanguage,
+        memoryLanguageSource: targetDescriptor?.memoryLanguageSource,
         forceBackfill: false,
         deferExtraction: true,
       } satisfies TurnPrepareRequest;

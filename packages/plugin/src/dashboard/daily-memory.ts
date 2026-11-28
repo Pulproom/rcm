@@ -12,7 +12,6 @@ export type DailyMemory = {
   memory: any;
   reason: "birthday" | "year" | "month" | "week" | "story-day" | "anniversary" | "holiday" | "archive";
   label: string;
-  credit: string;
   playedAt?: number;
   anniversary?: { label: string; key: string };
   /** Story days since the pair's first meeting at this scene (story clock, not real play time). */
@@ -87,9 +86,9 @@ export function dailyMemoryCandidates(data: DashboardData, times: readonly Messa
     const entry = pairItems.find(({ pair }) => names.has(pair.a.toLocaleLowerCase()) && names.has(pair.b.toLocaleLowerCase())) ?? pairItems[0];
     return entry ? daysSinceFirstMet(entry.items, memory.story_time_normalized ?? memory.story_time ?? memory.storyTime ?? null) : null;
   };
-  const append = (memory: any, reason: DailyMemory["reason"], label: string, credit: string, playedAt?: number, anniversary?: DailyMemory["anniversary"], birthday?: DailyMemory["birthday"]) => {
+  const append = (memory: any, reason: DailyMemory["reason"], label: string, playedAt?: number, anniversary?: DailyMemory["anniversary"], birthday?: DailyMemory["birthday"]) => {
     if (result.some(item => item.memory.id === memory.id)) return;
-    result.push({ memory, reason, label, credit, playedAt: playedAt ?? playTimes.get(String(memory.id))?.[0], storyDay: storyDayOf(memory), birthdays: sceneBirthdays(memory), ...(anniversary ? { anniversary } : {}), ...(birthday ? { birthday } : {}) });
+    result.push({ memory, reason, label, playedAt: playedAt ?? playTimes.get(String(memory.id))?.[0], storyDay: storyDayOf(memory), birthdays: sceneBirthdays(memory), ...(anniversary ? { anniversary } : {}), ...(birthday ? { birthday } : {}) });
   };
   const celebrating = birthdaysForStoryDate({ month: now.getMonth() + 1, day: now.getDate() }, people);
   // Real local birthday leads; story dates only choose/tag a scene, never define "today".
@@ -97,18 +96,18 @@ export function dailyMemoryCandidates(data: DashboardData, times: readonly Messa
     const person = celebrating.find(person => sceneMatches
       ? sceneBirthdays(memory).some(match => match === person)
       : (memory.participants ?? []).some((name: unknown) => person.names.includes(normalizeName(name))));
-    if (person) append(memory, "birthday", "Happy Birthday!", "HAPPY BIRTHDAY", undefined, undefined, { person, sceneMatches });
+    if (person) append(memory, "birthday", "Happy Birthday!", undefined, undefined, { person, sceneMatches });
   }
   const targets = [
-    { day: priorDate(now, 1, 0), reason: "year", label: "1년 전 오늘", credit: "A YEAR AGO TODAY" },
-    { day: priorDate(now, 0, 1), reason: "month", label: "한 달 전 오늘", credit: "A MONTH AGO TODAY" },
-    { day: localDay(now) - 7, reason: "week", label: "일주일 전 오늘", credit: "A WEEK AGO TODAY" },
+    { day: priorDate(now, 1, 0), reason: "year", label: "1년 전 오늘" },
+    { day: priorDate(now, 0, 1), reason: "month", label: "한 달 전 오늘" },
+    { day: localDay(now) - 7, reason: "week", label: "일주일 전 오늘" },
   ] as const;
   for (const target of targets) {
     if (target.day === undefined) continue;
     for (const memory of ranked) {
       const playedAt = playTimes.get(String(memory.id))?.find(time => localDay(new Date(time)) === target.day);
-      if (playedAt !== undefined) append(memory, target.reason, target.label, target.credit, playedAt);
+      if (playedAt !== undefined) append(memory, target.reason, target.label, playedAt);
     }
   }
   const currentStoryTime = scenes.at(-1)?.story_time_normalized ?? scenes.at(-1)?.story_time ?? null;
@@ -133,18 +132,18 @@ export function dailyMemoryCandidates(data: DashboardData, times: readonly Messa
   // Round story days precede named anniversaries; scene scoring settles multiple pairs/scenes.
   for (const round of [true, false]) for (const memory of ranked) {
     const item = anniversaries.find(item => item.memoryId === String(memory.id) && (item.days !== null) === round);
-    if (item) append(memory, round ? "story-day" : "anniversary", round ? `처음 만난 지 D+${item.days}` : `${item.label} 그날`, round ? `DAY ${item.days}` : "ON THIS STORY DAY", undefined,
+    if (item) append(memory, round ? "story-day" : "anniversary", round ? `처음 만난 지 D+${item.days}` : `${item.label} 그날`, undefined,
       !round && item.userDefined ? { label: item.label, key: `landmark:${item.memoryId}#${item.index}:label` } : undefined);
   }
   const holiday = holidayForStoryDate({ month: now.getMonth() + 1, day: now.getDate() });
   if (holiday) for (const memory of ranked) {
     const date = parseStoryTime(memory.story_time_normalized ?? memory.story_time ?? memory.storyTime);
-    if (holidayForStoryDate(date)?.id === holiday.id) append(memory, "holiday", `그해 ${holiday.label}`, `THAT ${holiday.credit}`);
+    if (holidayForStoryDate(date)?.id === holiday.id) append(memory, "holiday", `그해 ${holiday.label}`);
   }
   const recentIds = new Set(scenes.slice(-10).map(memory => memory.id));
   const archive = ranked.filter(memory => !recentIds.has(memory.id));
   const start = archive.length ? (localDay(now) + hash(chatId)) % archive.length : 0;
-  for (let index = 0; index < archive.length; index++) append(archive[(start + index) % archive.length], "archive", "다시 보는 장면", "FROM THE ARCHIVE");
+  for (let index = 0; index < archive.length; index++) append(archive[(start + index) % archive.length], "archive", "다시 보는 장면");
   return result;
 }
 

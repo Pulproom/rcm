@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const AuxiliaryShapeDiagnosticSchema = z.object({
   contract:z.string(), purpose:z.string(), path:z.array(z.union([z.string(),z.number().int().nonnegative()])),
-  rule:z.enum(["single_key_wrapper","declared_alias"]), beforeShape:z.string(), afterShape:z.string(),
+  rule:z.enum(["single_key_wrapper","declared_alias","comma_joined_source_refs"]), beforeShape:z.string(), afterShape:z.string(),
 });
 export type AuxiliaryShapeDiagnostic = z.infer<typeof AuxiliaryShapeDiagnosticSchema>;
 export interface AuxiliaryShapeContext { contract:string; purpose:string }

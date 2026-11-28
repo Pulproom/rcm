@@ -1,9 +1,10 @@
+import { memoryLocationTranslationRecords } from "../translation.js";
 import { orderStoryMemories, isScene, storyScenes, sceneNumbers } from "@rcm/shared";
 export { orderStoryMemories, isScene, storyScenes, sceneNumbers };
 import { isRecognitionMemory } from "@rcm/shared";
 
 /** `number` and `place` let a caller write a short range (S#12–S#31) or name where it happened. */
-export type SceneRef = { memoryId: string; label: string; number?: number; place?: string };
+export type SceneRef = { memoryId: string; label: string; number?: number; place?: string; placeKey?: string };
 
 /**
  * Finds the scene a source ordinal belongs to: the active scene whose first source message is the
@@ -17,8 +18,9 @@ export function sceneLocator(memories: any[], formatDate: (storyTime: string) =>
   const ref = (memory: any): SceneRef => {
     const date = memory.story_time ? formatDate(String(memory.story_time)) : "";
     const number = numbers.get(String(memory.id));
-    const place = Array.isArray(memory.locations) ? String(memory.locations[0] ?? "").trim() : "";
-    return { memoryId: String(memory.id), label: [`S#${number ?? "?"}`, date].filter(Boolean).join(" · "), ...(number === undefined ? {} : { number }), ...(place ? { place } : {}) };
+    const location = memoryLocationTranslationRecords(memory)[0];
+    const place = location?.text.trim() ?? "";
+    return { memoryId: String(memory.id), label: [`S#${number ?? "?"}`, date].filter(Boolean).join(" · "), ...(number === undefined ? {} : { number }), ...(place ? { place, placeKey: location!.itemId } : {}) };
   };
   const byId = new Map(scenes.map((memory) => [String(memory.id), memory]));
   return (target: unknown) => {

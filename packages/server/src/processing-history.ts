@@ -1,3 +1,4 @@
+import {readSourceTransport} from '@rcm/shared';
 import {jobListMetadata} from './job-list-metadata.js';
 import type { ProcessingCall, ProcessingHistory, ProcessingJob, ProcessingModel, ProcessingStage, ProcessingTotals, ProcessingUnit } from '@rcm/shared';
 import { operationLabel, settingsFailureMessage, processingStageOrder, sumProcessingTotals, PROCESSING_BATCH_TYPES } from '@rcm/shared';
@@ -64,7 +65,7 @@ const modelRows=(db:RcmDatabase,where:string,args:unknown[]):ProcessingModel[]=>
 function projectCall(row:Row):ProcessingCall {
  const stopped=row.outcome==='running'&&(row.attempt_outcome&&row.attempt_outcome!=='running'||row.job_status&&row.job_status!=='leased');
  return {...model(row),id:row.id,jobId:row.job_id,purpose:row.purpose,at:row.started_at,input:row.input_tokens,output:row.output_tokens,duration:row.duration_ms,
-  outcome:stopped?'interrupted':row.outcome,code:row.failure_code,reason:row.reason,repairOf:row.repair_of,repairReason:row.repair_reason??null,
+  outcome:stopped?'interrupted':row.outcome,code:row.failure_code,reason:row.reason,repairOf:row.repair_of,repairReason:row.repair_reason??null,sourceTransport:readSourceTransport(row.source_transport_json),
   attempt:row.ordinal??null,attemptCount:row.attempt_count??0,attemptOutcome:row.attempt_outcome??null,attemptReason:row.attempt_reason??null};
 }
 

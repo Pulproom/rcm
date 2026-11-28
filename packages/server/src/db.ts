@@ -16,7 +16,7 @@ import { cleanupUnsupportedEntities } from "./entity-cleanup.js";
 import { processingSchema, migrateLegacyProcessingRecords, repairProcessingOwnership } from "./processing-records.js";
 
 export type RcmDatabase = Database.Database;
-export const DATABASE_SCHEMA_VERSION = 70 as const;
+export const DATABASE_SCHEMA_VERSION = 71 as const;
 
 const entityColorColumn = "color TEXT CHECK(color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]')";
 
@@ -1092,7 +1092,7 @@ export function openDatabase(path: string): DatabaseHandle {
       db.close();
       throw Object.assign(new Error("Unreleased album schema 59 cannot be upgraded in place: it conflicts with released 1.0.25 schema 59. Preserve this development database and start with a fresh schema 62, or use a released schema 58/59 database."), { code: "ALBUM_SCHEMA_59_RESET_REQUIRED" });
     }
-    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, DATABASE_SCHEMA_VERSION].includes(version)) {
+    if (![46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, DATABASE_SCHEMA_VERSION].includes(version)) {
       db.close();
       throw Object.assign(new Error(`RCM pre-release schema ${version} cannot be upgraded in place. Archive the database and start with a fresh schema.`), { code: "PRE_RELEASE_SCHEMA_RESET_REQUIRED" });
     }
@@ -1292,6 +1292,7 @@ export function openDatabase(path: string): DatabaseHandle {
     db.exec(processingSchema);
     const processingColumns=new Set((db.pragma('table_info(processing_calls)') as Array<{name:string}>).map(c=>c.name));
     if(!processingColumns.has('repair_reason'))db.exec('ALTER TABLE processing_calls ADD COLUMN repair_reason TEXT');
+    if(!processingColumns.has('source_transport_json'))db.exec('ALTER TABLE processing_calls ADD COLUMN source_transport_json TEXT');
     if(!processingColumns.has('completed_items'))db.exec('ALTER TABLE processing_calls ADD COLUMN completed_items INTEGER');
     if(hasSchemaLedger && version<68)migrateLegacyProcessingRecords(db);
     if(hasSchemaLedger && version<69)repairProcessingOwnership(db);

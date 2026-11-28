@@ -165,10 +165,9 @@ export async function showAlbumPreview(params: URLSearchParams): Promise<void> {
       const src = canvas.toDataURL("image/png"); cache.set(id, src); return src;
     };
 
-    const skin = params.get("skin") === "phone" ? "phone" : "film";
-    document.documentElement.dataset.skin = skin;
-    document.documentElement.dataset.theme = schemeValue === "light" ? "day" : schemeValue === "dark" ? "night" : skin === "phone" ? "day" : "night";
-    document.head.innerHTML = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Album preview</title>${ALBUM_FONT_LINKS}<style>${dashboardStylesheet(skin)}</style>`;
+    document.documentElement.dataset.skin = "phone";
+    document.documentElement.dataset.theme = schemeValue === "dark" ? "night" : "day";
+    document.head.innerHTML = `<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Album preview</title>${ALBUM_FONT_LINKS}<style>${dashboardStylesheet()}</style>`;
     document.body.className = "film";
     const root = document.createElement("div"); document.body.replaceChildren(root);
     const books = new Map([[doc.id, structuredClone(doc)]]), imported = new Map<string, { bytes: Uint8Array; mime: string }>();
@@ -321,7 +320,7 @@ export async function showAlbumPreview(params: URLSearchParams): Promise<void> {
       async readImage(path: string) { if (params.get("profileFail") === "1") throw new Error("Unreadable synthetic image"); return Uint8Array.from(atob(photoSrc(path).split(",")[1]!), c => c.charCodeAt(0)); },
     };
     let previousMarkup = "";
-    const controller = createAlbumViewController(root, api, { toast: message => { const toast = document.createElement("p"); toast.setAttribute("role","status"); toast.textContent=message; toast.style.cssText="position:fixed;z-index:100;bottom:24px;left:24px;right:24px;background:var(--screen);color:var(--ink);padding:16px"; root.append(toast); setTimeout(()=>toast.remove(),4000); }, skin: () => skin, host: imageHost,
+    const controller = createAlbumViewController(root, api, { toast: message => { const toast = document.createElement("p"); toast.setAttribute("role","status"); toast.textContent=message; toast.style.cssText="position:fixed;z-index:100;bottom:24px;left:24px;right:24px;background:var(--screen);color:var(--ink);padding:16px"; root.append(toast); setTimeout(()=>toast.remove(),4000); }, host: imageHost,
       render: () => { const markup = controller.render(); if (markup !== previousMarkup) { previousMarkup = markup; root.innerHTML = markup; } },
       closed: () => { const url = new URL(location.href); url.searchParams.set("album", "shelf"); location.href = url.href; },
       confirm: message => confirmDashboard(message),

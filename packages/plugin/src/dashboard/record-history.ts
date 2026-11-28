@@ -4,7 +4,7 @@ import type { DashboardData } from "../dashboard.js";
 import { displayText } from "../translation.js";
 import type { TranslationDisplay } from "../types.js";
 import { sceneLocator, type SceneRef } from "./scenes.js";
-import { icon, menu, type MenuItem } from "./film/ui.js";
+import { icon, menu, signalIcon, type MenuItem } from "./film/ui.js";
 import { nameHtml } from "./film/names.js";
 
 /**
@@ -209,6 +209,7 @@ const sceneRange = (from: SceneRef | null, to: SceneRef | null): string => {
 };
 
 export type RecordDetailOptions = {
+  alwaysInject?: boolean;
   accessEditing?: string;
   translations: ReadonlyMap<string, string>;
   display: TranslationDisplay;
@@ -253,7 +254,7 @@ export function renderRecordDetail(chain: RecordChain, data: Pick<DashboardData,
   // A single live version has no history worth a section; an ended or changed record shows its steps.
   const showSteps = chain.versions.length > 1 || chain.current === null;
   const steps: string[] = [];
-  if (ended && end && !deleted) steps.push(`<li class="chg__step is-end"><span class="chg__when"><b>${escapeHtml(sceneRange(end, null) || "끝남")}</b>${sceneLink(end)}</span><p class="chg__text">여기서 끝났어요.</p></li>`, `<li class="chg__how">끝남</li>`);
+  if (ended && end && !deleted) steps.push(`<li class="chg__step is-end"><span class="chg__when"><b>${escapeHtml(sceneRange(end, null) || "끝남")}</b>${sceneLink(end, copy)}</span><p class="chg__text">여기서 끝났어요.</p></li>`, `<li class="chg__how">끝남</li>`);
   chain.versions.forEach((version, index) => {
     const older = chain.versions[index + 1];
     const isNow = index === 0 && chain.current !== null;
@@ -268,14 +269,14 @@ export function renderRecordDetail(chain: RecordChain, data: Pick<DashboardData,
     const own = !isNow && !version.deleted && chain.kind !== "promise" && version.id
       ? `<span class="chg__acts">${menu({ label: "이 버전 더보기", items: [{ label: "이 버전 삭제", icon: "delete", action: "delete-world", data: { kind: chain.kind, id: version.id }, danger: true }] })}</span>`
       : "";
-    steps.push(`<li class="chg__step${state}${own ? " has-acts" : ""}">${own}<span class="chg__when"><b>${escapeHtml(when)}</b>${sceneLink(from)}</span><p class="chg__text">${copy(version.text, version.textKey)}</p>${reason}<span class="chg__tag">${escapeHtml(tag)}</span></li>`);
+    steps.push(`<li class="chg__step${state}${own ? " has-acts" : ""}">${own}<span class="chg__when"><b>${escapeHtml(when)}</b>${sceneLink(from, copy)}</span><p class="chg__text">${copy(version.text, version.textKey)}</p>${reason}<span class="chg__tag">${escapeHtml(tag)}</span></li>`);
     if (older) steps.push(`<li class="chg__how">${escapeHtml(transition(version, older, chain.kind))}</li>`);
   });
   const history = showSteps ? `<section class="psec rec-history"><h2 class="sec">변화 <span class="n">${chain.versions.length}</span></h2><ol class="chg">${steps.join("")}</ol></section>` : "";
   const actions = options.actions.length ? `<div class="reader__acts">${menu({ label: "기록 더보기", items: options.actions })}</div>` : "";
-  return `<article class="reader rec"><div class="reader__bar"><button type="button" class="back hit" data-action="now-back">${icon("back")}<span>${escapeHtml(options.back)}</span></button>${actions}</div><p class="rec-who">${who}</p><h2 class="reader__title">${title}</h2>${card}${chain.kind === "promise" && chain.current ? detailAccessLine("", chain.current, options.accessEditing === chain.current.id, "promise") : ""}${truth}${history}</article>`;
+  return `<article class="reader rec"><div class="reader__bar"><button type="button" class="back hit" data-action="now-back">${icon("back")}<span>${escapeHtml(options.back)}</span></button>${actions}</div><p class="rec-who">${(options.alwaysInject ?? item.alwaysInject ?? item.pinned) ? signalIcon('pin','항상 전달') : ''}${who}</p><h2 class="reader__title">${title}</h2>${card}${chain.kind === "promise" && chain.current ? detailAccessLine("", chain.current, options.accessEditing === chain.current.id, "promise") : ""}${truth}${history}</article>`;
 }
 
-const sceneLink = (scene: SceneRef | null): string => scene
-  ? `<button type="button" class="linkbtn chg__scene" data-action="open-timeline-memory" data-memory-id="${escapeHtml(scene.memoryId)}">${escapeHtml(scene.place ?? scene.label)}</button>`
+const sceneLink = (scene: SceneRef | null, copy: (text: string, key: string) => string): string => scene
+  ? `<button type="button" class="linkbtn chg__scene" data-action="open-timeline-memory" data-memory-id="${escapeHtml(scene.memoryId)}">${scene.place && scene.placeKey ? copy(scene.place, scene.placeKey) : escapeHtml(scene.place ?? scene.label)}</button>`
   : "";

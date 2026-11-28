@@ -22,34 +22,27 @@ const ALERT_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="2
 const WIDGET_SELECTOR = '[x-rcm-status-widget="true"]';
 const WIDGET_STYLE_SELECTOR = '[x-rcm-status-style="true"]';
 
-/** The chip's tokens, inlined because it lives in the host page. Film keeps its night screening look; phone follows 밤/낮 as a glass capsule. */
+/** The chip's tokens, inlined because it lives in the host page. */
 export type ChipSkin = {
   screen: string; button: string; hover: string; rule: string; border: string; ink: string; ink2: string; ink3: string;
   accent: string; accentInk: string; accentHover: string; wait: string; cut: string; ok: string; sans: string;
   radius: string; radiusOpen: string; buttonRadius: string; buttonAlign: string; shadow: string; backdrop: string;
 };
-const FILM_CHIP: ChipSkin = {
-  screen: "#0f1012", button: "#16171a", hover: "#1e1f23", rule: "#222328", border: "1px solid #33353b",
-  ink: "#ebe8e2", ink2: "#b3afa7", ink3: "#8b8881", accent: "#dba35a", accentInk: "#1b1308", accentHover: "#e6b575", wait: "#dba35a", cut: "#e2735d", ok: "#8fbf9a",
-  sans: '"Pretendard Variable",Pretendard,"Pretendard JP","Noto Sans JP","Noto Sans SC",system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif',
-  radius: "4px", radiusOpen: "6px", buttonRadius: "3px", buttonAlign: "left", shadow: "0 20px 44px -12px rgba(0,0,0,.85)", backdrop: "none",
-};
 const PHONE_SANS = '-apple-system,BlinkMacSystemFont,"SF Pro Text","Pretendard Variable",Pretendard,"Pretendard JP","Noto Sans JP","Noto Sans SC",system-ui,"Apple SD Gothic Neo","Malgun Gothic",sans-serif';
 const PHONE_CHIP_LIGHT: ChipSkin = {
   screen: "rgba(255,255,255,.8)", button: "rgba(118,118,128,.12)", hover: "rgba(118,118,128,.2)", rule: "rgba(60,60,67,.18)", border: ".5px solid rgba(0,0,0,.08)",
   ink: "#000000", ink2: "rgba(60,60,67,.85)", ink3: "#6C6C70", accent: "#007AFF", accentInk: "#ffffff", accentHover: "#0A6CE0", wait: "#FF9500", cut: "#FF3B30", ok: "#34C759",
-  sans: PHONE_SANS, radius: "17px", radiusOpen: "16px", buttonRadius: "10px", buttonAlign: "center", shadow: "0 10px 30px -8px rgba(0,0,0,.28)", backdrop: "blur(24px) saturate(1.8)",
+  sans: PHONE_SANS, radius: "50%", radiusOpen: "16px", buttonRadius: "10px", buttonAlign: "center", shadow: "0 10px 30px -8px rgba(0,0,0,.28)", backdrop: "blur(24px) saturate(1.8)",
 };
 const PHONE_CHIP_DARK: ChipSkin = {
   screen: "rgba(30,30,32,.8)", button: "rgba(118,118,128,.24)", hover: "rgba(118,118,128,.36)", rule: "rgba(84,84,88,.6)", border: ".5px solid rgba(255,255,255,.12)",
   ink: "#ffffff", ink2: "rgba(235,235,245,.82)", ink3: "rgba(235,235,245,.6)", accent: "#0A84FF", accentInk: "#ffffff", accentHover: "#3395FF", wait: "#FF9F0A", cut: "#FF453A", ok: "#30D158",
-  sans: PHONE_SANS, radius: "17px", radiusOpen: "16px", buttonRadius: "10px", buttonAlign: "center", shadow: "0 10px 30px -8px rgba(0,0,0,.6)", backdrop: "blur(24px) saturate(1.8)",
+  sans: PHONE_SANS, radius: "50%", radiusOpen: "16px", buttonRadius: "10px", buttonAlign: "center", shadow: "0 10px 30px -8px rgba(0,0,0,.6)", backdrop: "blur(24px) saturate(1.8)",
 };
-export function chipSkin(settings: Pick<RuntimeState["settings"], "dashboardSkin" | "dashboardTheme">): ChipSkin {
-  if (settings.dashboardSkin !== "phone") return FILM_CHIP;
+export function chipSkin(settings: Pick<RuntimeState["settings"], "dashboardTheme">): ChipSkin {
   return settings.dashboardTheme === "light" ? PHONE_CHIP_LIGHT : PHONE_CHIP_DARK;
 }
-const chipSkinKey = (settings: Pick<RuntimeState["settings"], "dashboardSkin" | "dashboardTheme">): string => `${settings.dashboardSkin}:${settings.dashboardTheme}`;
+const chipSkinKey = (settings: Pick<RuntimeState["settings"], "dashboardTheme">): string => settings.dashboardTheme;
 const STATUS_ICON_PATHS: Record<"ok" | "wait" | "bad" | "off", string> = {
   ok: '<path d="M5 12.5 9.5 17 19 7.5"/>',
   wait: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -170,12 +163,12 @@ export function statusPointInRect(x: number, y: number, rect: { left: number; ri
 }
 
 export function statusWidgetWidth(expanded: boolean, viewportWidth: number): number {
-  return Math.max(0, Math.min(expanded ? 232 : 156, viewportWidth - 16));
+  return Math.max(0, Math.min(expanded ? 232 : 32, viewportWidth - 16));
 }
 
-export function clampStatusPosition(left: number, top: number, viewportWidth: number, viewportHeight: number, widgetWidth = 154, widgetHeight = 48): { left: number; top: number } {
-  const right = Math.max(8, viewportWidth - Math.max(154, widgetWidth) - 8);
-  const bottom = Math.max(8, viewportHeight - Math.max(48, widgetHeight) - 8);
+export function clampStatusPosition(left: number, top: number, viewportWidth: number, viewportHeight: number, widgetWidth = 32, widgetHeight = 32): { left: number; top: number } {
+  const right = Math.max(8, viewportWidth - Math.max(32, widgetWidth) - 8);
+  const bottom = Math.max(8, viewportHeight - Math.max(32, widgetHeight) - 8);
   return { left: Math.max(8, Math.min(right, left)), top: Math.max(8, Math.min(bottom, top)) };
 }
 
@@ -432,19 +425,40 @@ function statusWidgetVisual(current: FloatingWidgetState, skin: ChipSkin) {
   return { color, tone };
 }
 
+const COMPACT = '[x-rcm-status-widget][x-rcm-expanded="false"]';
+const PANEL = '[x-rcm-status-widget][x-rcm-expanded="true"]';
+const TOGGLE = '[data-rcm-toggle="true"]';
+
 export const statusWidgetStyleText = (skin: ChipSkin) => `
 .risu-chat[data-chat-id="supaMemory"]:has(.italic) { display: none !important; }
 [x-rcm-status-widget] button:focus-visible{outline:1.5px solid ${skin.accent};outline-offset:-3px}
-[x-rcm-status-widget] button:not([aria-disabled="true"]):not([data-rcm-quiz-scene]):hover{background:${skin.hover}!important}
-[x-rcm-status-widget] button:is([data-rcm-open]:not([data-quiet]),[data-rcm-quiz-start],[data-rcm-quiz-next]):hover{background:${skin.accentHover}!important;color:${skin.accentInk}!important}
+${PANEL} button:not([aria-disabled="true"]):not([data-rcm-quiz-scene]):hover{background:${skin.hover}!important}
+${PANEL} button:is([data-rcm-open]:not([data-quiet]),[data-rcm-quiz-start],[data-rcm-quiz-next]):hover{background:${skin.accentHover}!important;color:${skin.accentInk}!important}
+${COMPACT}{height:32px;overflow:visible!important}
+${COMPACT} button{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);box-sizing:border-box;width:32px;height:32px;padding:0;border:0;border-radius:${skin.radius};background:transparent;display:grid;place-items:center;cursor:grab;touch-action:none}
+${COMPACT} button:focus-visible{outline:2px solid ${skin.accent};outline-offset:2px}
+${COMPACT}:has([data-rcm-tone="bad"]){background:${skin.cut}!important;border-color:transparent!important}
+${COMPACT}:has([data-rcm-tone="off"]){opacity:.6}
+${COMPACT} [data-rcm-ring]{position:absolute;inset:-4px;pointer-events:none;border-radius:50%;mask:radial-gradient(farthest-side,transparent calc(100% - 2.5px),#000 calc(100% - 2px))}
+@keyframes rcmStatusBreath{0%,100%{box-shadow:${skin.shadow},0 0 0 0 ${skin.wait}66}50%{box-shadow:${skin.shadow},0 0 0 6px ${skin.wait}00}}
+@media(prefers-reduced-motion:no-preference){${COMPACT}:has([data-rcm-breath]){animation:rcmStatusBreath 2.4s ease-in-out infinite}}
 @media(pointer:coarse){
-[x-rcm-status-widget] [data-rcm-drag]{height:44px!important}
-[x-rcm-status-widget] button{min-height:36px!important}
-[x-rcm-status-widget] [data-rcm-toggle]{width:44px!important;height:44px!important}
-[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-drag]{height:34px!important}
-[x-rcm-status-widget][x-rcm-expanded="false"] [data-rcm-toggle]{height:34px!important;min-height:34px!important}
+${PANEL} [data-rcm-drag]{height:44px!important}
+${PANEL} button{min-height:36px!important}
+${PANEL} [data-rcm-toggle]{width:44px!important;height:44px!important}
+${COMPACT} button::after{content:"";position:absolute;inset:-6px}
 }
 `;
+
+function statusButtonLabel(current: FloatingWidgetState, observedAt: number): string {
+  return `RCM ${current.label}${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}`;
+}
+
+function statusButton(current: FloatingWidgetState, skin: ChipSkin, label: string): string {
+  const { tone, color } = statusWidgetVisual(current, skin);
+  const name = escapeHtml(label);
+  return `<button type="button" data-rcm-toggle="true" aria-expanded="false" aria-label="${name}" title="${name}" style="color:${tone === "bad" ? "#fff" : color}"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${tone === "bad" ? 2 : 1.9}" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></button>`;
+}
 
 export const statusWidgetSurface = (skin: ChipSkin): Record<string, string> => ({
   border: skin.border, borderRadius: skin.radius, backgroundColor: skin.screen, color: skin.ink, boxShadow: skin.shadow,
@@ -467,11 +481,18 @@ export function renderStatusWidget(state: RuntimeState, options: {
   const skin = chipSkin(state.settings);
   const { color, tone } = statusWidgetVisual(current, skin);
   const pendingPrepare = state.pendingPrepare;
+  const upgrade = current.kind === "upgrade" ? widgetUpgradeLock(state) : undefined;
+  const showQuiz = quizEnabled && current.kind !== "upgrade";
+  const quizReady = showQuiz && quizNext?.available && quizNext.question;
+  if (!expanded) {
+    const progress = upgrade?.phase === 1 ? Math.min(1, Math.max(0, upgrade.done / Math.max(1, upgrade.total))) : undefined;
+    const ring = progress === undefined ? "" : `<span aria-hidden="true" data-rcm-ring style="background:conic-gradient(${skin.accent} ${progress * 360}deg,${skin.rule} 0)"></span>`;
+    return `<span data-rcm-status-elapsed="true" data-rcm-tone="${tone}"${tone === "wait" && !ring ? " data-rcm-breath" : ""}>${statusButton(current, skin, statusButtonLabel(current, observedAt))}</span>${ring}`;
+  }
   const compactButtonStyle = `min-width:0;min-height:32px;border:0;border-radius:${skin.buttonRadius};background:${skin.button};color:${skin.ink};cursor:pointer;text-align:${skin.buttonAlign};font-family:inherit;font-size:12px;font-weight:600;line-height:1.5;white-space:normal;word-break:keep-all;overflow-wrap:anywhere;padding:6px 10px`;
   const activeRows = activeStatusTimingRows(state);
   const showDetail = !activeRows.some(event => event.label === current.detail);
   let body = showDetail ? `<div data-rcm-status-detail="true" style="color:${skin.ink2}">${escapeHtml(current.detail)}</div>` : "";
-  const upgrade = widgetUpgradeLock(state);
   if (current.kind === 'upgrade' && upgrade) {
     if (upgrade.phase === 1) body += `<div style="display:flex;align-items:center;gap:8px"><progress aria-label="다시 만들기 진행" max="${Math.max(1,upgrade.total)}" value="${upgrade.done}" style="flex:1;min-width:0;accent-color:${skin.accent}"></progress><span style="font-variant-numeric:tabular-nums">${upgrade.done}/${upgrade.total}</span></div><button type="button" data-rcm-upgrade-cancel="true" style="${compactButtonStyle};width:100%">취소하고 이전 기억으로 계속</button>`;
   }
@@ -487,29 +508,26 @@ export function renderStatusWidget(state: RuntimeState, options: {
   if (timingRows) body += `<div${showDetail ? ` style="border-top:1px solid ${skin.rule};margin-top:8px;padding-top:4px"` : ""}><div style="font-size:11px;color:${skin.ink3}">진행 중인 작업</div>${timingRows}</div>`;
   const dashboardLabel = state.statusSummary?.initialCalibration?.status === "awaiting_confirmation" ? "초기 장부 확인" : "대시보드";
   const waitingSince = state.activeModelRequest?.chatId === state.current?.chatId ? state.activeModelRequest?.startedAt : undefined;
-  const showQuiz = quizEnabled && current.kind !== 'upgrade';
   const quizStart = quizEntryButton(showQuiz ? quizNext : undefined, skin, Boolean(waitingSince));
   const quizEntry = quizStart || (showQuiz && quizLoadFailed ? quizReloadRow(skin) : "");
-  const quizReady = showQuiz && quizNext?.available && quizNext.question;
   const dashboardTone = quizReady ? `background:${skin.button};color:${skin.ink}` : `background:${skin.accent};color:${skin.accentInk}`;
   // While the user decides how to send, the decision is the only action; the dashboard can wait.
   if (current.kind !== "prepare-choice") body += `${state.settings.workerPaused ? `<button data-rcm-resume="true" style="${compactButtonStyle};width:100%;margin-top:6px">처리 재개</button>` : ""}${quizEntry}<button data-rcm-open="true"${quizReady ? " data-quiet" : ""} style="${compactButtonStyle};width:100%;margin-top:6px;${dashboardTone}">${dashboardLabel} 열기</button>`;
   if (current.kind !== "prepare-choice" && showQuiz && quizView) body = quizViewHtml(quizView, skin);
   if (actionError) body = `<div role="alert" style="border-radius:${skin.buttonRadius};padding:7px 9px;margin-bottom:8px;background:rgba(226,115,93,.12);color:${skin.cut}">${escapeHtml(actionError)}</div>${body}`;
-  return `<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-label="${expanded ? "접기" : "펼치기"}" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(${expanded ? "90deg" : "0deg"})"><path d="m9 6 6 6-6 6"/></svg></button></div>${expanded ? `<div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);max-height:calc(100dvh - 60px);overflow:auto;overscroll-behavior:contain;box-sizing:border-box">${body}</div>` : ""}`;
+  return `<div data-rcm-drag="true" style="box-sizing:border-box;display:flex;align-items:center;gap:8px;height:34px;padding:0 4px 0 12px;cursor:grab;touch-action:none;white-space:nowrap"><span data-rcm-status-dot="true" aria-hidden="true" style="display:grid;place-items:center;width:14px;height:14px;flex:none;color:${color}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${STATUS_ICON_PATHS[tone]}</svg></span><strong data-rcm-status-label="true" title="${escapeHtml(current.label)}" style="display:flex;align-items:baseline;flex:1;min-width:0;line-height:1.4;white-space:nowrap;font-weight:600"><span aria-hidden="true" style="flex:none">RCM&nbsp;·&nbsp;</span><span data-rcm-status-label-text="true" style="min-width:0;overflow:hidden;text-overflow:ellipsis">${escapeHtml(current.label)}</span><span data-rcm-status-elapsed="true" aria-hidden="true" style="flex:none;font-weight:400;color:${skin.ink3};font-variant-numeric:tabular-nums">${current.startedAt ? ` · ${statusElapsedLabel(current.startedAt, observedAt)}` : ""}</span></strong><button type="button" data-rcm-toggle="true" aria-expanded="true" aria-label="접기" style="display:grid;place-items:center;width:28px;height:28px;flex:none;border:0;background:transparent;border-radius:${skin.buttonRadius};color:${skin.ink3};cursor:pointer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform:rotate(90deg)"><path d="m9 6 6 6-6 6"/></svg></button></div><div style="border-top:1px solid ${skin.rule};padding:10px;line-height:1.55;max-height:calc(100vh - 60px);max-height:calc(100dvh - 60px);overflow:auto;overscroll-behavior:contain;box-sizing:border-box">${body}</div>`;
 }
 
 export async function installStatusWidget(state: RuntimeState, client: ServerClient): Promise<void> {
-  let installedRoot: SafeRootDocument | undefined;
   let installedWidget: SafeRootElement | undefined;
   let installedWidgetStyle: SafeRootElement | undefined;
   let elapsedTimer: number | undefined;
   let completionTimer: number | undefined;
+  let onResize: (() => void) | undefined;
   let elapsedClockStopped = false;
-  const installedListeners: Array<{ type: string; id: string }> = [];
+  const installedListeners: Array<{ owner: SafeRootElement; type: string; id: string }> = [];
   try {
     const root = await risuai.getRootDocument();
-    installedRoot = root;
     const bodyHost = await root.querySelector("body");
     if (!bodyHost) throw new Error("Status widget requires a document body");
     await (await root.querySelector(WIDGET_SELECTOR))?.remove();
@@ -527,6 +545,12 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     const viewportHeight = await root.clientHeight();
     const savedPosition = state.settings.statusWidgetPosition;
     const initialPosition = clampStatusPosition(savedPosition?.left ?? viewportWidth - statusWidgetWidth(false, viewportWidth) - 8, savedPosition?.top ?? viewportHeight - 140, viewportWidth, viewportHeight);
+    let buttonPosition = initialPosition;
+    let layoutWidth = 32;
+    let layoutHeight = 32;
+    let headerHeight = 34;
+    let screenWidth = viewportWidth;
+    let screenHeight = viewportHeight;
     let widgetLeft = initialPosition.left;
     let widgetTop = initialPosition.top;
     const baseStyles: Record<string, string> = {
@@ -547,6 +571,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       return skin;
     };
     await applySkin();
+    let userExpanded = false;
     let expanded = false;
     let press: { x: number; y: number; region: "header" | "action" } | undefined;
     let dragging = false;
@@ -576,12 +601,13 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     let elapsedLabelElement: SafeRootElement | undefined;
     let elapsedRowElements: SafeRootElement[] = [];
     let elapsedMarkerErrorReported = false;
-    const eventInsideWidget = async (event: any): Promise<{ inside: boolean; x: number; y: number; width: number; height: number }> => {
-      const x = Number(event.clientX) - widgetLeft;
-      const y = Number(event.clientY) - widgetTop;
-      const width = await widget.clientWidth();
-      const height = await widget.clientHeight();
-      return { inside: Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= width && y >= 0 && y <= height, x, y, width, height };
+    const eventInsideWidget = (event: any): boolean => {
+      if (!shouldShowStatusWidget(state, dashboardHidden)) return false;
+      const pad = !expanded && window.matchMedia?.("(pointer:coarse)").matches ? 6 : 0;
+      return statusPointInRect(Number(event.clientX), Number(event.clientY), {
+        left: widgetLeft - pad, right: widgetLeft + layoutWidth + pad,
+        top: widgetTop - pad, bottom: widgetTop + layoutHeight + pad,
+      });
     };
     const currentVisual = () => {
       const current = widgetState(state);
@@ -604,11 +630,26 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         addLog(state.logs, "warn", "Status widget clock markers were removed by host HTML sanitization", "WIDGET_CLOCK_SANITIZED");
       } else if (!missingMarkers) elapsedMarkerErrorReported = false;
     };
+    let buttonLabel = "";
+    const focusToggle = async (parent: SafeRootElement): Promise<void> => {
+      await (await parent.querySelector(TOGGLE))?.focus();
+    };
     const syncElapsedClocks = async (current: FloatingWidgetState): Promise<void> => {
       const startedAt = current.startedAt ?? 0;
       const observedAt = Date.now();
       const updates: Promise<void>[] = [];
-      if (elapsedLabelElement) updates.push(elapsedLabelElement.setTextContent(startedAt ? ` · ${statusElapsedLabel(startedAt, observedAt)}` : ""));
+      // SafeRoot permits only x-* attribute writes. Replace the compact control
+      // inside its clock marker so the native tooltip and accessible name agree.
+      if (elapsedLabelElement && !expanded) {
+        const label = statusButtonLabel(current, observedAt);
+        const marker = elapsedLabelElement;
+        if (label !== buttonLabel && !press && !await marker.querySelector("button:active")) {
+          const focused = await marker.querySelector("button:focus");
+          buttonLabel = label;
+          await marker.setInnerHTML(statusButton(current, chipSkin(state.settings), label));
+          if (focused) await focusToggle(marker);
+        }
+      } else if (elapsedLabelElement) updates.push(elapsedLabelElement.setTextContent(startedAt ? ` · ${statusElapsedLabel(startedAt, observedAt)}` : ""));
       const rows = activeStatusTimingRows(state);
       for (let index = 0; index < Math.min(rows.length, elapsedRowElements.length); index += 1) {
         updates.push(elapsedRowElements[index]!.setTextContent(statusElapsedLabel(rows[index]!.startedAt, observedAt)));
@@ -616,18 +657,14 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       await Promise.all(updates);
     };
     const keepInViewport = async (): Promise<void> => {
-      await widget.setStyle("width", expanded ? `${statusWidgetWidth(true, await root.clientWidth())}px` : "max-content");
+      screenWidth = await root.clientWidth();
+      screenHeight = await root.clientHeight();
+      layoutWidth = statusWidgetWidth(expanded, screenWidth);
+      await widget.setStyle("width", `${layoutWidth}px`);
       const skin = chipSkin(state.settings);
       await widget.setStyle("borderRadius", expanded ? skin.radiusOpen : skin.radius);
-      const width = await widget.clientWidth() || statusWidgetWidth(expanded, await root.clientWidth());
-      const position = clampStatusPosition(
-        widgetLeft,
-        widgetTop,
-        await root.clientWidth(),
-        await root.clientHeight(),
-        width,
-        await widget.clientHeight(),
-      );
+      layoutHeight = expanded ? (await widget.getBoundingClientRect()).height || await widget.clientHeight() : 32;
+      const position = clampStatusPosition(buttonPosition.left, buttonPosition.top, screenWidth, screenHeight, layoutWidth, layoutHeight);
       if (position.left !== widgetLeft) { widgetLeft = position.left; await widget.setStyle("left", `${widgetLeft}px`); }
       if (position.top !== widgetTop) { widgetTop = position.top; await widget.setStyle("top", `${widgetTop}px`); }
     };
@@ -635,19 +672,23 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     let widgetChatId = state.current?.chatId;
     const lineageQuizKey = () => JSON.stringify([state.current?.chatId, state.statusSummary?.lineage?.status, state.statusSummary?.lineage?.parentChatId, state.statusSummary?.lineage?.forkOrdinal, state.statusSummary?.lineage?.appliedAt]);
     let widgetLineageQuizKey = lineageQuizKey();
-    const syncVisibility = async () => {
+    const syncChat = () => {
       if (widgetChatId !== state.current?.chatId) {
         widgetChatId = state.current?.chatId;
-        expanded = false;
+        userExpanded = false;
         actionError = "";
         quiz.reset();
       }
-      const visible = shouldShowStatusWidget(state, dashboardHidden);
-      await widget.setStyle("display", visible ? "block" : "none");
-      return visible;
+    };
+    let shown = false;
+    // Full renders, clock patches and resizes share the asynchronous SafeRoot surface.
+    let layoutWork = Promise.resolve();
+    const scheduleLayout = (work: () => Promise<void>) => {
+      layoutWork = layoutWork.then(work, work);
+      return layoutWork;
     };
     const patchStatus = async () => {
-      if (!await syncVisibility()) return;
+      if (!shown || !shouldShowStatusWidget(state, dashboardHidden)) return;
       await keepInViewport();
       const { current, color } = currentVisual();
       await (await widget.querySelector('[data-rcm-status-dot="true"]'))?.setStyle("color", color);
@@ -655,15 +696,9 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       await syncElapsedClocks(current);
       await (await widget.querySelector('[data-rcm-status-detail="true"]'))?.setTextContent(current.detail);
     };
-    let patchQueue = Promise.resolve();
-    const schedulePatch = (): Promise<void> => {
-      patchQueue = patchQueue.then(patchStatus, patchStatus);
-      return patchQueue;
-    };
-    const patchElapsedOnly = async (): Promise<void> => {
-      if (!shouldShowStatusWidget(state, dashboardHidden)) return;
-      await syncElapsedClocks(currentVisual().current);
-    };
+    const patchElapsedOnly = () => scheduleLayout(async () => {
+      if (shown && shouldShowStatusWidget(state, dashboardHidden)) await syncElapsedClocks(currentVisual().current);
+    });
     let elapsedClockErrorReported = false;
     const reportElapsedClockError = (error: unknown): void => {
       if (elapsedClockErrorReported) return;
@@ -710,38 +745,56 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     state.setStatusWidgetHidden = async (hidden) => {
       dashboardHidden = hidden;
       if (hidden) clearElapsedTick();
-      if (!await syncVisibility()) return;
-      // The elapsed timer sleeps while the dashboard covers the widget. Rebase
-      // its text to wall time before revealing the widget again.
-      await widget.setStyle("visibility", "hidden");
-      await schedulePatch();
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      await widget.setStyle("visibility", "visible");
-      await schedulePatch();
+      await render();
       scheduleElapsedTick();
     };
-    const render = async () => {
-      await syncVisibility();
-      await keepInViewport();
+    const renderKey = (current: FloatingWidgetState) => [
+      statusVisualKey(current), statusTimingKey(state), chipSkinKey(state.settings), state.serverWorker?.embeddingConfigured,
+      sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery), quizOn(), shouldShowStatusWidget(state, dashboardHidden),
+    ].join("\u0002");
+    const render = () => scheduleLayout(async () => {
+      syncChat();
+      if (!shouldShowStatusWidget(state, dashboardHidden)) {
+        shown = false;
+        await widget.setStyle("display", "none");
+        return;
+      }
       const { current } = currentVisual();
-      if (current.kind === "prepare-choice" || current.kind === 'upgrade' && state.upgradeBlocked) expanded = true;
+      if (current.kind === "upgrade" && state.upgradeBlocked) userExpanded = true;
+      elapsedLabelElement = undefined;
+      const nextExpanded = userExpanded || current.kind === "prepare-choice";
+      const transition = !shown || nextExpanded !== expanded;
+      const focused = await widget.querySelector(`${TOGGLE}:focus`);
+      if (transition) {
+        shown = false;
+        await widget.setStyle("visibility", "hidden");
+        await widget.setStyle("display", "block");
+      }
+      expanded = nextExpanded;
       await applySkin();
-      renderedStatusKey = `${statusVisualKey(current)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
+      renderedStatusKey = renderKey(current);
       await widget.setAttribute("x-rcm-expanded", String(expanded));
       await widget.setAttribute("x-rcm-lineage-state", currentLineageOperation(state)?.status ?? "resolved");
       await widget.setAttribute(STATUS_TIMED_ATTRIBUTE, current.startedAt ? "true" : "false");
+      const observedAt = Date.now();
+      buttonLabel = statusButtonLabel(current, observedAt);
       await widget.setInnerHTML(renderStatusWidget(state, {
-        current, expanded, connectionReady: quizConnectionReady(), quizEnabled: quizOn(),
+        current, expanded, observedAt, connectionReady: quizConnectionReady(), quizEnabled: quizOn(),
         quizNext: quiz.next, quizLoadFailed: quiz.loadFailed, quizView: quiz.view, actionError,
       }));
+      await keepInViewport();
+      if (transition) await widget.setStyle("visibility", "visible");
+      shown = true;
+      if (focused) await focusToggle(widget);
+      if (expanded) headerHeight = await (await widget.querySelector('[data-rcm-drag="true"]'))?.clientHeight() || 34;
       await cacheElapsedClockElements(expanded ? activeStatusTimingRows(state).length : 0);
       await syncElapsedClocks(current);
-      await keepInViewport();
       scheduleCompletionExpiry(current);
-    };
+    });
 
     const toggleExpanded = async (): Promise<void> => {
-      expanded = !expanded;
+      if (widgetState(state).kind === "prepare-choice") return;
+      userExpanded = !expanded;
       await render();
       if (expanded && !quiz.view && quizOn()) {
         await quiz.refresh();
@@ -816,16 +869,17 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       // Status observation is read-only. Fetch a question only after the server
       // has one, regardless of the notice occupying the status header.
       if (quizStatusPending || !quizOn() || quiz.view) return;
-      if (!inheritedQuizPending && (!expanded || dashboardHidden || !quiz.next || quiz.next.available)) return;
+      if (!inheritedQuizPending && (dashboardHidden || !expanded || !quiz.next || quiz.next.available)) return;
       const chatId = state.current!.chatId;
       const lineageKey = lineageQuizKey();
       quizStatusPending = true;
       try {
         // A newly selected chat must reset its old session before we load its pool.
-        await syncVisibility();
+        syncChat();
         const previous = quiz.next;
+        const wasExpanded = expanded;
         const status = await client.quizStatus(chatId);
-        if (state.current?.chatId !== chatId || lineageQuizKey() !== lineageKey || quiz.next !== previous || quiz.view || !quizOn()) return;
+        if (state.current?.chatId !== chatId || lineageQuizKey() !== lineageKey || quiz.next !== previous || wasExpanded !== expanded || quiz.view || !quizOn()) return;
         inheritedQuizPending = false;
         if (status.unanswered > 0) {
           await quiz.refresh();
@@ -836,7 +890,6 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
     };
     state.refreshStatusWidget = () => {
       // Inheritance refreshes the pool even while collapsed or dashboard-hidden.
-      // Ordinary status polls only observe an already-open waiting entry.
       if (!quizOn()) quiz.reset();
       const nextLineageQuizKey = lineageQuizKey();
       if (nextLineageQuizKey !== widgetLineageQuizKey) {
@@ -847,35 +900,31 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
           quiz.reset();
         }
       }
+      const chatChanged = widgetChatId !== state.current?.chatId;
       void refreshWaitingQuiz();
       const next = currentVisual().current;
-      const nextKey = `${statusVisualKey(next)}\u0002${statusTimingKey(state)}\u0002${chipSkinKey(state.settings)}\u0002${state.serverWorker?.embeddingConfigured}\u0002${sourceRecoverySummary(state.statusSummary?.lastJobSourceRecovery)}`;
+      const nextKey = renderKey(next);
       // An open quiz is not rebuilt by status polls; only a chat or skin change redraws it.
-      const quizHolds = next.kind !== "prepare-choice" && next.kind !== 'upgrade' && quizOn() && Boolean(quiz.view) && nextKey.split("")[2] === renderedStatusKey.split("")[2];
+      const quizHolds = !renderedStatusKey.startsWith("prepare-choice\u0000") && next.kind !== "prepare-choice" && next.kind !== 'upgrade' && quizOn() && Boolean(quiz.view) && chipSkinKey(state.settings) === appliedSkinKey;
       const blockedUpgradeCollapsed = next.kind === 'upgrade' && state.upgradeBlocked && !expanded;
-      if (blockedUpgradeCollapsed || widgetChatId !== state.current?.chatId || (nextKey !== renderedStatusKey && !quizHolds)) {
+      if (shown !== shouldShowStatusWidget(state, dashboardHidden) || blockedUpgradeCollapsed || chatChanged || (nextKey !== renderedStatusKey && !quizHolds)) {
         renderedStatusKey = nextKey;
         void render().then(scheduleElapsedTick, reportElapsedClockError);
       } else if (nextKey !== renderedStatusKey) {
         renderedStatusKey = nextKey;
-        void schedulePatch().then(scheduleElapsedTick, reportElapsedClockError);
+        void scheduleLayout(patchStatus).then(scheduleElapsedTick, reportElapsedClockError);
       } else requestElapsedPatch();
     };
     await bodyHost.appendChild(widget);
     await render();
-    const listen = async (type: string, callback: (event: any) => void | Promise<void>): Promise<void> => {
-      installedListeners.push({ type, id: await root.addEventListener(type, callback) });
+    const listen = async (type: string, callback: (event: any) => void | Promise<void>, owner: SafeRootElement = root): Promise<void> => {
+      installedListeners.push({ owner, type, id: await owner.addEventListener(type, callback) });
     };
     await listen("pointerdown", async (event: any) => {
-      const hit = await eventInsideWidget(event);
-      if (!hit.inside) return;
-      const pointerRegion = statusPointerRegion(hit.x, hit.y, hit.width, await (await widget.querySelector('[data-rcm-drag="true"]'))?.clientHeight() ?? 36);
-      if (pointerRegion === "toggle") {
-        press = { x: Number(event.clientX), y: Number(event.clientY), region: "action" };
-        return;
-      }
-      const region = pointerRegion === "header" ? "header" : undefined;
-      press = { x: Number(event.clientX), y: Number(event.clientY), region: region ?? "action" };
+      if (!eventInsideWidget(event)) return;
+      const x = Number(event.clientX), y = Number(event.clientY);
+      const region = expanded ? statusPointerRegion(x - widgetLeft, y - widgetTop, layoutWidth, headerHeight) : "header";
+      press = { x, y, region: region === "header" ? "header" : "action" };
       dragging = false;
       offsetX = Number(event.clientX) - widgetLeft; offsetY = Number(event.clientY) - widgetTop;
     });
@@ -887,9 +936,8 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         return;
       }
       dragging = true;
-      const width = await root.clientWidth();
-      const height = await root.clientHeight();
-      const position = clampStatusPosition(Number(event.clientX) - offsetX, Number(event.clientY) - offsetY, width, height, await widget.clientWidth(), await widget.clientHeight());
+      const position = clampStatusPosition(Number(event.clientX) - offsetX, Number(event.clientY) - offsetY, screenWidth, screenHeight, layoutWidth, layoutHeight);
+      buttonPosition = position;
       widgetLeft = position.left;
       widgetTop = position.top;
       state.settings.statusWidgetPosition = { left: widgetLeft, top: widgetTop };
@@ -904,8 +952,7 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
         await saveSettings(state.settings).catch(() => undefined);
         return;
       }
-      const hit = await eventInsideWidget(event);
-      if (!hit.inside) return;
+      if (!eventInsideWidget(event) || statusDragStarted(released.x, released.y, Number(event.clientX), Number(event.clientY))) return;
       if (released.region === "header") {
         await toggleExpanded();
         return;
@@ -913,34 +960,40 @@ export async function installStatusWidget(state: RuntimeState, client: ServerCli
       const action = await actionAt(Number(event.clientX), Number(event.clientY));
       if (action) await runAction(action);
     });
+    // Native button activation from Enter, Space or assistive technology has
+    // zero client coordinates. Pointer clicks already ran through pointerup.
+    await listen("click", async (event) => {
+      if (event.clientX === 0 && event.clientY === 0 && (!expanded || await widget.querySelector(`${TOGGLE}:focus`))) await toggleExpanded();
+    }, widget);
     await listen("pointercancel", async () => {
       press = undefined;
       dragging = false;
     });
-    await keepInViewport();
+    onResize = () => { void scheduleLayout(keepInViewport).catch(reportElapsedClockError); };
+    window.addEventListener?.("resize", onResize);
     scheduleElapsedTick();
     await risuai.onUnload(async () => {
       elapsedClockStopped = true;
       clearElapsedTick();
       clearCompletionExpiry();
+      if (onResize) window.removeEventListener?.("resize", onResize);
       state.refreshStatusWidget = undefined;
       state.refreshQuizWidget = undefined;
       state.setStatusWidgetHidden = undefined;
-      for (const listener of installedListeners) await (root as any).removeEventListener(listener.type, listener.id);
+      for (const listener of installedListeners) await (listener.owner as any).removeEventListener(listener.type, listener.id);
       await widget.remove();
       await widgetStyle.remove();
     });
   } catch (error) {
     elapsedClockStopped = true;
+    if (onResize) window.removeEventListener?.("resize", onResize);
     if (elapsedTimer !== undefined) window.clearTimeout(elapsedTimer);
     if (completionTimer !== undefined) window.clearTimeout(completionTimer);
     state.refreshStatusWidget = undefined;
     state.refreshQuizWidget = undefined;
     state.setStatusWidgetHidden = undefined;
-    if (installedRoot) {
-      for (const listener of installedListeners) {
-        await Promise.resolve((installedRoot as any).removeEventListener(listener.type, listener.id)).catch(() => undefined);
-      }
+    for (const listener of installedListeners) {
+      await Promise.resolve((listener.owner as any).removeEventListener(listener.type, listener.id)).catch(() => undefined);
     }
     if (installedWidget) await installedWidget.remove().catch(() => undefined);
     if (installedWidgetStyle) await installedWidgetStyle.remove().catch(() => undefined);

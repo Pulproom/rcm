@@ -1,6 +1,6 @@
 import { backfillLegacyParticipantAccess } from "./access-migration.js";
 import { isEndedPromiseStatus, promiseFirstMade, type PromiseFirstMade } from "./promise-recency.js";
-import { validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, intersectAccessKnowledge, type ItemAccessScope } from "./item-access.js";
+import { validItemAccessScope, EVERYONE_HOLDER, itemAccessKnowledge, type ItemAccessScope } from "./item-access.js";
 import { createItemAccessReadContext, loadKnownByLabels, type ItemAccessReadContext, linkedDetailKnowledge, promiseLinkedSupport, correctedPromiseDetailIds, projectPromiseRow } from "./item-access.js";
 import { createHash } from "node:crypto";
 import { stateCandidateValue } from './now-delivery.js';
@@ -60,20 +60,14 @@ export function stateEvidenceScope(item: StateEvidence): KnowledgeScope | undefi
   const scope = publicKnowledgeScope(item.holders);
   return scope.knownByEveryone || scope.knownBy.length || item.holders.includes(NARRATOR_ARCHIVE_HOLDER) ? scopeOf(scope) : undefined;
 }
-const evidenceKey = (item: any): string => JSON.stringify([
-  item.messageId, item.canonicalHash ?? null, item.startOffset ?? null, item.endOffset ?? null, item.quote ?? null,
-]);
 
 export function resolveAssertionHolders(db: RcmDatabase, chatId: string, row: any): string[] | null {
   return assertionHolders(db, chatId, [row]).get(String(row.id)) ?? null;
 }
 
-/** One snapshot per collection, preserving detail scan/intersection order. */
+/** Resolve direct grants in one batch for the collection. */
 function assertionHolders(db: RcmDatabase, chatId: string, rows: any[], reads?:ItemAccessReadContext): Map<string, string[] | null> {
   const directScopes = loadItemAccessScopes(db, chatId, rows.map(row => ({kind:"assertion",id:String(row.id)})));
-  type Detail = { id:string; memory_id:string; evidence_json:string; known_by_json:string };
-  let fallback: { byEvidence:Map<string,Detail[]>; byMemory:Map<string,Map<string,Detail[]>>;
-    order:Map<Detail,number>; scopes:Map<string,ItemAccessScope> } | undefined;
   const supported = (row:any): string[] | null => {
     if (row.linked_detail_ids_json != null && row.user_edit_ordinal == null)
       return linkedDetailKnowledge(db,chatId,parse(row.linked_detail_ids_json),reads) ?? null;
@@ -83,40 +77,7 @@ function assertionHolders(db: RcmDatabase, chatId: string, rows: any[], reads?:I
     if (relation && !direct.pending) return relation.manual && !relation.knownByEveryone && !relation.knownBy?.length ? [NARRATOR_ARCHIVE_HOLDER] : socialRelationKnowledge(db,chatId,relation,reads) ?? null;
     if (!restrictedStateKind(row.state_kind)) return direct.pending ? null : [];
     if (direct.explicit) return null;
-    const evidence = parse(row.evidence_json);
-    if (!evidence.length) return null;
-    if (!fallback) {
-      // Single-row dashboard/editor reads retain their parent projection;
-      // collection reads materialize the archive once for every assertion.
-      const sourceMemory=rows.length===1 ? rows[0].source_memory_id ?? null : null;
-      const details = db.prepare(`SELECT d.id,d.memory_id,d.evidence_json,d.known_by_json FROM visible_memory_details d
-        JOIN memories m ON m.id=d.memory_id WHERE d.chat_id=? AND d.active=1 AND m.active=1
-        AND (? IS NULL OR d.memory_id=?)`).all(chatId,sourceMemory,sourceMemory) as Detail[];
-      const byEvidence=new Map<string,Detail[]>(), byMemory=new Map<string,Map<string,Detail[]>>();
-      const append=(map:Map<string,Detail[]>,key:string,detail:Detail) => {
-        const entries=map.get(key) ?? []; entries.push(detail); map.set(key,entries);
-      };
-      for (const detail of details) {
-        const local=byMemory.get(detail.memory_id) ?? new Map<string,Detail[]>();
-        for (const key of new Set(parse(detail.evidence_json).map(evidenceKey))) {
-          append(byEvidence,key,detail); append(local,key,detail);
-        }
-        byMemory.set(detail.memory_id,local);
-      }
-      fallback={byEvidence,byMemory,order:new Map(details.map((detail,index)=>[detail,index])),
-        scopes:loadItemAccessScopes(db,chatId,details.map(detail=>({kind:"detail",id:detail.id})))};
-    }
-    const evidenceKeys = new Set(evidence.map(evidenceKey));
-    // Shared source spans across many memories must not fan out a parent's
-    // lookup over the whole archive before applying its memory constraint.
-    const index=row.source_memory_id == null ? fallback.byEvidence : fallback.byMemory.get(row.source_memory_id);
-    const matching = [...new Set([...evidenceKeys].flatMap(key=>index?.get(key) ?? []))]
-      .sort((a,b)=>fallback!.order.get(a)!-fallback!.order.get(b)!);
-    if (!matching.length) return null;
-    const resolved = matching.map(detail => storedItemAccessScope(fallback!.scopes, "detail", detail.id));
-    if (resolved.some(scope => !scope.explicit || !validItemAccessScope(scope))) return null;
-    const holders = [...new Set(resolved.map(itemAccessKnowledge).reduce(intersectAccessKnowledge))];
-    return holders.length || resolved.every(scope => scope.narratorOnly) ? holders : null;
+    return parse(row.evidence_json).length ? [row.subject] : null;
   };
   return new Map(rows.map(row=>[String(row.id),supported(row)]));
 }
@@ -310,7 +271,7 @@ function readStateEvidence(db: RcmDatabase, chatId: string, trace?: StateOutcome
     const basisEvidence = JSON.stringify(basis.flatMap(event => event ? parse(event.evidence_json) : []));
     const summary = row.summary || Object.entries(row.axes).filter(([, axis]) => axis.level !== "unknown").map(([axis, value]) => `${axis}: ${value.level}`).join("; ");
     const displaySummary = !summaryReady ? "Relationship summary is not ready yet." : summary;
-    add("relationship", { id: `${row.from}:${row.to}`, evidence_json: basisEvidence, ...projection }, `${row.from} → ${row.to}: ${summary}${row.stale ? " [Last recorded relationship; update pending.]" : ""}${row.activeTensions.length ? ` Unresolved tensions: ${row.activeTensions.join("; ")}` : ""}`, [row.from], [row.from, row.to], true, undefined, undefined,
+    add("relationship", { id: `${row.from}:${row.to}`, evidence_json: basisEvidence, ...projection }, `${row.from} → ${row.to}${summary ? `: ${summary}` : ""}${row.stale ? " [Last recorded relationship; update pending.]" : ""}${row.activeTensions.length ? ` Unresolved tensions: ${row.activeTensions.join("; ")}` : ""}`, [row.from], [row.from, row.to], true, undefined, undefined,
       { subject: `${row.from} → ${row.to}`, body: displaySummary, axes: row.axes, tensions: row.activeTensions, summaryReady },
       {linkedDetailIds:basis.flatMap(event=>event?.source_detail_id ? [event.source_detail_id] : [])});
     for (const [axis,value] of Object.entries(row.axes)) if (value.level !== "unknown") {

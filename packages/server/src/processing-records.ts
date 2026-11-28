@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS processing_calls (
   purpose TEXT NOT NULL, site TEXT, provider TEXT, slot TEXT, model TEXT,
   batch_id TEXT, run_id TEXT, start_ordinal INTEGER, end_ordinal INTEGER,
   repair_of TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, duration_ms INTEGER,
-  input_tokens INTEGER, output_tokens INTEGER, item_count INTEGER, completed_items INTEGER, repair_reason TEXT,
+  input_tokens INTEGER, output_tokens INTEGER, item_count INTEGER, completed_items INTEGER, repair_reason TEXT, source_transport_json TEXT,
   outcome TEXT NOT NULL, failure_code TEXT, reason TEXT,
   FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
   FOREIGN KEY(attempt_id) REFERENCES processing_attempts(id) ON DELETE SET NULL
@@ -67,7 +67,7 @@ export function processingFailure(error: unknown): { code: string; reason: strin
   const candidate = metadata.code ?? settingsFailureCode(error);
   const code = typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(candidate) ? candidate
     : metadata.status ? `HTTP_${metadata.status}` : error instanceof SyntaxError || (error as any)?.name === 'ZodError' ? 'VALIDATION_FAILED' : 'CALL_FAILED';
-  const reason = /TIMEOUT/.test(code) ? '시간 초과' : code === 'LEASE_EXPIRED' ? '작업 제어권 만료' : code==='WORKER_RELEASED' ? '작업 중단 · lease 반환'
+  const reason = code === 'SOURCE_PDF_REJECTED' ? 'PDF 원문 거절 · 텍스트로 다시 보냄' : /TIMEOUT/.test(code) ? '시간 초과' : code === 'LEASE_EXPIRED' ? '작업 제어권 만료' : code==='WORKER_RELEASED' ? '작업 중단 · lease 반환'
     : /VALID|JSON|REPAIR|TRUNCATED/.test(code) ? '응답 검증 실패'
     : /AUTH|HTTP_40[13]/.test(code) ? '인증 실패' : /429|RATE_LIMIT/.test(code) ? '요청 한도 초과'
     : /^HTTP_/.test(code) ? `공급자 오류 ${metadata.status ?? code.slice(5)}` : '호출 실패';
@@ -147,7 +147,7 @@ export function endProcessingAttempt(db: RcmDatabase, jobId: string, outcome: st
     .run(at, at, failure?.code ?? null, failure?.reason ?? null, jobId);
 }
 
-export interface CallIdentity { site: 'server' | 'risu'; provider?: string; slot?: string; model?: string; }
+export interface CallIdentity { site: 'server' | 'risu'; provider?: string; slot?: string; transport?: import('@rcm/shared').SourceTransport; model?: string; }
 const label = (value: unknown): string | null => typeof value === 'string' && value.length <= 200 && !/[\r\n]/.test(value) ? value : null;
 
 export function recordProcessingCall(db: RcmDatabase, jobId: string, event: { purpose: string; outcome: string; at: number; usage?: unknown; code?: string; error?: unknown; risuCall?: any; repairReason?:string }, identity?: CallIdentity): void {
@@ -167,6 +167,7 @@ export function recordProcessingCall(db: RcmDatabase, jobId: string, event: { pu
       batch?.id??payload.batchId ?? null, processingRunId(payload),
       batch?.start_ordinal??range.lo ?? payload.startOrdinal ?? null, batch?.end_ordinal??range.hi ?? payload.endOrdinal ?? null, repaired?.id ?? null, at);
     db.prepare('UPDATE processing_calls SET repair_reason=? WHERE job_id=? AND started_at=? AND outcome=\'running\'').run(event.repairReason ?? null,jobId,at);
+    db.prepare("UPDATE processing_calls SET source_transport_json=? WHERE job_id=? AND started_at=? AND outcome='running'").run(JSON.stringify(identity?.transport ?? {kind:'text'}),jobId,at);
     maybePruneProcessingRecords(db, owner.chat_id);
     return;
   }

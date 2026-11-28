@@ -12,6 +12,7 @@ export interface ProcessingTotals {
   missingTokens?: number;
 }
 export interface ProcessingCall extends ProcessingModel {
+  sourceTransport?: import('./source-pdf.js').SourceTransport | null;
   id: string; jobId: string | null; purpose: string; at: number;
   input: number | null; output: number | null; duration: number | null;
   outcome: string; code: string | null; reason: string | null; repairOf: string | null;

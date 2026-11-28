@@ -30,9 +30,7 @@ export function quizEntryButton(next: QuizNextResponse | undefined, skin: ChipSk
   if (!next?.enabled) return "";
   if (!next.available || !next.question) return `<p role="status" style="margin:8px 0 0;font-size:12px;line-height:1.5;color:${skin.ink3};overflow-wrap:anywhere">${next.waitingReason ? waitingCopy[next.waitingReason] : next.generating ? "새 퀴즈를 만들고 있어요." : "퀴즈가 순서를 기다리고 있어요."}</p>`;
   const count = next.remaining > 0 ? next.remaining : 1;
-  const centred = skin.buttonAlign === "center";
-  const layout = centred ? "display:block" : "display:flex;justify-content:space-between;align-items:baseline;gap:8px";
-  return `<button type="button" data-rcm-quiz-start="true" data-waiting="${waiting}" style="${primaryButton(skin)};${layout}">퀴즈 풀기<span style="font-weight:500;opacity:.82">${centred ? " · " : ""}${count}문제${centred ? "" : " 남음"}</span></button>`;
+  return `<button type="button" data-rcm-quiz-start="true" data-waiting="${waiting}" style="${primaryButton(skin)};display:block">퀴즈 풀기<span style="font-weight:500;opacity:.82"> · ${count}문제</span></button>`;
 }
 
 /** Shown in place of the entry button when the quiz could not be loaded. */

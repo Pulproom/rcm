@@ -16,6 +16,7 @@ interface LocalStorageApi {
 }
 
 interface SafeRootElement {
+  focus(): Promise<void>;
   appendChild(child: SafeRootElement): Promise<void>;
   remove(): Promise<void>;
   setTextContent(value: string): Promise<void>;

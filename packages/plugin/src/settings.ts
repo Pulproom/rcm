@@ -1,4 +1,4 @@
-import { MemoryBudgetPresetSchema, TurnPrepareRequestSchema, defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
+import { MemoryLanguageSchema, MemoryBudgetPresetSchema, TurnPrepareRequestSchema, defaultCanonicalizationPolicy, sanitizeDiagnosticText } from "@rcm/shared";
 import type { PluginSettings, RuntimeLog } from "./types.js";
 
 export const SETTINGS_KEY = "rcm.settings.v1";
@@ -16,11 +16,18 @@ export const defaults: PluginSettings = {
   defaultChatEnabled: true,
   characterEnabled: {},
   chatEnabled: {},
+  lineageSettingsFrom: {},
   chatCatchUpPending: {},
   workerPaused: false,
   statusWidgetVisible: true,
   majorAlerts: true,
   quizEnabled: true,
+  defaultMemoryLanguage: "en",
+  defaultExtractionGroupTurns: 6,
+  defaultIncludeUserMessages: true,
+  defaultMemoryOnlyInjection: false,
+  defaultPairProgress: false,
+  defaultUpcomingOccasions: true,
   defaultProfile: "companion",
   profiles: {},
   narrationViewpoint: {},
@@ -54,6 +61,7 @@ export const defaults: PluginSettings = {
   autoTranslate: true,
   dashboardTheme: "light",
   dashboardSkin: "phone",
+  homeWallpaper: "bloom",
   christmasSnow: true,
   defaultMemoryBudget: 8_000,
   memoryBudgets: {},
@@ -99,8 +107,39 @@ export async function saveStoredJson(key: string, value: unknown): Promise<void>
   await local.setItem(key, value);
 }
 
+/** A missing chat entry follows the common value; explicit equal values remain explicit. */
+export const scopedSettings = {
+  chatEnabled: "defaultChatEnabled", profiles: "defaultProfile", memoryBudgets: "defaultMemoryBudget",
+  memoryLanguages: "defaultMemoryLanguage", extractionGroupTurns: "defaultExtractionGroupTurns",
+  includeUserMessages: "defaultIncludeUserMessages", memoryOnlyInjection: "defaultMemoryOnlyInjection",
+  pairProgress: "defaultPairProgress", upcomingOccasions: "defaultUpcomingOccasions",
+} as const;
+export type ScopedSetting = keyof typeof scopedSettings;
+export function resolveChatSetting<K extends ScopedSetting>(settings: PluginSettings, key: K, chatId: string): PluginSettings[K][string] {
+  return (settings[key][chatId] ?? settings[scopedSettings[key]]) as PluginSettings[K][string];
+}
+
+/** Additive settings22 upgrade: only old implicit defaults are released to common scope. */
+export function normalizeCommonSettings(stored: Partial<PluginSettings>): Partial<PluginSettings> {
+  const legacy = Object.values(scopedSettings).filter(key => !["defaultChatEnabled", "defaultProfile", "defaultMemoryBudget"].includes(key));
+  const upgrade = legacy.every(key => !Object.hasOwn(stored, key));
+  const result = { ...stored, dashboardSkin: defaults.dashboardSkin };
+  const lineage = stored.lineageSettingsFrom;
+  result.lineageSettingsFrom = lineage && typeof lineage === "object" && !Array.isArray(lineage)
+    ? Object.fromEntries(Object.entries(lineage).filter(([, parent]) => typeof parent === "string")) : {};
+  for (const key of legacy) Object.assign(result, { [key]: typeof stored[key] === typeof defaults[key] ? stored[key] : defaults[key] });
+  result.defaultMemoryLanguage = MemoryLanguageSchema.safeParse(result.defaultMemoryLanguage).data ?? defaults.defaultMemoryLanguage;
+  const turns = Number(result.defaultExtractionGroupTurns);
+  result.defaultExtractionGroupTurns = Number.isFinite(turns) ? Math.min(50, Math.max(1, Math.round(turns))) : defaults.defaultExtractionGroupTurns;
+  if (upgrade) for (const key of ["memoryLanguages", "extractionGroupTurns", "includeUserMessages", "memoryOnlyInjection", "pairProgress", "upcomingOccasions"] as const) {
+    Object.assign(result, { [key]: Object.fromEntries(Object.entries(stored[key] ?? {}).filter(([, value]) => value !== defaults[scopedSettings[key]])) });
+  }
+  return result;
+}
+
 export async function loadSettings(): Promise<PluginSettings> {
-  const stored = await loadStoredJson<Partial<PluginSettings>>(SETTINGS_KEY);
+  const raw = await loadStoredJson<Partial<PluginSettings>>(SETTINGS_KEY);
+  const stored = raw ? normalizeCommonSettings(raw) : undefined;
   if (stored && !supportedSettingsRevision(stored.settingsRevision)) {
     throw Object.assign(new Error(`RCM pre-release settings ${stored.settingsRevision ?? "unknown"} are unsupported. Reinstall the plugin or clear its settings.`), { code: "PRE_RELEASE_SETTINGS_RESET_REQUIRED" });
   }
@@ -122,9 +161,11 @@ export async function loadSettings(): Promise<PluginSettings> {
   };
   const settings: PluginSettings = {
     ...defaults,
+    ...Object.fromEntries(Object.values(scopedSettings).map(key => [key, stored?.[key] ?? defaults[key]])),
     defaultChatEnabled: stored?.defaultChatEnabled ?? defaults.defaultChatEnabled,
     characterEnabled: normalizeMemoryOnlyInjection(stored?.characterEnabled),
     chatEnabled: stored?.chatEnabled ?? {},
+    lineageSettingsFrom: stored?.lineageSettingsFrom ?? {},
     chatCatchUpPending: stored?.chatCatchUpPending ?? {},
     workerPaused: stored?.workerPaused ?? defaults.workerPaused,
     workerAttention: stored?.workerAttention,
@@ -168,6 +209,7 @@ export async function loadSettings(): Promise<PluginSettings> {
     autoTranslate: translationDisplay === "ko",
     dashboardTheme: stored?.dashboardTheme ?? defaults.dashboardTheme,
     dashboardSkin: stored?.dashboardSkin ?? defaults.dashboardSkin,
+    homeWallpaper: stored?.homeWallpaper ?? defaults.homeWallpaper,
     christmasSnow: stored?.christmasSnow !== false,
     defaultMemoryBudget: stored?.defaultMemoryBudget ?? defaults.defaultMemoryBudget,
     mcpCap: stored?.mcpCap ?? defaults.mcpCap,
@@ -186,9 +228,10 @@ export async function loadSettings(): Promise<PluginSettings> {
     }));
   settings.mcpCap = Math.max(1_500, Math.min(4_000, Number(settings.mcpCap) || defaults.mcpCap));
   settings.dashboardTheme = settings.dashboardTheme === "light" ? "light" : "dark";
-  settings.dashboardSkin = settings.dashboardSkin === "phone" ? "phone" : "film";
+  settings.homeWallpaper = (["bloom", "ocean", "sage", "sunset", "cinema", "mono"] as const).includes(settings.homeWallpaper as any) ? settings.homeWallpaper : "bloom";
   settings.settingsRevision = defaults.settingsRevision;
   rememberDiagnosticSecrets([settings.serverToken]);
+  if (raw && !Object.hasOwn(raw, "defaultMemoryLanguage")) await saveSettings(settings);
   return settings;
 }
 
@@ -200,6 +243,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.defaultChatEnabled === right.defaultChatEnabled
     && JSON.stringify(left.characterEnabled) === JSON.stringify(right.characterEnabled)
     && JSON.stringify(left.chatEnabled) === JSON.stringify(right.chatEnabled)
+    && JSON.stringify(left.lineageSettingsFrom) === JSON.stringify(right.lineageSettingsFrom)
     && JSON.stringify(left.chatCatchUpPending) === JSON.stringify(right.chatCatchUpPending)
     && left.workerPaused === right.workerPaused
     && JSON.stringify(left.workerAttention) === JSON.stringify(right.workerAttention)
@@ -209,6 +253,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.incidentCursor === right.incidentCursor
     && left.incidentServerUrl === right.incidentServerUrl
     && (left.quizEnabled === true) === (right.quizEnabled === true)
+    && Object.values(scopedSettings).every(key => left[key] === right[key])
     && left.defaultProfile === right.defaultProfile
     && left.auxiliaryMode === right.auxiliaryMode
     && left.extractionEngine === right.extractionEngine
@@ -220,6 +265,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
     && left.autoTranslate === right.autoTranslate
     && left.dashboardTheme === right.dashboardTheme
     && left.dashboardSkin === right.dashboardSkin
+    && (left.homeWallpaper ?? "bloom") === (right.homeWallpaper ?? "bloom")
     && left.christmasSnow === right.christmasSnow
     && left.defaultMemoryBudget === right.defaultMemoryBudget
     && JSON.stringify(left.memoryBudgets) === JSON.stringify(right.memoryBudgets)
@@ -245,7 +291,7 @@ function sameSettings(left: PluginSettings | undefined, right: PluginSettings): 
 
 export function isChatMemoryEnabled(settings: PluginSettings, chatId: string, characterId: string | undefined): boolean {
   return !!characterId && settings.characterEnabled[characterId] !== false
-    && (settings.chatEnabled[chatId] ?? settings.defaultChatEnabled);
+    && resolveChatSetting(settings, "chatEnabled", chatId);
 }
 
 export function serverScopeKey(settings: PluginSettings, chatId: string): string | undefined {

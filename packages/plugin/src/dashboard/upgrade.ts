@@ -8,7 +8,7 @@ const legacy = (status: UpgradeStatus) => status.summary.legacyMemories > 0
 const failed = (status: UpgradeStatus) => status.lastRun?.status === 'failed'
   || Boolean(status.lastRun?.phase === 2 && status.lastRun.error && status.lock);
 
-export function renderUpgradeCard(status: UpgradeStatus, skin: 'film' | 'phone'): string | null {
+export function renderUpgradeCard(status: UpgradeStatus): string | null {
   if (!status.summary.totalMemories) return null;
   const run = status.lastRun, lock = status.lock;
   const workOff = status.workEnabled === false;
@@ -33,8 +33,7 @@ export function renderUpgradeCard(status: UpgradeStatus, skin: 'film' | 'phone')
   } else if (run?.status === 'applied') {
     title = `새 버전으로 다시 만들었어요 · 기억 ${status.summary.visibleTotalMemories}개`;
     const close = iconBtn('close', '닫기', { action: 'upgrade-dismiss' });
-    if (skin === 'phone') return `<section class="gap-card noti noti--done noti--one" aria-live="polite"><span class="noti__ic noti__ic--gray">${icon('refresh')}</span><span class="noti__hd"><b>${escapeHtml(title)}</b></span>${close}</section>`;
-    return `<section class="gap-card notice notice--done" aria-live="polite"><div><span class="txt"><strong>${escapeHtml(title)}</strong></span>${close}</div></section>`;
+    return `<section class="gap-card noti noti--done noti--one" aria-live="polite"><span class="noti__ic noti__ic--gray">${icon('refresh')}</span><span class="noti__hd"><b>${escapeHtml(title)}</b></span>${close}</section>`;
   } else {
     title = `이전 버전으로 만든 기억${status.summary.visibleLegacyMemories ? ` ${status.summary.visibleLegacyMemories}개` : ''}`;
     body = '새 버전으로 다시 만들면 누가 무엇을 아는지 더 정확해져요.';
@@ -42,8 +41,7 @@ export function renderUpgradeCard(status: UpgradeStatus, skin: 'film' | 'phone')
   }
   const bad = failed(status);
   const bodyHtml = escapeHtml(body) + (workOff && bad && run?.phase === 1 ? `<br><span role="status">${escapeHtml(upgradeErrorReason('CHAT_WORK_OFF'))}</span>` : '');
-  if (skin === 'phone') return `<section class="gap-card noti${bad ? ' is-bad' : ''}" aria-live="polite"><span class="noti__ic noti__ic--${bad ? 'red' : 'gray'}">${icon(bad ? 'alert' : 'refresh')}</span><span class="noti__hd"><b>${escapeHtml(title)}</b></span>${body ? `<span class="noti__bd">${bodyHtml}</span>` : ''}<div class="noti__acts">${progress}${actions}</div></section>`;
-  return `<section class="gap-card notice${bad ? ' is-bad' : ''}" aria-live="polite"><div><strong>${escapeHtml(title)}</strong>${body ? `<p>${bodyHtml}</p>` : ''}${progress}${actions ? `<div class="notice__acts">${actions}</div>` : ''}</div></section>`;
+  return `<section class="gap-card noti${bad ? ' is-bad' : ''}" aria-live="polite"><span class="noti__ic noti__ic--${bad ? 'red' : 'gray'}">${icon(bad ? 'alert' : 'refresh')}</span><span class="noti__hd"><b>${escapeHtml(title)}</b></span>${body ? `<span class="noti__bd">${bodyHtml}</span>` : ''}<div class="noti__acts">${progress}${actions}</div></section>`;
 }
 
 export function renderUpgradeLine(status: UpgradeStatus): string | null {

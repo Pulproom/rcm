@@ -121,7 +121,7 @@ import { attachAuxiliaryPlan, cancelExtractionJobs, enqueueExtractionJobs, enque
 import { completeExtractionJob, ExtractionValidationError, type DialogueRecoveryCandidate } from "./extraction-completion.js";
 import { completeEpisodeJob } from "./episode-completion.js";
 import { hardDeleteMessage, hasDerivedState, purgeExpiredContent, syncSnapshot, syncChatTitle } from "./lifecycle.js";
-import { nowAlwaysInjectCount, assertNowDeliveryCapacity, deliverablePromiseSql, inheritNowDelivery } from './now-delivery.js';
+import { nowAlwaysInjectCount, deliverablePromiseSql, inheritNowDelivery } from './now-delivery.js';
 import { alwaysInjectEstimate, prepareAlwaysInject, prependAlwaysInject, automaticHardMemoryLimit, automaticHardTokenCeiling, automaticMemoryLimit, consolidateMemoryPacket, renderAlwaysInjectPlan, processedHistoryCoverage, lexicalCandidates, retrieve, mcpRetrievalAudience, type RetrievalCandidateClass, type RetrievalDiagnostics, type RetrievalSelectionRole } from "./retrieval.js";
 import { ServerLlmStore, ProviderRequestError } from "./server-llm.js";
 declare const __RCM_DISTRIBUTION__: boolean | undefined;
@@ -137,7 +137,7 @@ import { applyExtractionAuditPatch } from "./extraction-audit.js";
 import { changeEpisodeStart, closeEpisodeHold, episodeOverview, previewEpisodeStart, retryEpisode, releaseManualEpisode, startEpisodeHold, syncEpisodeMembership } from "./episodes.js";
 import { resolveSceneCharacters, resolveNarrationViewpoint, narrationViewpointKey, storedNarrationViewpoint } from "./perspectives.js";
 import { hasBufferedSource, ingestionSummary } from "./ingestion-state.js";
-import { resolveConflict, type ConflictResolution } from "./conflicts.js";
+import { listDashboardConflicts, resolveConflict, type ConflictResolution } from "./conflicts.js";
 import { readMemoryBookmarks, rememberMemoryPreferenceFields, setMemoryBookmark } from "./memory-bookmarks.js";
 import { InvalidViewPreferencesPatchError, readViewPreferences, ViewPreferencesStorageError, writePersonaHint, writeViewPreferences } from "./view-preferences.js";
 import { acknowledgeChatLineage, applyManualLineage, applyProbedLineage, chooseChatLineage, declineChatLineage, ensureChatLineage, hasPendingLineageDiscovery, getChatLineage, previewManualLineage, probeChatLineage, revertChatLineage } from "./lineage.js";
@@ -439,17 +439,28 @@ export function createApp(dependencies: Dependencies): Hono {
   });
   app.get("/v1/chats/:id/dashboard-home", (context) => {
     const chatId = context.req.param("id");
+    // Lazily share successful projections, keeping each dataset's failure boundary.
+    let ingestion: ReturnType<typeof ingestionSummary> | undefined;
+    let lineage: ReturnType<typeof getChatLineage> | undefined;
+    let conflicts: ReturnType<typeof listDashboardConflicts> | undefined;
+    let calibration: ReturnType<typeof initialCalibrationView> | undefined;
+    const common = {
+      ingestion: () => ingestion ??= ingestionSummary(db, chatId),
+      lineage: () => lineage ??= getChatLineage(db, chatId),
+      conflicts: () => conflicts ??= listDashboardConflicts(db, chatId),
+      calibration: () => calibration ??= initialCalibrationView(db, chatId),
+    };
     const readers = {
       memories: () => readDashboardMemories(chatId),
       relationships: () => readDashboardRelationships(chatId),
       entities: () => readDashboardEntities(chatId),
       viewPreferences: () => readViewPreferences(db, chatId),
       world: () => readDashboardWorld(chatId, { includeHistory: "true" }),
-      conflicts: () => readDashboardConflicts(chatId),
-      jobs: () => readDashboardJobs(chatId),
-      lineage: () => getChatLineage(db, chatId),
-      status: () => readDashboardStatus(chatId),
-      initialCalibration: () => initialCalibrationLedger(db, chatId),
+      conflicts: () => ({ items: common.conflicts() }),
+      jobs: () => readDashboardJobs(chatId, common.ingestion()),
+      lineage: common.lineage,
+      status: () => readDashboardStatus(chatId, common),
+      initialCalibration: () => initialCalibrationLedger(db, chatId, common.calibration()),
       storySpine: () => listStorySpine(db, chatId),
       socialKnowledge: () => readDashboardSocialKnowledge(chatId),
       gapRecovery: () => listGapRecovery(db,chatId),
@@ -1465,6 +1476,7 @@ export function createApp(dependencies: Dependencies): Hono {
           includeUserMessages: body.includeUserMessages,
           extractionGroupTurns: body.extractionGroupTurns,
           memoryLanguage: body.memoryLanguage,
+          memoryLanguageSource: body.memoryLanguageSource,
           canonicalizationPolicy: body.canonicalizationPolicy,
           chatId: context.req.param("id"),
           messages: [],
@@ -1475,7 +1487,7 @@ export function createApp(dependencies: Dependencies): Hono {
           deferExtraction: true,
         };
         const lineage = applyProbedLineage(db, request, body.parentChatId, body.fingerprint);
-        return context.json({ ok: true, lineage, initialCalibration: initialCalibrationView(db, request.chatId), queuedJobs: 0 });
+        return context.json({ ok: true, lineage, memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(request.chatId) as {memory_language:string}).memory_language, initialCalibration: initialCalibrationView(db, request.chatId), queuedJobs: 0 });
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'CHAT_UPGRADING') throw error;
@@ -1491,7 +1503,7 @@ export function createApp(dependencies: Dependencies): Hono {
         const chatId = context.req.param("id");
         const lineage = chooseChatLineage(db, chatId, body.parentChatId, { ...body, chatId, messages: [], query: '', perspectives: [],
           tokenBudget: 0, forceBackfill: false, deferExtraction: true }, body.fingerprint);
-        return context.json({ ...lineage, initialCalibration: initialCalibrationView(db, chatId), queuedJobs: 0 });
+        return context.json({ ...lineage, memoryLanguage: (db.prepare("SELECT memory_language FROM chats WHERE id=?").get(chatId) as {memory_language:string}).memory_language, initialCalibration: initialCalibrationView(db, chatId), queuedJobs: 0 });
       });
     }
     catch (error) {
@@ -1579,16 +1591,16 @@ export function createApp(dependencies: Dependencies): Hono {
     });
     for (const {chatId,lock} of locks) cancelUpgrade(db,chatId,lock!.runId);
   };
+  const workChats = (characterId?: string) => db.prepare(`SELECT id,character_id FROM chats WHERE ${userChatSql()} AND NOT EXISTS
+    (SELECT 1 FROM regeneration_runs u WHERE u.shadow_chat_id=chats.id)${characterId ? " AND character_id=?" : ""}`)
+    .all(...(characterId ? [characterId] : [])) as Array<{ id: string; character_id: string }>;
   const syncChatWork = (body: { chatEnabled?: Record<string, boolean>; characterEnabled?: Record<string, boolean>; defaultChatEnabled?: boolean; cancelUpgrade?: boolean; chatId?: string }, characterId?: string) => {
     if (body.chatId) assertUserChat(db,body.chatId);
     Object.keys(body.chatEnabled ?? {}).forEach(id=>assertUserChat(db,id));
     const settings = body.chatEnabled ?? {};
     const effective = new Map(characterId ? [] : Object.entries(settings));
     if (body.characterEnabled || body.defaultChatEnabled !== undefined) {
-      const chats = db.prepare(`SELECT id,character_id FROM chats WHERE ${userChatSql()} AND NOT EXISTS
-        (SELECT 1 FROM regeneration_runs u WHERE u.shadow_chat_id=chats.id)${characterId ? " AND character_id=?" : ""}`)
-        .all(...(characterId ? [characterId] : [])) as Array<{ id: string; character_id: string }>;
-      for (const chat of chats) effective.set(chat.id, body.characterEnabled?.[chat.character_id] !== false
+      for (const chat of workChats(characterId)) effective.set(chat.id, body.characterEnabled?.[chat.character_id] !== false
         && (settings[chat.id] ?? body.defaultChatEnabled ?? true));
     }
     checkWorkOff([...effective].filter(([,enabled]) => !enabled).map(([chatId]) => chatId),body.cancelUpgrade === true);
@@ -2519,14 +2531,13 @@ export function createApp(dependencies: Dependencies): Hono {
     const body = await context.req.json().catch(() => null);
     return withChatWrite(db, context.req.param('id'), () => {
       if (body?.action === 'retry') assertSourceSnapshotAccepted(db,context.req.param('id'));
-      if (!body || !["keep", "keep_as_written", "keep_edited", "keep_names", "hold", "discard", "retry"].includes(body.action) || !Array.isArray(body.items)
-        || body.action === "keep_edited" && (typeof body.text !== "string" || !body.text.trim())
+      if (!body || !["keep", "keep_as_written", "keep_names", "hold", "discard", "retry"].includes(body.action) || !Array.isArray(body.items)
         || !body.items.length || !body.items.every((item: any) => item && typeof item.auditId === "string" && typeof item.candidateId === "string" && (item.sourceChoiceId === undefined || typeof item.sourceChoiceId === "string"))
         || body.items.length > 1 && !["hold", "discard", "keep_as_written"].includes(body.action)) return context.json({error: "후보와 처리 방법을 확인해 주세요."}, 400);
       try {
-        const items = resolveSmallReviews(db, context.req.param("id"), body.items, body.action, body.text);
+        const items = resolveSmallReviews(db, context.req.param("id"), body.items, body.action);
         if (body.action === "retry") serverWorker.wake();
-        if (["keep", "keep_as_written", "keep_edited", "keep_names"].includes(body.action) && items.some(item => item.status === "kept" && item.reason !== "unsupported_kind")) void embeddings.indexPending(context.req.param("id"));
+        if (["keep", "keep_as_written", "keep_names"].includes(body.action) && items.some(item => item.status === "kept" && item.reason !== "unsupported_kind")) void embeddings.indexPending(context.req.param("id"));
         return context.json({items, ...(body.action === "keep_as_written" ? {counts: {
           kept:items.filter(item => item.status === "kept" && item.reason !== "unsupported_kind").length,
           pending:items.filter(item => item.status === "pending" && item.reason !== "unsupported_kind").length,
@@ -3038,6 +3049,27 @@ export function createApp(dependencies: Dependencies): Hono {
   app.delete("/v1/chats/:id/messages/:messageId", (context) => withChatWrite(db, context.req.param('id'), () => context.json({
     ok: hardDeleteMessage(db, context.req.param("id"), context.req.param("messageId")),
   })));
+  app.put("/v1/admin/chat-work", async context => {
+    const schema = CharacterWorkRequestSchema.omit({enabled:true}).required({defaultChatEnabled:true}).extend({
+      current: z.object({chatId:z.string().min(1),characterId:z.string().min(1),characterChanged:z.boolean(),chatChanged:z.boolean()}).optional(),
+    });
+    const parsed = schema.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({error:"Invalid chat work settings"},400);
+    const {current,chatEnabled,characterEnabled,defaultChatEnabled,cancelUpgrade} = parsed.data;
+    const applied = db.transaction(() => {
+      const targets = new Map<string,boolean>();
+      const include = (id:string, character:string) => targets.set(id, characterEnabled?.[character] !== false && (chatEnabled?.[id] ?? defaultChatEnabled));
+      for (const chat of workChats()) {
+        if (!Object.hasOwn(chatEnabled ?? {},chat.id) || (current?.characterChanged && chat.character_id === current.characterId)) include(chat.id,chat.character_id);
+      }
+      if (current) include(current.chatId,current.characterId);
+      const settings = Object.fromEntries(targets);
+      syncChatWork({chatEnabled:settings,cancelUpgrade});
+      if (current?.chatChanged) markChatEngaged(db,current.chatId);
+      return settings;
+    })();
+    return context.json({chatEnabled:applied});
+  });
   app.put("/v1/characters/:id/work", async context => {
     const body = CharacterWorkRequestSchema.safeParse(await context.req.json().catch(() => null));
     if (!body.success) return context.json({ error: "Invalid character work settings" }, 400);
@@ -3058,7 +3090,7 @@ export function createApp(dependencies: Dependencies): Hono {
     return context.json({ ok: true, worker: serverWorker.statusForChat(chatId) });
   });
   app.patch("/v1/chats/:id", async (context) => {
-    const body = await context.req.json() as { profile?: unknown; includeUserMessages?: unknown; memoryLanguage?: unknown; backfill?: boolean; extractionReviewOverride?: unknown };
+    const body = await context.req.json() as { profile?: unknown; includeUserMessages?: unknown; memoryLanguage?: unknown; memoryLanguageSource?: unknown; clearPendingMemoryLanguage?: unknown; backfill?: boolean; extractionReviewOverride?: unknown };
     return withChatWrite(db, context.req.param('id'), () => {
       const chatId = context.req.param("id");
       const previous = db.prepare("SELECT profile,include_user_messages,memory_language,pending_memory_language FROM chats WHERE id=?").get(chatId) as { profile: string; include_user_messages: number; memory_language: string; pending_memory_language: string | null } | undefined;
@@ -3067,13 +3099,16 @@ export function createApp(dependencies: Dependencies): Hono {
       if (body.extractionReviewOverride !== undefined && typeof body.extractionReviewOverride !== "boolean") return context.json({ error: "extractionReviewOverride must be boolean" }, 400);
       const profile = body.profile === undefined ? RpProfileSchema.parse(previous.profile) : RpProfileSchema.parse(body.profile);
       const includeUserMessages = body.includeUserMessages === undefined ? previous.include_user_messages === 1 : body.includeUserMessages === true;
+      const clearPendingMemoryLanguage = z.boolean().optional().parse(body.clearPendingMemoryLanguage);
+      const memoryLanguageSource = TurnPrepareRequestSchema.shape.memoryLanguageSource.parse(body.memoryLanguageSource);
       const memoryLanguage = body.memoryLanguage === undefined ? undefined : MemoryLanguageSchema.parse(body.memoryLanguage);
       const shouldBackfill = body.backfill === true && body.profile !== undefined && previous.profile === "companion" && profile === "simulation";
-      if (body.profile === undefined && body.includeUserMessages === undefined && memoryLanguage === undefined) return context.json({ error: "No supported changes" }, 400);
+      if (body.profile === undefined && body.includeUserMessages === undefined && memoryLanguage === undefined && !clearPendingMemoryLanguage) return context.json({ error: "No supported changes" }, 400);
       db.transaction(() => {
         markChatEngaged(db, chatId);
         db.prepare("UPDATE chats SET profile=?,include_user_messages=?,updated_at=? WHERE id=?").run(profile, includeUserMessages ? 1 : 0, Date.now(), chatId);
-        if (memoryLanguage !== undefined) {
+        if (clearPendingMemoryLanguage) db.prepare("UPDATE chats SET pending_memory_language=NULL WHERE id=?").run(chatId);
+        else if (memoryLanguage !== undefined && memoryLanguageSource !== "default") {
           if (memoryLanguage === previous.memory_language) db.prepare("UPDATE chats SET pending_memory_language=NULL WHERE id=?").run(chatId);
           else if (hasDerivedState(db, chatId)) db.prepare("UPDATE chats SET pending_memory_language=? WHERE id=?").run(memoryLanguage, chatId);
           else db.prepare("UPDATE chats SET memory_language=?,pending_memory_language=NULL WHERE id=?").run(memoryLanguage, chatId);
@@ -3254,8 +3289,6 @@ export function createApp(dependencies: Dependencies): Hono {
       const result = db.transaction(() => {
         const previous = db.prepare("SELECT * FROM memories WHERE id=? AND chat_id=?").get(memoryId, chatId) as Record<string, any> | undefined;
         if (!previous) return 0;
-        if (body.alwaysInject===true && !previous.always_inject
-          && (db.prepare('SELECT COUNT(*) n FROM memories WHERE chat_id=? AND always_inject=1').get(chatId) as {n:number}).n>=5) return 2;
         const changed = updates.map((key,index) => ({key,value:values[index]})).filter(({key,value}) => {
           const stored = previous[columns[key]];
           return value !== (columns[key].endsWith('_json') ? JSON.stringify(JSON.parse(stored)) : stored);
@@ -3289,7 +3322,6 @@ export function createApp(dependencies: Dependencies): Hono {
         if (body.active === false) embeddings.removeMemory(memoryId);
         else if (updates.includes("title") || updates.includes("content") || updates.includes("locations") || updates.includes("landmarkKinds") || body.active === true) void embeddings.indexPending(chatId);
       }
-      if (result===2) return context.json({error:'항상 주입할 기억은 채팅마다 5개까지 선택할 수 있어요',code:'ALWAYS_INJECT_LIMIT',limit:5},409);
       return result === 1
         ? context.json({ ok: true,alwaysInject:alwaysInjectEstimate(db,chatId) })
         : context.json({ error: "Memory not found" }, 404);
@@ -3600,7 +3632,10 @@ export function createApp(dependencies: Dependencies): Hono {
     });
   });
   app.delete("/v1/chats/:id/quiz/stats", (context) => withChatWrite(db, context.req.param('id'), () => context.json(resetQuizStats(db, context.req.param("id")))));
-  function readDashboardStatus(chatId: string) {
+  function readDashboardStatus(chatId: string, common?: {
+    ingestion: () => ReturnType<typeof ingestionSummary>; conflicts: () => ReturnType<typeof listDashboardConflicts>;
+    lineage: () => ReturnType<typeof getChatLineage>; calibration: () => ReturnType<typeof initialCalibrationView>;
+  }) {
     const worker = serverWorker.statusForChat(chatId);
     const jobs = db.prepare(`SELECT
       SUM(CASE WHEN status IN ('queued','leased') AND type<>'quiz' THEN 1 ELSE 0 END) AS queued,
@@ -3613,8 +3648,8 @@ export function createApp(dependencies: Dependencies): Hono {
     const pendingReconciliations = (db.prepare("SELECT count(*) AS count FROM reconciliation_items WHERE chat_id=? AND status='pending'").get(chatId) as { count: number }).count;
     const pendingExtractionAudits = countBlockingExtractionAudits(db, chatId);
     const pendingSmallReviews = countPendingSmallReviews(db, chatId);
-    const pendingConflicts = (db.prepare("SELECT count(*) AS count FROM conflicts WHERE chat_id=? AND status='pending' AND kind<>'static_projection_changed'").get(chatId) as { count: number }).count;
-    const ingestion = ingestionSummary(db, chatId);
+    const pendingConflicts = (common?.conflicts() ?? listDashboardConflicts(db,chatId)).filter(item => item.status === 'pending').length;
+    const ingestion = common?.ingestion() ?? ingestionSummary(db, chatId);
     const embeddingJobs = db.prepare("SELECT count(*) AS pending FROM embedding_blocks WHERE chat_id=? AND status='queued'").get(chatId) as { pending: number };
     const embeddingFailures = embeddings.failedWork(chatId);
     const sourceProgress = db.prepare(`SELECT SUM(CASE WHEN memory_excluded=0 THEN 1 ELSE 0 END) total,
@@ -3675,7 +3710,7 @@ export function createApp(dependencies: Dependencies): Hono {
       : { total: 0, repairs: 0, active: 0 };
     const acknowledged = latestBackfill?.runId ? Boolean(db.prepare("SELECT 1 FROM server_meta WHERE key=?").get(`backfill_ack:${chatId}:${latestBackfill.runId}`)) : true;
     const responseFailure = db.prepare("SELECT json_extract(payload_json,'$.modelResponseDiagnostic') diagnostic FROM jobs WHERE chat_id=? AND status='failed' AND json_type(payload_json,'$.modelResponseDiagnostic')='object' ORDER BY updated_at DESC LIMIT 1").get(chatId) as { diagnostic: string } | undefined;
-    const calibration = initialCalibrationView(db, chatId);
+    const calibration = common?.calibration() ?? initialCalibrationView(db, chatId);
     const lastJob = db.prepare("SELECT json_extract(payload_json,'$.sourceRecoveryMetadata') metadata FROM jobs WHERE chat_id=? AND type<>'quiz' AND status IN ('done','failed') ORDER BY updated_at DESC,rowid DESC LIMIT 1").get(chatId) as { metadata: string | null } | undefined;
     const calibrationPending = ["unseeded", "awaiting_setup", "queued", "awaiting_confirmation"].includes(calibration.status);
     const chat = db.prepare(`SELECT id,character_id AS characterId,profile,revision,memory_language,pending_memory_language AS pendingMemoryLanguage,
@@ -3717,7 +3752,7 @@ export function createApp(dependencies: Dependencies): Hono {
       upgrade: readUpgradeStatus(chatId),
       worker,
       episode: (episodeOverview(db, chatId) as any).active,
-      lineage: getChatLineage(db, chatId),
+      lineage: common?.lineage() ?? getChatLineage(db, chatId),
       ...sourceSnapshotStatus(db, chatId),
     };
   }
@@ -3859,7 +3894,6 @@ export function createApp(dependencies: Dependencies): Hono {
       const current = body.kind === 'assertion' ? 'valid_to_revision IS NULL' : body.kind === 'belief' ? "active=1 AND status='active'" : deliverablePromiseSql;
       const row = db.prepare(`SELECT ${column} enabled FROM ${table} WHERE chat_id=? AND id=? AND ${current}`).get(chatId,body.id) as {enabled:number}|undefined;
       if (!row) return context.json({code:'NOW_ITEM_NOT_CURRENT',error:'현재 기록을 찾지 못했어요'},409);
-      if (body.alwaysInject && !row.enabled) assertNowDeliveryCapacity(db,chatId);
       db.prepare(`UPDATE ${table} SET ${column}=? WHERE chat_id=? AND id=?`).run(Number(body.alwaysInject),chatId,body.id);
       if (row.enabled !== Number(body.alwaysInject)) db.prepare('UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?').run(Date.now(),chatId);
       return context.json({ok:true,alwaysInject:body.alwaysInject,alwaysInjectCount:nowAlwaysInjectCount(db,chatId)});
@@ -3906,7 +3940,6 @@ export function createApp(dependencies: Dependencies): Hono {
       const id = randomUUID();
       const revision = chat.revision + 1;
       db.transaction(() => {
-        if (kind === "promise" && body.pinned && body.status !== "invalidated") assertNowDeliveryCapacity(db,chatId);
         if (kind === "assertion") {
           const stateKind = assertionStateKind!;
           db.prepare(`INSERT INTO assertions(id,chat_id,subject,predicate,value,state_kind,confidence,valid_from_revision,valid_from_ordinal,source_memory_id,evidence_json,retention_class,created_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,'durable',?)`).run(id, chatId, body.subject!.trim(), body.predicate!.trim(), body.value!.trim(), stateKind, confidence, revision, ordinal, evidence, Date.now());
@@ -3998,7 +4031,6 @@ export function createApp(dependencies: Dependencies): Hono {
           || body.recency === 'recent' || body.recency === 'already_past' && current.recency_until_turn != null;
         if (!authored) {
           if (current.pinned !== Number(body.pinned)) db.transaction(()=>{
-            if (body.pinned && current.status !== 'invalidated') assertNowDeliveryCapacity(db,chatId);
             db.prepare('UPDATE promises SET pinned=? WHERE id=? AND chat_id=?').run(Number(body.pinned),body.id,chatId);
             db.prepare('UPDATE chats SET revision=revision+1,updated_at=? WHERE id=?').run(Date.now(),chatId);
           })();
@@ -4013,8 +4045,6 @@ export function createApp(dependencies: Dependencies): Hono {
           : body.kind === 'belief' || body.kind === 'promise'
             ? db.prepare(`SELECT * FROM ${body.kind === 'belief' ? 'beliefs' : 'promises'} WHERE id=? AND chat_id=?`).get(body.id,chatId) as Record<string,any>|undefined : undefined;
         if (!current) return;
-        if (body.kind === 'promise' && (body.pinned ?? current.pinned) && (body.status ?? current.status) !== 'invalidated'
-          && (!current.pinned || current.status === 'invalidated')) assertNowDeliveryCapacity(db,chatId);
         const support = body.kind === 'promise' ? promiseLinkedSupport(db,chatId,body.id!)
           : current.linked_detail_ids_json != null && current.user_edit_ordinal == null
             ? {ids:JSON.parse(String(current.linked_detail_ids_json)) as string[],holders:linkedDetailKnowledge(db,chatId,JSON.parse(String(current.linked_detail_ids_json))) ?? [PENDING_ACCESS_HOLDER]} : undefined;
@@ -4176,11 +4206,10 @@ export function createApp(dependencies: Dependencies): Hono {
     });
   });
   function readDashboardConflicts(chatId: string) {
-    return { items: db.prepare("SELECT * FROM conflicts WHERE chat_id=? AND kind<>'static_projection_changed' ORDER BY created_at DESC").all(chatId) };
+    return { items: listDashboardConflicts(db,chatId) };
   }
   app.get("/v1/chats/:id/conflicts", (context) => context.json(readDashboardConflicts(context.req.param("id"))));
-  function readDashboardJobs(chatId: string) {
-    const ingestion = ingestionSummary(db, chatId);
+  function readDashboardJobs(chatId: string, ingestion = ingestionSummary(db, chatId)) {
     return {
       items: db.prepare(`
         SELECT id,type,status,attempts,leased_until,last_error,payload_json,created_at,updated_at FROM jobs
@@ -4292,7 +4321,7 @@ export function createApp(dependencies: Dependencies): Hono {
       ensureChatLineage(db, body, false, policy.allowDestructive);
       return { stats: syncSnapshot(db, { ...body, deferExtraction: true, tokenBudget: 0, forceBackfill: false }, policy) };
     });
-    return context.json({ ok: true, stats, ...sourceStatus });
+    return context.json({ ok: true, serverInstanceId, stats, ...sourceStatus });
   });
   app.patch("/v1/chats/:id/conflicts/:conflictId", async (context) => {
     const body = await context.req.json() as { resolution?: ConflictResolution; targetAssertionId?: unknown };
@@ -4425,7 +4454,6 @@ export function createApp(dependencies: Dependencies): Hono {
 
   app.onError(async (error, context) => {
     if ((error as {code?:string}).code === 'INTERNAL_CHAT') return context.json({code:'INTERNAL_CHAT',error:error.message},403);
-    if ((error as {code?:string}).code === 'NOW_ALWAYS_INJECT_LIMIT') return context.json({code:'NOW_ALWAYS_INJECT_LIMIT',error:error.message},409);
     const upgradeCode = (error as {code?:string}).code;
     if (upgradeCode && ['SOURCE_SNAPSHOT_HELD','CHAT_WORK_OFF','UPGRADE_ACTIVE','PHASE_LOCKED','SETUP_UNAVAILABLE','BACKUP_FAILED','SOURCE_MISSING','BUSY','ALREADY_CURRENT','RUN_NOT_FOUND','RUN_NOT_RESUMABLE','SOURCE_CHANGED','RUN_NOT_READY'].includes(upgradeCode)) {
       const reasons: Record<string,string> = {SETUP_UNAVAILABLE:'초기 설정 자료를 선택한 뒤 다시 시도해 주세요.',BACKUP_FAILED:'이 채팅의 백업을 만들지 못해서 다시 만들기를 시작하지 않았어요.'};

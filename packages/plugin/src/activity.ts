@@ -330,7 +330,7 @@ export function installActivityCoordinator(state: RuntimeState, client: ServerCl
             }
             const serverUrl = state.settings.serverUrl;
             const revision = JSON.stringify([serverUrl, result.serverInstanceId, chatId, result.translationRevision, state.settings.translationProvider]);
-            if (backgroundTranslationEnabled(state) && !prefetchBusy && now >= prefetchNextAt && state.settings.autoTranslate && state.settings.translationDisplay === "ko"
+            if (backgroundTranslationEnabled(state) && !prefetchBusy && now >= prefetchNextAt
               && result.memoryLanguage !== "ko" && Number(result.progress?.memories ?? 0) > 0 && result.serverInstanceId
               && (revision !== prefetchRevision || prefetchPending.length > 0)
               && !translationCooldownMs()) {

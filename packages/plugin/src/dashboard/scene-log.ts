@@ -1,3 +1,4 @@
+import { memoryLocationTranslationRecords } from "../translation.js";
 import { normalizeName, memoryIdOf, memoryStoryTime, arrayMatchesPair, itemMatchesPair, memoryMatchesPair, mergePromiseHistory } from "./pair-records.js";
 export { itemMatchesPair } from "./pair-records.js";
 import { formatStoryTime, parseStoryTime, storyScenes, sceneNumbers } from "@rcm/shared";
@@ -7,7 +8,7 @@ import { isRecognitionMemory } from "@rcm/shared";
 import { intimacyLabelTranslationKey, milestoneLabel, type PairSummary } from "./pairs.js";
 
 export type SceneChip = { kind: "landmark" | "love" | "up" | "down" | "promise_made" | "promise_kept" | "promise_broken" | "bookmark" | "secret_ended" | "minor"; label: string; translationKey?: string; trend?: "up" | "down" };
-export type SceneCard = { memoryId: string; slate: { no: number; time: string | null; place: string | null }; date: string | null; title: string; chips: SceneChip[]; key: boolean };
+export type SceneCard = { memoryId: string; slate: { no: number; time: string | null; place: string | null; placeKey?: string }; date: string | null; title: string; chips: SceneChip[]; key: boolean };
 export type SceneDay = { date: string | null; weekday: string | null; scenes: SceneCard[] };
 
 type Scene = {
@@ -21,6 +22,7 @@ type Scene = {
   weekday: string | null;
   time: string | null;
   place: string | null;
+  placeKey?: string;
   chips: Array<SceneChip & { order: number }>;
   key: boolean;
   fallbackTitle: string;
@@ -85,6 +87,9 @@ const sceneTime = (memory: any, storyTime: string | null): string | null => {
 
 export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "all" | "key" | "intimacy" | "heart" | "promise" | "bookmark", sort: "newest" | "oldest" = "newest"): SceneDay[] {
   const direction = sort === "oldest" ? 1 : -1;
+  const members = [pair.a, pair.b].map(normalizeName);
+  const persona = normalizeName(data.personaEntity);
+  const nonPersonaMembers = members.filter(name => name !== persona);
   const allMemories = (data.memories ?? []).filter((memory: any) => !isRecognitionMemory(memory));
   const allMemoryById = new Map(allMemories.map((memory: any) => [String(memory?.id ?? ""), memory]));
   const activeScenes = storyScenes(allMemories).filter(memory => memory.active !== false);
@@ -93,6 +98,7 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
   const scenes = activeScenes.map((memory): Scene => {
     const storyTime = memoryStoryTime(memory);
     const date = sceneDate(storyTime);
+    const location = memoryLocationTranslationRecords(memory)[0];
     const scene: Scene = {
       memory,
       memoryId: String(memory?.id ?? ""),
@@ -101,7 +107,8 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
       storyTime,
       ...date,
       time: sceneTime(memory, storyTime),
-      place: Array.isArray(memory?.locations) ? String(memory.locations[0] ?? "").trim() || null : null,
+      place: location?.text.trim() || null,
+      placeKey: location?.itemId,
       chips: [],
       key: false,
       fallbackTitle: "",
@@ -122,7 +129,11 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
       if (scene.ordinal === null || scene.ordinal > sourceOrdinal) return closest;
       return !closest || closest.ordinal === null || scene.ordinal > closest.ordinal ? scene : closest;
     }, undefined);
-    if (previous) return previous;
+    if (previous) {
+      if (pair.tier !== 2) return previous;
+      const participants = Array.isArray(previous.memory?.participants) ? previous.memory.participants.map(normalizeName) : [];
+      if (nonPersonaMembers.every(name => participants.includes(name))) return previous;
+    }
     const orphanKey = directMemoryId || `${String(item?.id ?? item?.promise_id ?? item?.promise_key ?? chipOrder)}`;
     const existing = orphanScenes.get(orphanKey);
     if (existing) return existing;
@@ -208,7 +219,7 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
   for (const item of data.endedAssertions ?? []) {
     if (String(item?.stateKind ?? item?.state_kind ?? "condition") !== "secret") continue;
     const subject = normalizeName(item?.subject);
-    if (subject !== normalizeName(pair.a) && subject !== normalizeName(pair.b)) continue;
+    if (!(pair.tier === 2 ? nonPersonaMembers : members).includes(subject)) continue;
     const id = String(item?.id ?? "").trim();
     if (id && currentSecretIds.has(id)) continue;
     const rawEndedOrdinal = item?.valid_to_ordinal ?? item?.validToOrdinal;
@@ -232,7 +243,7 @@ export function buildSceneLog(data: DashboardData, pair: PairSummary, filter: "a
 
   const cardOf = (scene: Scene): SceneCard => ({
     memoryId: scene.memoryId,
-    slate: { no: scene.no, time: scene.time, place: scene.place },
+    slate: { no: scene.no, time: scene.time, place: scene.place, ...(scene.placeKey ? { placeKey: scene.placeKey } : {}) },
     date: scene.date,
     title: String(scene.memory?.title ?? "").trim() || scene.fallbackTitle,
     chips: scene.chips.map(({ order: _order, ...chip }) => chip),

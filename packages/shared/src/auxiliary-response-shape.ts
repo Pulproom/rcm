@@ -3,6 +3,7 @@ import { normalizeAuxiliaryShape, type AuxiliaryShapeAlias, type AuxiliaryShapeC
 import { extractionDraftSchema, ExtractionAuditPatchSchema, EpisodeDraftResultSchema, EpisodeCapsuleResultSchema, InitialCalibrationResultSchema, LedgerConsistencyResultSchema, RelationshipProjectionResultSchema, StorySpineConsolidationResultSchema, ReconciliationResultSchema, StateExtractionSchema, StateObservationSchema, SeedResolutionSchema, ItemAccessGrantSchema } from "./index.js";
 import { MemoryGroupingResultSchema } from "./memory-grouping.js";
 import { QuizDraftSchema } from "./quiz.js";
+import { normalizeAuxiliarySourceLists } from "./source-references.js";
 
 // Aliases are contract declarations, never inferred from a misspelled field.
 const predicateAlias={from:"predicate",to:"predicateHint"};
@@ -13,6 +14,8 @@ const CONTRACT_OBSERVATION_ALIASES:Readonly<Record<string,Readonly<Record<string
 /** Authored contracts may differ from the storage shape. Overrides here declare
  * only wire fields; expansion and all semantic/link checks still run afterward. */
 export function normalizeAuxiliaryResponse(value:unknown,context:AuxiliaryShapeContext) {
+  const refDiagnostics:import("./auxiliary-shape.js").AuxiliaryShapeDiagnostic[]=[];
+  value=normalizeAuxiliarySourceLists(value,path=>refDiagnostics.push({...context,path,rule:"comma_joined_source_refs",beforeShape:"comma-joined source IDs",afterShape:"array"}));
   const purpose=context.purpose.replace(/_repair$/, "");
   let schema:z.ZodType|undefined;
   const aliases:AuxiliaryShapeAlias[]=[];
@@ -47,5 +50,6 @@ export function normalizeAuxiliaryResponse(value:unknown,context:AuxiliaryShapeC
   else if(purpose==="story_consolidation")schema=StorySpineConsolidationResultSchema;
   else if(purpose==="memory_group")schema=MemoryGroupingResultSchema;
   else if(purpose==="quiz")schema=Array.isArray(value) ? z.array(QuizDraftSchema) : z.object({items:z.array(QuizDraftSchema)});
-  return schema ? normalizeAuxiliaryShape(value,schema,context,aliases) : {value,diagnostics:[]};
+  const shaped=schema ? normalizeAuxiliaryShape(value,schema,context,aliases) : {value,diagnostics:[]};
+  return {value:shaped.value,diagnostics:[...refDiagnostics,...shaped.diagnostics]};
 }

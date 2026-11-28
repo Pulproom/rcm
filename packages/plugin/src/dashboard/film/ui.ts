@@ -2,7 +2,6 @@ import { avatarColorStyle } from "../person-colors.js";
 export { avatarHue } from "../person-colors.js";
 // Film component helpers. Each returns an HTML string; every label and attribute value is escaped here,
 // while `body`, `control`, `end`, `record`, and `action` slots take caller-built HTML.
-import { lex } from "../lexicon.js";
 import { formatStoryTime } from "@rcm/shared";
 
 export const escapeHtml = (value: unknown): string => String(value ?? "")
@@ -22,6 +21,9 @@ const dataAttrs = (data?: Data): string => Object.entries(data ?? {})
 
 const actionAttrs = (action?: string, data?: Data): string =>
   `${action ? ` data-action="${escapeHtml(action)}"` : ""}${dataAttrs(data)}`;
+
+export const signalIcon = (name: string, label: string): string =>
+  `<span class="signal" role="img" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">${icon(name)}</span>`;
 
 export const ICONS: Record<string, string> = {
   sprout: '<path d="M12 20.5V12"/><path d="M12 12.5C12 8.6 9.6 6 5.5 6c0 3.9 2.4 6.5 6.5 6.5Z"/><path d="M12 10.5c0-3.3 2.1-5.5 6-5.5 0 3.3-2.1 5.5-6 5.5Z"/>',
@@ -148,7 +150,7 @@ export function tabs(items: Array<{ label: string; selected: boolean; count?: nu
 export function filters(items: Array<{ label: string; pressed: boolean; count?: number; icon?: string; action: string; data?: Data }>, label: string): string {
   const buttons = items.map((item) => {
     const count = item.count === undefined ? "" : ` <span class="n">${item.count}</span>`;
-    // The phone skin draws icon filters as tiles; Film hides the icon.
+    // Draw icon filters as tiles.
     const mark = item.icon ? `<span class="filter__ic" aria-hidden="true">${icon(item.icon)}</span>` : "";
     return `<button type="button" class="filter"${actionAttrs(item.action, item.data)} aria-pressed="${item.pressed}">${mark}${escapeHtml(item.label)}${count}</button>`;
   }).join("");
@@ -182,7 +184,7 @@ export function menu(opts: { label: string; title?: string; items: Array<MenuIte
 
 /** `actions` (a `menu()`) sits at the summary's right edge, outside the summary so it never toggles the fold. */
 export function fold(summary: string, body: string, opts: { summaryHtml?: string; count?: number; open?: boolean; preserveKey?: string; actions?: string; role?: "more" | "section" | "hidden-lines"; marks?: string; className?: string } = {}): string {
-  const more = opts.role === "more" && lex().skin === "phone";
+  const more = opts.role === "more";
   const label = more ? `${opts.count ?? 0}개 더 보기` : summary;
   const count = more || opts.count === undefined ? "" : `<span class="n">${opts.count}</span>`;
   const preserve = opts.preserveKey ? ` data-preserve-open="${escapeHtml(opts.preserveKey)}"` : "";
@@ -211,16 +213,16 @@ export function row(opts: {
   return `<${tag}${type} class="row"${current}${actionAttrs(opts.action, opts.data)}>${slug}<div class="row__title">${opts.titleHtml ?? escapeHtml(opts.title)}</div>${end}${sub}</${tag}>`;
 }
 
-/** `titleHtml` and `subtitle.html` take caller-built HTML (translated text from `displayText`). */
+/** `slugHtml`, `titleHtml` and `subtitle.html` take caller-built HTML (translated text from `displayText`). */
 export function frame(opts: {
-  slug: string; tag?: string; date?: string; title: string; titleHtml?: string; subtitle?: { text?: string; html?: string; speaker: string };
+  slug: string; slugHtml?: string; tag?: string; date?: string; title: string; titleHtml?: string; subtitle?: { text?: string; html?: string; speaker: string };
   record?: string; expanded?: boolean; mark?: boolean; action?: string; data?: Data;
 }): string {
   const interactive = Boolean(opts.action || opts.record);
   const tag = interactive ? "button" : "div";
   const type = interactive ? ' type="button"' : "";
   const expanded = opts.record ? ` aria-expanded="${Boolean(opts.expanded)}"` : "";
-  const slug = `<div class="frame__slug"><b title="${escapeHtml(opts.slug)}">${escapeHtml(opts.slug)}</b>${opts.tag ? `<span class="tag">${escapeHtml(opts.tag)}</span>` : ""}${opts.date ? `<span>${escapeHtml(opts.date)}</span>` : ""}</div>`;
+  const slug = `<div class="frame__slug"><b title="${escapeHtml(opts.slug)}">${opts.slugHtml ?? escapeHtml(opts.slug)}</b>${opts.tag ? `<span class="tag">${escapeHtml(opts.tag)}</span>` : ""}${opts.date ? `<span>${escapeHtml(opts.date)}</span>` : ""}</div>`;
   const subtitle = opts.subtitle ? `<p class="subtitle"><span>${opts.subtitle.html ?? escapeHtml(opts.subtitle.text)}</span><small>${escapeHtml(opts.subtitle.speaker)}</small></p>` : "";
   const record = opts.record ? `<div class="frame__rec">${opts.record}</div>` : "";
   return `<${tag}${type} class="frame${opts.mark ? " is-mark" : ""}"${expanded}${actionAttrs(opts.action, opts.data)}>${slug}<div class="frame__title">${opts.titleHtml ?? escapeHtml(opts.title)}</div>${subtitle}${record}</${tag}>`;

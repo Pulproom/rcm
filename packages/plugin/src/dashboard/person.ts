@@ -1,4 +1,3 @@
-import { lex } from "./lexicon.js";
 import { defaultPersonColor } from "./person-colors.js";
 import { classifyEntityType, EntityColorSchema, type EntityBirthday } from "@rcm/shared";
 import { birthdayLabel } from "./birthdays.js";
@@ -204,15 +203,15 @@ const sceneLink = (item: Record<string, unknown>, options: RenderEssentials, tar
  * A ledger line. A state's name is its title; a promise's or belief's direction (who → whom) is a small line
  * above the text. The section heading names the kind, so only an exceptional kind or stance (목표, 비밀, 의심) is tagged.
  */
-const entry = (parts: { tag?: string; title?: string; who?: string; body: string; src: string; note?: string }): string => {
+const entry = (parts: { tag?: string; title?: string; who?: string; body: string; src: string; note?: string; actions?: string }): string => {
   const tag = parts.tag ? `<span class="entry__tag">${parts.tag}</span>` : "";
   // A stance reads after the direction, like a promise's status: "A → B · 의심".
   const who = parts.who ? `<span class="entry__who">${parts.who}${parts.title || !parts.tag ? "" : ` · ${tag}`}</span>` : "";
   const title = parts.title ? `<span class="entry__title">${tag}${parts.title}</span>` : "";
   const bodyTag = parts.title || parts.who ? "" : tag;
   const note = parts.note ?? "";
-  const src = parts.src ? `<div class="entry__src">${parts.src}</div>` : "";
-  return `<li class="entry"><div class="entry__v">${who}${title}<span class="entry__body">${bodyTag}${parts.body}</span>${note}</div>${src}</li>`;
+  const end = parts.src || parts.actions ? `<div class="entry__src">${parts.src}${parts.actions ?? ""}</div>` : "";
+  return `<li class="entry"><div class="entry__v">${who}${title}<span class="entry__body">${bodyTag}${parts.body}</span>${note}</div>${end}</li>`;
 };
 
 const mentionOrdinal = (item: Record<string, unknown>): number => {
@@ -229,12 +228,23 @@ const limitedEntries = (rows: string[], limit: number, label: string, preserveKe
   return rest.length ? `${shown}${fold(label, `<ul class="entries entries--flat">${rest.join("")}</ul>`, { role: "more", count: rest.length, preserveKey })}` : shown;
 };
 
+const worldRowMenu = (kind: "assertion" | "belief", id: unknown, label: string): string => {
+  if (!id) return "";
+  const data = { kind, id: String(id) };
+  return menu({ label: `${label} 더보기`, items: [
+    { label: "수정", icon: "edit", action: "edit-world", data },
+    { label: "종료", icon: "inactive", action: "end-world", data },
+    "sep",
+    { label: "삭제", icon: "delete", action: "delete-world", data, danger: true },
+  ] });
+};
+
 const assertionRow = (item: LedgerRow, tag: string, options: RenderEssentials): string => {
   const predicate = displayText(String(item?.predicate ?? ""), options.translations.get(`assertion-predicate:${item?.id}`), options.display);
   const value = displayText(String(item?.value ?? ""), options.translations.get(`assertion:${item?.id}`), options.display);
   const knownBy = Array.isArray(item?.knownBy) ? item.knownBy.map(String).filter(Boolean) : [];
   // 목표·비밀 is a small kind line above the state's name, like a promise's direction line.
-  return entry({ who: tag || undefined, title: predicate, body: value, src: sceneLink(item, options), note: knownBy.length ? accessLine(escapeHtml(knownBy.join(" · "))) : "" });
+  return entry({ who: tag || undefined, title: predicate, body: value, src: sceneLink(item, options), note: knownBy.length ? accessLine(escapeHtml(knownBy.join(" · "))) : "", actions: worldRowMenu("assertion", item?.id, String(item?.predicate ?? "상태")) });
 };
 
 const promiseRow = (item: PromiseRow, options: RenderEssentials): string => {
@@ -280,7 +290,7 @@ const beliefRow = (item: BeliefRow, lead: string, options: RenderEssentials): st
   const key = `belief:${item?.id ?? ""}`;
   const polarity = String(item?.polarity ?? "believes");
   // 믿음 is the default stance; only a different stance earns a tag.
-  return entry({ tag: polarity === "believes" ? "" : escapeHtml(POLARITY_LABELS[polarity] ?? polarity), who: lead, body: displayText(String(item?.value ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options) });
+  return entry({ tag: polarity === "believes" ? "" : escapeHtml(POLARITY_LABELS[polarity] ?? polarity), who: lead, body: displayText(String(item?.value ?? ""), options.translations.get(key), options.display), src: sceneLink(item, options), actions: worldRowMenu("belief", item?.id, "인식") });
 };
 
 export const socialEditorForm = (editor: SocialEditorState): string => {
@@ -291,7 +301,7 @@ export const socialEditorForm = (editor: SocialEditorState): string => {
 /** Edits directional names while preserving the record's cognition and lock state. */
 export const addressEditorForm = (editor: SocialEditorState): string => {
   const hidden = (name: string, value: string) => `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
-  return `<form id="social-form" class="form social-editor address-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h3 class="subhead">${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}</h3>${hidden("holder", editor.holder)}${hidden("subject", editor.subject)}${hidden("level", editor.level || "interacted")}${field({ id: "social-knownAs", label: "알고 있는 이름", control: `<input id="social-knownAs" class="input notranslate" translate="no" name="knownAs" value="${escapeHtml(editor.knownAs)}" placeholder="쉼표로 구분">` })}${field({ id: "social-addressTerms", label: "부르는 이름", control: `<input id="social-addressTerms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">`, hint: "대사에서 상대를 부를 때 쓰는 이름이에요." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
+  return `<form id="social-form" class="form social-editor address-editor" data-original-holder="${escapeHtml(editor.editing ? editor.holder : "")}" data-original-subject="${escapeHtml(editor.editing ? editor.subject : "")}"><h3 class="subhead">${escapeHtml(editor.holder)} → ${escapeHtml(editor.subject)}</h3>${hidden("holder", editor.holder)}${hidden("subject", editor.subject)}${hidden("level", editor.level || "interacted")}${field({ id: "social-knownAs", label: "알고 있는 이름", control: `<input id="social-knownAs" class="input notranslate" translate="no" name="knownAs" value="${escapeHtml(editor.knownAs)}" placeholder="쉼표로 구분">`, hint: "상대의 이름이나 직함으로 알고 있는 정보예요." })}${field({ id: "social-addressTerms", label: "부르는 이름", control: `<input id="social-addressTerms" class="input notranslate" translate="no" name="addressTerms" value="${escapeHtml(editor.addressTerms ?? "")}" placeholder="쉼표로 구분">`, hint: "대사에서 상대를 직접 부를 때 쓰는 호칭이에요." })}<div class="form__bar">${btn("취소", { kind: "quiet", action: "cancel-social" })}${btn("저장", { kind: "primary", icon: "save", action: "submit-form" })}</div></form>`;
 };
 
 /**
@@ -363,13 +373,13 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
     // The persona cannot be deleted; unassign it first.
     ...(detail.isPersona ? [] : ["sep" as const, { label: "인물 삭제", icon: "delete", action: "open-entity-delete", data: { personName: detail.name }, danger: true }]),
   ] });
-  const face = lex().skin === "phone" && detail.entityId
+  const face = detail.entityId
     ? `<button type="button" class="person__avatar-button" data-action="open-person-color" data-entity-id="${escapeHtml(detail.entityId)}" aria-label="${escapeHtml(detail.name)} 색상 바꾸기">${avatar(detail.name, "xl")}</button>`
     : avatar(detail.name, "xl");
   // A contact card's head: the face, the name, the names they also go by, and their billing.
   const aka = detail.aliases.length ? `<p class="person__aka notranslate" translate="no">${escapeHtml(detail.aliases.join(" · "))}</p>` : "";
   const roleText = detail.isPersona ? "페르소나" : `${escapeHtml(prominence)} 인물`;
-  const role = detail.birthday && lex().skin === "phone"
+  const role = detail.birthday
     ? `<div class="person__chips"><p class="person__role">${roleText}</p><span class="holiday-pill" data-holiday="birthday"><span aria-hidden="true">🎂</span>${escapeHtml(birthdayLabel(detail.birthday))}</span></div>`
     : `<p class="person__role">${roleText}${detail.birthday ? ` · <span data-holiday="birthday">생일 ${escapeHtml(birthdayLabel(detail.birthday))}</span>` : ""}</p>`;
   // Only this tab knows which person you are looking at, so the one shortcut here is the pair with the persona.
@@ -398,8 +408,9 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
     ? fold("종료된 소속", `<ul class="entries entries--flat">${detail.endedAffiliations.map((item) => endedAffiliationRow(item, renderOptions)).join("")}</ul>`, { role: "section", count: detail.endedAffiliations.length, preserveKey: `person-ended-affiliations:${detail.name}` })
     : "";
   const section = (title: string, body: string, count?: number, head = "") => `<section class="psec">${head ? `<div class="sec-head">` : ""}<h2 class="sec">${title}${count === undefined ? "" : ` <span class="n">${count}</span>`}</h2>${head ? `${head}</div>` : ""}${body}</section>`;
+  const addAffiliationBtn = btn("추가", { kind: "quiet", icon: "add", action: "new-world", data: { kind: "assertion", social: "true", relationKind: "affiliation", personName: detail.name, lockSubject: "true" }, hit: true });
   const profile = affiliationFields.length || endedAffiliations
-    ? section("소속", `<div class="stack">${affiliationFields.length ? `<div class="pfields">${affiliationFields.join("")}</div>` : ""}${endedAffiliations}</div>`, affiliationFields.length || undefined)
+    ? section("소속", `<div class="stack">${affiliationFields.length ? `<div class="pfields">${affiliationFields.join("")}</div>` : ""}${endedAffiliations}</div>`, affiliationFields.length || undefined, addAffiliationBtn)
     : "";
 
   // 지금 can grow long over a story, so it stays plain text rows: no per-row icon, the newest four open.
@@ -412,8 +423,9 @@ export function renderPersonDetail(detail: PersonDetail, options: PersonDetailRe
   const ended = detail.now.ended.length
     ? fold("종료된 상태", `<ul class="entries entries--flat">${detail.now.ended.map((item) => endedAssertionRow(item, renderOptions)).join("")}</ul>`, { role: "section", count: detail.now.ended.length, preserveKey: `person-ended:${detail.name}` })
     : "";
+  const addStateBtn = btn("추가", { kind: "quiet", icon: "add", action: "new-world", data: { kind: "assertion", personName: detail.name, lockSubject: "true" }, hit: true });
   const now = currentRows.length || detail.now.ended.length
-    ? section("지금", `<div class="stack">${limitedEntries(currentRows, 4, "더 보기", `person-now:${detail.name}`)}${ended}</div>`, currentRows.length || undefined)
+    ? section("지금", `<div class="stack">${limitedEntries(currentRows, 4, "더 보기", `person-now:${detail.name}`)}${ended}</div>`, currentRows.length || undefined, addStateBtn)
     : "";
 
   // 관계 from this person's side: the other person's face and name, the pair's label and scenes.

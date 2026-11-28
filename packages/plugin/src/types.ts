@@ -7,7 +7,7 @@ export type AuxiliaryMode = "main" | "memory" | "otherAx" | "static";
 export type TranslationProvider = "google" | "risu" | "server";
 export type TranslationDisplay = "ko" | "en";
 export type DashboardTheme = "dark" | "light";
-export type DashboardSkin = "film" | "phone";
+export type HomeWallpaper = "bloom" | "ocean" | "sage" | "sunset" | "cinema" | "mono";
 
 /** Numeric observations only; source sizes are UTF-16 code units, never content. */
 export interface ContextReadTimings {
@@ -59,6 +59,7 @@ export interface PluginSettings {
   defaultChatEnabled: boolean;
   characterEnabled: Record<string, boolean>;
   chatEnabled: Record<string, boolean>;
+  lineageSettingsFrom: Record<string, string>;
   chatCatchUpPending: Record<string, boolean>;
   workerPaused: boolean;
   workerAttention?: { at: number; message: string };
@@ -68,6 +69,12 @@ export interface PluginSettings {
   incidentCursor?: number;
   incidentServerUrl?: string;
   quizEnabled?: boolean;
+  defaultMemoryLanguage: MemoryLanguage;
+  defaultExtractionGroupTurns: number;
+  defaultIncludeUserMessages: boolean;
+  defaultMemoryOnlyInjection: boolean;
+  defaultPairProgress: boolean;
+  defaultUpcomingOccasions: boolean;
   defaultProfile: RpProfile;
   profiles: Record<string, RpProfile>;
   /** Canonical name; empty string records an explicit omniscient choice for inheritance. */
@@ -102,7 +109,8 @@ export interface PluginSettings {
   translationDisplay: TranslationDisplay;
   autoTranslate: boolean;
   dashboardTheme: DashboardTheme;
-  dashboardSkin: DashboardSkin;
+  dashboardSkin: "phone";
+  homeWallpaper?: HomeWallpaper;
   christmasSnow: boolean;
   defaultMemoryBudget: MemoryBudgetPreset;
   memoryBudgets: Record<string, MemoryBudgetPreset>;
@@ -163,6 +171,7 @@ export interface CurrentContext {
   canonicalizationPolicy?: CanonicalizationPolicy;
   extractionGroupTurns: number;
   memoryLanguage: MemoryLanguage;
+  memoryLanguageSource?: "chat" | "default";
   sourceMessageCount: number;
   sourceActiveMessageCount: number;
   /** Local dashboard metadata only; never sent as a server/API field. Risu time is epoch milliseconds. */

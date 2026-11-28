@@ -148,7 +148,7 @@ export function recordJobStateRecovery(db: RcmDatabase, jobId: string, report: i
     .run(JSON.stringify(report), now(), jobId, workerId ?? null, workerId ?? null).changes === 1;
 }
 
-export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string, workerId?: string, identity?: CallIdentity, repairReason?:string): OperationLlmCallStats {
+export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string, workerId?: string, identity?: CallIdentity, repairReason?:string, transportRetry=false): OperationLlmCallStats {
   assertUpgradeJobWritable(db,jobId);
   return db.transaction(() => {
     const row = db.prepare("SELECT payload_json,status,lease_owner,attempts FROM jobs WHERE id=?").get(jobId) as { payload_json: string; status: string; lease_owner: string | null; attempts: number } | undefined;
@@ -156,7 +156,7 @@ export function recordJobLlmCall(db: RcmDatabase, jobId: string, purpose: string
     if (row.status !== "leased" || (workerId && row.lease_owner !== workerId)) throw new Error("Cannot account an LLM call outside the active job lease");
     const payload = JSON.parse(row.payload_json || "{}") as Record<string, unknown>;
     const stats = normalizeLlmCallStats(payload.llmCallStats);
-    Object.assign(payload, consumeAuxiliaryRepair(purpose, { repairBudgetUsed: repairBudgetSpent(payload, stats), stateRepairBudgetUsed: stateRepairBudgetSpent(payload, stats) }));
+    if (!transportRetry) Object.assign(payload, consumeAuxiliaryRepair(purpose, { repairBudgetUsed: repairBudgetSpent(payload, stats), stateRepairBudgetUsed: stateRepairBudgetSpent(payload, stats) }));
     stats.byPurpose[purpose] = (stats.byPurpose[purpose] ?? 0) + 1;
     stats.total += 1;
     if (purpose.endsWith("_repair")) {
@@ -522,7 +522,8 @@ export function buildPrompt(db: RcmDatabase, chatId: string, profile: RpProfile,
       }))
       .map((unit, index) => ({ ...unit, ref: `s${index + 1}` }));
   }
-  const userPrompt = `Extract memory from these ordered source units only. referenceIndex and recallCandidates are lookup aids, never new story evidence.\n${JSON.stringify({ canonicalEntities, referenceIndex, recallCandidates, messages: messages.map((message) => ({ messageId: message.message_id, role: message.role, units: sourceUnits.filter((unit) => unit.messageId === message.message_id).map(({ ref, text }) => ({ ref, text })) })) })}`;
+  const sourceMessages = messages.map((message) => ({ messageId: message.message_id, role: message.role, units: sourceUnits.filter((unit) => unit.messageId === message.message_id).map(({ ref, text }) => ({ ref, text })) }));
+  const userPrompt = `Extract memory from these ordered source units only. referenceIndex and recallCandidates are lookup aids, never new story evidence.\n${JSON.stringify({ canonicalEntities, referenceIndex, recallCandidates, messages: sourceMessages })}`;
   return { systemPrompt, userPrompt, prompt: `${systemPrompt}\n\n${userPrompt}`, sourceUnits, recallCandidates, recallAtomRefs, lookup: { canonicalEntities, referenceIndex, recallCandidates, recallAtomRefs }, promptContract: typeof eventWriting === "string" ? eventWriting : eventWriting ? "e1d" : undefined };
 }
 

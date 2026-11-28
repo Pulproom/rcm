@@ -1,7 +1,7 @@
 import { latestStoryTime } from "@rcm/shared";
 import type { DashboardData } from "../dashboard.js";
 import type { RuntimeState, TranslationDisplay } from "../types.js";
-import { displayText } from "../translation.js";
+import { displayText, memoryLocationTranslationRecords } from "../translation.js";
 import { buildAnniversaries, daysSinceFirstMet } from "./diary.js";
 import { recentScenes, storyScenes } from "./scenes.js";
 import { buildNowPage, overduePromiseEntries } from "./now.js";
@@ -91,13 +91,14 @@ export function homeTranslationRecords(
     // Injected scene titles are short and lead the widget; 현재 records show only in the full view.
     ...(manifest?.memoryIds ?? []).flatMap((id) => {
       const memory: any = byId(data.memories as any[], id);
-      return memory && text(memory.title) ? [{ kind: "memory-title", itemId: `${memory.id}:title`, text: text(memory.title) }] : [];
+      return memory ? [{ kind: "memory-title", itemId: `${memory.id}:title`, text: text(memory.title) }, ...memoryLocationTranslationRecords(memory)] : [];
     }),
     ...[...homeRecentMemories(data.memories), ...(dailyMemory ? [dailyMemory] : [])].flatMap((memory) => {
       const lines: any[] = Array.isArray(memory.keyDialogues) ? memory.keyDialogues : [];
       const index = lines.findIndex((line) => text(line?.text));
       return [
         { kind: "memory-title", itemId: `${memory.id}:title`, text: text(memory.title) },
+        ...memoryLocationTranslationRecords(memory),
         ...(index < 0 ? [] : [{ kind: "dialogue", itemId: `${memory.id}:dialogue:${index}`, text: text(lines[index].text) }]),
       ];
     }),

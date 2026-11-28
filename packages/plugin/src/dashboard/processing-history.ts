@@ -1,4 +1,4 @@
-import { operationLabel, settingsFailureMessage, type ProcessingCall, type ProcessingHistory, type ProcessingJob, type ProcessingModel, type ProcessingTotals, type ProcessingUnit } from '@rcm/shared';
+import { readSourceTransport, operationLabel, settingsFailureMessage, type ProcessingCall, type ProcessingHistory, type ProcessingJob, type ProcessingModel, type ProcessingTotals, type ProcessingUnit } from '@rcm/shared';
 import { btn, empty, escapeHtml as esc, fold, icon, loading } from './film/ui.js';
 import { sourceRecoverySummary } from '@rcm/shared';
 import type { ServerClient } from '../api-client.js';
@@ -41,6 +41,11 @@ function table(head:string,last:string,rows:string,totals?:ProcessingTotals,miss
 function callRows(calls:ProcessingCall[],baseline?:ProcessingModel,rerun=false):string {
   return calls.map(call=>{
     const repair=call.purpose.endsWith('_repair');
+    const sourceTransport=readSourceTransport(call.sourceTransport);
+    const estimate = sourceTransport?.estimatedTextInputTokens;
+    const saving = estimate && call.input !== null && Number.isSafeInteger(call.input) && call.input >= 0 && call.input < estimate
+      ? Number(((1 - call.input / estimate) * 100).toPrecision(2)) : undefined;
+    const pdfTag = sourceTransport?.kind === 'pdf' ? tag('PDF') + (saving === undefined ? '' : tag(`약 ${saving}% 절감`)) : '';
     const label=call.attemptOnly?'작업 실행':repair?'다시 요청':call.purpose==='translation'?'참고 번역':operationLabel(call.purpose);
     const ownModel=!call.attemptOnly && baseline && modelKey(baseline)!==modelKey(call);
     const status=call.outcome==='running'?'진행 중':call.outcome==='failed'?'실패':call.outcome==='interrupted'?'중단됨':call.outcome==='succeeded'?'성공':'결과 기록 없음';
@@ -48,7 +53,7 @@ function callRows(calls:ProcessingCall[],baseline?:ProcessingModel,rerun=false):
     const attemptReason=call.outcome==='succeeded'?'성공':call.attemptReason??call.reason??status;
     const attempt=repeated?`<small class="ph-attempt is-${call.outcome==='succeeded'?'ok':'warn'}">${esc(`${call.attempt??'기록 없음'}번째 · ${attemptReason}`)}</small>`:'';
     const statusLine=!repeated&&['running','failed','interrupted'].includes(call.outcome)?`<small class="ph-attempt is-warn">${esc(call.reason??status)}</small>`:'';
-    return `<tr${repair || call.outcome==='failed'?' class="ph-call-alert"':''}><th scope="row">${esc(label)}${repair?tag(repairReasons[call.repairReason??''] ?? (call.purpose==='state_field_repair'?'상태 값 빠짐':'응답 보완'),'repair'):''}${call.after?tag('정리 뒤 자동','after'):''}${attempt}${statusLine}${ownModel?`<small>${esc(modelName(call).join(' · '))}</small>`:''}</th><td>${number(call.input)}</td><td>${number(call.output)}</td><td>${duration(call.duration)}</td></tr>`;
+    return `<tr${repair || call.outcome==='failed'?' class="ph-call-alert"':''}><th scope="row">${esc(label)}${pdfTag}${repair?tag(repairReasons[call.repairReason??''] ?? (call.purpose==='state_field_repair'?'상태 값 빠짐':'응답 보완'),'repair'):''}${call.after?tag('정리 뒤 자동','after'):''}${attempt}${statusLine}${sourceTransport?`<small>${esc(sourceTransport.kind==='pdf'?`${sourceTransport.pages}쪽 · ${sourceTransport.fontPt}pt`:'텍스트')}</small>`:''}${ownModel?`<small>${esc(modelName(call).join(' · '))}</small>`:''}</th><td>${number(call.input)}</td><td>${number(call.output)}</td><td>${duration(call.duration)}</td></tr>`;
   }).join('');
 }
 

@@ -1,6 +1,6 @@
 import { withMemoryGuidance, canonicalizeSourceText, defaultCanonicalizationPolicy, imageComparisonText, sourceComparisonText, estimateTokens, selectTailStart, selectGigaTransTranslation, type CanonicalizationPolicy, type LineageProbeRequest, type MessageHostVisibility, type ResolvedSetupProjection, type SearchQuerySignal, type TurnPrepareRequest } from "@rcm/shared";
 import type { ChatScopeTiming, ContextReadTimings, CurrentContext, DashboardContext, RuntimeState } from "./types.js";
-import { addLog, isChatMemoryEnabled, serverScopeKey } from "./settings.js";
+import { resolveChatSetting, addLog, isChatMemoryEnabled, serverScopeKey } from "./settings.js";
 import { resolveUserPersonaName } from "./persona.js";
 import { cachedSourceReceipt, ServerRequestError, type ServerClient } from './api-client.js';
 import { messageDisplay, resolveMessageSource, resolveSourceInput, yumiSourceRecord, yumiSourceRecordId, type ResolvedMessageSource } from "./message-source.js";
@@ -398,7 +398,7 @@ export async function readDashboardLineageRequest(context: DashboardContext): Pr
     chatTitle: context.chatTitle, characterId: context.characterId, profile: context.profile,
     messageVisibility,
     lineageHint: parseBranchLineageHint(messages), canonicalizationPolicy: context.canonicalizationPolicy,
-    includeUserMessages: context.includeUserMessages, extractionGroupTurns: context.extractionGroupTurns, memoryLanguage: context.memoryLanguage,
+    includeUserMessages: context.includeUserMessages, extractionGroupTurns: context.extractionGroupTurns, memoryLanguage: context.memoryLanguage, memoryLanguageSource: context.memoryLanguageSource,
   };
 }
 
@@ -461,15 +461,16 @@ export async function readDashboardContext(state: RuntimeState): Promise<Dashboa
     ...identity, chatId, characterName, hostIdentity: !chat.id ? { kind: 'position', listFingerprint: '' } : undefined,
     identityHints: { userPersonaName: resolveUserPersonaName(database, chat), hostCharacterName: characterName, recentSpeakerNames: [], cachedPerspectives: [] },
     narrationViewpoint: state.settings.narrationViewpoint[chatId] || undefined,
-    profile: state.settings.profiles[chatId] ?? state.settings.defaultProfile,
-    includeUserMessages: state.settings.includeUserMessages[chatId] ?? true,
-    memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
-    upcomingOccasions: state.settings.upcomingOccasions[chatId] ?? true,
-    pairProgress: state.settings.pairProgress[chatId] ?? false,
+    profile: resolveChatSetting(state.settings, "profiles", chatId),
+    includeUserMessages: resolveChatSetting(state.settings, "includeUserMessages", chatId),
+    memoryOnlyInjection: resolveChatSetting(state.settings, "memoryOnlyInjection", chatId),
+    upcomingOccasions: resolveChatSetting(state.settings, "upcomingOccasions", chatId),
+    pairProgress: resolveChatSetting(state.settings, "pairProgress", chatId),
     sourceProtectionTurns: state.settings.sourceProtectionTurns, editProtectionTurns: state.settings.editProtectionTurns,
     canonicalizationPolicy: state.settings.canonicalizationPolicy,
-    extractionGroupTurns: state.settings.extractionGroupTurns[chatId] ?? 6,
-    memoryLanguage: state.settings.memoryLanguages[chatId] ?? "en",
+    extractionGroupTurns: resolveChatSetting(state.settings, "extractionGroupTurns", chatId),
+    memoryLanguage: resolveChatSetting(state.settings, "memoryLanguages", chatId),
+    memoryLanguageSource: Object.hasOwn(state.settings.memoryLanguages, chatId) ? "chat" : "default",
     sourceMessageCount: messages.length, sourceActiveMessageCount: messageVisibility.filter((item: any) => item.visibility === "active").length,
     sourceMessageTimes: messages.flatMap((message: any, ordinal: number) => typeof message?.time === "number" && Number.isFinite(message.time) && message.time > 0
       ? [{ id: String(message.chatId ?? message.id ?? `${chatId}:${ordinal}`), ordinal, time: message.time }] : []),
@@ -750,16 +751,17 @@ export async function readCurrentContext(
     narrationViewpoint: state.settings.narrationViewpoint[chatId] || undefined,
     identityHints: { userPersonaName, hostCharacterName: characterName, recentSpeakerNames, cachedPerspectives: [] },
     chat,
-    profile: state.settings.profiles[chatId] ?? state.settings.defaultProfile,
-    includeUserMessages: state.settings.includeUserMessages[chatId] ?? true,
-    memoryOnlyInjection: state.settings.memoryOnlyInjection[chatId] ?? false,
-    upcomingOccasions: state.settings.upcomingOccasions[chatId] ?? true,
-    pairProgress: state.settings.pairProgress[chatId] ?? false,
+    profile: resolveChatSetting(state.settings, "profiles", chatId),
+    includeUserMessages: resolveChatSetting(state.settings, "includeUserMessages", chatId),
+    memoryOnlyInjection: resolveChatSetting(state.settings, "memoryOnlyInjection", chatId),
+    upcomingOccasions: resolveChatSetting(state.settings, "upcomingOccasions", chatId),
+    pairProgress: resolveChatSetting(state.settings, "pairProgress", chatId),
     sourceProtectionTurns: Math.min(20, Math.max(1, Math.round(state.settings.sourceProtectionTurns ?? 10))),
     editProtectionTurns: Math.min(5, Math.max(1, Math.round(state.settings.editProtectionTurns ?? 2))),
     canonicalizationPolicy: state.settings.canonicalizationPolicy,
-    extractionGroupTurns: Math.min(50, Math.max(1, Math.round(state.settings.extractionGroupTurns[chatId] ?? 6))),
-    memoryLanguage: state.settings.memoryLanguages[chatId] ?? "en",
+    extractionGroupTurns: Math.min(50, Math.max(1, Math.round(resolveChatSetting(state.settings, "extractionGroupTurns", chatId)))),
+    memoryLanguage: resolveChatSetting(state.settings, "memoryLanguages", chatId),
+    memoryLanguageSource: Object.hasOwn(state.settings.memoryLanguages, chatId) ? "chat" : "default",
     sourceMessageCount: messages.length,
     sourceActiveMessageCount,
     estimatedSourceTokens,
@@ -817,7 +819,7 @@ export function makePrepareRequest(
     extractionGroupTurns: context.extractionGroupTurns,
     editProtectionTurns: context.editProtectionTurns ?? 2,
     canonicalizationPolicy: context.canonicalizationPolicy,
-    memoryLanguage: context.memoryLanguage,
+    memoryLanguage: context.memoryLanguage, memoryLanguageSource: context.memoryLanguageSource,
     promptSourceMessageIds: [...new Set(options.promptSourceMessageIds ?? [])].slice(-512),
     memoryReferenceMode: options.memoryReferenceMode ?? "short",
     memoryGeneration: options.memoryGeneration,

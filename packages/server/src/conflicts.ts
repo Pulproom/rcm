@@ -5,8 +5,10 @@ import { ExtractionResultSchema } from "@rcm/shared";
 import type { RcmDatabase } from "./db.js";
 import { normalizeLedgerPredicate, normalizeLedgerText } from "./normalization.js";
 import { parseSocialRelation, resolveSocialRelation, resolveStateDetailLinks, sameSocialRelationScope } from "./social-relations.js";
-import { linkedDetailKnowledge, PENDING_ACCESS_HOLDER, snapshotKnowledgeGrants } from "./item-access.js";
-import { replaceItemAccess } from "./ingest.js";
+import { EVERYONE_HOLDER } from "./item-access.js";
+import { preserveLinkedAssertionAccess } from "./ingest.js";
+import { listRecordedSocialKnowledge, protectedRecognitionChanges, setManualSocialKnowledge } from "./social-knowledge.js";
+import { fingerprintMatches, isSourceFingerprint } from "./source-fingerprint.js";
 
 export type ConflictResolution = "accept_incoming" | "keep_existing" | "acknowledged";
 
@@ -21,6 +23,65 @@ type ConflictRow = {
 
 function conflictError(message: string, code: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+function recognitionCandidate(value: string) {
+  try { return ExtractionResultSchema.safeParse({socialKnowledge:[JSON.parse(value)]}).data?.socialKnowledge?.[0]; }
+  catch { return undefined; }
+}
+
+/** Hide obsolete no-op proposals without mutating stored conflicts; counts share this reader. */
+export function listDashboardConflicts(db: RcmDatabase, chatId: string) {
+  const rows = db.prepare("SELECT * FROM conflicts WHERE chat_id=? AND kind<>'static_projection_changed' ORDER BY created_at DESC")
+    .all(chatId) as ConflictRow[];
+  let ledger: ReturnType<typeof listRecordedSocialKnowledge> | undefined;
+  return rows.flatMap(row => {
+    if (row.kind !== "recognition_auto_protected" || row.status !== "pending") return [row];
+    const incoming = recognitionCandidate(row.incoming_json);
+    if (!incoming) return [row];
+    const recognition = protectedRecognitionChanges(incoming,ledger ??= listRecordedSocialKnowledge(db,chatId));
+    if (!recognition.additions.knownAs.length && !recognition.additions.addressTerms.length && !recognition.higherLevel) return [];
+    return [{...row,recognition}];
+  });
+}
+
+function acceptProtectedRecognition(db: RcmDatabase, chatId: string, conflict: ConflictRow): void {
+  const incoming = recognitionCandidate(conflict.incoming_json);
+  if (!incoming) throw conflictError("Stored conflict candidate is invalid", "CONFLICT_CANDIDATE_INVALID");
+  const {current,additions,higherLevel} = protectedRecognitionChanges(incoming,listRecordedSocialKnowledge(db,chatId));
+  if (!current) throw conflictError("Candidate recognition is no longer active", "CONFLICT_SOURCE_STALE");
+  let stored: Record<string,any>;
+  try {
+    stored = JSON.parse(conflict.existing_json);
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) throw new Error("Invalid conflict metadata");
+  }
+  catch { throw conflictError("Stored conflict candidate is invalid", "CONFLICT_CANDIDATE_INVALID"); }
+  const sources = [...new Set(incoming.evidence.map(e => e.messageId))];
+  const live = db.prepare(`SELECT message_id,canonical_content FROM messages WHERE chat_id=?
+    AND message_id IN (SELECT value FROM json_each(?)) AND lifecycle IN ('committed','client_pruned')
+    AND memory_excluded=0 AND host_visibility IN ('active','all_before') AND canonical_content IS NOT NULL`)
+    .all(chatId,JSON.stringify(sources)) as Array<{message_id:string;canonical_content:string}>;
+  if (!sources.length || live.length !== sources.length
+    || stored.sourceFingerprint !== undefined && (!isSourceFingerprint(stored.sourceFingerprint)
+      || stored.sourceFingerprint.length !== sources.length || !fingerprintMatches(db,chatId,stored.sourceFingerprint))
+    || stored.sourceFingerprint === undefined && sources.some(id => !incoming.evidence.some(e => e.messageId === id && e.quote?.trim()))
+    || incoming.evidence.some(e => e.quote && !live.find(row => row.message_id === e.messageId)?.canonical_content.includes(e.quote))) {
+    throw conflictError("Candidate source is no longer active", "CONFLICT_SOURCE_STALE");
+  }
+  const hasMemory = stored.sourceMemoryId || incoming.memoryKey;
+  const sourceMemory = hasMemory ? db.prepare("SELECT id FROM memories WHERE chat_id=? AND (id=? OR memory_key=?) AND active=1")
+    .get(chatId,stored.sourceMemoryId ?? null,incoming.memoryKey ?? null) as {id:string} | undefined : undefined;
+  if (hasMemory && !sourceMemory) throw conflictError("Candidate source memory is no longer active", "CONFLICT_SOURCE_STALE");
+  const detailIds = db.prepare(`SELECT d.id FROM visible_memory_details d JOIN memories m ON m.id=d.memory_id
+    WHERE d.chat_id=? AND d.active=1 AND m.active=1
+    AND (d.id IN (SELECT value FROM json_each(?)) OR (d.memory_id=? AND d.detail_key IN (SELECT value FROM json_each(?))))
+    AND EXISTS (SELECT 1 FROM item_access a WHERE a.chat_id=d.chat_id AND a.item_kind='detail' AND a.item_id=d.id
+      AND a.active=1 AND (a.holder=? COLLATE NOCASE OR a.holder=?))`)
+    .all(chatId,JSON.stringify(stored.cognitionDetailIds ?? []),sourceMemory?.id ?? null,
+      JSON.stringify(incoming.cognitionDetailKeys ?? []),current.holder,EVERYONE_HOLDER) as Array<{id:string}>;
+  setManualSocialKnowledge(db,chatId,{holder:current.holder,subject:current.subject,level:higherLevel ?? current.level,
+    knownAs:[...current.knownAs,...additions.knownAs],addressTerms:[...current.addressTerms,...additions.addressTerms],
+    locked:current.locked,cognitionDetailIds:detailIds.map(row => row.id)});
 }
 
 export function resolveConflict(
@@ -41,7 +102,7 @@ export function resolveConflict(
     const resolution = assertionConflict && requestedResolution === "acknowledged"
       ? "accept_incoming"
       : requestedResolution;
-    if (resolution === "accept_incoming" && !assertionConflict) {
+    if (resolution === "accept_incoming" && !assertionConflict && conflict.kind !== "recognition_auto_protected") {
       throw conflictError("This conflict cannot be applied as a world fact", "CONFLICT_NOT_APPLICABLE");
     }
     const recoverableAcknowledgement = conflict.status === "resolved"
@@ -55,6 +116,13 @@ export function resolveConflict(
       db.prepare("UPDATE conflicts SET status='resolved',resolution=?,resolved_at=? WHERE id=? AND chat_id=?")
         .run(resolution, Date.now(), conflictId, chatId);
       return { resolution, applied: false };
+    }
+
+    if (conflict.kind === "recognition_auto_protected") {
+      acceptProtectedRecognition(db,chatId,conflict);
+      db.prepare("UPDATE conflicts SET status='resolved',resolution='accept_incoming',resolved_at=? WHERE id=? AND chat_id=?")
+        .run(Date.now(),conflictId,chatId);
+      return {resolution,applied:true};
     }
 
     let incomingValue: unknown;
@@ -93,9 +161,9 @@ export function resolveConflict(
     }
     const revision = chat.revision + 1;
     const currentRows = (db.prepare(`
-      SELECT id,predicate,value,state_kind,evidence_json,social_relation_json,always_inject FROM assertions
+      SELECT id,predicate,value,state_kind,evidence_json,social_relation_json,always_inject,linked_detail_ids_json,user_edit_ordinal FROM assertions
       WHERE chat_id=? AND subject=? AND valid_to_revision IS NULL ORDER BY created_at DESC
-    `).all(chatId, incoming.subject) as Array<{ id: string; predicate: string; value: string; state_kind: string; evidence_json: string; social_relation_json: string | null; always_inject: number }>)
+    `).all(chatId, incoming.subject) as Array<{ id: string; predicate: string; value: string; state_kind: string; evidence_json: string; social_relation_json: string | null; always_inject: number; linked_detail_ids_json: string | null; user_edit_ordinal: number | null }>)
       .filter((row) => normalizeLedgerPredicate(row.predicate) === normalizeLedgerPredicate(incoming.predicate)
         && sameSocialRelationScope(row.social_relation_json, incoming.socialRelation));
     const incomingStateKind = incoming.socialRelation ? "condition" : incoming.stateKind;
@@ -121,6 +189,7 @@ export function resolveConflict(
       }
     }
     const timestamp = Date.now();
+    let acceptedLinks = linkedDetails;
     let assertionId: string;
     if (current && normalizeLedgerText(current.value) === normalizeLedgerText(incoming.value)) {
       if (replacementTarget && replacementTarget.id !== current.id) {
@@ -131,6 +200,8 @@ export function resolveConflict(
       db.prepare("UPDATE assertions SET state_kind=?,confidence=MAX(confidence,?),evidence_json=?,social_relation_json=?,linked_detail_ids_json=COALESCE(?,linked_detail_ids_json) WHERE id=?")
         .run(incomingStateKind, incoming.confidence, JSON.stringify(evidence), socialRelation, JSON.stringify(linkedDetails) ?? null, current.id);
       assertionId = current.id;
+      if (!acceptedLinks && concurrentState && current.user_edit_ordinal == null && current.linked_detail_ids_json != null)
+        acceptedLinks = JSON.parse(current.linked_detail_ids_json);
     } else {
       if (current) db.prepare("UPDATE assertions SET valid_to_revision=? WHERE id=?").run(revision, current.id);
       assertionId = randomUUID();
@@ -142,8 +213,7 @@ export function resolveConflict(
         incomingStateKind, incoming.confidence, revision, validFromOrdinal, sourceMemoryId, JSON.stringify(incoming.evidence), incoming.retention ?? "arc", timestamp, socialRelation, JSON.stringify(linkedDetails) ?? null);
     }
     inheritNowDelivery(db,'assertions',assertionId,[...(current ? [current] : []),...(replacementTarget ? [replacementTarget] : [])]);
-    if (linkedDetails) replaceItemAccess(db,chatId,'assertion',assertionId,snapshotKnowledgeGrants(db,chatId,'assertion',assertionId,
-      {ids:linkedDetails,holders:linkedDetailKnowledge(db,chatId,linkedDetails) ?? [PENDING_ACCESS_HOLDER]}),revision,timestamp);
+    if (acceptedLinks) preserveLinkedAssertionAccess(db, chatId, assertionId, acceptedLinks, revision, timestamp);
     db.prepare("UPDATE assertions SET user_edit_ordinal=? WHERE id=? AND chat_id=?").run(committedEditOrdinal(db,chatId),assertionId,chatId);
     db.prepare("UPDATE chats SET revision=?,updated_at=? WHERE id=?").run(revision, timestamp, chatId);
     db.prepare("UPDATE conflicts SET status='resolved',resolution='accept_incoming',resolved_at=? WHERE id=? AND chat_id=?")

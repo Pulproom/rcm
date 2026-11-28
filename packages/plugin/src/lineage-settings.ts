@@ -133,44 +133,36 @@ export async function resolveOpenedChat(state: RuntimeState, client: ServerClien
 
 export async function inheritLineageSettings(state: RuntimeState, target: string | { chatId: string }, parentId: string, inheritedMemoryLanguage?: MemoryLanguage): Promise<void> {
   const chatId = typeof target === "string" ? target : target.chatId;
-  await stageLineageSettings(state, chatId, parentId, inheritedMemoryLanguage).commit();
+  if (inheritedMemoryLanguage) {
+    state.activeMemoryLanguages = { ...state.activeMemoryLanguages, [chatId]: inheritedMemoryLanguage };
+    if (state.current?.chatId === chatId) state.current.memoryLanguage = inheritedMemoryLanguage;
+  }
+  await stageLineageSettings(state, chatId, parentId).commit();
 }
 
 type LineageSetting = "chatEnabled" | "profiles" | "includeUserMessages" | "upcomingOccasions" | "pairProgress"
   | "memoryOnlyInjection" | "extractionGroupTurns" | "memoryLanguages" | "memoryBudgets" | "narrationViewpoint";
 
-/** Preview what a second prepare will send, then persist after the host confirms. */
-export function stageLineageSettings(state: RuntimeState, chatId: string, parentId: string, inheritedMemoryLanguage?: MemoryLanguage) {
+/** Stage explicit parent choices once; absent entries continue to follow common settings. */
+export function stageLineageSettings(state: RuntimeState, chatId: string, parentId: string) {
   const settings = { ...state.settings };
-  const writes: Array<() => boolean> = [];
-  const copy = <Key extends LineageSetting>(key: Key, fallback: PluginSettings[Key][string]): void => {
+  const pending: Array<() => void> = [];
+  const applied = state.settings.lineageSettingsFrom[chatId] === parentId;
+  const copy = <Key extends LineageSetting>(key: Key): void => {
     const record = state.settings[key];
-    if (Object.hasOwn(record, chatId)) return;
-    const value = structuredClone(record[parentId] ?? fallback);
-    if (value === undefined) return;
+    if (applied || Object.hasOwn(record, chatId) || !Object.hasOwn(record, parentId)) return;
+    const value = structuredClone(record[parentId]);
     Object.assign(settings, { [key]: { ...record, [chatId]: value } });
-    writes.push(() => {
-      const current = state.settings[key];
-      if (Object.hasOwn(current, chatId)) return false;
-      Object.assign(current, { [chatId]: value });
-      return true;
-    });
+    pending.push(() => { if (!Object.hasOwn(state.settings[key], chatId)) Object.assign(state.settings[key], { [chatId]: value }); });
   };
-  copy("chatEnabled", settings.defaultChatEnabled);
-  copy("profiles", settings.defaultProfile);
-  copy("includeUserMessages", true);
-  copy("upcomingOccasions", true);
-  copy("pairProgress", false);
-  copy("memoryOnlyInjection", false);
-  copy("extractionGroupTurns", 6);
-  copy("memoryLanguages", inheritedMemoryLanguage ?? "en");
-  copy("memoryBudgets", settings.defaultMemoryBudget);
-  copy("narrationViewpoint", "");
+  for (const key of ["chatEnabled", "profiles", "includeUserMessages", "upcomingOccasions", "pairProgress", "memoryOnlyInjection",
+    "extractionGroupTurns", "memoryLanguages", "memoryBudgets", "narrationViewpoint"] as const) copy(key);
+  if (!applied) settings.lineageSettingsFrom = { ...settings.lineageSettingsFrom, [chatId]: parentId };
   return { settings, async commit(): Promise<void> {
-    let changed = false;
-    for (const write of writes) if (write()) changed = true;
-    if (!changed) return;
+    if (applied || state.settings.lineageSettingsFrom[chatId] === parentId) return;
+    for (const write of pending) write();
+    state.settings.lineageSettingsFrom[chatId] = parentId;
     try { await saveSettings(state.settings); }
-    catch { addLog(state.logs, "warn", `Lineage setting persistence failed: [오류 원문 제외]`, "LINEAGE_SETTINGS_SAVE_FAILED"); }
+    catch { addLog(state.logs, "warn", "Lineage setting persistence failed: [오류 원문 제외]", "LINEAGE_SETTINGS_SAVE_FAILED"); }
   } };
 }

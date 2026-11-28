@@ -161,6 +161,14 @@ export function createOrganizationController(organizationView: OrganizationView,
         const id = target.dataset.id ?? '';
         const leavesCandidate = ['organization-close', 'organization-list', 'organization-back-detail', 'organization-detail', 'organization-select', 'organization-candidate', 'organization-add-memory'].includes(action ?? '');
         if (leavesCandidate && !await host.discardReadyOrganizationCandidate()) return;
+        if (action === 'organization-toggle-sources') {
+          const items = [...root.querySelectorAll<HTMLDetailsElement>('.org-sources > details')];
+          if (!items.length) return;
+          const expand = items.some((item) => !item.open);
+          for (const item of items) item.open = expand;
+          target.textContent = expand ? '모두 접기' : '모두 펼치기';
+          return;
+        }
         if (action === 'organization-close') organizationView.open = false;
         else if (action === 'organization-list') { organizationView.mobileDetail = false; organizationView.candidateId = ''; organizationView.addition = undefined; }
         else if (action === 'organization-back-detail') { organizationView.candidateId = ''; organizationView.addition = undefined; organizationView.mobileDetail = Boolean(organizationView.focusedId); }
@@ -422,6 +430,7 @@ export interface TimelineViewState {
   landmarkOnly: boolean;
   bookmarkedOnly: boolean;
   pinnedOnly: boolean;
+  alwaysInjectOnly: boolean;
   includeInactive: boolean;
   editing: boolean;
   creating: boolean;
@@ -441,6 +450,7 @@ export interface TimelineMemory {
   landmark?: boolean;
   bookmarked?: boolean;
   pinned?: boolean;
+  alwaysInject?: boolean;
   story_time?: string | null;
   storyTime?: string | null;
   created_revision?: number;
@@ -451,7 +461,7 @@ export interface TimelineMemory {
   recognitionOnly?: unknown;
 }
 
-export const createTimelineView = (): TimelineViewState => ({ query: "", landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false, includeInactive: false, editing: false, creating: false, mobileDetail: false });
+export const createTimelineView = (): TimelineViewState => ({ query: "", landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false, alwaysInjectOnly: false, includeInactive: false, editing: false, creating: false, mobileDetail: false });
 
 export function beginRetryMemorySelection(view:TimelineViewState,day:string,memories:TimelineMemory[]):void {
   const ids=memories.filter(memory=>memory.userOnlyRetry===true).map(memory=>memory.id);
@@ -482,12 +492,13 @@ export async function deleteRetryMemorySelection(view:TimelineViewState,memories
   } finally { selection.busy=false; }
 }
 
-export function filterTimelineMemories<T extends TimelineMemory>(memories: T[], view: Pick<TimelineViewState, "landmarkOnly" | "bookmarkedOnly" | "pinnedOnly" | "includeInactive">): T[] {
+export function filterTimelineMemories<T extends TimelineMemory>(memories: T[], view: Pick<TimelineViewState, "landmarkOnly" | "bookmarkedOnly" | "pinnedOnly" | "alwaysInjectOnly" | "includeInactive">): T[] {
   const filtered = memories.filter((memory) => !isRecognitionMemory(memory)
     && (view.includeInactive || memory.active !== false)
     && (!view.landmarkOnly || Boolean(memory.landmark))
     && (!view.bookmarkedOnly || Boolean(memory.bookmarked))
-    && (!view.pinnedOnly || Boolean(memory.pinned)));
+    && (!view.pinnedOnly || Boolean(memory.pinned))
+    && (!view.alwaysInjectOnly || Boolean(memory.alwaysInject)));
   return orderStoryMemories(filtered, memories.filter(isScene));
 }
 
@@ -503,7 +514,7 @@ export function timelineMemoryView<T extends TimelineMemory>(memories: T[], view
   const matchingParents = new Set(matching.map((memory) => memory.capsule_parent_id).filter(Boolean));
   const topLevel = ordered(filterTimelineMemories(
     memories.filter((memory) => !memory.capsule_parent_id && (matchingIds.has(memory.id) || matchingParents.has(memory.id))),
-    { ...view, landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false },
+    { ...view, landmarkOnly: false, bookmarkedOnly: false, pinnedOnly: false, alwaysInjectOnly: false },
   ));
   return { matching, topLevel };
 }
@@ -580,6 +591,7 @@ export function createTimelineController(timelineView: TimelineViewState, root: 
         if (filter === "bookmark") timelineView.bookmarkedOnly = !timelineView.bookmarkedOnly;
         if (filter === "landmark") timelineView.landmarkOnly = !timelineView.landmarkOnly;
         if (filter === "pinned") timelineView.pinnedOnly = !timelineView.pinnedOnly;
+        if (filter === "always-inject") timelineView.alwaysInjectOnly = !timelineView.alwaysInjectOnly;
         if (filter === "inactive") timelineView.includeInactive = !timelineView.includeInactive;
         const visible = timelineMemoryView(memories, timelineView);
         const visibleIds = new Set([...visible.matching, ...visible.topLevel].map((memory) => String(memory.id)));

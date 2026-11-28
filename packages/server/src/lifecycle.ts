@@ -328,7 +328,7 @@ export function syncSnapshot(db: RcmDatabase, request: TurnPrepareRequest, mutat
     db.prepare("UPDATE chats SET last_seen_at=?,engaged_at=CASE WHEN ? THEN COALESCE(engaged_at,?) ELSE engaged_at END WHERE id=?").run(timestamp, Number(request.forceBackfill || request.backfillApproved === true), timestamp, request.chatId);
     syncChatTitle(db,request.chatId,request.chatTitle);
     if (!upgrade) writePersonaHint(db, request.chatId, request.identityHints?.userPersonaName);
-    if (existingChat) {
+    if (existingChat && request.memoryLanguageSource !== "default") {
       const derivedExists = hasDerivedState(db, request.chatId);
       if (requestedMemoryLanguage === existingChat.memory_language) {
         if (existingChat.pending_memory_language) db.prepare("UPDATE chats SET pending_memory_language=NULL WHERE id=?").run(request.chatId);
